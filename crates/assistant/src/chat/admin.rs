@@ -110,6 +110,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             "/internal/v1/projects/{project}/knowledge/conversations/{conversation}",
             delete(erase),
         )
+        .route(
+            "/internal/v1/projects/{project}/knowledge/conversations/{conversation}/turns/{turn}/same",
+            get(same),
+        )
         .with_state(state)
 }
 
@@ -152,6 +156,26 @@ async fn conversation(
     match super::transcript::detail(&state.pool, &project, &conversation).await {
         Ok(Some(found)) => Json(found).into_response(),
         Ok(None) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
+        Err(err) => failed(err),
+    }
+}
+
+/// The stored turns that asked what turn `turn` of a conversation asked (API/05 §3.1, T-4681).
+async fn same(
+    State(state): State<Arc<ChatState>>,
+    Path((project, conversation, turn)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let turn = turn.parse::<u32>().ok().filter(|t| (1..=200).contains(t));
+    let (true, Some(turn)) = (super::uuid_shaped(&conversation), turn) else {
+        return problem(404, "no such turn");
+    };
+    match super::transcript::same(&state.pool, &project, &conversation, turn).await {
+        Ok(Some(items)) => Json(json!({"items": items})).into_response(),
+        Ok(None) | Err(crate::Error::Project(_)) => problem(404, "no such turn"),
         Err(err) => failed(err),
     }
 }

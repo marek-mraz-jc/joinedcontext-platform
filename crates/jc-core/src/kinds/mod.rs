@@ -49,7 +49,7 @@ pub use assistant::{
     AnswerSpec, AssistantDeploymentSpec, AssistantScope, Budget, Channel, ChatWidget, Connector,
     KnowledgeSourceSpec, Localised, ModelChoice, PdfPolicy, PdfPolicyKind, ProviderRouting,
     ProviderSort, RateLimit, ReasoningEffort, Routes, SourceType, StageReasoning, Theme,
-    UploadLimits, Visibility, WidgetLanguage,
+    TranscriptRedaction, UploadLimits, Visibility, WidgetLanguage,
 };
 pub use blueprint::{BlueprintSpec, BlueprintTemplate, RiskClass};
 pub use catalog::{

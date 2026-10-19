@@ -102,6 +102,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             feedback: true,
             widget: None,
             transcript_retention: None,
+            transcript_redaction: None,
             privacy: None,
         },
     }
@@ -242,6 +243,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         endpoint_base: url::Url::parse("https://data.hronov.example/").ok(),
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,
