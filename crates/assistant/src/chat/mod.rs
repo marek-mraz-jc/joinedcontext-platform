@@ -16,6 +16,7 @@ pub mod documents;
 pub mod mcp;
 pub mod model;
 pub mod redact;
+pub mod resume;
 pub mod routed;
 pub mod script;
 pub mod trace;
@@ -108,6 +109,8 @@ pub struct ChatState {
     pub organization: String,
     /// What each public deployment knows, computed at most once a minute (T-4692).
     pub contexts: std::sync::Mutex<context::Held>,
+    /// Visitors' answers held for a resume after a page change (T-4685).
+    pub turns: resume::Turns,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).
@@ -372,6 +375,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .route(
             "/api/v1/d/{public_id}/token",
             post(token).options(preflight),
+        )
+        .route(
+            "/api/v1/d/{public_id}/turns/{turn}/resume",
+            get(resume::resume).options(preflight),
         )
         .route(
             "/api/v1/d/{public_id}/feedback",
@@ -1138,6 +1145,14 @@ async fn chat(
     with_cors(response, origin)
 }
 
+/// The `conversation` event's data: a visitor's carries the turn to resume (T-4685).
+fn opened(conversation: &str, at: &str, turn: Option<&str>) -> serde_json::Value {
+    match turn {
+        Some(turn) => json!({"id": conversation, "at": at, "turn": turn}),
+        None => json!({"id": conversation, "at": at}),
+    }
+}
+
 /// The visitor token's header (API/05 §1.2.1).
 pub const VISITOR_HEADER: &str = "x-jc-visitor";
 /// How many visitors' minutes one address may fill at once: people behind one network each have
@@ -1664,6 +1679,14 @@ async fn ask(
     let task_state = Arc::clone(state);
     let conversation_id = conversation.clone();
     let started_from = origin.map(str::to_owned);
+    // A visitor's answer is held for a resume on the next page and runs to its end (T-4685).
+    let held = token.and_then(|id| {
+        state
+            .turns
+            .start(&deployment.spec.public_id, id, Instant::now())
+    });
+    let turn_id = held.as_ref().map(|(id, _)| id.clone());
+    let held = held.map(|(_, turn)| turn);
     tokio::spawn(async move {
         // Held until the answer is done, whether or not anyone still reads it.
         let _permit = permit;
@@ -1704,6 +1727,9 @@ async fn ask(
         // The token reached the surfaces that need it; nothing else holds it past this point.
         drop(person);
         for event in failed {
+            if let Some(turn) = &held {
+                turn.push(&event);
+            }
             let _ = tx.send(event).await;
         }
         let name = format!("{}/{}", deployment.project, deployment.name);
@@ -1781,8 +1807,12 @@ async fn ask(
             while let Some(event) = passing.recv().await {
                 seen.see(&event);
                 trace.visual(&event);
-                // A reader who left closes the answer's channel too, so the loop stops as it did.
-                if tx.send(event).await.is_err() {
+                if let Some(turn) = &held {
+                    turn.push(&event);
+                }
+                // A reader who left closes the answer's channel too, so the loop stops as it did;
+                // a held turn goes on for its resume.
+                if tx.send(event).await.is_err() && held.is_none() {
                     passing.close();
                 }
             }
@@ -1800,6 +1830,9 @@ async fn ask(
                         .into(),
                 };
                 seen.see(&cut);
+                if let Some(turn) = &held {
+                    turn.push(&cut);
+                }
                 let _ = tx.send(cut).await;
                 // The calls made before the cut, so the day's cost and the timings hold them.
                 let spent = so_far.lock().map(|s| s.clone()).unwrap_or_default();
@@ -1852,14 +1885,19 @@ async fn ask(
             limits.close_stream(&holder);
         }
         drop(limits);
-        let _ = tx.send(Event::Done(spent, total_ms)).await;
+        let done = Event::Done(spent, total_ms);
+        if let Some(turn) = &held {
+            turn.push(&done);
+            turn.finish(Instant::now());
+        }
+        let _ = tx.send(done).await;
     });
 
     let first = futures_util::stream::once(async move {
         Ok::<_, Infallible>(
             SseEvent::default()
                 .event("conversation")
-                .data(json!({"id": conversation, "at": utc_second(asked_at)}).to_string()),
+                .data(opened(&conversation, &utc_second(asked_at), turn_id.as_deref()).to_string()),
         )
     });
     let rest = futures_util::stream::unfold(rx, move |mut rx| async move {
