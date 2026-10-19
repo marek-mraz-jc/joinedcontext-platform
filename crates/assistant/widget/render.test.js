@@ -505,6 +505,10 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
+    // T-4737: a long conversation is long, never a share the visitor used up.
+    const full = block.match(/\bfull: "([^"]*)"/)[1];
+    assert.match(full, /dlhý|long|dlouhý/, `${lang}.full`);
+    assert.doesNotMatch(full, /podiel|share|podíl|minul|vyčerpal/i, `${lang}.full`);
     // T-4283: the chips are the deployment's own; the widget invents no city questions.
     assert.doesNotMatch(block, /ideas: \[/, `${lang}.ideas`);
   }
