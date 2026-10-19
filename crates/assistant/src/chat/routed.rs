@@ -2634,6 +2634,7 @@ async fn answer_routed(
             citations,
             steps: routing.reads.len(),
             started,
+            named: routing.reads.iter().map(|r| r.endpoint.clone()).collect(),
         };
         let first = key.is_some();
         answer_data(q, &mut spent, start, routing.followups, &missing, first).await;
