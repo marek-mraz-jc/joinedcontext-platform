@@ -103,13 +103,14 @@ fn is_catalog_space(endpoint: &Endpoint) -> bool {
 }
 
 /// The public catalogue's CKAN-named `Dataset` and `Organization` entities, read through the
-/// installation's `catalog` Endpoint as the caller reaching it, at most once a minute for every
-/// caller: the Endpoint is public, so every caller reads the same. Without that Endpoint in
+/// installation's `catalog` Endpoint as the anonymous caller, at most once a minute for every
+/// caller: the one list every caller shares is what anyone may read, never what the first caller
+/// to reach it happened to hold. Without that Endpoint in
 /// reach the list is empty; a read that fails keeps the last one it had.
 async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Vec<Value>> {
     type Held = (String, Instant, Arc<Vec<Value>>);
     static HELD: OnceLock<Mutex<Option<Held>>> = OnceLock::new();
-    let Some((endpoint, subject)) = reach
+    let Some((endpoint, _)) = reach
         .iter()
         .find(|(endpoint, _)| endpoint.space == NAME && endpoint.audience == Audience::Public)
     else {
@@ -127,7 +128,8 @@ async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) 
             return Arc::clone(entities);
         }
     }
-    let read = match read_public(gateway, endpoint, subject).await {
+    let anonymous = crate::auth::subject::anonymous_on(endpoint);
+    let read = match read_public(gateway, endpoint, &anonymous).await {
         Ok(entities) => Arc::new(entities),
         Err(why) => {
             tracing::warn!(slug = %endpoint.slug, %why, "the public catalogue did not read");
