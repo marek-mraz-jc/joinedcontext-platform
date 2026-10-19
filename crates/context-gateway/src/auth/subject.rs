@@ -362,7 +362,7 @@ pub(crate) fn admit(
             ProblemDetails::new(
                 403,
                 "personal-data-public",
-                "Personal data on a public Endpoint",
+                "Personal Data on a Public Endpoint",
             )
             .with_detail(format!(
                 "the model marks {} as personal data; hide them or narrow the audience",
