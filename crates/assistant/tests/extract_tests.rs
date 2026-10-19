@@ -122,6 +122,27 @@ async fn an_undeclared_language_is_detected() {
 }
 
 #[tokio::test]
+async fn a_heading_of_whitespace_alone_does_not_lose_the_page() {
+    // www.bbsk.sk/uradne-hodiny (T-4688): an empty `<h2>&nbsp;</h2>` of the CMS made the HTML
+    // converter panic, and the page with the office's hours was never indexed.
+    for empty in [
+        "<h2>&nbsp;</h2>",
+        "<h3> </h3>",
+        "<h2><span> </span></h2>",
+        "<h4><a href=\"/x\">\u{a0}</a></h4>",
+    ] {
+        let html = format!(
+            "<html><body><h1>Úradné hodiny</h1>{empty}<p>Podateľňa je otvorená v pondelok od 7.30 do 15.30.</p></body></html>"
+        );
+        let extracted = extract(html.as_bytes(), "text/html", Some("sk"), 500)
+            .await
+            .unwrap_or_else(|err| panic!("{empty}: {err}"));
+        let text: String = extracted.passages.iter().map(|p| p.text.as_str()).collect();
+        assert!(text.contains("od 7.30 do 15.30"), "{empty}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn a_pdf_page_becomes_a_passage_that_knows_its_page() {
     let bytes = pdf("Cultural events in Banska Bystrica this summer");
     let extracted = extract(&bytes, "application/pdf", None, 500)
