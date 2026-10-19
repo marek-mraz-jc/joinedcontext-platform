@@ -1065,8 +1065,18 @@ fn validate_source(src: &PipelineSource) -> Result<()> {
 /// The runner's processors no pipeline may run, at the top of a step or nested inside one:
 /// `command` and `subprocess` run a program in the shared runner, `file` reads, writes and
 /// deletes its files, and `wasm` is the compute kind (PL-34). `bento_processors::PROCESSORS`
-/// leaves the same four out.
-const REFUSED_PROCESSORS: &[&str] = &["command", "file", "subprocess", "wasm"];
+/// leaves those four out. `awk` (`getline`, `ENVIRON`, `system()`), `javascript` (`require`,
+/// `bento.v0_fetch`) and `template` (Sprig's `env`) are on that list and read the runner's files
+/// or environment all the same, measured on the pinned image (T-3833).
+const REFUSED_PROCESSORS: &[&str] = &[
+    "awk",
+    "command",
+    "file",
+    "javascript",
+    "subprocess",
+    "template",
+    "wasm",
+];
 
 /// Checks one processor configuration the way a pipeline step is checked (PL-16, PL-50, PL-52):
 /// one processor name besides an optional `label`, a name the platform's list holds, no refused
@@ -1105,9 +1115,20 @@ pub fn validate_processor_reading(
         });
     };
     if !super::bento_processors::PROCESSORS.contains(&name.as_str()) {
+        let accepted: Vec<&str> = super::bento_processors::PROCESSORS
+            .iter()
+            .copied()
+            .filter(|p| !REFUSED_PROCESSORS.contains(p))
+            .collect();
         return Err(refused(format!(
             "unknown processor `{name}`; accepted processors are: {}",
-            super::bento_processors::PROCESSORS.join(", ")
+            accepted.join(", ")
+        )));
+    }
+    if REFUSED_PROCESSORS.contains(&name.as_str()) {
+        return Err(refused(format!(
+            "processor `{name}` runs a program or reads the runner's files or environment, which \
+             no pipeline step may do (PL-52)"
         )));
     }
     if let Some(nested) = nested_refused(&config[name]) {
@@ -1262,7 +1283,14 @@ fn is_injected_env(name: &str) -> bool {
 }
 
 /// The Bloblang functions that read the runner's host rather than the message (PL-16, PL-50).
-const HOST_FUNCTIONS: &[&str] = &["file", "file_json", "file_rel", "hostname", "env"];
+const HOST_FUNCTIONS: &[&str] = &[
+    "file",
+    "file_json",
+    "file_rel",
+    "file_rel_json",
+    "hostname",
+    "env",
+];
 
 /// Refuses a mapping that reads the runner's environment or its filesystem (PL-16, PL-50, PL-18).
 ///
@@ -1273,7 +1301,7 @@ const HOST_FUNCTIONS: &[&str] = &["file", "file_json", "file_rel", "hostname", "
 /// `spec.secrets` — and a mapping must not be the second door into it: `env("…")` reads only
 /// what the reconciler injects for it, and `file(…)` reads nothing at all, because whatever a
 /// mapping reads it writes to the pipeline's own target.
-fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
+pub(crate) fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
     for (function, argument) in host_calls(mapping) {
         if function == "env" {
             match argument.as_deref() {

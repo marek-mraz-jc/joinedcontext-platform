@@ -20,3 +20,8 @@ tracing = "0.1"
 walkdir = "2"
 # The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.
 utoipa = { version = "5", optional = true }
+
+[dev-dependencies]
+# archive_read_bento_tests writes a zip archive field by field (T-4752).
+crc32fast = "1"
+flate2 = "1"
