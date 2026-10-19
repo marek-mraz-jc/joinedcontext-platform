@@ -444,6 +444,7 @@ var JCRender = (function () {
     // A measured value to one decimal (11,5 µg/m³, never 11,506), a plain number to two (T-4711).
     var measured = new Intl.NumberFormat(lang, { maximumFractionDigits: 1 });
     var plainNumber = new Intl.NumberFormat(lang, { maximumFractionDigits: 2 });
+    var small = new Intl.NumberFormat(lang, { maximumSignificantDigits: 2 });
     var modelled = Array.isArray(data.labels) ? data.labels : [];
     var enums = Array.isArray(data.enums) ? data.enums : [];
     var raw = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, ROWS);
@@ -462,6 +463,8 @@ var JCRender = (function () {
       if (typeof v === "number") {
         if (!isFinite(v)) return "";
         if (plain(column) && Number.isInteger(v)) return String(v);
+        // Below 1, two significant digits: 0,04 mg/m³ never reads as 0 (integrator, T-4711).
+        if (v !== 0 && Math.abs(v) < 1) return small.format(v);
         return (typeof units[i] === "string" && units[i] ? measured : plainNumber).format(v);
       }
       if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
