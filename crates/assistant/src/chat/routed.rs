@@ -174,7 +174,10 @@ pub const MAX_FOLLOWUP_CHARS: usize = 120;
 
 /// The follow-up questions of a reply: strings, spaces collapsed, no control character, 1 to
 /// [`MAX_FOLLOWUP_CHARS`] long, distinct and not the question itself, at most [`MAX_FOLLOWUPS`].
+/// An English question offers no Slovak or Czech follow-up (T-4727), though the prompt asks for
+/// the question's language and the model sometimes answers in the space's.
 fn followups(reply: Option<&Value>, question: &str) -> Vec<String> {
+    let english = english(question);
     let asked = question
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -199,6 +202,10 @@ fn followups(reply: Option<&Value>, question: &str) -> Vec<String> {
         if text.is_empty()
             || text.chars().count() > MAX_FOLLOWUP_CHARS
             || key == asked
+            || (english
+                && text
+                    .chars()
+                    .any(|c| SK_CS_LETTERS.contains(c.to_lowercase().next().unwrap_or(c))))
             || out.iter().any(|f| f.to_lowercase() == key)
         {
             continue;
@@ -209,6 +216,23 @@ fn followups(reply: Option<&Value>, question: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The letters Slovak and Czech write and English never does.
+const SK_CS_LETTERS: &str = "áäčďéěíĺľňóôŕřšťúůýž";
+
+// ponytail: a word list, not language detection; an English question written without one of these
+// words keeps every follow-up, which is the behaviour before T-4727.
+/// The question is English: only ASCII letters and at least one English function word.
+fn english(question: &str) -> bool {
+    const WORDS: [&str; 14] = [
+        "the", "what", "which", "how", "where", "when", "is", "are", "of", "show", "many", "much",
+        "does", "there",
+    ];
+    question.is_ascii()
+        && question
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| WORDS.contains(&w.to_ascii_lowercase().as_str()))
 }
 
 /// One read the router asked for: an Endpoint, a type of it and the query that narrows its rows.
@@ -3655,6 +3679,26 @@ mod tests {
             .followups
             .is_empty());
         assert!(routing("not json", "q", &[]).followups.is_empty());
+        // T-4727: an English question keeps its English follow-ups and drops the Slovak and Czech
+        // ones; a Slovak question, with or without diacritics, keeps them all.
+        let mixed = json!({"queries": ["q"], "followups": ["Which station is cleanest?", "Ktorá stanica je najčistejšia?", "Koľko STANÍC?", "Show NO2 by hour"]}).to_string();
+        assert_eq!(
+            routing(&mixed, "How many air stations are there?", &[]).followups,
+            ["Which station is cleanest?", "Show NO2 by hour"]
+        );
+        assert_eq!(
+            routing(&mixed, "Kolko je stanic v Ziline?", &[])
+                .followups
+                .len(),
+            3
+        );
+        assert_eq!(
+            routing(&mixed, "Koľko staníc je v Žiline?", &[])
+                .followups
+                .len(),
+            3
+        );
+        assert!(!english("Kde je zberny dvor?") && english("What is the NO2 level?"));
         // An overlong query is no query.
         let long = format!("{{\"queries\": [\"{}\"]}}", "a".repeat(MAX_QUERY_CHARS + 1));
         assert_eq!(routing(&long, "q", &[]).queries, ["q"]);
