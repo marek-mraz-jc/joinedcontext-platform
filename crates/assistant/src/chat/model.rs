@@ -476,8 +476,10 @@ pub const MODEL_DID_NOT_ANSWER: &str = "Model asistenta neodpovedal. Skúste to 
 /// Why the proxy refused, for the log: a visitor never reads it, they read the day's limit
 /// (T-4671).
 pub const DAY_SPENT: &str = "the model proxy refused the deployment's day (budget.tokensPerDay)";
+/// A conversation past its tokens (T-4737): it is long, and a new one carries the question on;
+/// never that the visitor used up a share.
 pub const CONVERSATION_SPENT: &str =
-    "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.";
+    "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova.";
 
 fn unavailable(deployment: &str, why: &str) -> CallError {
     tracing::warn!(%deployment, %why, "a model call failed");

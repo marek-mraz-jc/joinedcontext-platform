@@ -1161,7 +1161,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
     // T-4192: the visitor reads it in Slovak, like the chat's other sentences.
     assert_eq!(
         error["detail"],
-        "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor."
+        "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova."
     );
     assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
     assert!(model_calls(&w.proxy).await.is_empty(), "nothing was spent");
