@@ -1882,7 +1882,7 @@ const MODEL_BYTES: usize = 1 << 20;
 /// The Endpoint's LinkML as the deployment is served it (`describe_schema`, format linkml), for a
 /// table's display order (T-4672); kept per deployment and Endpoint for [`TYPES_LIFE`], a failed
 /// read too, so a slow schema surface costs one wait, not one per table. `None` without one.
-async fn model_of(ask: &Ask<'_>, connector: &Connected) -> Option<std::sync::Arc<str>> {
+pub(super) async fn model_of(ask: &Ask<'_>, connector: &Connected) -> Option<std::sync::Arc<str>> {
     let key = format!("{}/{}", ask.deployment, connector.surface.slug.as_str());
     if let Some(kept) = ask.cache.model_of(&key) {
         return kept;
