@@ -10,6 +10,7 @@ pub mod admin;
 pub mod agent;
 pub mod cards;
 pub mod clock;
+pub mod context;
 pub mod data;
 pub mod documents;
 pub mod mcp;
@@ -105,6 +106,8 @@ pub struct ChatState {
     pub viz: Option<url::Url>,
     /// The organization the service answers for, the `sites` row an upload creates (T-4184).
     pub organization: String,
+    /// What each public deployment knows, computed at most once a minute (T-4692).
+    pub contexts: std::sync::Mutex<context::Held>,
 }
 
 /// The most keys [`Limits`] counts at once (T-3314).
@@ -375,6 +378,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             post(feedback).options(preflight),
         )
         .route(
+            "/api/v1/d/{public_id}/context",
+            get(context::document).options(preflight),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/deployments/{deployment}/chat",
             post(chat_in_portal),
         )
@@ -382,6 +389,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .with_state(Arc::clone(&state))
         .merge(widget::router(Arc::clone(&state)))
         .merge(documents::router(Arc::clone(&state)))
+        .merge(context::router(Arc::clone(&state)))
         .merge(admin::router(state))
 }
 
@@ -594,7 +602,9 @@ pub async fn forget_expired(pool: &PgPool) -> Result<u64, crate::Error> {
     sqlx::query("DELETE FROM answer_timings")
         .execute(pool)
         .await?;
-    // Transcripts until their deployment's retention ran out, steps with them (migration 0015).
+    // Transcripts until their deployment's retention ran out, steps with them (migration 0017).
+    // ponytail: one statement a minute holds one minute's expired turns; a sweep after a long
+    // outage deletes its backlog at once (batches need a cross-project SELECT policy, T-4681).
     sqlx::query("DELETE FROM turns").execute(pool).await?;
     let gone = sqlx::query("DELETE FROM conversations")
         .execute(pool)
@@ -746,10 +756,12 @@ pub async fn warm_types(state: Arc<ChatState>) {
     WARMING.store(false, Ordering::Release);
 }
 
-/// The connectors switched on for this question whose Endpoint the asker may reach, with their
-/// tools: a public Endpoint without a token; on an `internal` deployment, any other Endpoint
-/// with the person's token, when there is one (AG-106, AG-115). A connector whose tools cannot be
-/// listed is reported and left out (AG-104).
+/// The Endpoints the resolver gives the deployment (AG-121: connectors, selector and named
+/// server, less `exclude`, inside its project's reach), switched on for this question, that the
+/// asker may reach, with their tools: a public Endpoint without a token; on an `internal`
+/// deployment, any other Endpoint with the person's token, when there is one (AG-106, AG-115).
+/// One that joined by the selector or the server is offered every read tool. One whose tools
+/// cannot be listed is reported and left out (AG-104).
 async fn connected(
     state: &ChatState,
     deployment: &Deployment,
@@ -760,46 +772,42 @@ async fn connected(
     let Ok(snapshot) = state.snapshot.read().map(|s| s.clone()) else {
         return Vec::new();
     };
+    let read_tools: Vec<String> = mcp::READ_ONLY_TOOLS
+        .iter()
+        .map(|t| (*t).to_owned())
+        .collect();
     let mut reachable = Vec::new();
-    for connector in &deployment.spec.connectors {
-        if chosen.is_some_and(|chosen| !chosen.contains(&connector.endpoint)) {
+    for resolved in snapshot.reach(deployment).endpoints {
+        // The name a connector gives it: `{project}/{endpoint}` for a project of `scope.projects`.
+        let named = if resolved.project == deployment.project {
+            resolved.name.clone()
+        } else {
+            format!("{}/{}", resolved.project, resolved.name)
+        };
+        if chosen.is_some_and(|chosen| !chosen.contains(&named)) {
             continue;
         }
-        // `{project}/{endpoint}` reaches a project of `scope.projects` (T-4177); the manifest was
-        // validated, and the scope is checked again so no Endpoint outside it is ever reached.
-        let (project, name) = match connector_target(&connector.endpoint) {
-            (Some(project), name)
-                if deployment
-                    .spec
-                    .scope_projects()
-                    .iter()
-                    .any(|p| p == project) =>
-            {
-                (project, name)
-            }
-            (Some(_), _) => {
-                tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names a project outside the deployment's scope; not offered");
-                continue;
-            }
-            (None, name) => (deployment.project.as_str(), name),
+        let connector = jc_core::kinds::assistant::Connector {
+            endpoint: named,
+            tools: if resolved.tools.is_empty() {
+                read_tools.clone()
+            } else {
+                resolved.tools.clone()
+            },
+            timeout_seconds: resolved.timeout_seconds,
         };
         let Some(endpoint) = snapshot
             .endpoints
-            .get(&(project.to_owned(), name.to_owned()))
+            .get(&(resolved.project.clone(), resolved.name.clone()))
         else {
-            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a connector names no Endpoint; not offered");
             continue;
         };
-        let foreign = project != deployment.project;
         let token = if endpoint.audience == "public" {
             None
-        } else if foreign {
-            // Another project's Endpoint is read only when it is public, on every channel, and
-            // the person's token never goes to another project.
-            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "another project's Endpoint is not public; not offered");
-            continue;
-        } else if deployment.spec.channel.is_anonymous() {
-            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a public deployment's connector names a non-public Endpoint; not offered");
+        } else if resolved.project != deployment.project || deployment.spec.channel.is_anonymous() {
+            // The resolver keeps these out; the person's token never goes to another project
+            // and a public deployment reads public Endpoints alone, whatever a list says.
+            tracing::warn!(deployment = %deployment.name, endpoint = %connector.endpoint, "a non-public Endpoint outside the deployment's reach; not offered");
             continue;
         } else if let Some(person) = person {
             Some(person.clone())
@@ -1789,6 +1797,7 @@ async fn ask(
             let mut seen = transcript::Seen::default();
             while let Some(event) = passing.recv().await {
                 seen.see(&event);
+                trace.visual(&event);
                 // A reader who left closes the answer's channel too, so the loop stops as it did.
                 if tx.send(event).await.is_err() {
                     passing.close();
@@ -1816,7 +1825,7 @@ async fn ask(
             }
         };
         let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let steps = trace.steps();
+        let steps = trace::with_gaps(trace.steps(), trace.elapsed_ms());
         let route = trace.route();
         let kept = transcript::Record {
             project: &deployment.project,
@@ -1834,6 +1843,8 @@ async fn ask(
             total_ms,
             timed_out,
             days: deployment.spec.transcript_days(),
+            personal: deployment.spec.transcript_redaction
+                == Some(jc_core::kinds::TranscriptRedaction::Personal),
         };
         if let Err(err) = transcript::store(&state.pool, &kept).await {
             tracing::error!(%err, "a turn's transcript was not stored");
