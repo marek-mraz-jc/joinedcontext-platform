@@ -415,14 +415,22 @@ const ASKS_FOR_DATASETS: &[&str] = &[
 
 // ponytail: phrase list, not a classifier; other wordings still reach the catalogue through the
 // router's own "catalogue" route.
-/// The question asks which data or datasets there are, by one of [`ASKS_FOR_DATASETS`].
+/// The question asks which data or datasets there are, by one of [`ASKS_FOR_DATASETS`] at a
+/// word's start, so "make data" is no "ake data".
 fn asks_for_datasets(question: &str) -> bool {
     let asked = question
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    ASKS_FOR_DATASETS.iter().any(|start| asked.contains(start))
+    ASKS_FOR_DATASETS.iter().any(|phrase| {
+        asked.match_indices(phrase).any(|(at, _)| {
+            asked[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+        })
+    })
 }
 
 /// The route a turn takes, with its queries and reads, as the transcript's `route` step (T-4670).
@@ -883,8 +891,13 @@ pub fn dataset_pages(found: &[Hit]) -> Vec<Hit> {
     top(found, found.len())
         .into_iter()
         .filter(|hit| {
-            (is_dataset_page(&hit.url) || super::agent::endpoint_slug(&hit.url).is_some())
-                && seen.insert(hit.url.clone())
+            // One Endpoint is one dataset, whichever of its pages was found (T-4729).
+            let key = match super::agent::endpoint_slug(&hit.url) {
+                Some(slug) => format!("endpoint:{slug}"),
+                None if is_dataset_page(&hit.url) => hit.url.clone(),
+                None => return false,
+            };
+            seen.insert(key)
         })
         .take(CATALOGUE_PASSAGES)
         .collect()
@@ -3069,6 +3082,8 @@ mod tests {
             .catalogue
         );
         assert!(!routing(rag, "Kedy je otvorená knižnica?", &[]).catalogue);
+        assert!(!asks_for_datasets("Can you make data easier to read?"));
+        assert!(asks_for_datasets("Prosím, aké dáta máte o doprave?"));
         // A data question keeps its reads, whatever its wording.
         let live = vec![Shown {
             endpoint: "ovzdusie".into(),
@@ -3113,6 +3128,11 @@ mod tests {
             ),
             hit(6, "https://www.bbsk.sk/doprava", 0.7),
             hit(7, "https://opendata.dev.example/dataset/", 0.6),
+            hit(
+                8,
+                "https://api.dev.example/api/endpoint/praha-mesto/ngsi-ld/v1/types",
+                0.4,
+            ),
         ];
         let pages = dataset_pages(&found);
         assert_eq!(pages.iter().map(|h| h.chunk).collect::<Vec<_>>(), [3, 2, 4]);
