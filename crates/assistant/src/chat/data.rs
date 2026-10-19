@@ -5,6 +5,7 @@
 //! without a tool call is the answer. The bounds, the allowlist and the arguments are checked
 //! here, never left to the model.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,10 @@ const STEP_RESULT_CHARS: usize = 8_000;
 /// The tokens one question's loop may spend before its next call must be the answer (T-4651).
 /// ponytail: one number for every deployment; an `answer` field when one needs another.
 pub const QUESTION_TOKENS: u64 = 60_000;
+
+/// The most input tokens one call of the loop carries, its tool specs counted (T-4731, owner's
+/// order): calls of 125k-140k tokens were most of a data answer's time and cost on dev.
+const CALL_TOKENS: u64 = 100_000;
 
 /// What the answering model is told beside the routed answer's rules: when to call a tool, how
 /// NGSI-LD is asked, and that every number comes from a result. `{steps}` is the deployment's
@@ -278,24 +283,23 @@ pub async fn answer(
             )
             .await;
         }
+        let sent = capped(&messages, &tools, &tables);
         let at = Instant::now();
-        let pending = ask.trace.pending(
-            "data",
-            call.model.unwrap_or(ask.model.name()),
-            at,
-            &messages,
-        );
+        let pending = ask
+            .trace
+            .pending("data", call.model.unwrap_or(ask.model.name()), at, &sent);
         let stepped = ask
             .model
             .step(
                 ask.deployment,
                 ask.tokens_per_day,
                 &call,
-                &messages,
+                &sent,
                 &tools,
                 allow,
             )
             .await;
+        drop(sent);
         pending.done(stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
@@ -380,6 +384,67 @@ pub async fn answer(
             messages.push(json!({"role": "tool", "tool_call_id": id, "content": content}));
         }
     }
+}
+
+/// A rough token count of `values`, four characters a token, as the loop's own estimate.
+fn tokens_in(values: &[Value]) -> u64 {
+    (values
+        .iter()
+        .map(|v| v.to_string().chars().count())
+        .sum::<usize>()
+        / 4) as u64
+}
+
+/// The messages one call sends: within [`CALL_TOKENS`] with its `tools`, the oldest step results
+/// shortened first to a line naming their tool, Endpoint and rows. The newest two step results,
+/// the rules, the question and the router's tables and passages stay whole, and a call that is
+/// still over goes as it is: size never refuses a question (T-4731).
+fn capped<'m>(
+    messages: &'m [Value],
+    tools: &[Value],
+    tables: &[(usize, Table)],
+) -> Cow<'m, [Value]> {
+    let mut size = tokens_in(messages) + tokens_in(tools);
+    if size <= CALL_TOKENS {
+        return Cow::Borrowed(messages);
+    }
+    let results: Vec<usize> = (0..messages.len())
+        .filter(|&i| messages[i]["role"] == "tool")
+        .collect();
+    let mut out = messages.to_vec();
+    for &i in &results[..results.len().saturating_sub(2)] {
+        if size <= CALL_TOKENS {
+            break;
+        }
+        let Some(short) = shortened(&out[i]["content"], tables) else {
+            continue;
+        };
+        let before = tokens_in(&out[i..=i]);
+        out[i]["content"] = Value::String(short);
+        size = size - before + tokens_in(&out[i..=i]);
+    }
+    Cow::Owned(out)
+}
+
+/// A step result as one line: its number, tool, Endpoint and rows, without what it read. `None`
+/// for a message that is no step result (a refusal, the escape hatch's reply), which is short.
+fn shortened(content: &Value, tables: &[(usize, Table)]) -> Option<String> {
+    let result: Value = serde_json::from_str(content.as_str()?).ok()?;
+    let n = result.get("n")?.as_u64()?;
+    let rows = tables
+        .iter()
+        .find(|(at, _)| *at as u64 == n)
+        .map(|(_, t)| t.rows.len());
+    Some(
+        json!({
+            "n": n,
+            "tool": result["tool"],
+            "endpoint": result["endpoint"],
+            "rows": rows,
+            "result": "shortened to keep the call small: call the tool again for its values",
+        })
+        .to_string(),
+    )
 }
 
 /// One `show_visualization` call (T-4657): built from a table of this answer and sent as a
@@ -500,6 +565,83 @@ async fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A step result of `chars` characters, as [`step`] writes it.
+    fn result(n: usize, chars: usize) -> Value {
+        let content = json!({"n": n, "tool": "query_entities", "endpoint": "ovzdusie", "result": "x".repeat(chars)});
+        json!({"role": "tool", "tool_call_id": format!("c{n}"), "content": content.to_string()})
+    }
+
+    /// The rules, a question of `question` characters and `results` step results of 40 000
+    /// characters each (10 000 tokens), numbered from 2.
+    fn conversation(question: usize, results: usize) -> Vec<Value> {
+        let mut messages = vec![
+            json!({"role": "system", "content": "rules"}),
+            json!({"role": "user", "content": "q".repeat(question)}),
+        ];
+        for n in 2..2 + results {
+            messages.push(json!({"role": "assistant", "content": "", "tool_calls": []}));
+            messages.push(result(n, 40_000));
+        }
+        messages
+    }
+
+    fn rows(n: usize, rows: usize) -> (usize, Table) {
+        let table = Table {
+            rows: vec![vec![json!(1)]; rows],
+            ..Table::default()
+        };
+        (n, table)
+    }
+
+    #[test]
+    fn a_call_under_the_cap_or_empty_is_sent_as_it_is() {
+        let messages = conversation(4_000, 3);
+        assert!(matches!(capped(&messages, &[], &[]), Cow::Borrowed(_)));
+        assert!(matches!(capped(&[], &[], &[]), Cow::Borrowed(_)));
+    }
+
+    /// 75 000 tokens of question and tables and four results of 10 000: the two oldest are
+    /// shortened, the newest two and the question stay whole, and the call fits (T-4731).
+    #[test]
+    fn a_call_over_the_cap_shortens_the_oldest_results_first() {
+        let messages = conversation(300_000, 4);
+        let tables = [rows(2, 7), rows(3, 2)];
+        let sent = capped(&messages, &[], &tables);
+        assert!(tokens_in(&sent) <= CALL_TOKENS, "{}", tokens_in(&sent));
+        assert_eq!(sent[1], messages[1], "the question is whole");
+        let short: Value = serde_json::from_str(sent[3]["content"].as_str().unwrap_or_default())
+            .unwrap_or_default();
+        assert_eq!(
+            (&short["n"], &short["endpoint"], &short["rows"]),
+            (&json!(2), &json!("ovzdusie"), &json!(7))
+        );
+        assert_ne!(sent[5], messages[5], "the second oldest is shortened too");
+        assert_eq!(sent[7], messages[7]);
+        assert_eq!(sent[9], messages[9]);
+    }
+
+    /// The tool specs count, and a call still over once only the newest two are whole goes as it
+    /// is: the question is never cut and never refused for its size.
+    #[test]
+    fn a_call_that_stays_over_keeps_the_newest_two_and_the_question() {
+        let messages = conversation(380_000, 3);
+        let tools = vec![json!({"description": "t".repeat(40_000)})];
+        let sent = capped(&messages, &tools, &[]);
+        assert!(tokens_in(&sent) + tokens_in(&tools) > CALL_TOKENS);
+        assert_eq!(sent.len(), messages.len());
+        assert_eq!(sent[1], messages[1]);
+        assert_ne!(sent[3], messages[3]);
+        assert_eq!((&sent[5], &sent[7]), (&messages[5], &messages[7]));
+        // a reply that is no step result is never rewritten
+        let refused = vec![
+            json!({"role": "user", "content": "q".repeat(420_000)}),
+            json!({"role": "tool", "tool_call_id": "c", "content": "The tool refused or failed."}),
+            result(2, 10),
+            result(3, 10),
+        ];
+        assert_eq!(capped(&refused, &[], &[]).as_ref(), &refused[..]);
+    }
 
     fn connector(endpoint: &str, tools: &[&str]) -> Connected {
         Connected {
