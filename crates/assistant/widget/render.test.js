@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -446,8 +446,12 @@ test("an empty chat offers the deployment's questions in its language, else the 
 });
 
 test("a failed answer is said in the widget's words, by the service's title, else its status (T-4253)", () => {
-  // T-4286: the service never sends a spent day as an error, so the widget has no word for it.
   assert.equal(trouble(429, "Budget Spent"), "busy");
+  // T-4671: each limit is one word, and asking again before it resets cannot help.
+  for (const title of ["Daily Limit Reached", "Monthly Limit Reached", "Visitor Limit Reached"]) {
+    assert.equal(trouble(429, title), "limit", title);
+  }
+  assert.equal(retryable("limit"), false);
   assert.equal(trouble(429, "Conversation Budget Spent"), "full");
   assert.equal(trouble(503, "Model Unavailable"), "unreachable");
   assert.equal(trouble(502, "No Answer"), "unanswered");
@@ -470,7 +474,7 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   const fs = require("node:fs");
   const path = require("node:path");
   const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
-  const words = ["full", "declined", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
+  const words = ["full", "declined", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry", "limit"];
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
@@ -814,6 +818,16 @@ test("the close message goes to the framing page's origin alone, never to any (T
   assert.deepEqual(closeTargets(undefined, ["*", "", null, "null", "javascript:alert(1)", "https://a.sk/path", "https://a.sk@evil.example"]), []);
   assert.deepEqual(closeTargets(["null"], framers), [], "a sandboxed parent gets nothing");
   assert.deepEqual(closeTargets(undefined, undefined), []);
+});
+
+test("a limit reads the service's sentence with its reset time in Slovak, the widget's word elsewhere (T-4671)", () => {
+  const words = { limit: "The assistant has reached its limit. Try again later.", slow: "Too long." };
+  const day = "Asistent dnes dosiahol denný limit. Skúste to znova zajtra po 2:00.";
+  assert.equal(said("limit", day, "sk", words), day);
+  assert.equal(said("limit", day, "en", words), words.limit, "never Slovak in an English chat");
+  assert.equal(said("limit", "  ", "sk", words), words.limit);
+  assert.equal(said("limit", undefined, "sk", words), words.limit);
+  assert.equal(said("slow", "Answer Took Too Long detail", "sk", words), words.slow, "only a limit reads the detail");
 });
 
 test("a remembered conversation comes back for 90 days after its last change and not after (T-4670)", () => {
