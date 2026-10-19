@@ -9,7 +9,9 @@
 //! reaches them through its MCP connectors, never through this index.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
+use regex::Regex;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -154,11 +156,31 @@ fn dataset_html(dataset: &Dataset) -> String {
             if let Some(format) = present(&resource.format) {
                 item.push_str(&format!(" ({})", escape(format)));
             }
-            if let Some(description) = present(&resource.description) {
-                item.push_str(&format!(": {}", escape(description)));
-            }
-            if let Some(url) = present(&resource.url).filter(|u| u.contains("/api/endpoint/")) {
-                item.push_str(&format!(" ({})", escape(url)));
+            match present(&resource.url).filter(|u| u.contains("/api/endpoint/")) {
+                // An interface of the Endpoint: its addresses, the typed example among them
+                // (T-4625), but not its how-to, which is the same on every dataset page and is
+                // the catalogue's own page instead (T-4747).
+                Some(url) => {
+                    let mut addresses = vec![url];
+                    for found in present(&resource.description)
+                        .into_iter()
+                        .flat_map(|d| ADDRESS.find_iter(d))
+                    {
+                        // A sentence's own stop is not part of the address.
+                        let found = found.as_str().trim_end_matches(['.', ',', ';', ':']);
+                        if !addresses.contains(&found) {
+                            addresses.push(found);
+                        }
+                    }
+                    for address in addresses {
+                        item.push_str(&format!(" ({})", escape(address)));
+                    }
+                }
+                None => {
+                    if let Some(description) = present(&resource.description) {
+                        item.push_str(&format!(": {}", escape(description)));
+                    }
+                }
             }
             html.push_str(&format!("<li>{item}</li>"));
         }
@@ -166,6 +188,51 @@ fn dataset_html(dataset: &Dataset) -> String {
     }
     html.push_str("</body></html>");
     html
+}
+
+/// An Endpoint's address in a resource's description.
+static ADDRESS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://[^\s'"<>()]+/api/endpoint/[^\s'"<>()]+"#).expect("a pattern")
+});
+
+/// One Endpoint's slug and one type in an address, which the how-to page names generically.
+static SLUG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/api/endpoint/[a-z0-9-]+").expect("a pattern"));
+static TYPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"type=[A-Za-z0-9_]+").expect("a pattern"));
+
+/// How to reach the catalogue's data, from the interface descriptions of `dataset`: the text the
+/// catalogue gives every dataset the same, indexed once at the catalogue's own address, so a
+/// question about connecting cites the catalogue, never one dataset (T-4747). Its addresses name
+/// `{endpoint}` and `{type}`, so no Endpoint's citation finds this page. `None` when the
+/// dataset has no interface with a description.
+fn connect_html(dataset: &Dataset) -> Option<String> {
+    let mut body = String::new();
+    for resource in &dataset.resources {
+        let Some(description) = present(&resource.description) else {
+            continue;
+        };
+        if !present(&resource.url).is_some_and(|u| u.contains("/api/endpoint/")) {
+            continue;
+        }
+        let generic = SLUG.replace_all(description, "/api/endpoint/{endpoint}");
+        let generic = TYPE.replace_all(&generic, "type={type}");
+        let mut heading = escape(present(&resource.name).unwrap_or("Interface"));
+        if let Some(format) = present(&resource.format) {
+            heading.push_str(&format!(" ({})", escape(format)));
+        }
+        body.push_str(&format!("<h2>{heading}</h2>"));
+        for paragraph in generic
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            body.push_str(&format!("<p>{}</p>", escape(paragraph)));
+        }
+    }
+    (!body.is_empty()).then(|| {
+        format!("<html><body><h1>Connecting to the catalogue's data</h1>{body}</body></html>")
+    })
 }
 
 /// The catalogue's base URL with the trailing slash `Url::join` needs.
@@ -269,6 +336,35 @@ pub struct Catalogue<'a> {
     pub organizations: &'a [String],
 }
 
+/// A page of the catalogue as it is written to the index.
+struct Written<'a> {
+    url: &'a str,
+    hash: &'a str,
+    modified: Option<&'a str>,
+}
+
+/// Writes one page of the catalogue's site and returns its id, for the sink.
+async fn store(pool: &PgPool, catalogue: Catalogue<'_>, page: Written<'_>) -> Result<i64, Error> {
+    let mut tx = crate::project_scope(pool, catalogue.project).await?;
+    let page_id: i64 = sqlx::query_scalar(
+        "INSERT INTO pages (site_id, project, url, depth, status, content_hash, language, included, last_modified, fetched_at) \
+         VALUES ($1, $2, $3, 0, 'fetched', $4, $5, true, $6, now()) \
+         ON CONFLICT (site_id, url) DO UPDATE SET status = 'fetched', content_hash = EXCLUDED.content_hash, \
+             language = EXCLUDED.language, last_modified = EXCLUDED.last_modified, fetched_at = now() \
+         RETURNING id",
+    )
+    .bind(catalogue.site_id)
+    .bind(catalogue.project)
+    .bind(page.url)
+    .bind(page.hash)
+    .bind(catalogue.language)
+    .bind(page.modified)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(page_id)
+}
+
 /// Reads the public datasets of `catalogue` into its site, handing each new or changed dataset
 /// to `sink` as a page.
 pub async fn sync_ckan(
@@ -303,6 +399,7 @@ pub async fn sync_ckan(
 
     let mut report = CkanReport::default();
     let mut listed: HashSet<String> = HashSet::new();
+    let mut connect: Option<String> = None;
     let mut start = 0;
     'listing: loop {
         let page = search_page(crawler, &base, organizations, start).await?;
@@ -321,6 +418,9 @@ pub async fn sync_ckan(
             if !listed.insert(url.clone()) {
                 continue;
             }
+            if connect.is_none() {
+                connect = connect_html(&dataset);
+            }
             let html = dataset_html(&dataset);
             let hash = hex::encode(Sha256::digest(html.as_bytes()));
             if known.get(&url).is_some_and(|(modified, held)| {
@@ -330,23 +430,12 @@ pub async fn sync_ckan(
             }) {
                 continue;
             }
-            let mut tx = crate::project_scope(pool, project).await?;
-            let page_id: i64 = sqlx::query_scalar(
-                "INSERT INTO pages (site_id, project, url, depth, status, content_hash, language, included, last_modified, fetched_at) \
-                 VALUES ($1, $2, $3, 0, 'fetched', $4, $5, true, $6, now()) \
-                 ON CONFLICT (site_id, url) DO UPDATE SET status = 'fetched', content_hash = EXCLUDED.content_hash, \
-                     language = EXCLUDED.language, last_modified = EXCLUDED.last_modified, fetched_at = now() \
-                 RETURNING id",
-            )
-            .bind(site_id)
-            .bind(project)
-            .bind(&url)
-            .bind(&hash)
-            .bind(language)
-            .bind(dataset.metadata_modified.as_deref())
-            .fetch_one(&mut *tx)
-            .await?;
-            tx.commit().await?;
+            let written = Written {
+                url: &url,
+                hash: &hash,
+                modified: dataset.metadata_modified.as_deref(),
+            };
+            let page_id = store(pool, catalogue, written).await?;
             sink.page(page_id, &url, language, &html).await;
             report.changed += 1;
         }
@@ -356,6 +445,25 @@ pub async fn sync_ckan(
         }
     }
     report.datasets = listed.len();
+
+    // The how-to the interfaces share, once, at the catalogue's own address (T-4747).
+    if let Some(html) = connect {
+        let url = base.to_string();
+        let hash = hex::encode(Sha256::digest(html.as_bytes()));
+        if known
+            .get(&url)
+            .is_none_or(|(_, held)| held.as_deref() != Some(hash.as_str()))
+        {
+            let written = Written {
+                url: &url,
+                hash: &hash,
+                modified: None,
+            };
+            let page_id = store(pool, catalogue, written).await?;
+            sink.page(page_id, &url, language, &html).await;
+        }
+        listed.insert(url);
+    }
 
     // The whole listing was read: what it no longer names goes, with its passages.
     let listed: Vec<String> = listed.into_iter().collect();
@@ -405,6 +513,60 @@ mod tests {
         assert!(html.contains(
             "<li>Unnamed resource (API) (https://dev.example.org/api/endpoint/od-air/ngsi-ld/v1/entities?type=A&amp;x=&lt;y&gt;)</li>"
         ));
+    }
+
+    /// T-4747: the how-to every interface resource carries is the same on every dataset page, so
+    /// a question about it cited whichever dataset ranked first. A dataset page keeps each
+    /// interface's name, format and addresses (the typed example finds the page by its type,
+    /// T-4625); the how-to is one page of the catalogue's own.
+    #[test]
+    fn the_interface_how_to_is_one_catalogue_page_not_every_datasets() {
+        let dataset = |name: &str, slug: &str, kind: &str| -> Dataset {
+            serde_json::from_value(serde_json::json!({
+                "name": name,
+                "title": name,
+                "resources": [
+                    {"name": "NGSI-LD API", "format": "NGSI-LD",
+                     "url": format!("https://gw.example/api/endpoint/{slug}/ngsi-ld/v1/"),
+                     "description": format!("The NGSI-LD API of this dataset.\n\n    curl 'https://gw.example/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}'")},
+                    {"name": "Model Context Protocol", "format": "MCP",
+                     "url": format!("https://gw.example/api/endpoint/{slug}/mcp"),
+                     "description": format!("For AI assistants: a Model Context Protocol server over https://gw.example/api/endpoint/{slug}. Add it to Claude as a connector.")},
+                    {"name": "Readings", "format": "CSV", "description": "One row per hour",
+                     "url": "https://files.example.org/readings.csv"}
+                ]
+            }))
+            .expect("a dataset")
+        };
+        let html = dataset_html(&dataset("skoly", "bbsk-all", "School"));
+        assert!(
+            !html.contains("AI assistants") && !html.contains("Add it to Claude"),
+            "{html}"
+        );
+        assert!(html.contains(
+            "<li>NGSI-LD API (NGSI-LD) (https://gw.example/api/endpoint/bbsk-all/ngsi-ld/v1/) (https://gw.example/api/endpoint/bbsk-all/ngsi-ld/v1/entities?type=School)</li>"
+        ), "{html}");
+        assert!(html.contains("<li>Model Context Protocol (MCP) (https://gw.example/api/endpoint/bbsk-all/mcp) (https://gw.example/api/endpoint/bbsk-all)</li>"), "{html}");
+        assert!(
+            html.contains("<li>Readings (CSV): One row per hour</li>"),
+            "a plain file keeps its description"
+        );
+
+        let page = connect_html(&dataset("skoly", "bbsk-all", "School")).expect("a how-to page");
+        assert!(page.contains("Add it to Claude as a connector."), "{page}");
+        assert!(
+            !page.contains("bbsk-all") && !page.contains("type=School"),
+            "the catalogue's page names no dataset's Endpoint or type: {page}"
+        );
+        assert!(
+            page.contains("/api/endpoint/{endpoint}/ngsi-ld/v1/entities?type={type}"),
+            "{page}"
+        );
+        let plain: Dataset = serde_json::from_value(serde_json::json!({
+            "name": "x", "resources": [{"name": "Data", "format": "CSV"}]
+        }))
+        .expect("a dataset");
+        assert_eq!(connect_html(&plain), None, "no interface, no how-to page");
     }
 
     #[test]
