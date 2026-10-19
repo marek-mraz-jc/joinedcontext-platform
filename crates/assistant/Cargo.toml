@@ -41,6 +41,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+# A polygon answer's geodesic area and perimeter and its simpler outline for the map (T-4697);
+# already in the tree through ngsild-ql, no default features there either.
+geo = { version = "0.33", default-features = false }
 time = { version = "0.3", features = ["macros", "parsing", "formatting"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

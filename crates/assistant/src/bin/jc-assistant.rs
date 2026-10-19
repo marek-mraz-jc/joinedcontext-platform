@@ -190,6 +190,7 @@ fn chat_state(
         viz: viz_url(env).map_err(fail("the chart renderer's address is not usable"))?,
         organization: organization.to_owned(),
         contexts: Default::default(),
+        turns: Default::default(),
     });
     Ok((chat_state, reader))
 }

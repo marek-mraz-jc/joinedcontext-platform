@@ -355,6 +355,7 @@ dependencies = [
  "agent-proxy",
  "axum",
  "futures-util",
+ "geo",
  "hex",
  "jc-core",
  "jc-manifest",

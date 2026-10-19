@@ -460,9 +460,11 @@ mod tests {
             units: vec![None, Some("µg/m³".into())],
             labels: vec![None, None],
             summary: vec![false, false],
+            enums: vec![None, None],
             total: Some(12),
             dataset: None,
             download: None,
+            geojson: None,
             map: None,
             geometries: vec![],
         };

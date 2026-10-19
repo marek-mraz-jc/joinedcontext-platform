@@ -59,6 +59,9 @@ pub struct Connected {
     pub title: Option<String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
+    /// The slugs of the project's Endpoints over the same context space, its own included: one
+    /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
+    pub siblings: Vec<String>,
 }
 
 /// A turn the channel sent back (AG-99).
@@ -126,6 +129,9 @@ pub enum Event {
     Done(Spent, u64),
 }
 
+/// An enum's values, each as its words per language (T-4682).
+pub type Words = BTreeMap<String, BTreeMap<String, String>>;
+
 /// What a data round read, as API/05 §1.3's `data` event carries it (T-4140).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Table {
@@ -140,6 +146,10 @@ pub struct Table {
     /// empty for a type without a model class (DM-100, T-4672).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<Option<BTreeMap<String, String>>>,
+    /// Each column's enum values as words per language from the data model, `null` where the
+    /// column holds no enum the model describes; empty when none does (T-4682).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enums: Vec<Option<Words>>,
     /// Whether each column is one of the model's key attributes, which a map's popup shows
     /// (DM-99, T-4672); empty for a type without a model class.
     #[serde(skip)]
@@ -151,6 +161,10 @@ pub struct Table {
     pub dataset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<String>,
+    /// The one area's outline as the Endpoint serves it in GeoJSON (OGC API Features), when the
+    /// table is a single polygon row (T-4697).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub geojson: Option<String>,
     /// The map spec of the located rows (ADR-N-053 §2.9), when the deployment has a renderer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub map: Option<Value>,
@@ -202,9 +216,6 @@ pub struct Ask<'a> {
     pub data_steps: usize,
     /// How long after the question the loop may still call a tool (`answer.maxDataSeconds`).
     pub data_time: std::time::Duration,
-    /// The day's cost cap is reached: the sources' links, no model call (T-4149).
-    /// Set when the question is answered as search, without a model (T-4149, T-4286).
-    pub search_only: Option<super::routed::Cap>,
     /// The moment of the question, read from the server's clock once per request (T-4339).
     pub now: time::OffsetDateTime,
     /// The deployment's local time zone; UTC only when `None`.
@@ -589,9 +600,6 @@ pub async fn answer(
     question: &str,
     events: &Sender<Event>,
 ) -> Spent {
-    if let Some(cap) = &ask.search_only {
-        return super::routed::search_only(ask, cap, question, events).await;
-    }
     if ask.public_only && ask.functions.is_none() {
         return super::routed::answer(ask, history, question, events).await;
     }
@@ -647,12 +655,9 @@ pub async fn answer(
             .model("agent", ask.model.name(), at, completed.as_ref());
         let completion = match completed {
             Ok(completion) => completion,
-            // A spent day answers as search, never as a refusal (T-4286).
+            // The day ran out between the calls: the limit, never a quiet switch (T-4671).
             Err(CallError::DaySpent(_)) => {
-                let searched =
-                    super::routed::search_only(ask, &super::routed::Cap::Day, question, events)
-                        .await;
-                spent.first_token_ms = searched.first_token_ms;
+                send(events, super::routed::Limit::Day.event(ask.now, ask.zone)).await;
                 return spent;
             }
             Err(err) => {
@@ -863,6 +868,7 @@ async fn run_tool(
                 "The call was not made: {why}. Correct the arguments, or answer without this tool."
             );
         }
+        let kind = super::routed::queried_type(&tool.name, &arguments);
         send(
             events,
             Event::Tool {
@@ -895,10 +901,15 @@ async fn run_tool(
                     },
                 )
                 .await;
+                // Rows of a type cite the dataset a visitor can open (T-4625).
+                let dataset = match kind.as_deref() {
+                    Some(kind) => super::routed::dataset_of(ask, connector, kind).await,
+                    None => None,
+                };
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
-                    url: None,
+                    url: dataset,
                     tool: Some(tool.name.clone()),
                     endpoint,
                     title: None,

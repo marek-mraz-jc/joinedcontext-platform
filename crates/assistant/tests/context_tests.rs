@@ -197,6 +197,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
                 slug: slug.into(),
                 audience: page.page.audience.clone(),
                 title: None,
+                space: String::new(),
             },
         );
         snapshot
@@ -233,6 +234,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
         viz: None,
         organization: "banskabystrica".into(),
         contexts: Default::default(),
+        turns: Default::default(),
     });
     assistant::chat::context::count(Arc::clone(&state)).await;
     (router(state), gateway, realm, database)

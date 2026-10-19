@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines } = require("./render.js");
+const { notice, closeTargets, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -177,7 +177,7 @@ test("the visitor's toggle pick, else the browser's language, else the deploymen
   assert.equal(language("", skEn, known, null, ["en-GB"], "ask"), "en");
 });
 
-test("a data table shows at most 50 rows of text and only http(s) links", () => {
+test("a data table shows at most 20 rows of text and only http(s) links", () => {
   const rows = Array.from({ length: 60 }, (_, i) => [`Stanica ${i}`, i, null]);
   const shown = table({
     type: "AirQualityObserved",
@@ -185,15 +185,33 @@ test("a data table shows at most 50 rows of text and only http(s) links", () => 
     rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
     dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
     download: "javascript:alert(1)",
+    geojson: "data:application/geo+json,{}",
   }, "en");
-  assert.equal(shown.rows.length, 50);
-  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', "–"]);
-  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", "–"]);
-  assert.equal(shown.caption, "Air quality (50)");
+  assert.equal(shown.rows.length, 20);
+  assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
+  assert.deepEqual(shown.rows[1], ["Stanica 0", "0", ""]);
+  assert.equal(shown.caption, "Air quality (20)");
   assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
   assert.equal(shown.download, null);
+  assert.equal(shown.geojson, null);
+  const area = "https://api.dev.joinedcontext.com/api/endpoint/s/ogc/features/collections/AdministrativeArea/items/urn%3Angsi-ld%3AAdministrativeArea%3Ab";
+  assert.equal(table({ columns: ["name"], rows: [["Badín"]], geojson: area }, "sk").geojson, area);
   assert.equal(table({ columns: [], rows: [[1]] }), null);
   assert.equal(table(null), null);
+});
+
+test("a row measured a day before the table's newest is marked out of date, the rest are not (T-4682)", () => {
+  const now = Date.parse("2026-10-18T22:00:00Z");
+  const shown = table({
+    type: "BikeHireDockingStation",
+    columns: ["name", "availableBikeNumber", "observedAt"],
+    rows: [["Kamppi", 12, "2026-10-18T21:58:00Z"], ["040", 3, "2026-09-30T09:22:00Z"], ["Töölö", 4, null]],
+  }, "sk", now);
+  assert.ok(!shown.rows[0][2].includes("neaktuálne"));
+  assert.match(shown.rows[1][2], / · neaktuálne$/);
+  assert.equal(shown.rows[2][2], "");
+  const fresh = table({ columns: ["name", "observedAt"], rows: [["a", "2026-10-01T00:00:00Z"]] }, "en", now);
+  assert.ok(!fresh.rows[0][1].includes("out of date"), "one old row alone has nothing newer to lag");
 });
 
 test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
@@ -208,25 +226,26 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
     ],
   };
   const sk = table(data, "sk", now);
-  assert.equal(sk.caption, "Kvalita ovzdušia (2 z 12)");
+  assert.equal(sk.caption, "Kvalita ovzdušia — prvých 2 z 12");
   assert.deepEqual(sk.columns, ["Názov", "PM10 (µg/m³)", "NO₂ (µg/m³)", "Open", "Zmenené", "Čas merania"]);
   assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
   assert.equal(sk.rows[0][1], "21,5");
   assert.equal(sk.rows[0][2], "12");
   assert.equal(sk.rows[1][1], "9,123");
-  assert.equal(sk.rows[1][2], "–");
+  assert.equal(sk.rows[1][2], "");
   assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
   assert.match(sk.rows[0][5], /^pred 5 min/);
-  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2}$/);
+  assert.match(sk.rows[1][5], /^16\. 10\. 2026 \d{2}:\d{2} · neaktuálne$/);
   const en = table(data, "en", now);
-  assert.equal(en.caption, "Air quality (2 of 12)");
+  assert.equal(en.caption, "Air quality — first 2 of 12");
   assert.equal(en.columns[5], "Measured");
   assert.equal(en.rows[1][1], "9.123");
   assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
   assert.match(en.rows[0][5], /^5 min\. ago$/);
   // A key the table does not know is spelt out; a language it does not know reads English.
   assert.equal(table({ type: "BikeHireDockingStation", columns: ["availableBikeNumber"], rows: [[3]] }, "xx").columns[0], "Available bike number");
-  assert.equal(table({ type: "BikeHireDockingStation", columns: ["x"], rows: [] }, "sk").caption, "Bike hire docking station (0)");
+  assert.equal(table({ type: "BikeHireDockingStation", columns: ["x"], rows: [] }, "sk").caption, "Stanice bicyklov (0)");
+  assert.equal(table({ type: "WasteContainer", columns: ["x"], rows: [] }, "sk").caption, "Waste container (0)");
   // Text stays text: a cell that looks like markup is shown as typed.
   assert.equal(table({ columns: ["name"], rows: [["<img src=x onerror=alert(1)>"]] }, "sk").rows[0][0], "<img src=x onerror=alert(1)>");
 });
@@ -292,7 +311,7 @@ test("a stage is one fixed line, a search and a read name their topic, an unknow
   assert.equal(stage({ stage: "searching", topic: "otváracie hodiny knižnice" }, "sk"),
     "Hľadám v zdrojoch: „otváracie hodiny knižnice“…");
   assert.equal(stage({ stage: "searching" }, "en"), "Searching the sources…");
-  assert.equal(stage({ stage: "reading", topic: "AirQualityObserved" }, "cs"), "Čtu živá data: „AirQualityObserved“…");
+  assert.equal(stage({ stage: "reading", topic: "AirQualityObserved" }, "cs"), "Čtu živá data: „Kvalita ovzduší“…");
   assert.equal(stage({ stage: "answering", topic: "ignored" }, "xx"), "Preparing the answer…");
   assert.equal(stage({ stage: "searching", topic: "x".repeat(100) }, "en").length, "Searching the sources: „“…".length + 60);
   assert.equal(stage({ stage: "__proto__" }, "en"), null);
@@ -431,8 +450,12 @@ test("an empty chat offers the deployment's questions in its language, else the 
 });
 
 test("a failed answer is said in the widget's words, by the service's title, else its status (T-4253)", () => {
-  // T-4286: the service never sends a spent day as an error, so the widget has no word for it.
   assert.equal(trouble(429, "Budget Spent"), "busy");
+  // T-4671: each limit is one word, and asking again before it resets cannot help.
+  for (const title of ["Daily Limit Reached", "Monthly Limit Reached", "Visitor Limit Reached"]) {
+    assert.equal(trouble(429, title), "limit", title);
+  }
+  assert.equal(retryable("limit"), false);
   assert.equal(trouble(429, "Conversation Budget Spent"), "full");
   assert.equal(trouble(503, "Model Unavailable"), "unreachable");
   assert.equal(trouble(502, "No Answer"), "unanswered");
@@ -455,7 +478,7 @@ test("every word trouble names is in each of the widget's languages (T-4253)", (
   const fs = require("node:fs");
   const path = require("node:path");
   const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
-  const words = ["full", "declined", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry"];
+  const words = ["full", "declined", "unreachable", "unanswered", "slow", "busy", "paused", "offline", "failed", "retry", "limit"];
   for (const lang of ["sk", "en", "cs"]) {
     const block = widget.split(new RegExp(`\\n    ${lang}: \\{`))[1].split(/\n    [a-z]{2}: \{|\n  \};/)[0];
     for (const word of words) assert.match(block, new RegExp(`\\b${word}: "`), `${lang}.${word}`);
@@ -540,13 +563,15 @@ test("the speakers, the thumbs and every answer's tools are named by bound words
   assert.match(widget, /iconButton\("jc-copy", "copy", "copy"\)/);
 });
 
-test("the data loop's stages name their topic, and two or more work steps are listed under the answer (T-4294)", () => {
-  assert.equal(stage({ stage: "history", topic: "AirQualityObserved" }, "sk"), "Čítam históriu údajov: „AirQualityObserved“…");
-  assert.equal(stage({ stage: "schema", topic: "bbsk-otvorene-data" }, "en"), "Reading the data's schema: „bbsk-otvorene-data“…");
+test("the data loop's stages name their data in words, never a slug, and two or more work steps are listed with their times (T-4294, T-4682)", () => {
+  assert.equal(stage({ stage: "history", topic: "AirQualityObserved" }, "sk"), "Čítam históriu údajov: „Kvalita ovzdušia“…");
+  assert.equal(stage({ stage: "schema", topic: "bbsk-otvorene-data" }, "en"), "Reading the data's schema…");
+  assert.equal(stage({ stage: "reading", topic: "WasteContainer" }, "en"), "Reading live data…");
+  assert.equal(stage({ stage: "searching", topic: "cyklotrasy v BB" }, "sk"), "Hľadám v zdrojoch: „cyklotrasy v BB“…");
   assert.equal(stage({ stage: "steps" }, "en"), null, "the summary word is no stage");
-  const took = steps([{ stage: "understanding" }, { stage: "reading", topic: "School" }, { stage: "answering" },
-    { stage: "schema", topic: "od" }, { stage: "bogus" }], "sk");
-  assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „School“…", "Čítam schému údajov: „od“…"] });
+  const took = steps([{ stage: "understanding" }, { stage: "reading", topic: "School", ms: 1240 }, { stage: "answering" },
+    { stage: "schema", topic: "od", ms: -5 }, { stage: "bogus" }], "sk");
+  assert.deepEqual(took, { summary: "Postup (2)", lines: ["Čítam živé údaje: „Školy“… (1,2 s)", "Čítam schému údajov…"] });
   assert.equal(steps([{ stage: "reading", topic: "School" }], "en"), null, "one step needs no list");
   assert.equal(steps(undefined, "en"), null);
 });
@@ -639,11 +664,47 @@ test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4
   assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
 });
 
+test("a grid reads by meaning: no URN column, years and codes ungrouped, enums in words, short links (T-4682)", () => {
+  const data = {
+    type: "Bridge", total: 1651,
+    columns: ["id", "bridgedLength", "yearBuilt", "stationCode", "heritageStatus", "refRoad", "source", "spanCount"],
+    units: [null, "m", null, null, null, null, null, null],
+    enums: [null, null, null, null, { notListed: { sk: "nie je chránená", en: "not protected" } }, null, null, null],
+    rows: [
+      ["urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M1006", 1651.5, 1953, 12345, "notListed", "urn:ngsi-ld:Road:bbsk.sk:I-50", "https://data.slovensko.sk/download?id=9", null],
+      ["urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M1007", 9.46, 2021, 7, "other", null, "javascript:alert(1)", 3],
+    ],
+  };
+  const sk = table(data, "sk");
+  // The URN is a name, never a column, and a column of references goes.
+  assert.deepEqual(sk.columns.length, 7);
+  assert.equal(sk.columns[0], "Názov");
+  assert.equal(sk.rows[0][0], "M1006");
+  assert.ok(!JSON.stringify(sk).includes("urn:"), JSON.stringify(sk));
+  // A quantity is grouped; a year or a code is not.
+  assert.equal(sk.rows[0][1], "1\u00a0651,5".replace("\u00a0", new Intl.NumberFormat("sk").format(1000).charAt(1)));
+  assert.equal(sk.rows[0][2], "1953");
+  assert.equal(sk.rows[0][3], "12345");
+  assert.equal(sk.rows[1][1], "9,46");
+  // An enum reads its words; one the model does not describe stays as written.
+  assert.equal(sk.rows[0][4], "nie je chránená");
+  assert.equal(table(data, "en").rows[0][4], "not protected");
+  assert.equal(sk.rows[1][4], "other");
+  // A long address is a short link; anything but http(s) stays text.
+  assert.deepEqual(sk.rows[0][5], { text: "Zdroj", href: "https://data.slovensko.sk/download?id=9" });
+  assert.equal(sk.rows[1][5], "javascript:alert(1)");
+  // An empty cell is empty.
+  assert.equal(sk.rows[0][6], "");
+  assert.equal(sk.caption, "Mosty — prvých 2 z 1\u00a0651".replace("\u00a0", new Intl.NumberFormat("sk").format(1000).charAt(1)));
+  assert.equal(table(data, "en").caption, "Bridges — first 2 of 1,651");
+});
+
 test("the table's labels are jc-core's field-order.json, the CKAN publisher's and theme's (T-4661)", () => {
   const fields = require("../../jc-core/data/field-order.json");
   const shown = table({ columns: ["startDate", "eventCategory", "url"], rows: [] }, "sk");
   assert.deepEqual(shown.columns, ["Začiatok", "Kategória", "Odkaz"]);
-  for (const key of Object.keys(fields.labels)) {
+  // `id` is the row's name in the grid (T-4682), so it reads as `name` does.
+  for (const key of Object.keys(fields.labels).filter((k) => k !== "id")) {
     assert.equal(table({ columns: [key], rows: [] }, "cs").columns[0], fields.labels[key].cs, key);
   }
 });
@@ -744,6 +805,9 @@ test("a chart or a map reaches only the viz origin, in the visitor's language, m
   const bar = { encoding: { x: { field: "value", title: "no2 (µg/m³)" }, y: { field: "label", title: null } } };
   assert.equal(vizSpec(bar, "en").encoding.x.title, "NO₂ (µg/m³)");
   assert.equal(vizSpec(bar, "en").encoding.y.title, null);
+  // T-4682: the model's words for the column win, in the visitor's language.
+  assert.equal(vizSpec(bar, "sk", { no2: { sk: "Oxid dusičitý", en: "Nitrogen dioxide" } }).encoding.x.title, "Oxid dusičitý (µg/m³)");
+  assert.equal(vizSpec(bar, "en", { no2: "nope" }).encoding.x.title, "NO₂ (µg/m³)");
   assert.equal(mapFirst({ rows: [[1], [2]], map }), true);
   assert.equal(mapFirst({ rows: [[1], [2], [3]], map }), false, "a row without a place: the table first");
   assert.equal(mapFirst({ rows: [[1]] }), false);
@@ -758,6 +822,16 @@ test("the close message goes to the framing page's origin alone, never to any (T
   assert.deepEqual(closeTargets(undefined, ["*", "", null, "null", "javascript:alert(1)", "https://a.sk/path", "https://a.sk@evil.example"]), []);
   assert.deepEqual(closeTargets(["null"], framers), [], "a sandboxed parent gets nothing");
   assert.deepEqual(closeTargets(undefined, undefined), []);
+});
+
+test("a limit reads the service's sentence with its reset time in Slovak, the widget's word elsewhere (T-4671)", () => {
+  const words = { limit: "The assistant has reached its limit. Try again later.", slow: "Too long." };
+  const day = "Asistent dnes dosiahol denný limit. Skúste to znova zajtra po 2:00.";
+  assert.equal(said("limit", day, "sk", words), day);
+  assert.equal(said("limit", day, "en", words), words.limit, "never Slovak in an English chat");
+  assert.equal(said("limit", "  ", "sk", words), words.limit);
+  assert.equal(said("limit", undefined, "sk", words), words.limit);
+  assert.equal(said("slow", "Answer Took Too Long detail", "sk", words), words.slow, "only a limit reads the detail");
 });
 
 test("a remembered conversation comes back for 90 days after its last change and not after (T-4670)", () => {
@@ -791,4 +865,54 @@ test("the privacy dialog leads with the deployment's disclaimer, says what is ke
   assert.equal(privacyLines(words, 7, { contact: "not an address", documentsUrl: "https://x.sk/gdpr" }).length, 2, "no contact, no section");
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "javascript:alert(1)" }).length, 3);
   assert.equal(privacyLines(words, 7, { contact: "dpo@x.sk", documentsUrl: "http://x.sk/gdpr" }).length, 3, "https only");
+});
+
+const C = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+const T = "0a1b2c3d-4e5f-4a7b-8c9d-0e1f2a3b4c5d";
+
+test("an answer about one dataset opens it, a broad or an outside one never (T-4685)", () => {
+  const cyklo = "https://opendata.dev.example/dataset/cyklotrasy-bbsk";
+  // One dataset, cited first, twice and once by a tool: open it, the trailing slash and query dropped.
+  assert.deepEqual(dataset([{ n: 1, url: cyklo + "/", title: "Cyklotrasy BBSK" }, { n: 2, url: "https://www.bbsk.sk/doprava" },
+    { n: 3, tool: "query_entities", url: cyklo + "?x=1", title: "Cyklotrasy" }]), { url: cyklo, title: "Cyklotrasy BBSK" });
+  // Two datasets: a list, stay.
+  assert.equal(dataset([{ n: 1, url: cyklo }, { n: 2, url: "https://opendata.dev.example/dataset/zastavky" }]), null);
+  // The dataset is not the first citation: the answer is about something else.
+  assert.equal(dataset([{ n: 1, url: "https://www.bbsk.sk/doprava" }, { n: 2, url: cyklo }]), null);
+  // No citation, a tool without a page, http, a resource of the dataset, or a lookalike path.
+  assert.equal(dataset([]), null);
+  assert.equal(dataset(null), null);
+  assert.equal(dataset([{ n: 1, tool: "query_entities" }]), null);
+  assert.equal(dataset([{ n: 1, url: "http://opendata.dev.example/dataset/cyklotrasy-bbsk" }]), null);
+  assert.deepEqual(dataset([{ n: 1, url: "http://127.0.0.1:8080/dataset/cyklotrasy-bbsk" }]), { url: "http://127.0.0.1:8080/dataset/cyklotrasy-bbsk", title: "" });
+  assert.equal(dataset([{ n: 1, url: cyklo + "/resource/1" }]), null);
+  assert.equal(dataset([{ n: 1, url: "https://evil.example/x/dataset/cyklotrasy" }]), null);
+  assert.equal(dataset([{ n: 1, url: "javascript:alert(1)//dataset/x" }]), null);
+  // A hostile title is cut, never markup: the widget writes it as text.
+  assert.equal(dataset([{ n: 1, url: cyklo, title: "<img src=x>".repeat(50) }]).title.length, 200);
+});
+
+test("the panel's view comes back after a page change: draft, caret, scroll and a streaming answer (T-4685)", () => {
+  const saved = { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320, focused: true,
+    streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00:00Z" } };
+  assert.deepEqual(view(JSON.stringify(saved)), { draft: "Kde sú cyklotrasy?", caret: 4, scroll: 320, focused: true,
+    streaming: { turn: T, conversation: C, number: 2, question: "Aké cyklotrasy?", text: "Cyklotrasy sú", askedAt: "2026-10-19T08:00Z" } });
+  // A caret past the draft is at its end; a bad scroll is none; a turn that is no UUID streams nothing.
+  assert.deepEqual(view(JSON.stringify({ draft: "ab", caret: 9, scroll: -1, streaming: { ...saved.streaming, turn: "../x" } })),
+    { draft: "ab", caret: 2, scroll: null, focused: false, streaming: null });
+  assert.deepEqual(view(JSON.stringify({ draft: 7, focused: "yes" })), { draft: "", caret: 0, scroll: null, focused: false, streaming: null });
+  assert.equal(view("not json"), null);
+  assert.equal(view(null), null);
+  assert.equal(view(JSON.stringify("x")), null);
+  // Overlong pieces are cut.
+  assert.equal(view(JSON.stringify({ draft: "x".repeat(5000) })).draft.length, 4000);
+});
+
+test("a turn that opened a dataset keeps it, a forged one is dropped (T-4685)", () => {
+  const turn = { question: "q", text: "a", turn: 1, citations: [] };
+  const kept = restore(JSON.stringify({ conversation: C, asked: 1, turns: [
+    { ...turn, opened: { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" } },
+    { ...turn, turn: 2, opened: { url: "javascript:alert(1)", title: "x" } }] }));
+  assert.deepEqual(kept.turns[0].opened, { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" });
+  assert.equal(kept.turns[1].opened, undefined);
 });
