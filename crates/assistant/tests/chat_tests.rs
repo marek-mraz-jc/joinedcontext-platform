@@ -1426,6 +1426,58 @@ async fn one_reply_may_carry_four_calls_and_none_with_overlong_arguments() {
     );
 }
 
+/// T-4729: two tables of one Endpoint are looked up once and both cite the dataset page that
+/// names the Endpoint, so a visitor reads where the data is described, never a tool's name.
+#[tokio::test]
+async fn two_tables_of_one_endpoint_both_cite_its_dataset_page() {
+    let mut d = looped(50_000);
+    d.spec.sources.push("catalogue".into());
+    let w = world("chatnamed", d).await;
+    let page = "https://opendata.hronov.example/dataset/ovzdusie";
+    corpus::pages(
+        &w.pool,
+        "hronov",
+        "catalogue",
+        &[(
+            page,
+            "sk",
+            &format!("# Ovzdušie\n\nNGSI-LD: https://api.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"),
+        )],
+    )
+    .await;
+    // No type named, so the citations' pages come from naming the sources, not from the type's
+    // dataset (T-4625).
+    let calls: Vec<Value> = [5, 10].iter().enumerate()
+        .map(|(n, limit)| json!({"id": format!("c{n}"), "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"limit": limit}).to_string()}}))
+        .collect();
+    let both = json!({"role": "assistant", "content": null, "tool_calls": calls});
+    script(
+        &w.proxy,
+        vec![
+            completion(both, 100),
+            completion(
+                json!({"role": "assistant", "content": "NO2 je 21 [1], PM10 tiež 21 [2]."}),
+                100,
+            ),
+        ],
+    )
+    .await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "Aké je ovzdušie?"}))).await;
+    let (_, citations) = events
+        .iter()
+        .find(|(n, _)| n == "citations")
+        .expect("citations");
+    let urls: Vec<&str> = citations
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|c| c["url"].as_str())
+        .collect();
+    assert_eq!(urls, [page, page], "{citations}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 #[tokio::test]
 async fn the_route_refuses_before_it_spends() {
     let w = world("chatrefuse", deployment(Channel::Public, 50_000, 2)).await;
@@ -3717,6 +3769,62 @@ async fn a_data_question_with_rows_does_not_wait_for_the_first_rounds_judgement(
         took < pause * 2 - std::time::Duration::from_millis(500),
         "{took:?}"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4731: the two reads of one reply go out at once and are numbered in the reply's order. Each
+/// read takes 2 s: the router's read and the reply's two used to take 6 s in a row.
+#[tokio::test]
+async fn a_replys_tool_calls_run_at_once_and_keep_their_order() {
+    let pause = std::time::Duration::from_secs(2);
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatreplyonce", d).await;
+    recorded_air_after(&w.gateway, SLUG, pause).await;
+    let read = |id: &str, limit: u64| json!({"id": id, "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": json!({"type": ["AirQualityObserved"], "limit": limit}).to_string()}});
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 50),
+    ], vec![
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [read("c1", 5), read("c2", 7)]}), 1_000),
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [2] a 34 [3]."}), 1_200),
+    ]).await;
+    let began = std::time::Instant::now();
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 najvyššie?"}), Some(ORIGIN)),
+    )
+    .await;
+    let took = began.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let statuses: Vec<&str> = events
+        .iter()
+        .filter(|(n, _)| n == "tool")
+        .filter_map(|(_, d)| d["status"].as_str())
+        .collect();
+    assert_eq!(
+        statuses,
+        ["started", "done", "started", "started", "done", "done"]
+    );
+    let all = model_calls(&w.proxy).await;
+    let last = calls_of(&all, None)
+        .last()
+        .and_then(|c| c["messages"].as_array().cloned())
+        .unwrap_or_default();
+    let results: Vec<(Value, Value)> = last
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| {
+            let r: Value =
+                serde_json::from_str(m["content"].as_str().unwrap_or_default()).unwrap_or_default();
+            (m["tool_call_id"].clone(), r["n"].clone())
+        })
+        .collect();
+    assert_eq!(results, [(json!("c1"), json!(2)), (json!("c2"), json!(3))]);
+    // in a row: 6 s; the reply's two at once: 4 s
+    eprintln!("a reply of two reads: {took:?}");
+    assert!(took < pause * 5 / 2, "{took:?}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
