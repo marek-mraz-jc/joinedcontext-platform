@@ -14,7 +14,7 @@
       script: "Skript, ktorý asistent spustil", failed: "Odpoveď sa nepodarilo načítať. Skúste to znova.",
       offline: "Nepodarilo sa spojiť so službou. Skontrolujte pripojenie a skúste to znova.",
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
-      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teraz neodpovedá. Skúste to neskôr.", limit: "Asistent dosiahol svoj limit. Skúste to znova neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
@@ -43,7 +43,7 @@
       script: "Script the assistant ran", failed: "The answer could not be loaded. Try again.",
       offline: "The service could not be reached. Check your connection and try again.",
       busy: "You asked many questions at once. Wait a moment and try again.",
-      paused: "The assistant is not answering right now. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
+      paused: "The assistant is not answering right now. Try again later.", limit: "The assistant has reached its limit. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", close: "Close", suggested: "You can ask",
@@ -72,7 +72,7 @@
       script: "Skript, který asistent spustil", failed: "Odpověď se nepodařilo načíst. Zkuste to znovu.",
       offline: "Službu se nepodařilo zastihnout. Zkontrolujte připojení a zkuste to znovu.",
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
-      paused: "Asistent teď neodpovídá. Zkuste to později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
+      paused: "Asistent teď neodpovídá. Zkuste to později.", limit: "Asistent dosáhl svého limitu. Zkuste to znovu později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
@@ -912,15 +912,16 @@
   }
 
   // A failed answer as one quiet line in the visitor's language and a Retry that asks the same
-  // question again, through the same route and its per-visitor limit (T-4253).
-  function fail(item, word) {
+  // question again, through the same route and its per-visitor limit (T-4253); a limit offers no
+  // Retry, since nothing changes before it resets (T-4671).
+  function fail(item, word, detail) {
     if (item.status) item.status.remove();
     if (item.streaming) {
       item.streaming.remove();
       item.streaming = null;
     }
     item.classList.add("jc-error");
-    var p = el("p", "", w[word]);
+    var p = el("p", "", JCRender.said(word, detail, lang, w));
     p.setAttribute("role", "alert");
     item.appendChild(p);
     if (word === "full") {
@@ -1022,7 +1023,7 @@
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
     } else if (name === "error") {
-      fail(item, JCRender.trouble(data.status, data.title));
+      fail(item, JCRender.trouble(data.status, data.title), data.detail);
     }
   }
 
@@ -1098,7 +1099,7 @@
     if (response.status === 401) response = await post(await visitorToken(true));
     if (!response.ok || !response.body) {
       var problem = await response.json().catch(function () { return {}; });
-      fail(item, refusal(response.status, problem.title));
+      fail(item, refusal(response.status, problem.title), problem.detail);
       return;
     }
     var reader = response.body.getReader();
