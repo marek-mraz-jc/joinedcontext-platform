@@ -371,6 +371,10 @@ fn app_route(settings: &Settings, app: &RoutedApp, upstream_id: &str) -> Value {
 /// The App's own endpoint on its host, for its own slugs only (AP-133). A request without a
 /// session is a `401` for a non-public App, not a redirect a `fetch` cannot follow, and the
 /// session's token reaches the gateway as the bearer it verifies.
+/// The session cookie stays at the edge: the gateway takes the bearer and drops any cookie, and
+/// the cookie (two chunks, about 6 KB) beside a long id list pushed a read past the upstream's
+/// header limit (praha-odpad's isle names answered 431, T-3579). `openid-connect` reads the
+/// session in its own, earlier phase, before `proxy-rewrite` removes it.
 fn app_endpoint_route(settings: &Settings, app: &RoutedApp) -> Option<Value> {
     if app.slugs.is_empty() {
         return None;
@@ -394,6 +398,7 @@ fn app_endpoint_route(settings: &Settings, app: &RoutedApp) -> Option<Value> {
             "request-id": { "include_in_response": true },
             "serverless-pre-function": strip_forgeable_headers(),
             "openid-connect": oidc,
+            "proxy-rewrite": { "headers": { "remove": ["Cookie"] } },
             "response-rewrite": security_headers(&[("X-Frame-Options", "DENY")]),
         },
     }))

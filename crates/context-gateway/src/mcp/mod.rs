@@ -6,6 +6,7 @@ use crate::auth::subject::HUB_PATH;
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::{Arc, LazyLock};
+pub mod annotations;
 pub mod catalog;
 pub mod describe;
 pub mod documents;
@@ -15,7 +16,6 @@ pub mod jsonrpc;
 pub mod personal;
 pub mod search;
 pub mod server;
-pub mod titles;
 pub mod tools;
 pub mod units;
 pub mod writes;
@@ -125,7 +125,7 @@ mod tests {
     }
 
     /// T-4732: every tool the hub or an Endpoint lists carries a title of at most 64 characters,
-    /// the same at the top and in `annotations`, no two alike, beside its read-only hints; the
+    /// the same at the top and in `annotations`, no two alike, and its three hints as booleans; the
     /// names stay as they were.
     #[test]
     fn every_listed_tool_has_a_unique_short_title_and_its_hints() {
@@ -143,7 +143,7 @@ mod tests {
             super::documents::tool(""),
         ]);
         let names: Vec<Value> = listed.iter().map(|tool| tool["name"].clone()).collect();
-        super::titles::titled(&mut listed);
+        super::annotations::annotate(&mut listed);
         let mut titles = std::collections::HashSet::new();
         for (tool, name) in listed.iter().zip(&names) {
             assert_eq!(&tool["name"], name, "the name never changes");
@@ -154,7 +154,9 @@ mod tests {
             );
             assert_eq!(tool["annotations"]["title"], tool["title"], "{tool}");
             assert!(titles.insert(title.to_owned()), "two tools titled {title}");
-            assert!(tool["annotations"]["readOnlyHint"].is_boolean(), "{tool}");
+            for hint in ["readOnlyHint", "destructiveHint", "openWorldHint"] {
+                assert!(tool["annotations"][hint].is_boolean(), "{hint}: {tool}");
+            }
         }
         assert_eq!(listed[0]["title"], "Append attributes");
 
@@ -164,16 +166,39 @@ mod tests {
             serde_json::json!({ "name": "get_entity", "title": "Read one entity" }),
             serde_json::json!({ "name": "list_types", "title": " ", "annotations": null }),
         ];
-        super::titles::titled(&mut broker);
+        super::annotations::annotate(&mut broker);
         assert_eq!(broker[0]["title"], "Query temporal");
+        // No readOnlyHint is never guessed, so neither is destructiveHint; the world is closed.
         assert_eq!(
             broker[0]["annotations"],
-            serde_json::json!({ "title": "Query temporal" })
+            serde_json::json!({ "title": "Query temporal", "openWorldHint": false })
         );
         assert_eq!(broker[1]["title"], "Read one entity");
         assert_eq!(broker[1]["annotations"]["title"], "Read one entity");
         assert_eq!(broker[2]["title"], "List types");
         assert_eq!(broker[2]["annotations"]["title"], "List types");
+
+        // The hints a tool states stay; a read is not destructive, a write is unless it says not.
+        let mut hinted = vec![
+            serde_json::json!({ "name": "get_type", "annotations": {
+                "readOnlyHint": true, "openWorldHint": false } }),
+            serde_json::json!({ "name": "delete_entity", "annotations": { "readOnlyHint": false } }),
+            serde_json::json!({ "name": "create_entity", "annotations": {
+                "readOnlyHint": false, "destructiveHint": false, "openWorldHint": true } }),
+        ];
+        super::annotations::annotate(&mut hinted);
+        let hints = |tool: &Value| {
+            let a = &tool["annotations"];
+            (
+                a["readOnlyHint"].clone(),
+                a["destructiveHint"].clone(),
+                a["openWorldHint"].clone(),
+            )
+        };
+        let (t, f) = (Value::Bool(true), Value::Bool(false));
+        assert_eq!(hints(&hinted[0]), (t.clone(), f.clone(), f.clone()));
+        assert_eq!(hints(&hinted[1]), (f.clone(), t.clone(), f.clone()));
+        assert_eq!(hints(&hinted[2]), (f.clone(), f, t));
     }
 
     /// T-4501, T-4502: the hub's own lines stay short, and the whole primer under 5,000 bytes.
