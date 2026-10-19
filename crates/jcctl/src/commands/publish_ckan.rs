@@ -520,7 +520,12 @@ pub fn publish_one(
     };
     let views = match outcome {
         Outcome::NotPublished => ckan::Views::default(),
-        _ => ckan::publish_views(api, &target.manifest, &settings)?,
+        _ => ckan::publish_views(
+            api,
+            &target.manifest,
+            &settings,
+            rows.and_then(|r| r.schema.as_ref()),
+        )?,
     };
     Ok(Line {
         endpoint: target.id.clone(),
