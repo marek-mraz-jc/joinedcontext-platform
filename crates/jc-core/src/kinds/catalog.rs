@@ -66,6 +66,12 @@ pub struct Catalog {
     /// what it serves.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visualizations: Vec<crate::kinds::visualization::Visualization>,
+    /// Whether the installation's and the project's feeds list the record (EP-139, EP-84,
+    /// EP-127). `false` for a door over data other datasets already publish, such as a whole
+    /// space split into one dataset per type: its own record stays, a harvester never takes the
+    /// same data twice. Unset is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harvest: Option<bool>,
 }
 
 /// The publisher's statement about personal data in a dataset (API/08 section 5).
@@ -547,6 +553,11 @@ fn is_nuts_code(entry: &str) -> bool {
 }
 
 impl Catalog {
+    /// Whether the feeds of EP-84 and EP-127 list the record: unless `harvest: false` (EP-139).
+    pub fn harvested(&self) -> bool {
+        self.harvest != Some(false)
+    }
+
     /// Validates every member, naming the field that is wrong (EP-78, EP-80).
     pub fn validate(&self) -> Result<()> {
         if let Some(publisher) = &self.publisher {

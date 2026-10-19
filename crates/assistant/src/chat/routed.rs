@@ -117,6 +117,7 @@ const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Repl
 - data: only for \"data\" or \"both\", at most 2, each an endpoint and a type from the live data you are shown; never one you are not shown. Leave it out when you are shown none.\n\
 - When the question names several places (two cities, a city and a region), each with its own endpoint of the type, take one data item per place, the endpoint of that place, so every place asked about is answered (\"Kvalita ovzdušia v Žiline a B. Bystrici?\" reads the Žilina endpoint and the Banská Bystrica one).\n\
 - When several endpoints hold the type a question needs, choose by what the endpoint holds, the same way every time: first the one whose title and attributes name the asked quantity at the asked level (a region, a district, a town); then the newest period; then indicators, one row per territory with a name and a current value, before raw statistical data whose rows are cube cells (dataSet, refArea, refPeriod). Read raw data only with a q naming its dataset, area and period, never all its rows.\n\
+- A question about some rows of a type (one place, one kind, like the schools of one district) reads an endpoint whose listed attributes let a q keep only those rows, like organizationCategory==\"school\";address.addressLocality==\"Zvolen\"; never an endpoint shown with no attributes, which only reads all rows of a type.\n\
 - q: optional in a data item, an NGSI-LD query over the attributes shown for its endpoint that keeps only the rows the question is about, like okresPoskytovania==\"Brezno\" or druhZariadenia~=\"(?i).*nemocnic.*\"; leave it out when the question is about all rows of the type or you are not sure which attribute holds it. When the question refers to places or things of the earlier turns (there, those, them, the same), keep only those: build q from the names or codes the earlier turns give, like name~=\"(?i).*(Žilina|Banská Bystrica).*\".\n\
 - followups: up to 3 short questions the resident may want to ask next about the same topic, in the question's language, each under 120 characters, and each one the sources and types you are shown can answer: never about an app, a service or a body outside them; [] when none fits.\n\
 - Words like today, tomorrow, this week or now mean the local date of the Now line beside the question: name that date in the queries, and bound a q over a date attribute by it, like startDate>=\"2026-10-16T00:00:00Z\";startDate<\"2026-10-17T00:00:00Z\" for today.\n\
@@ -1698,18 +1699,15 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
             result
         }
     };
-    // A `q` the gateway refuses (an attribute the type lacks, a broken expression) costs the
-    // narrowing, never the read.
-    let rows = async {
-        match call(wanted.q.as_deref()).await {
-            Err(why) if wanted.q.is_some() => {
-                tracing::info!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a read's q was refused; read without it");
-                call(None).await
-            }
-            other => other,
-        }
-    };
-    let (text, profile) = tokio::join!(rows, profile_of(ask, connector, wanted));
+    // A read whose `q` fails (refused, or the broker's ten seconds over a large type) is a
+    // failed read, never the type read whole: the router names a `q` only for a question about
+    // some rows, and the first rows of all of them answered "which schools are in Zvolen" with
+    // 20 of 433 other organizations (T-4740). An attribute the type lacks answers no rows, not
+    // an error, so nothing is lost there.
+    let (text, profile) = tokio::join!(
+        call(wanted.q.as_deref()),
+        profile_of(ask, connector, wanted)
+    );
     let asked = asked_of(&json!({ "q": wanted.q }));
     let mut table = table(ask, connector, kind, &text?, &asked)
         .await
@@ -1965,7 +1963,9 @@ pub fn router_messages(
                 asked.push_str(&format!(" ({title})"));
             }
             asked.push_str(&format!(": {}", shown.types.join(", ")));
-            if !shown.attributes.is_empty() {
+            if shown.attributes.is_empty() {
+                asked.push_str("; no attributes listed, so no q narrows it");
+            } else {
                 asked.push_str(&format!("; {}", shown.attributes.join(", ")));
             }
             asked.push('\n');
@@ -4318,10 +4318,13 @@ mod tests {
         let messages = router_messages(&[], "Nezamestnanosť?", &[titled, plain], &[], "now");
         let asked = &text(&messages[1]);
         assert!(asked.contains("- slovensko/susr-pr (Unemployment, Slovak statistics): KeyPerformanceIndicator; indicator\n"), "{asked}");
+        // T-4740: an Endpoint the broker lists no attribute names for is said to be one no q
+        // narrows, and the rules send a question about some rows to one that lists them.
         assert!(
-            asked.contains("- slovensko/ovzdusie-sk: AirQualityObserved\n"),
+            asked.contains("- slovensko/ovzdusie-sk: AirQualityObserved; no attributes listed, so no q narrows it\n"),
             "{asked}"
         );
+        assert!(ROUTER_RULES.contains("never an endpoint shown with no attributes"));
     }
 
     fn shown(endpoint: &str, types: &[&str], attributes: &[&str]) -> Shown {

@@ -772,6 +772,14 @@ impl EndpointSpec {
 
         if let Some(ref catalog) = self.catalog {
             catalog.validate()?;
+            // EP-139: a record the feeds leave out would be a dataset in CKAN alone.
+            if !catalog.harvested() && self.publish.as_ref().is_some_and(|p| p.ckan.is_some()) {
+                return Err(Error::Name {
+                    field: "spec.catalog.harvest",
+                    value: "false".to_owned(),
+                    reason: "a door the feeds leave out is no catalogue dataset: drop spec.publish.ckan, or drop harvest: false (EP-139)",
+                });
+            }
             crate::kinds::visualization::validate_list(
                 &catalog.visualizations,
                 &self.served_representations(),

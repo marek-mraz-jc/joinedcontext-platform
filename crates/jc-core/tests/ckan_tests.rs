@@ -280,3 +280,40 @@ fn an_unknown_member_of_the_publication_is_refused() {
         .expect_err("licence is not the member's name");
     assert!(err.to_string().contains("licence"), "{err}");
 }
+
+/// EP-139, T-4744: a door the feeds leave out is no catalogue dataset, so publishing it to CKAN
+/// beside `harvest: false` is a contradiction; unset or `true` stays harvested.
+#[test]
+fn harvest_false_keeps_a_door_out_of_the_feeds_and_out_of_ckan() {
+    let publish = "publish:\n  ckan:\n    instanceRef: { kind: CkanInstance, name: open-data }\n";
+
+    let door = endpoint("catalog: { harvest: false }\n").expect("a door without a dataset");
+    assert!(!door.catalog.as_ref().expect("a catalog block").harvested());
+    let dataset = endpoint(&format!("{publish}catalog: {{ harvest: true }}\n")).expect("harvested");
+    assert!(dataset
+        .catalog
+        .as_ref()
+        .expect("a catalog block")
+        .harvested());
+    let unset = endpoint("catalog: { themes: [ENVI] }\n").expect("unset");
+    assert!(unset.catalog.as_ref().expect("a catalog block").harvested());
+
+    let error = endpoint(&format!("{publish}catalog: {{ harvest: false }}\n"))
+        .expect_err("harvest false beside publish.ckan is refused");
+    assert!(
+        matches!(
+            error,
+            Error::Name {
+                field: "spec.catalog.harvest",
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("EP-139"), "{error}");
+}
+
+#[test]
+fn harvest_is_a_boolean() {
+    assert!(endpoint("catalog: { harvest: no-thanks }\n").is_err());
+}
