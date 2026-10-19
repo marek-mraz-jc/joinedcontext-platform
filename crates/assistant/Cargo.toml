@@ -74,3 +74,5 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "test-util"] }
+# The gateway's q grammar, so a query card's example is one the gateway takes (T-4759).
+antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
