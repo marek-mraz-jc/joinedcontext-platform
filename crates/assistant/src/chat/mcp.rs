@@ -115,7 +115,7 @@ pub const LISTING_LIFE: Duration = Duration::from_secs(300);
 const MAX_LISTINGS: usize = 512;
 
 /// Public Endpoints' tool listings, kept per gateway and slug for [`LISTING_LIFE`], at most
-/// [`MAX_LISTINGS`] (T-4680).
+/// `MAX_LISTINGS` (T-4680).
 // ponytail: in memory, one replica; each replica lists for itself, as the answer cache does.
 #[derive(Default)]
 pub struct Listings(Mutex<Vec<(String, Instant, Vec<Value>)>>);
