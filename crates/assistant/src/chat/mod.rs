@@ -19,6 +19,7 @@ pub mod redact;
 pub mod resume;
 pub mod routed;
 pub mod script;
+pub mod shape;
 pub mod trace;
 pub mod transcript;
 pub mod visitor;
@@ -2152,6 +2153,7 @@ mod tests {
             total: None,
             dataset: Some("https://data.dev.example/dataset/ovzdusie".into()),
             download: None,
+            geojson: None,
             map: None,
             geometries: Vec::new(),
         });

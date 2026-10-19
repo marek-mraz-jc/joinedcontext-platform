@@ -329,7 +329,7 @@ var JCRender = (function () {
 
   /**
    * A `data` event as a table to show (T-4138, T-4140): its columns and at most 50 rows of
-   * text, and its dataset and download links when they are http(s); null when nothing to show.
+   * text, and its dataset, download and GeoJSON links when they are http(s); null when nothing to show.
    */
   // Headers a person reads (T-4650): the common Smart Data Models attributes and types in the
   // widget's languages; any other key is spelt out from its camelCase.
@@ -502,7 +502,8 @@ var JCRender = (function () {
       numeric: numeric,
       rows: rows,
       dataset: safeUrl(data.dataset),
-      download: safeUrl(data.download)
+      download: safeUrl(data.download),
+      geojson: safeUrl(data.geojson)
     };
   }
 

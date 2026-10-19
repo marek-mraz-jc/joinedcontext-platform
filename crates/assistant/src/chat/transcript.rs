@@ -628,6 +628,7 @@ mod tests {
                 total: None,
                 dataset: None,
                 download: None,
+                geojson: None,
                 map: None,
                 geometries: vec![],
             }),
