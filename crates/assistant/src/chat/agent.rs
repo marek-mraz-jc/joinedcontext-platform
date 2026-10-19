@@ -703,11 +703,11 @@ pub async fn answer(
             }
             let (text, dangling) = without_dangling(&text, &citations);
             spent.dangling += dangling;
+            let text = super::scope::checked_scripts(ask, question, &text, &citations);
             let used = markers(&text);
             citations.retain(|c| used.contains(&c.n));
             name_sources(ask, &mut citations).await;
             spent.first_token_ms = Some(started.elapsed().as_millis() as u64);
-            let text = super::scope::checked_scripts(ask, question, &text);
             send(events, Event::Answer(text)).await;
             send(events, Event::Citations(citations)).await;
             return spent;

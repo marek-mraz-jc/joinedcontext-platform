@@ -2243,7 +2243,7 @@ pub async fn answer(
         };
         if let Some((text, citations)) = super::data::answer(ask, start, &mut spent, events).await {
             let text = without_invented_absence(&text, &missing);
-            let text = super::scope::checked_scripts(ask, question, &text);
+            let text = super::scope::checked_scripts(ask, question, &text, &citations);
             send(events, Event::Answer(text)).await;
             send(events, Event::Citations(citations)).await;
             if !routing.followups.is_empty() {
@@ -2674,6 +2674,8 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
     }
     let (text, dangling) = super::agent::without_dangling(&text, &citations);
     spent.dangling += dangling;
+    // Before the citations narrow to the cited ones: a script may download any source the turn found.
+    let text = super::scope::checked_scripts(ask, question, &text, &citations);
     let used = super::agent::markers(&text);
     citations.retain(|c| used.contains(&c.n));
     name_sources(ask, &mut citations).await;
@@ -2694,7 +2696,6 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         .iter()
         .any(|at| text.contains(at.as_str()));
     let keep = keep && !told_time && worth_keeping(&completion, &text);
-    let text = super::scope::checked_scripts(ask, question, &text);
     if let (Some(key), true) = (key, keep) {
         ask.cache.put(key, text.clone(), citations.clone());
     }

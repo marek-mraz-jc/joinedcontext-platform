@@ -4,7 +4,7 @@
 //! answer with one fixed template, in the question's language, with the deployment's own example
 //! questions. A script in an answer may name only this deployment's hosts.
 
-use super::agent::{send, Ask, Event};
+use super::agent::{send, Ask, Citation, Event};
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 use url::Url;
@@ -233,16 +233,16 @@ pub fn refusal(lang: &str, publisher: Option<&str>, examples: &[String]) -> Stri
     text
 }
 
-/// The hosts a script in an answer may name: the public API's own host and its `api.`,
-/// `opendata.` and `portal.` siblings of the same domain. Empty when the deployment has no
-/// public origin, so every script with a URL is dropped.
+/// The hosts a script in an answer may name: the public API's own host and its `api.`, `data.`,
+/// `opendata.` and `portal.` siblings of the same domain (the catalogue is `data.` on dev and
+/// `opendata.` elsewhere). Empty when the deployment has no public origin.
 pub fn allowed_hosts(endpoint_base: Option<&Url>) -> Vec<String> {
     let Some(host) = endpoint_base.and_then(Url::host_str).map(str::to_lowercase) else {
         return Vec::new();
     };
     let mut hosts = vec![host.clone()];
     if let Some((_, domain)) = host.split_once('.').filter(|(_, d)| d.contains('.')) {
-        for sibling in ["api", "opendata", "portal"] {
+        for sibling in ["api", "data", "opendata", "portal"] {
             let name = format!("{sibling}.{domain}");
             if !hosts.contains(&name) {
                 hosts.push(name);
@@ -250,6 +250,22 @@ pub fn allowed_hosts(endpoint_base: Option<&Url>) -> Vec<String> {
         }
     }
     hosts
+}
+
+/// [`allowed_hosts`] and the host of every source the turn found.
+fn allowed_with(endpoint_base: Option<&Url>, cited: &[Citation]) -> Vec<String> {
+    let mut allowed = allowed_hosts(endpoint_base);
+    for host in cited
+        .iter()
+        .filter_map(|c| c.url.as_deref())
+        .filter_map(|u| Url::parse(u).ok())
+        .filter_map(|u| u.host_str().map(str::to_lowercase))
+    {
+        if !allowed.contains(&host) {
+            allowed.push(host);
+        }
+    }
+    allowed
 }
 
 /// `text` with every fenced code block that names a host outside `allowed` taken out, and how
@@ -345,10 +361,12 @@ pub async fn refuse(ask: &Ask<'_>, question: &str, router: Option<&str>, events:
     send(events, Event::Citations(Vec::new())).await;
 }
 
-/// An answer's text with every script that names a host outside this deployment taken out.
-pub fn checked_scripts(ask: &Ask<'_>, question: &str, text: &str) -> String {
+/// An answer's text with every script that names a host outside this deployment, or outside the
+/// sources the turn cited from the catalogue, taken out: a dataset's own download address stays
+/// usable, every other host is dropped.
+pub fn checked_scripts(ask: &Ask<'_>, question: &str, text: &str, cited: &[Citation]) -> String {
     let lang = language(question, None, first_language(ask));
-    let (text, dropped) = confined(text, &allowed_hosts(ask.endpoint_base), lang);
+    let (text, dropped) = confined(text, &allowed_with(ask.endpoint_base, cited), lang);
     if dropped > 0 {
         tracing::info!(deployment = %ask.deployment, dropped, "scripts outside the catalogue's hosts left out");
     }
@@ -471,6 +489,7 @@ mod tests {
             hosts,
             [
                 "api.dev.joinedcontext.com",
+                "data.dev.joinedcontext.com",
                 "opendata.dev.joinedcontext.com",
                 "portal.dev.joinedcontext.com"
             ]
@@ -494,6 +513,26 @@ mod tests {
             "only code blocks are held to it"
         );
         assert!(allowed_hosts(None).is_empty());
+        // A dataset's own download address, found by the turn, stays usable (the capability gate).
+        let cited = [Citation {
+            n: 1,
+            url: Some(
+                "https://opendata.bbsk.sk/dataset/cyklotrasy/resource/1/download/cyklotrasy.csv"
+                    .into(),
+            ),
+            tool: None,
+            endpoint: None,
+            title: None,
+            cards: Vec::new(),
+        }];
+        let found = allowed_with(base.as_ref(), &cited);
+        let csv = "```python\npd.read_csv('https://opendata.bbsk.sk/dataset/cyklotrasy/resource/1/download/cyklotrasy.csv')\n```";
+        assert_eq!(confined(csv, &found, "sk").1, 0);
+        assert_eq!(
+            confined(csv, &hosts, "sk").1,
+            1,
+            "not found by the turn: dropped"
+        );
         assert_eq!(
             confined("```\nhttps://api.dev.joinedcontext.com\n```", &[], "en").1,
             1
