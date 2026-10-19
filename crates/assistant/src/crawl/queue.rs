@@ -17,6 +17,8 @@ pub struct Job {
     pub source: String,
     /// Number of attempts made so far.
     pub attempts: i32,
+    /// A daily sitemap check, not a full crawl (T-4749).
+    pub sitemap_only: bool,
 }
 
 /// Enqueues a crawl job for `project` and `source`.
@@ -24,6 +26,20 @@ pub async fn enqueue(pool: &PgPool, project: &str, source: &str) -> Result<i64, 
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO crawl_jobs (project, source, state, run_after, attempts) \
          VALUES ($1, $2, 'queued', now(), 0) \
+         RETURNING id",
+    )
+    .bind(project)
+    .bind(source)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+/// Enqueues a daily sitemap check of `project`'s website `source` (T-4749).
+pub async fn enqueue_check(pool: &PgPool, project: &str, source: &str) -> Result<i64, Error> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO crawl_jobs (project, source, state, run_after, attempts, kind) \
+         VALUES ($1, $2, 'queued', now(), 0, 'sitemap') \
          RETURNING id",
     )
     .bind(project)
@@ -79,7 +95,7 @@ pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
              FOR UPDATE SKIP LOCKED \
              LIMIT 1 \
          ) \
-         RETURNING id, project, source, attempts",
+         RETURNING id, project, source, attempts, kind",
     )
     .bind(worker)
     .bind(LEASE)
@@ -92,6 +108,7 @@ pub async fn claim(pool: &PgPool, worker: &str) -> Result<Option<Job>, Error> {
             project: r.try_get("project")?,
             source: r.try_get("source")?,
             attempts: r.try_get("attempts")?,
+            sitemap_only: r.try_get::<String, _>("kind")? == "sitemap",
         })),
         None => Ok(None),
     }

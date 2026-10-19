@@ -198,6 +198,8 @@ impl Frontier {
 struct Walk {
     frontier: Frontier,
     seen_documents: HashSet<String>,
+    /// A sitemap check: the pages it reads queue none of their links (T-4749).
+    sitemap_only: bool,
     /// When the sitemap says each of its URLs last changed, by canonical URL (T-4749).
     lastmod: HashMap<String, String>,
     /// The pages this crawl visited, whatever they answered.
@@ -300,6 +302,56 @@ pub async fn crawl_site(
     spec: &KnowledgeSourceSpec,
     sink: &mut impl Sink,
 ) -> Result<CrawlReport, Error> {
+    let names = Names {
+        organization,
+        project,
+        source,
+    };
+    crawl(pool, crawler, names, spec, sink, false).await
+}
+
+/// The daily sitemap check of a website knowledge source (T-4749): only the pages its sitemap
+/// lists as new to the store, or as changed since the crawl last read them, are read, with the
+/// documents they link; no link is followed further and nothing unreached is aged. The site's
+/// scheduled full crawl stays what finds what the sitemap misses.
+pub async fn check_sitemap(
+    pool: &PgPool,
+    crawler: &Crawler,
+    organization: &str,
+    project: &str,
+    source: &str,
+    spec: &KnowledgeSourceSpec,
+    sink: &mut impl Sink,
+) -> Result<CrawlReport, Error> {
+    let names = Names {
+        organization,
+        project,
+        source,
+    };
+    crawl(pool, crawler, names, spec, sink, true).await
+}
+
+/// Whose source a crawl reads.
+#[derive(Clone, Copy)]
+struct Names<'a> {
+    organization: &'a str,
+    project: &'a str,
+    source: &'a str,
+}
+
+async fn crawl(
+    pool: &PgPool,
+    crawler: &Crawler,
+    names: Names<'_>,
+    spec: &KnowledgeSourceSpec,
+    sink: &mut impl Sink,
+    sitemap_only: bool,
+) -> Result<CrawlReport, Error> {
+    let Names {
+        organization,
+        project,
+        source,
+    } = names;
     let (start_url, site_host) = start_of(source, spec)?;
     let (start_url, site_host) = settle_start(crawler, start_url, site_host).await;
     let site_id = upsert_site(pool, project, organization, source, spec.visibility).await?;
@@ -316,7 +368,7 @@ pub async fn crawl_site(
     )
     .await;
 
-    let listed = if spec.sitemap {
+    let mut listed = if spec.sitemap {
         let mut initial_sitemaps = Vec::new();
         if let Ok(default_sm) = start_url.join("/sitemap.xml") {
             initial_sitemaps.push(default_sm.to_string());
@@ -334,18 +386,6 @@ pub async fn crawl_site(
         sitemap::Listed::default()
     };
 
-    // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
-    // reached it is the site's content that is kept, newest change first.
-    let wordpress_urls = wordpress::fetch_wordpress_urls(
-        &crawler.client,
-        &crawler.policy,
-        &site_host,
-        &start_url,
-        &spec.wordpress_types,
-        spec.max_pages,
-    )
-    .await;
-
     let run = DocRun {
         pool,
         crawler,
@@ -356,35 +396,22 @@ pub async fn crawl_site(
         robots: &robots,
     };
     let mut walk = Walk {
-        lastmod: listed.lastmod,
+        lastmod: std::mem::take(&mut listed.lastmod),
+        sitemap_only,
         ..Walk::default()
     };
-
-    for (i, url_str) in spec.start_urls.iter().enumerate() {
-        let Ok(u) = Url::parse(url_str) else {
-            continue;
-        };
-        // The first start address is where its redirect led; any other on the named host
-        // moves to the host the site answers under.
-        let u = if i == 0 {
-            start_url.clone()
-        } else {
-            rehost(u, &site_host)
-        };
-        let canon = canonicalise_url(u);
-        // A start address that names a document is one document of the site (T-3293),
-        // under the `pdf` policy and its bounds, not a page of its bytes.
-        if links::is_document_url(&canon) {
-            handle_document(run, None, &canon, &mut walk, sink, false).await?;
-        } else {
-            walk.frontier.push(canon, None, 0);
+    if sitemap_only {
+        let read = read_at(pool, project, site_id).await?;
+        for u in listed.urls {
+            if changed_since_read(&read, &walk.lastmod, u.as_str()) {
+                walk.frontier.push(u, None, 1);
+            }
         }
-    }
-    for u in wordpress_urls.into_iter().chain(listed.urls) {
-        walk.frontier.push(u, None, 1);
+    } else {
+        seed(run, &start_url, listed.urls, &mut walk, sink).await?;
     }
 
-    let mut complete = true;
+    let mut complete = !sitemap_only;
     while let Some(item) = walk.frontier.queue.pop_front() {
         if walk.report.pages_fetched + walk.report.pages_unchanged >= spec.max_pages {
             complete = false;
@@ -402,9 +429,90 @@ pub async fn crawl_site(
     if complete && answered && !matches!(robots, robots::Robots::DisallowAll) {
         walk.report.removed += age_unreached(pool, project, site_id, &walk).await?;
     }
-
-    update_site_last_crawl(pool, project, site_id).await?;
+    if !sitemap_only {
+        update_site_last_crawl(pool, project, site_id).await?;
+    }
     Ok(walk.report)
+}
+
+/// Whether a sitemap URL is new to the store, never read, or listed as changed after the crawl
+/// last read it; one without a `<lastmod>` waits for the full crawl. Both dates are RFC 3339 in
+/// UTC with whole seconds, so their text orders as their instants do.
+fn changed_since_read(
+    read: &HashMap<String, Option<String>>,
+    lastmod: &HashMap<String, String>,
+    url: &str,
+) -> bool {
+    match (read.get(url), lastmod.get(url)) {
+        (None | Some(None), _) => true,
+        (Some(Some(at)), Some(changed)) => changed > at,
+        (Some(Some(_)), None) => false,
+    }
+}
+
+/// When the crawl last read each page of the site, by URL; `None` for a page it never read.
+async fn read_at(
+    pool: &PgPool,
+    project: &str,
+    site_id: i64,
+) -> Result<HashMap<String, Option<String>>, Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT url, to_char(fetched_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+         FROM pages WHERE site_id = $1",
+    )
+    .bind(site_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.rollback().await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// Queues what a full crawl starts from: the start addresses, the WordPress site's own content
+/// list, then the sitemap's pages.
+async fn seed(
+    run: DocRun<'_>,
+    start_url: &Url,
+    sitemap_urls: Vec<Url>,
+    walk: &mut Walk,
+    sink: &mut impl Sink,
+) -> Result<(), Error> {
+    let (crawler, spec, site_host) = (run.crawler, run.spec, run.site_host);
+    // A WordPress site's own content list (T-4154): read before the sitemap, so with `maxPages`
+    // reached it is the site's content that is kept, newest change first.
+    let wordpress_urls = wordpress::fetch_wordpress_urls(
+        &crawler.client,
+        &crawler.policy,
+        site_host,
+        start_url,
+        &spec.wordpress_types,
+        spec.max_pages,
+    )
+    .await;
+    for (i, url_str) in spec.start_urls.iter().enumerate() {
+        let Ok(u) = Url::parse(url_str) else {
+            continue;
+        };
+        // The first start address is where its redirect led; any other on the named host
+        // moves to the host the site answers under.
+        let u = if i == 0 {
+            start_url.clone()
+        } else {
+            rehost(u, site_host)
+        };
+        let canon = canonicalise_url(u);
+        // A start address that names a document is one document of the site (T-3293),
+        // under the `pdf` policy and its bounds, not a page of its bytes.
+        if links::is_document_url(&canon) {
+            handle_document(run, None, &canon, walk, sink, false).await?;
+        } else {
+            walk.frontier.push(canon, None, 0);
+        }
+    }
+    for u in wordpress_urls.into_iter().chain(sitemap_urls) {
+        walk.frontier.push(u, None, 1);
+    }
+    Ok(())
 }
 
 /// Reads one queued page of the site and records what it answered.
@@ -527,7 +635,7 @@ async fn revisit(
             continue;
         };
         match kind.as_str() {
-            "page" if item.depth < run.spec.max_depth => {
+            "page" if item.depth < run.spec.max_depth && !walk.sitemap_only => {
                 walk.frontier.push(to_url, Some(page_id), item.depth + 1);
             }
             "document" => {
@@ -628,7 +736,7 @@ async fn read_page(
             continue;
         }
         match link.kind {
-            links::LinkKind::Page if item.depth < run.spec.max_depth => {
+            links::LinkKind::Page if item.depth < run.spec.max_depth && !walk.sitemap_only => {
                 walk.frontier.push(link.url, Some(page_id), item.depth + 1);
             }
             links::LinkKind::Document => {

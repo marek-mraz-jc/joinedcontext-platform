@@ -89,10 +89,11 @@ async function slow(res) {
 
 // T-4685: a catalogue page that docks the panel, as the CKAN theme does: it opens a dataset the
 // widget names on its own origin, answers `jc-assistant-opened` first, and goes back on
-// `jc-assistant-back`.
-const DOCK_HOST = (name) => `<!doctype html><html lang="sk"><head><meta charset="utf-8"><title>${name}</title></head>
-<body style="margin:0 480px 0 0;font:16px sans-serif"><main id="main"><h1>Dataset ${name}</h1>
-<a id="next" href="/dataset/zastavky">Zastávky</a> <input id="search" aria-label="Hľadať"></main>
+// `jc-assistant-back`. Docked, the page scrolls in its body beside the panel, never the window behind
+// it, so its bar is not a second one at the screen's edge (T-4767, jc-theme.css and landing.css).
+const DOCK_HOST = (name) => `<!doctype html><html lang="sk" style="overflow:hidden"><head><meta charset="utf-8"><title>${name}</title></head>
+<body style="margin:0 480px 0 0;height:100vh;overflow-y:auto;font:16px sans-serif"><main id="main"><h1>Dataset ${name}</h1>
+<a id="next" href="/dataset/zastavky">Zastávky</a> <input id="search" aria-label="Hľadať"><div style="height:3000px"></div></main>
 <iframe id="jc" src="/d/bb/widget?embed=1&amp;dock=1&amp;lang=sk" title="Asistent" style="position:fixed;top:0;right:0;width:480px;height:100vh;border:0"></iframe>
 <script>addEventListener("message", (e) => {
   const frame = document.getElementById("jc");
@@ -114,6 +115,7 @@ async function docked(res, asked) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
   send("conversation", { id: UUIDS.c, at: "2026-10-19T08:00:00Z", turn: UUIDS.t });
+  if (asked.includes("veľa")) return send("answer", { text: Array(4).fill(STREAMED).join("\n\n") }), res.end();
   if (asked.includes("dlho")) return streamTo(res, send, 40);
   const one = asked.includes("cyklotrasy");
   send("answer", { text: one ? "V kraji je 42 cyklotrás [1]." : "Máme dáta o zastávkach [1] a parkoviskách [2]." });
@@ -515,6 +517,27 @@ test("a token the service forgot is earned again once, and the question is answe
   await expect(page.locator(".jc-error")).toHaveCount(0);
 });
 
+test("an answer's copy button copies, and where the browser refuses it selects the answer and says Ctrl+C (T-4762)", async ({ page, context }) => {
+  WIDGET = undefined;
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(`${base}/d/bb?lang=en`);
+  await page.locator("#jc-question").fill("When is the client centre open?");
+  await page.locator("#jc-question").press("Enter");
+  const copy = page.locator(".jc-bot .jc-copy").last();
+  await expect(copy).toBeVisible();
+  await copy.click();
+  await expect(page.locator("p.jc-sr[aria-live]").first()).toHaveText("The answer is copied.");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toContain("The client centre is open on weekdays");
+  // A host frame without clipboard-write and no copy command: the answer is selected, and said so.
+  await page.evaluate(() => {
+    Clipboard.prototype.writeText = () => Promise.reject(new DOMException("denied", "NotAllowedError"));
+    document.execCommand = () => false;
+  });
+  await copy.click();
+  await expect(page.locator("p.jc-sr[aria-live]").first()).toHaveText("The answer is selected: press Ctrl+C.");
+  expect(await page.evaluate(() => String(getSelection()))).toContain("The client centre is open on weekdays");
+});
+
 test("a streamed answer is formatted while it streams, never raw markers, and ends as it streamed (T-4649)", async ({ page }) => {
   WIDGET = undefined;
   SLOW = true;
@@ -767,6 +790,28 @@ test.describe("docked beside the catalogue (T-4685)", () => {
       lines: Math.round(n.offsetHeight / parseFloat(getComputedStyle(n).lineHeight)) }));
     expect({ ...name, lines: name.lines <= 2 }).toEqual({ text: TITLE, whole: true, lines: true });
     await expect(chat.locator(".jc-langs button")).toHaveCount(2);
+  });
+
+  test("docked at 1280x800 with a long answer, one thin scrollbar stands at the screen's edge (T-4767)", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await expect(chat.locator(".jc-dock")).toHaveAttribute("aria-pressed", "true");
+    await chat.locator("#jc-question").fill("Napíš veľa o doprave");
+    await chat.locator("#jc-question").press("Enter");
+    await expect(chat.locator(".jc-bot .jc-answer pre")).toHaveCount(4);
+    // Every element that scrolls, in the page and in the panel, with its right edge on the screen.
+    const edges = (doc) => doc.evaluate(() => [...document.querySelectorAll("*")].filter((el) => {
+      const style = getComputedStyle(el);
+      return /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 1;
+    }).map((el) => ({ cls: el.className || el.tagName, right: Math.round(el.getBoundingClientRect().right), bar: getComputedStyle(el).scrollbarWidth })));
+    const frame = page.frame({ url: /\/d\/bb\/widget/ });
+    const host = await page.evaluate(() => document.scrollingElement.scrollHeight > document.scrollingElement.clientHeight);
+    const offset = await page.locator("#jc").evaluate((f) => Math.round(f.getBoundingClientRect().left));
+    const all = [...(await edges(page)), ...(await edges(frame)).map((e) => ({ ...e, right: e.right + offset }))];
+    expect(host, "the window behind the panel does not scroll").toBe(false);
+    expect(all.filter((e) => e.right >= 1280 - 24)).toEqual([{ cls: "jc-log", right: 1280, bar: "thin" }]);
+    expect(all.filter((e) => e.right < 1280 - 24).map((e) => [e.cls, e.right]), "the page scrolls beside the panel").toEqual([["BODY", 800]]);
   });
 
   test("below 1100 px there is no dock button", async ({ page }) => {

@@ -119,15 +119,17 @@ pub(crate) fn anonymous_may(name: &str) -> bool {
     ANONYMOUS_TOOLS.contains(&name)
 }
 
-/// The JSON-RPC error a caller without a token gets for any other tool: what it may call instead,
-/// and that a token opens the rest under the Endpoint's own Policy.
+/// The JSON-RPC error for any other tool on a surface that reads only: a caller without a token,
+/// or anyone on a public named server (EP-141). It names what may be called instead, and where
+/// the rest is: the Endpoint's own URL, under its own Policy, with a token.
 pub(crate) fn anonymous_refusal(id: Value, name: &str) -> Value {
     crate::mcp::jsonrpc::error(
         id,
         -32602,
         &format!(
-            "`{name}` is not offered without a token; an anonymous caller may use {} only. \
-             Sign in for the tools the Endpoint's Policy grants you",
+            "`{name}` is not offered here: this surface reads only and offers {}. \
+             The other tools the Endpoint's Policy grants you are on the Endpoint's own MCP URL, \
+             with a token",
             ANONYMOUS_TOOLS.join(", ")
         ),
     )

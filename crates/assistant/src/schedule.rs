@@ -8,6 +8,16 @@
 /// A source with no schedule is read once a day at 03:00, the example Architecture/22 gives.
 pub const DEFAULT: &str = "0 3 * * *";
 
+/// The schedule's minute and hour on every day: when a website's daily sitemap check runs
+/// (T-4749). `None` for an expression that is not five fields.
+pub fn daily(cron: &str) -> Option<String> {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    let [minute, hour, _, _, _] = fields.as_slice() else {
+        return None;
+    };
+    Some(format!("{minute} {hour} * * *"))
+}
+
 /// Whether `cron` names the minute `at`; `None` for an expression that is not five valid fields.
 /// The reading is jc-core's, the one the manifest check uses (`jc_core::cron`).
 pub fn matches(cron: &str, at: time::OffsetDateTime) -> Option<bool> {
@@ -25,6 +35,13 @@ pub fn matches(cron: &str, at: time::OffsetDateTime) -> Option<bool> {
 mod tests {
     use super::*;
     use time::macros::datetime;
+
+    #[test]
+    fn the_daily_form_keeps_the_minute_and_hour() {
+        assert_eq!(daily("0 3 * * 0").as_deref(), Some("0 3 * * *"));
+        assert_eq!(daily("15 2 1 * *").as_deref(), Some("15 2 * * *"));
+        assert_eq!(daily("0 3 * *"), None);
+    }
 
     #[test]
     fn the_default_reads_once_a_day_at_three() {

@@ -579,6 +579,9 @@ test("the speakers, the thumbs and every answer's tools are named by bound words
   assert.match(widget, /words\(b, key, "ariaLabel"\)/);
   // T-4283: copy, thumbs and the header's actions are icon buttons named by their bound word.
   assert.match(widget, /iconButton\("jc-copy", "copy", "copy"\)/);
+  // T-4762: every copy goes through copyText, which falls back and never fails silently.
+  assert.equal(widget.match(/\.writeText\(/g).length, 1);
+  assert.equal(widget.match(/copyText\(/g).length, 3);
 });
 
 test("the data loop's stages name their data in words, never a slug, and two or more work steps are listed with their times (T-4294, T-4682)", () => {
@@ -915,6 +918,8 @@ test("the connector panel gives each client's steps for an https address and not
   // No step is a link: no client documents a one-click add.
   for (const client of panel.clients) for (const step of client.steps) assert.ok(!("href" in step));
   assert.equal(connector(url, "bb-doprava", "de").title, connector(url, "bb-doprava", "sk").title, "Slovak for a language it lacks");
+  // T-4762: where the browser refuses the clipboard the panel says the address is selected.
+  for (const lang of ["sk", "cs", "en"]) assert.match(connector(url, "bb-doprava", lang).selected, /Ctrl\+C\.$/, lang);
   assert.equal(connector(url, "x\"; rm -rf /", "en").clients[2].steps[2].code, "claude mcp add --transport http assistant " + url);
   for (const bad of [null, "", "http://api.example/api/mcp/d/x", "javascript:alert(1)", "https://a b/x", "https://api.example/x y"]) {
     assert.equal(connector(bad, "x", "en"), null, String(bad));

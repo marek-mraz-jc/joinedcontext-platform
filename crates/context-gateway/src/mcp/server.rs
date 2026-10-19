@@ -298,7 +298,8 @@ pub(crate) async fn serve(
                 })
                 .filter(level)
                 .collect();
-            let reads_only = server.project == DEPLOYMENTS;
+            // A public server reads only, whoever calls (EP-141): writes stay on the member's URL.
+            let reads_only = server.project == DEPLOYMENTS || server.audience == Audience::Public;
             (format!("subject:{}", claims.sub), reach, reads_only)
         }
     };

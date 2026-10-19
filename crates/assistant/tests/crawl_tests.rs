@@ -1766,3 +1766,116 @@ async fn a_page_without_its_own_date_takes_the_sitemaps_lastmod() {
     );
     drop_database(admin, pool, &db_name).await;
 }
+
+/// T-4749: the daily sitemap check reads only what its sitemap lists as new, or as changed
+/// after the crawl last read it, follows none of their links, and marks the job's kind.
+#[tokio::test]
+async fn the_sitemap_check_reads_only_what_changed_since_it_was_read() {
+    let (admin, pool, db_name) = database("sitemapcheck").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    let base = format!("http://www.city.test:{port}");
+    let mount = |sitemap: String| {
+        let server = &server;
+        async move {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/robots.txt"))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/sitemap.xml"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(format!("<urlset>{sitemap}</urlset>")),
+                )
+                .mount(server)
+                .await;
+            for p in ["/", "/a", "/b", "/linked", "/new", "/deeper"] {
+                let links = match p {
+                    "/" => r#"<a href="/a">a</a><a href="/linked">l</a>"#,
+                    "/new" => r#"<a href="/deeper">d</a>"#,
+                    _ => "",
+                };
+                Mock::given(method("GET"))
+                    .and(path(p))
+                    .respond_with(
+                        ResponseTemplate::new(200)
+                            .insert_header("content-type", "text/html; charset=utf-8")
+                            .set_body_string(format!("<html><body>{p} {links}</body></html>")),
+                    )
+                    .mount(server)
+                    .await;
+            }
+        }
+    };
+    let url = |p: &str, lastmod: &str| {
+        let lastmod = if lastmod.is_empty() {
+            String::new()
+        } else {
+            format!("<lastmod>{lastmod}</lastmod>")
+        };
+        format!("<url><loc>{base}{p}</loc>{lastmod}</url>")
+    };
+    mount(url("/a", "2020-01-01") + &url("/b", "2020-01-01")).await;
+    let spec = test_spec(&format!("{base}/"));
+    let full = crawl_site(
+        &pool,
+        &crawler,
+        "za",
+        "zilina",
+        "web",
+        &spec,
+        &mut RecordingSink::default(),
+    )
+    .await
+    .expect("full crawl");
+    assert_eq!(full.pages_fetched, 4, "{full:?}");
+
+    // /a is as it was, /b changed after it was read, /new is new and links /deeper.
+    mount(url("/a", "2020-01-01") + &url("/b", "2999-01-01") + &url("/new", "")).await;
+    let check = assistant::crawl::check_sitemap(
+        &pool,
+        &crawler,
+        "za",
+        "zilina",
+        "web",
+        &spec,
+        &mut RecordingSink::default(),
+    )
+    .await
+    .expect("sitemap check");
+    let mut read: Vec<String> = server
+        .received_requests()
+        .await
+        .expect("recorded")
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .filter(|p| p != "/robots.txt" && p != "/sitemap.xml")
+        .collect();
+    read.sort();
+    // The start address is asked once, to learn the host the site answers under.
+    assert_eq!(read, ["/", "/b", "/new"]);
+    assert_eq!(check.pages_fetched + check.pages_unchanged, 2, "{check:?}");
+    assert_eq!(check.removed, 0, "a check ages nothing");
+
+    let job = queue::enqueue_check(&pool, "zilina", "web")
+        .await
+        .expect("queued");
+    let claimed = queue::claim(&pool, "w")
+        .await
+        .expect("claim")
+        .expect("a job");
+    assert_eq!((claimed.id, claimed.sitemap_only), (job, true));
+    queue::enqueue(&pool, "zilina", "web")
+        .await
+        .expect("queued");
+    let full_job = queue::claim(&pool, "w")
+        .await
+        .expect("claim")
+        .expect("a job");
+    assert!(!full_job.sitemap_only);
+    drop_database(admin, pool, &db_name).await;
+}

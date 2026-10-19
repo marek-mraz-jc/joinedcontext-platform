@@ -7,6 +7,8 @@
 //! per entity (207). A target the writer may not read is answered as missing, word for word
 //! (DM-71).
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
@@ -51,12 +53,22 @@ async fn broker() -> (String, Calls) {
             |State((calls, held)): State<(Calls, Arc<Vec<Value>>)>, request: Request| async move {
                 let method = request.method().clone();
                 let query = request.uri().query().unwrap_or_default().to_owned();
-                calls
-                    .lock()
-                    .expect("the call log")
-                    .push(format!("{method} {}?{query}", request.uri().path()));
+                let tenant = request
+                    .headers()
+                    .get("ngsild-tenant")
+                    .and_then(|tenant| tenant.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                calls.lock().expect("the call log").push(format!(
+                    "{method} {}?{query} @{tenant}",
+                    request.uri().path()
+                ));
                 if method != Method::GET {
                     return StatusCode::NO_CONTENT.into_response();
+                }
+                // The space's entities are in its tenant; the broker's default one holds none.
+                if tenant != SPACE {
+                    return axum::Json(json!([])).into_response();
                 }
                 let pairs: Vec<(String, String)> = query
                     .split('&')
@@ -168,7 +180,7 @@ fn endpoint(readable: &[&str]) -> Endpoint {
         project: SPACE.to_owned(),
         audience: Audience::Public,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![Representation::NgsiLd, Representation::Mcp],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -458,4 +470,65 @@ async fn an_upsert_that_updates_may_leave_a_required_end_out() {
     .await;
     assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
     assert_eq!(answer.writes().len(), 1, "{:?}", answer.calls);
+}
+
+/// T-4755: an MCP write's relationship guard reads its targets in the Endpoint's space, as the
+/// NGSI-LD surface's does; it used to ask the broker's default tenant, which holds none of them.
+#[tokio::test]
+async fn a_write_through_mcp_reads_its_targets_in_the_endpoints_space() {
+    let (upstream, calls) = broker().await;
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .serve([endpoint(READS_ALL)])
+            .authenticate(
+                Arc::new(realm.verifier()),
+                context_gateway::auth::accounts::ServiceAccounts::new(),
+                None,
+            ),
+    );
+    // A write tool is offered to a signed-in caller only.
+    let token = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "sub-jana",
+        "aud": SLUG,
+        "preferred_username": "jana",
+        "realm_access": { "roles": ["public"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    let call = json!({
+        "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        "params": { "name": "create_entity",
+                    "arguments": { "entity": user("u1", at(SCHOOL), &[COURSE]) } }
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/endpoint/{SLUG}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(call.to_string()))
+        .expect("a request");
+    let response = router(gateway)
+        .oneshot(request)
+        .await
+        .expect("the gateway answers");
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("the body");
+    let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert_ne!(answer["result"]["isError"], true, "{answer}");
+    let calls = calls.lock().expect("the call log").clone();
+    let probes: Vec<&String> = calls.iter().filter(|c| c.starts_with("GET ")).collect();
+    assert!(
+        !probes.is_empty(),
+        "the targets are read: {calls:?} {answer}"
+    );
+    assert!(
+        probes
+            .iter()
+            .all(|probe| probe.ends_with(&format!("@{SPACE}"))),
+        "every target read names the space: {calls:?}"
+    );
 }
