@@ -2604,8 +2604,11 @@ mod tests {
         let visitor = key("198.51.100.9, 10.0.0.1");
         assert_eq!(visitor, key("6.6.6.6, 198.51.100.9, 10.0.0.1"));
         assert_ne!(visitor, key("198.51.100.10, 10.0.0.1"));
+        // 16 hex digits and nothing of the address: a bare "198" can occur in any hash.
         assert!(
-            !visitor.contains("198") && !visitor.contains('.'),
+            visitor.len() == 16
+                && visitor.bytes().all(|b| b.is_ascii_hexdigit())
+                && !visitor.contains("19851100"),
             "{visitor}"
         );
         assert_ne!(
