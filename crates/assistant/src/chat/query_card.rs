@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jc_core::display_order::{query_attributes, QueryAttribute};
+use jc_core::query_card::type_lines;
 use serde_json::Value;
 
 use super::agent::Connected;
@@ -13,14 +14,7 @@ use super::agent::Connected;
 /// How the attribute lines read: in the cached rules, once, never per Endpoint.
 pub const LEGEND: &str = "\n- After an Endpoint's first result comes its query card. Its attribute lines: `attr` text; `attr:range` a typed value; `attr:range[unit]` a number stored in that UCUM unit; `attr:a|b` the only allowed values; `attr:Type` a Relationship to an entity of that type; `attr:ref` a link value; `attr[]` several values.";
 
-/// Above this many tokens a card lists its types with their attribute counts, and a type's lines
-/// come with the first query on it (the BBSK catalogue: 24 types, 1,317 attributes, ~6.2k tokens).
-pub const CARD_TOKENS: usize = 1_500;
-
-/// Tokens of a text, about characters / 3.7 (the ratio of the board's measurements).
-pub fn tokens(text: &str) -> usize {
-    text.chars().count() * 10 / 37
-}
+pub use jc_core::query_card::{tokens, CARD_TOKENS};
 
 /// The Endpoints and types the question's cards already gave, so each is given once.
 #[derive(Default)]
@@ -93,83 +87,20 @@ fn queried(
         .collect()
 }
 
-/// The card: the fixed NGSI-LD lines, naming only the tools the Endpoint grants, then the
-/// attributes every type shares once, then each type's lines, or with `brief` each type's count.
+/// The card of a connector's Endpoint, naming only the tools it lists ([`jc_core::query_card`]).
 pub fn card_of(
     connector: &Connected,
     classes: &BTreeMap<String, Vec<QueryAttribute>>,
     brief: bool,
 ) -> String {
     let offers = |tool: &str| connector.tools.iter().any(|t| t.name == tool);
-    let title = connector
-        .title
-        .as_deref()
-        .map(|t| format!(" ({t})"))
-        .unwrap_or_default();
-    let reads: Vec<&str> = [
-        ("query_entities", "query_entities (type, q, georel, pick)"),
-        ("query_temporal", "query_temporal (history)"),
-        ("summarize", "summarize (aggregates)"),
-    ]
-    .into_iter()
-    .filter(|(tool, _)| offers(tool))
-    .map(|(_, said)| said)
-    .collect();
-    let mut card = format!(
-        "NGSI-LD Endpoint {}{title}, ETSI GS CIM 009 / TS 104 175.",
-        connector.endpoint
-    );
-    if !reads.is_empty() {
-        card.push_str(&format!(" Read it with {}.", reads.join(", ")));
-    }
-    if offers("query_entities") || offers("query_temporal") {
-        card.push_str("\nq: attr==value; AND, | OR, == != > >= < <= ~= (regex), ranges a..b; a text value in quotes; a Relationship by its target id (refParentArea==\"urn:ngsi-ld:...\").");
-    }
-    if offers("query_entities") {
-        card.push_str("\nGeo: georel near;maxDistance==<metres> or within on location. Units: compare in the unit shown (pm10 is ug/m3; a distance asked in km is sent in m).");
-    }
-    let shared = shared(classes);
-    if !shared.is_empty() {
-        card.push_str(&format!("\nEvery type also has: {}.", shared.join(", ")));
-    }
-    for (kind, attributes) in classes {
-        if brief {
-            card.push_str(&format!("\n{kind}: {} attributes", attributes.len()));
-        } else {
-            card.push_str(&type_lines(kind, attributes, &shared));
-        }
-    }
-    if brief {
-        card.push_str("\nA type's attributes come with your first query on it.");
-    }
-    card
-}
-
-/// The attribute lines every type writes alike, when there are two types or more.
-fn shared(classes: &BTreeMap<String, Vec<QueryAttribute>>) -> Vec<String> {
-    let mut all = classes.values();
-    let (Some(first), true) = (all.next(), classes.len() > 1) else {
-        return Vec::new();
-    };
-    first
-        .iter()
-        .map(|a| a.written.clone())
-        .filter(|w| classes.values().all(|c| c.iter().any(|a| &a.written == w)))
-        .collect()
-}
-
-/// One type's line, without the `shared` attributes, and its example `q` when it has one.
-fn type_lines(kind: &str, attributes: &[QueryAttribute], shared: &[String]) -> String {
-    let own: Vec<&str> = attributes
-        .iter()
-        .map(|a| a.written.as_str())
-        .filter(|w| !shared.iter().any(|s| s == w))
-        .collect();
-    let mut lines = format!("\n{kind}: {}", own.join(", "));
-    if let Some(example) = attributes.iter().find_map(|a| a.example.as_deref()) {
-        lines.push_str(&format!("\n  e.g. q={example}"));
-    }
-    lines
+    jc_core::query_card::card(
+        &connector.endpoint,
+        connector.title.as_deref(),
+        offers,
+        classes,
+        brief,
+    )
 }
 
 #[cfg(test)]
