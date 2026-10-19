@@ -224,9 +224,9 @@ pub const COLUMNS: [&str; 16] = [
 ];
 
 /// One CSV cell (RFC 4180): quoted when it holds a quote, a comma or a line break, and a text a
-/// spreadsheet would run as a formula (`=`, `+`, `-`, `@` first) gets a leading `'`.
+/// spreadsheet would run as a formula (`=`, `+`, `-`, `@`, a tab or a CR first) gets a leading `'`.
 pub fn cell(text: &str) -> String {
-    let text = if text.starts_with(['=', '+', '-', '@']) {
+    let text = if text.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{text}")
     } else {
         text.to_owned()
@@ -321,6 +321,8 @@ mod tests {
         assert_eq!(cell("line\nbreak"), "\"line\nbreak\"");
         assert_eq!(cell("=SUM(A1)"), "'=SUM(A1)");
         assert_eq!(cell("-1,5"), "\"'-1,5\"");
+        assert_eq!(cell("\t=1+1"), "'\t=1+1");
+        assert_eq!(cell("\r=1+1"), "\"'\r=1+1\"");
         assert_eq!(cell(""), "");
     }
 
