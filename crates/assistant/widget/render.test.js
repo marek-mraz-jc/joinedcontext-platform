@@ -185,6 +185,7 @@ test("a data table shows at most 20 rows of text and only http(s) links", () => 
     rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
     dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
     download: "javascript:alert(1)",
+    geojson: "data:application/geo+json,{}",
   }, "en");
   assert.equal(shown.rows.length, 20);
   assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
@@ -192,6 +193,9 @@ test("a data table shows at most 20 rows of text and only http(s) links", () => 
   assert.equal(shown.caption, "Air quality (20)");
   assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
   assert.equal(shown.download, null);
+  assert.equal(shown.geojson, null);
+  const area = "https://api.dev.joinedcontext.com/api/endpoint/s/ogc/features/collections/AdministrativeArea/items/urn%3Angsi-ld%3AAdministrativeArea%3Ab";
+  assert.equal(table({ columns: ["name"], rows: [["Badín"]], geojson: area }, "sk").geojson, area);
   assert.equal(table({ columns: [], rows: [[1]] }), null);
   assert.equal(table(null), null);
 });
