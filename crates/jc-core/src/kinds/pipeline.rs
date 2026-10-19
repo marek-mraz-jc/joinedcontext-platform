@@ -1273,7 +1273,7 @@ const HOST_FUNCTIONS: &[&str] = &["file", "file_json", "file_rel", "hostname", "
 /// `spec.secrets` — and a mapping must not be the second door into it: `env("…")` reads only
 /// what the reconciler injects for it, and `file(…)` reads nothing at all, because whatever a
 /// mapping reads it writes to the pipeline's own target.
-fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
+pub(crate) fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
     for (function, argument) in host_calls(mapping) {
         if function == "env" {
             match argument.as_deref() {
