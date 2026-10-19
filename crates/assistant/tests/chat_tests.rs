@@ -46,6 +46,8 @@ struct World {
     app: axum::Router,
     /// The service's question permits, to fill in a test of the limit.
     questions: Arc<tokio::sync::Semaphore>,
+    /// The service's state, to mint a visitor token a test names itself.
+    state: Arc<ChatState>,
 }
 
 fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deployment {
@@ -248,6 +250,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         viz: None,
         organization: "hronov".into(),
         contexts: Default::default(),
+        turns: Default::default(),
     });
     World {
         admin,
@@ -257,8 +260,9 @@ async fn world(test: &str, deployment: Deployment) -> World {
         proxy,
         gateway,
         functions,
-        app: with_visitor_tokens(state),
+        app: with_visitor_tokens(Arc::clone(&state)),
         questions,
+        state,
     }
 }
 
@@ -838,47 +842,140 @@ async fn a_made_up_tool_is_never_called_and_a_repeated_call_ends_the_loop() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-3314: a visitor who leaves stops the question at the model's next call; the call already
-/// sent is let finish and counted.
+/// A visitor token of the test's own, earned at no difficulty from the service's signer.
+async fn visitor_token(state: &ChatState, public_id: &str, nonce: &str) -> String {
+    let now = unix_now();
+    let limits = state.limits.lock().await;
+    let challenge = limits.signer.challenge(public_id, 0, now);
+    limits
+        .signer
+        .redeem(public_id, &challenge, nonce, now)
+        .expect("a proof of no bits")
+        .0
+}
+
+fn resume_of(turn: &str, after: Option<usize>, token: Option<&str>) -> Request<Body> {
+    resume_from(turn, after, token, "203.0.113.7")
+}
+
+fn resume_from(
+    turn: &str,
+    after: Option<usize>,
+    token: Option<&str>,
+    client: &str,
+) -> Request<Body> {
+    let query = after.map(|n| format!("?after={n}")).unwrap_or_default();
+    let mut request = Request::builder()
+        .uri(format!(
+            "/api/v1/d/hronov-obcania/turns/{turn}/resume{query}"
+        ))
+        .header("x-forwarded-for", format!("{client}, 10.0.0.1"));
+    if let Some(token) = token {
+        request = request.header(VISITOR_HEADER, token);
+    }
+    request.body(Body::empty()).expect("a request")
+}
+
+/// The SSE `id`s of a resumed stream, in order.
+async fn ids_of(app: &axum::Router, request: Request<Body>) -> Vec<usize> {
+    let response = app.clone().oneshot(request).await.expect("an answer");
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| l.strip_prefix("id: "))
+        .map(|id| id.parse().expect("an index"))
+        .collect()
+}
+
+/// T-4685 (was T-3314's stop): a visitor who leaves mid-answer, a link clicked on the host page,
+/// leaves the answer running to its end; the next page reads it again from the index it reached,
+/// nothing repeated, and the turn is that address's alone.
 #[tokio::test]
-async fn a_question_stops_when_its_visitor_leaves() {
+async fn an_answer_whose_visitor_left_runs_to_its_end_and_resumes_on_the_next_page() {
     let w = world("chatgone", deployment(Channel::Public, 50_000, 10)).await;
     let slow = std::time::Duration::from_millis(300);
     script_routed(
         &w.proxy,
         vec![completion(json!({"role": "assistant", "content": "{\"route\": \"rag\", \"queries\": [\"knižnica\"]}"}), 100).set_delay(slow)],
         vec![completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100).set_delay(slow)],
-        vec![completion(
-            json!({"role": "assistant", "content": "Do 18:00 [1]."}),
-            100,
-        )],
+        vec![streamed(&["Do 18:00 ", "[1]."], 90, 10)],
     )
     .await;
-    let response = w
-        .app
-        .clone()
-        .oneshot(ask(
-            json!({"message": "Dokedy je otvorená knižnica?"}),
-            None,
-        ))
-        .await
-        .expect("an answer");
+    let token = visitor_token(&w.state, "hronov-obcania", "0").await;
+    let mut request = ask(json!({"message": "Dokedy je otvorená knižnica?"}), None);
+    request
+        .headers_mut()
+        .insert(VISITOR_HEADER, token.parse().expect("a header value"));
+    let response = w.app.clone().oneshot(request).await.expect("an answer");
     assert_eq!(response.status(), StatusCode::OK);
-    // The visitor leaves while the first call is with the model.
-    for _ in 0..100 {
-        if !model_calls(&w.proxy).await.is_empty() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    drop(response);
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    // The router and the first round's judgement were with the model; no answer call followed.
-    let calls = model_calls(&w.proxy).await;
+    // The first event names the turn; the visitor leaves while the first call is with the model.
+    let mut body = response.into_body().into_data_stream();
+    let first = futures_util::StreamExt::next(&mut body)
+        .await
+        .expect("an event")
+        .expect("bytes");
+    let first = String::from_utf8_lossy(&first).to_string();
+    let data = first
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("the conversation event");
+    let turn = serde_json::from_str::<Value>(data).expect("json")["turn"]
+        .as_str()
+        .expect("a visitor's stream names its turn")
+        .to_owned();
+    drop(body);
+    // The answer goes on: every event through `done`, numbered from 0.
+    let (status, events, headers) = answer_of(&w.app, resume_of(&turn, None, Some(&token))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
     assert!(
-        calls_of(&calls, None).is_empty(),
-        "no call after the visitor left"
+        names.contains(&"answer") && names.contains(&"citations"),
+        "{events:?}"
     );
+    assert_eq!(names.last(), Some(&"done"));
+    let all = ids_of(&w.app, resume_of(&turn, Some(0), Some(&token))).await;
+    assert_eq!(all, (0..events.len()).collect::<Vec<_>>());
+    let rest = ids_of(&w.app, resume_of(&turn, Some(2), Some(&token))).await;
+    assert_eq!(
+        rest,
+        (2..events.len()).collect::<Vec<_>>(),
+        "from the index, nothing twice"
+    );
+    let calls = model_calls(&w.proxy).await;
+    assert_eq!(calls_of(&calls, None).len(), 1, "the answer call ran");
+    // The next page's new token reads it from the same address; another address, no token, an
+    // unknown turn and a bad index are refused.
+    let other = visitor_token(&w.state, "hronov-obcania", "1").await;
+    assert_ne!(other, token);
+    let app = &w.app;
+    let refused = |request| async move { answer_of(app, request).await.0 };
+    assert_eq!(
+        refused(resume_of(&turn, None, Some(&other))).await,
+        StatusCode::OK
+    );
+    let elsewhere = resume_from(&turn, None, Some(&other), "198.51.100.9");
+    assert_eq!(refused(elsewhere).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        refused(resume_of(&turn, None, None)).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let unknown = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+    assert_eq!(
+        refused(resume_of(unknown, None, Some(&token))).await,
+        StatusCode::NOT_FOUND
+    );
+    let bad = Request::builder()
+        .uri(format!(
+            "/api/v1/d/hronov-obcania/turns/{turn}/resume?after=-1"
+        ))
+        .header(VISITOR_HEADER, token.as_str())
+        .body(Body::empty())
+        .expect("a request");
+    assert_eq!(refused(bad).await, StatusCode::BAD_REQUEST);
+    // The turn is stored as any other.
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await
         .expect("scope");
@@ -889,9 +986,18 @@ async fn a_question_stops_when_its_visitor_leaves() {
     assert_eq!(
         tokens,
         100 * i64::try_from(calls.len()).expect("few"),
-        "every call that was sent is counted"
+        "every call is counted"
     );
     drop(tx);
+    // Past 20 resumes a minute from one address: 429.
+    let mut statuses = Vec::new();
+    for _ in 0..30 {
+        statuses.push(refused(resume_of(unknown, None, Some(&token))).await);
+    }
+    assert!(
+        statuses.contains(&StatusCode::TOO_MANY_REQUESTS),
+        "{statuses:?}"
+    );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
