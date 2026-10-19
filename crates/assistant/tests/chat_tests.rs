@@ -1296,7 +1296,11 @@ async fn a_conversation_at_its_cost_cap_is_long_and_asks_the_model_nothing() {
         vec![streamed(&["Áno."], 15, 5)],
     )
     .await;
-    let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    let (status, first, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kedy je zber?"}), Some(ORIGIN)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(first.iter().all(|(name, _)| name != "error"), "{first:?}");
     let id = first[0].1["id"].as_str().expect("an id").to_owned();
@@ -1365,7 +1369,8 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
     }
     let w = world("chatbudget", long).await;
     // The estimate of the first call alone is over a 3,700-token conversation.
-    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "x".repeat(4000)}))).await;
+    let (_, events, _) =
+        answer_of(&w.app, ask_looped(json!({"message": "zber ".repeat(800)}))).await;
     let error = events
         .iter()
         .find(|(n, _)| n == "error")
@@ -1391,7 +1396,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .mount(&w.proxy)
         .await;
     // T-4671: a day the proxy refuses mid-loop is the day's limit, never a quiet switch.
-    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Kedy je zber?"}))).await;
     let error = &events
         .iter()
         .find(|(n, _)| n == "error")
@@ -1410,7 +1415,7 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .respond_with(ResponseTemplate::new(502))
         .mount(&w.proxy)
         .await;
-    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Kedy je zber?"}))).await;
     let error = events
         .iter()
         .find(|(n, _)| n == "error")
@@ -1956,7 +1961,7 @@ async fn no_script_runs_without_the_sandbox() {
         ],
     )
     .await;
-    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
+    let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Kedy je zber?"}))).await;
     assert!(events.iter().all(|(n, _)| n != "script"));
     let calls = model_calls(&w.proxy).await;
     assert!(calls[0].1["tools"]
@@ -3245,7 +3250,11 @@ async fn past_the_day_s_cost_cap_the_chat_says_the_limit_and_nothing_else() {
     )
     .await;
     // A question that already started finishes its answer call past the cap.
-    let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    let (status, first, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kedy je zber?"}), Some(ORIGIN)),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!limited(&first), "{first:?}");
     // T-4178, T-4654: the day's cost is kept below; a visitor's stream does not carry it.
@@ -3356,7 +3365,7 @@ async fn a_visitor_past_their_month_reads_when_it_resets_and_others_are_answered
     .await;
     let from =
         |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
-    let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Kedy je zber?")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!limited(&first), "{first:?}");
     let calls = model_calls(&w.proxy).await.len();
@@ -3372,7 +3381,7 @@ async fn a_visitor_past_their_month_reads_when_it_resets_and_others_are_answered
     );
     assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
 
-    let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Kedy je zber?")).await;
     assert!(!limited(&other), "{other:?}");
     assert!(
         model_calls(&w.proxy).await.len() > calls,
@@ -3399,7 +3408,7 @@ async fn a_visitor_past_their_share_of_the_day_is_refused_until_midnight() {
     script(&w.proxy, vec![answered(), answered(), answered()]).await;
     let from =
         |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
-    let (status, _, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    let (status, _, _) = answer_of(&w.app, from("203.0.113.7", "Kedy je zber?")).await;
     assert_eq!(status, StatusCode::OK);
     let calls = model_calls(&w.proxy).await.len();
 
@@ -3418,7 +3427,7 @@ async fn a_visitor_past_their_share_of_the_day_is_refused_until_midnight() {
     assert!((1..=86_400).contains(&retry), "{retry}");
     assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
 
-    let (status, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    let (status, other, _) = answer_of(&w.app, from("203.0.113.8", "Kedy je zber?")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(!limited(&other), "{other:?}");
     db::drop_database(w.admin, w.pool, &w.name).await;
@@ -4735,6 +4744,60 @@ async fn a_bare_sum_or_an_order_to_drop_the_rules_costs_no_model_call() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4768: small talk gets its fixed line and a message with no content word ("b", "ddd") is
+/// asked what the person looks for, with the deployment's examples as chips. Neither reaches the
+/// router, a search, a connector or a model.
+#[tokio::test]
+async fn small_talk_and_noise_never_reach_retrieval() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.suggestions = [("sk".to_owned(), vec!["Kedy je zber?".to_owned()])].into();
+    let w = world("chatbrief", d).await;
+    script_routed(&w.proxy, vec![], vec![], vec![streamed(&["Áno."], 300, 12)]).await;
+    for (message, start, chips) in [
+        ("b", "Napíšte, prosím, čo hľadáte. Alebo vyberte", true),
+        ("ddd", "Napíšte, prosím, čo hľadáte.", true),
+        ("Ahoj ako sa mas?", "Mám sa dobre, ďakujem.", false),
+        ("s nicim", "Dobre. Keď budete niečo hľadať", false),
+    ] {
+        let (status, events, _) =
+            answer_of(&w.app, ask(json!({"message": message}), Some(ORIGIN))).await;
+        assert_eq!(status, StatusCode::OK);
+        let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names
+                .iter()
+                .any(|n| *n == "tool" || *n == "stage" || *n == "data"),
+            "{message}: no step, search or read: {names:?}"
+        );
+        let answer = events
+            .iter()
+            .find(|(n, _)| n == "answer")
+            .expect("an answer");
+        assert!(
+            answer.1["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with(start)),
+            "{message}: {answer:?}"
+        );
+        let cited = events
+            .iter()
+            .find(|(n, _)| n == "citations")
+            .expect("citations");
+        assert_eq!(cited.1, json!([]), "{message}: no source chip");
+        let offered = events.iter().find(|(n, _)| n == "followups");
+        assert_eq!(offered.is_some(), chips, "{message}: {events:?}");
+    }
+    assert!(model_calls(&w.proxy).await.is_empty(), "no model call");
+    let reads = w.gateway.received_requests().await.unwrap_or_default();
+    assert!(
+        !reads
+            .iter()
+            .any(|r| String::from_utf8_lossy(&r.body).contains("tools/call")),
+        "no connector read"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4680: a broad read of a connector that offers `summarize` reads the type's profile beside
 /// its rows and the answer call gets both; a read narrowed by `q` reads the rows alone.
 #[tokio::test]
@@ -5213,7 +5276,7 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
         "a.b.c",
         "0123456789abcdef0123456789abcdef.4102444800.00",
     ] {
-        let mut request = ask(json!({"message": "a"}), Some(ORIGIN));
+        let mut request = ask(json!({"message": "Kedy je zber?"}), Some(ORIGIN));
         request
             .headers_mut()
             .insert(VISITOR_HEADER, token.parse().expect("a header value"));
@@ -5301,7 +5364,11 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
     )
     .await;
     let with = |token: &str| {
-        let mut request = ask_from(json!({"message": "a"}), Some(ORIGIN), "198.51.100.40");
+        let mut request = ask_from(
+            json!({"message": "Kedy je zber?"}),
+            Some(ORIGIN),
+            "198.51.100.40",
+        );
         request
             .headers_mut()
             .insert(VISITOR_HEADER, token.parse().expect("a header value"));

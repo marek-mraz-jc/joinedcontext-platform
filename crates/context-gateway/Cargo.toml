@@ -12,7 +12,6 @@ jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 arc-swap = "1"
 # base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
-argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 # The Endpoint's WebSocket (EP-106) is relayed to the broker view's own: the client half of the
 # tungstenite axum's `ws` already links, and the stream split of the futures it already uses.
