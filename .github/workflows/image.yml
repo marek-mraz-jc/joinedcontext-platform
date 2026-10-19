@@ -66,7 +66,7 @@ jobs:
           file: ${{ steps.has.outputs.df }}
           build-args: APT_REFRESH=${{ steps.day.outputs.d }}
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:main
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:main,ghcr.io/${{ github.repository }}:dev-${{ github.run_number }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true
@@ -115,7 +115,7 @@ jobs:
           # rather than a second release compile (3.5 min, T-4721)
           build-args: APT_REFRESH=${{ steps.day.outputs.d }}
           push: true
-          tags: ghcr.io/${{ github.repository }}/checkouts:${{ github.sha }},ghcr.io/${{ github.repository }}/checkouts:main
+          tags: ghcr.io/${{ github.repository }}/checkouts:${{ github.sha }},ghcr.io/${{ github.repository }}/checkouts:main,ghcr.io/${{ github.repository }}/checkouts:dev-${{ github.run_number }}
           cache-from: |
             type=gha
             type=gha,scope=checkouts
@@ -154,7 +154,7 @@ jobs:
         with:
           context: tools/model-tools
           push: true
-          tags: ghcr.io/${{ github.repository }}/model-tools:${{ github.sha }},ghcr.io/${{ github.repository }}/model-tools:main
+          tags: ghcr.io/${{ github.repository }}/model-tools:${{ github.sha }},ghcr.io/${{ github.repository }}/model-tools:main,ghcr.io/${{ github.repository }}/model-tools:dev-${{ github.run_number }}
           cache-from: type=gha,scope=model-tools
           cache-to: type=gha,mode=max,scope=model-tools
           provenance: true
