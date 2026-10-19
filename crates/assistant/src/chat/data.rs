@@ -35,6 +35,7 @@ const DATA_RULES: &str = "\n\nYou may read more live data before you answer, wit
 - query_entities takes `type` (a list), `q` (conditions joined with `;` for AND and `|` for OR; == != > >= < <= ~= for a regular expression; a member of a structured value as `address[addressLocality]==\"X\"`), `idPattern` (a regular expression over ids), `georel` (`near;maxDistance==1000`) with `geometry` and `coordinates` (longitude first), `limit` and `count`.\n\
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
 - A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
+- When the place asked for has no figure but the same indicator is there for a wider area that holds it (the whole country, `refArea` SK0), read that one, say in one sentence that the place itself has no figure and give the wider area's value with its [n]; never present it as the place's own.\n\
 - get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
 - When a more_tools tool is offered and the tools you have cannot answer, because the data is on another Endpoint or needs another tool (list_types, list_attributes, describe_schema, get_entity, retrieve_temporal), call more_tools first: it offers every tool of every Endpoint.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.";
@@ -714,6 +715,15 @@ mod tests {
             more_tools()["function"]["parameters"]["properties"],
             json!({})
         );
+    }
+
+    /// T-4741: the owner asked for BBSK's births; SUSR holds them for Slovakia only (SK0), and the
+    /// answer said nothing was published instead of giving the national figure as such.
+    #[test]
+    fn a_figure_absent_for_the_place_is_given_for_the_wider_area_as_such() {
+        assert!(DATA_RULES.contains("the same indicator is there for a wider area"));
+        assert!(DATA_RULES.contains("`refArea` SK0"));
+        assert!(DATA_RULES.contains("never present it as the place's own"));
     }
 
     #[test]
