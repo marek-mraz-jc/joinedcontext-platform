@@ -352,11 +352,8 @@ impl DataTheme {
         Self::Tran,
     ];
 
-    /// The languages [`DataTheme::label_in`] holds a label in (AG-124).
-    pub const LABEL_LANGUAGES: [&'static str; 7] = ["sk", "en", "cs", "hu", "de", "fi", "uk"];
-
-    /// The category label in `lang`, one of [`DataTheme::LABEL_LANGUAGES`], else the English
-    /// one (AG-124, ADR-N-055 §2.4). The EU Vocabularies labels for the EU languages; the
+    /// The category label in `lang`, one of `sk`, `en`, `cs`, `hu`, `de`, `fi` and `uk`, else
+    /// the English one (AG-124, ADR-N-055 §2.4). The EU Vocabularies labels for the EU languages; the
     /// Ukrainian ones are a reviewed translation, since the table has none. The Portal, the
     /// assistant's context page and the CKAN groups read their labels from here.
     pub const fn label_in(self, lang: &str) -> &'static str {
@@ -722,7 +719,7 @@ mod tests {
     #[test]
     fn every_theme_has_a_label_in_every_category_language() {
         for theme in DataTheme::ALL {
-            for lang in DataTheme::LABEL_LANGUAGES {
+            for lang in ["sk", "en", "cs", "hu", "de", "fi", "uk"] {
                 assert!(!theme.label_in(lang).trim().is_empty(), "{theme:?} {lang}");
             }
             assert_eq!(theme.label_in("en"), theme.label());
