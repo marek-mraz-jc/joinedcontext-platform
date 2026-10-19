@@ -1,5 +1,5 @@
 //! The stored transcripts of a deployment's conversations (AG-99, API/05 §3.1, T-4670): what a
-//! turn showed the visitor, read off the events as they pass, and the steps of its [`Trace`],
+//! turn showed the visitor, read off the events as they pass, and the steps of its `Trace`,
 //! redacted and written once the turn ends; and the reads and the erasure the Portal's
 //! administration routes answer.
 
@@ -12,7 +12,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 
 use super::agent::{Event, Turn};
-use super::redact::redact;
+use super::redact::masked;
 use super::trace::Step;
 
 static RFC3339: LazyLock<Regex> = LazyLock::new(|| {
@@ -42,6 +42,13 @@ impl Seen {
             Event::Data(table) => {
                 let mut block = json!(table);
                 block["kind"] = json!("table");
+                self.blocks.push(block);
+            }
+            Event::Visualization(shown) => {
+                let map = shown.pointer("/spec/$schema").and_then(Value::as_str)
+                    == Some(super::viz::MAP_SCHEMA);
+                let mut block = shown.clone();
+                block["kind"] = json!(if map { "map" } else { "chart" });
                 self.blocks.push(block);
             }
             Event::Citations(citations) => self
@@ -89,6 +96,9 @@ pub struct Record<'a> {
     pub timed_out: bool,
     /// The deployment's `transcriptRetention` in days; 0 stores nothing.
     pub days: u32,
+    /// Whether the deployment's `transcriptRedaction` is `personal`; else only secrets are
+    /// masked (T-4681).
+    pub personal: bool,
 }
 
 /// The sum of the priced model calls of `steps` and how many calls had no price (T-4178).
@@ -106,29 +116,30 @@ fn big(n: u64) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-fn redacted(text: Option<&str>) -> Option<String> {
-    text.map(redact)
-}
-
-/// A JSON value with every string in it redacted.
-fn redact_value(value: &Value) -> Value {
+/// A JSON value with every string in it masked.
+fn redact_value(value: &Value, personal: bool) -> Value {
     match value {
-        Value::String(text) => Value::String(redact(text)),
-        Value::Array(items) => Value::Array(items.iter().map(redact_value).collect()),
+        Value::String(text) => Value::String(masked(text, personal)),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| redact_value(v, personal)).collect())
+        }
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), redact_value(v)))
+                .map(|(k, v)| (k.clone(), redact_value(v, personal)))
                 .collect(),
         ),
         other => other.clone(),
     }
 }
 
-/// Writes one turn and its steps, every text redacted first; nothing when `days` is 0.
+/// Writes one turn and its steps, every text masked first; nothing when `days` is 0.
 pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Error> {
     if record.days == 0 {
         return Ok(());
     }
+    let personal = record.personal;
+    let redact = |text: &str| masked(text, personal);
+    let redacted = |text: Option<&str>| text.map(redact);
     let (cost, uncosted) = priced(record.steps);
     let models = record.steps.iter().filter(|s| s.kind == "model");
     let tokens_in: u64 = models.clone().filter_map(|s| s.tokens_in).sum();
@@ -142,9 +153,10 @@ pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Erro
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO turns (project, deployment, conversation, turn, expires_at, origin, client, \
          question, answer, blocks, history, route, first_token_ms, total_ms, error, timed_out, \
-         tokens_in, tokens_out, cost_micros, uncosted) \
+         tokens_in, tokens_out, cost_micros, uncosted, question_hash) \
          VALUES ($1, $2, $3::uuid, $4, now() + make_interval(days => $5), $6, $7, $8, $9, $10, \
-         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) \
+         $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \
+         md5(btrim(regexp_replace(lower(unaccent($8)), '[^[:alnum:]]+', ' ', 'g')))) \
          ON CONFLICT (conversation, turn) DO NOTHING RETURNING id",
     )
     .bind(record.project)
@@ -156,12 +168,21 @@ pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Erro
     .bind(record.client)
     .bind(redact(record.question))
     .bind(redact(record.seen.answer()))
-    .bind(redact_value(&Value::Array(record.seen.blocks.clone())))
+    .bind(redact_value(
+        &Value::Array(record.seen.blocks.clone()),
+        personal,
+    ))
     .bind(Value::Array(history))
     .bind(record.route)
     .bind(record.first_token_ms.map(big))
     .bind(big(record.total_ms))
-    .bind(record.seen.error.as_ref().map(redact_value))
+    .bind(
+        record
+            .seen
+            .error
+            .as_ref()
+            .map(|e| redact_value(e, personal)),
+    )
     .bind(record.timed_out)
     .bind(big(tokens_in))
     .bind(big(tokens_out))
@@ -178,9 +199,10 @@ pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Erro
         sqlx::query(
             "INSERT INTO turn_steps (turn_id, project, ordinal, kind, name, endpoint, input, \
              output, output_bytes, status, start_ms, duration_ms, error, stage, model, provider, \
-             tokens_in, tokens_out, reasoning_tokens, cost_micros) \
+             tokens_in, tokens_out, reasoning_tokens, cost_micros, cached_tokens, reasoning, \
+             finish_reason, effort, prompt_version, rows) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-             $18, $19, $20)",
+             $18, $19, $20, $21, $22, $23, $24, $25, $26)",
         )
         .bind(id)
         .bind(record.project)
@@ -202,6 +224,12 @@ pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Erro
         .bind(step.tokens_out.map(big))
         .bind(step.reasoning_tokens.map(big))
         .bind(step.cost_micros.map(big))
+        .bind(step.cached_tokens.map(big))
+        .bind(redacted(step.reasoning.as_deref()).map(|t| kept_redacted(&t)))
+        .bind(step.finish_reason.as_deref().map(|f| cut(f, 32)))
+        .bind(step.effort.as_deref().map(|e| cut(e, 16)))
+        .bind(step.prompt_version.as_deref().map(|p| cut(p, 64)))
+        .bind(step.rows.map(big))
         .execute(&mut *tx)
         .await?;
     }
@@ -209,7 +237,7 @@ pub async fn store(pool: &PgPool, record: &Record<'_>) -> Result<(), crate::Erro
     Ok(())
 }
 
-/// A redacted text may be longer than the 8 kB it was cut to (`[rodné číslo]` for ten digits).
+/// A masked text may be longer than the 64 kB it was cut to (`[rodné číslo]` for ten digits).
 fn kept_redacted(text: &str) -> String {
     super::trace::kept(text).0
 }
@@ -319,7 +347,7 @@ macro_rules! list_sql {
              sum(t.uncosted)::bigint, coalesce(max(f.up), 0), coalesce(max(f.down), 0) \
              FROM turns t LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE verdict = 'up') AS up, \
              count(*) FILTER (WHERE verdict = 'down') AS down FROM feedback \
-             WHERE feedback.conversation = t.conversation) f ON true \
+             WHERE feedback.project = t.project AND feedback.conversation = t.conversation) f ON true \
              WHERE ($1::text IS NULL OR t.deployment = $1) \
              AND ($2::timestamptz IS NULL OR t.at >= $2::timestamptz) \
              AND ($3::timestamptz IS NULL OR t.at < $3::timestamptz) \
@@ -333,8 +361,8 @@ macro_rules! list_sql {
                OR ($5 = 'none' AND coalesce(max(f.up), 0) + coalesce(max(f.down), 0) = 0)) \
              AND (NOT $6 OR max(t.total_ms) > 15000) /* slow: 15 s */ \
              AND ($7::bigint IS NULL OR sum(t.cost_micros) >= $7) \
-             AND ($8::text IS NULL OR bool_or(unaccent(lower(t.question || ' ' || t.answer)) \
-               LIKE unaccent(lower($8)))) \
+             AND ($8::text IS NULL OR bool_or(lower(unaccent(t.question || ' ' || t.answer)) \
+               LIKE lower(unaccent($8)))) \
              ORDER BY ",
             $order,
             " LIMIT $9 OFFSET $10"
@@ -424,7 +452,8 @@ pub async fn detail(
          to_char(t.at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS at, t.question, \
          t.answer, t.blocks, t.history, t.route, t.first_token_ms, t.total_ms, t.error, \
          t.timed_out, t.cost_micros, t.uncosted, f.verdict \
-         FROM turns t LEFT JOIN feedback f ON f.conversation = t.conversation AND f.turn = t.turn \
+         FROM turns t LEFT JOIN feedback f ON f.project = t.project \
+         AND f.conversation = t.conversation AND f.turn = t.turn \
          WHERE t.conversation = $1::uuid ORDER BY t.turn",
     )
     .bind(conversation)
@@ -447,7 +476,8 @@ pub async fn detail(
     let steps: Vec<PgRow> = sqlx::query(
         "SELECT turn_id, kind, name, endpoint, input, output, output_bytes, status, start_ms, \
          duration_ms, error, stage, model, provider, tokens_in, tokens_out, reasoning_tokens, \
-         cost_micros FROM turn_steps WHERE turn_id = ANY($1) ORDER BY turn_id, ordinal",
+         cost_micros, cached_tokens, reasoning, finish_reason, effort, prompt_version, rows \
+         FROM turn_steps WHERE turn_id = ANY($1) ORDER BY turn_id, ordinal",
     )
     .bind(&ids)
     .fetch_all(&mut *tx)
@@ -505,7 +535,58 @@ fn step_json(s: &PgRow) -> Result<Value, sqlx::Error> {
         "tokensOut": number("tokens_out")?,
         "reasoningTokens": number("reasoning_tokens")?,
         "costUsd": number("cost_micros")?.map(usd),
+        "cachedTokens": number("cached_tokens")?,
+        "reasoning": text("reasoning")?,
+        "finishReason": text("finish_reason")?,
+        "effort": text("effort")?,
+        "promptVersion": text("prompt_version")?,
+        "rows": number("rows")?,
     }))
+}
+
+/// The most turns [`same`] lists.
+pub const MAX_SAME: i64 = 50;
+
+/// The stored turns of `project` whose question reads as turn `turn` of `conversation`'s,
+/// newest first, at most [`MAX_SAME`]; `None` when that turn is not stored (API/05 §3.1, T-4681).
+pub async fn same(
+    pool: &PgPool,
+    project: &str,
+    conversation: &str,
+    turn: u32,
+) -> Result<Option<Vec<Value>>, crate::Error> {
+    let mut tx = crate::project_scope(pool, project).await?;
+    let hash: Option<String> = sqlx::query_scalar(
+        "SELECT question_hash FROM turns WHERE conversation = $1::uuid AND turn = $2",
+    )
+    .bind(conversation)
+    .bind(i32::try_from(turn).unwrap_or(i32::MAX))
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(hash) = hash else {
+        let _ = tx.rollback().await;
+        return Ok(None);
+    };
+    type Row = (String, i32, String, String, i64, i64, i64);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT t.conversation::text, t.turn, \
+         to_char(t.at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), t.deployment, \
+         t.total_ms, t.cost_micros, (SELECT count(*) FROM turn_steps s WHERE s.turn_id = t.id) \
+         FROM turns t WHERE t.question_hash = $1 ORDER BY t.at DESC LIMIT $2",
+    )
+    .bind(&hash)
+    .bind(MAX_SAME)
+    .fetch_all(&mut *tx)
+    .await?;
+    let _ = tx.rollback().await;
+    Ok(Some(
+        rows.into_iter()
+            .map(|r| {
+                json!({"conversation": r.0, "turn": r.1, "at": r.2, "deployment": r.3,
+                    "totalMs": r.4, "costUsd": usd(r.5), "steps": r.6})
+            })
+            .collect(),
+    ))
 }
 
 /// Erases one conversation's turns and steps (T-4668); whether it held any.
@@ -644,12 +725,36 @@ mod tests {
     }
 
     #[test]
-    fn every_string_of_a_block_is_redacted() {
-        let block =
-            json!([{"kind": "table", "rows": [["jan@x.sk", 3]], "note": "tel. 0905 123 456"}]);
+    fn every_string_of_a_block_is_masked_as_the_deployment_says() {
+        let block = json!([{"kind": "table", "rows": [["jan@x.sk", 3]],
+            "note": "tel. 0905 123 456, heslo: tajne1"}]);
         assert_eq!(
-            redact_value(&block),
-            json!([{"kind": "table", "rows": [["[e-mail]", 3]], "note": "tel. [telefón]"}])
+            redact_value(&block, true),
+            json!([{"kind": "table", "rows": [["[e-mail]", 3]], "note": "tel. [telefón], heslo: [heslo]"}])
         );
+        assert_eq!(
+            redact_value(&block, false),
+            json!([{"kind": "table", "rows": [["jan@x.sk", 3]], "note": "tel. 0905 123 456, heslo: [heslo]"}])
+        );
+    }
+
+    /// T-4681: a chart and a map the visitor saw are blocks with their kind, as a table is.
+    #[test]
+    fn a_chart_and_a_map_shown_are_kept_with_their_kind() {
+        let mut seen = Seen::default();
+        seen.see(&Event::Visualization(
+            json!({"spec": {"mark": "bar"}, "rows": [{"a": 1}]}),
+        ));
+        seen.see(&Event::Visualization(
+            json!({"spec": {"$schema": super::super::viz::MAP_SCHEMA}}),
+        ));
+        assert_eq!(
+            seen.blocks
+                .iter()
+                .map(|b| b["kind"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("chart"), Some("map")]
+        );
+        assert_eq!(seen.blocks[0]["rows"][0]["a"], 1);
     }
 }
