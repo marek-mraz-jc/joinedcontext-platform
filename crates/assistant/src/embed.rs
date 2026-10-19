@@ -54,7 +54,7 @@ struct Model {
 }
 
 /// The loaded model. Cloning shares it; one embedding runs at a time, on `threads` ONNX Runtime
-/// threads, off the async runtime, and a visitor's question before any passage ([`Turns`]).
+/// threads, off the async runtime, and a visitor's question before any passage (`Turns`).
 #[derive(Clone)]
 pub struct Embedder {
     model: Arc<Mutex<Model>>,
