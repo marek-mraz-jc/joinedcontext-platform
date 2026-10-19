@@ -19,7 +19,7 @@
       paused: "Asistent teraz neodpovedá. Skúste to neskôr.", limit: "Asistent dosiahol svoj limit. Skúste to znova neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
       reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
-      copied: "Odpoveď je skopírovaná.", close: "Zavrieť", suggested: "Môžete sa opýtať",
+      copied: "Odpoveď je skopírovaná.", selected: "Odpoveď je označená: stlačte Ctrl+C.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
       missing: "Čo chýbalo? (nepovinné)", sendNote: "Odoslať", skip: "Preskočiť",
@@ -50,7 +50,7 @@
       paused: "The assistant is not answering right now. Try again later.", limit: "The assistant has reached its limit. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
       reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
-      copied: "The answer is copied.", close: "Close", suggested: "You can ask",
+      copied: "The answer is copied.", selected: "The answer is selected: press Ctrl+C.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
       missing: "What was missing? (optional)", sendNote: "Send", skip: "Skip",
@@ -81,7 +81,7 @@
       paused: "Asistent teď neodpovídá. Zkuste to později.", limit: "Asistent dosáhl svého limitu. Zkuste to znovu později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
       reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
-      copied: "Odpověď je zkopírovaná.", close: "Zavřít", suggested: "Můžete se zeptat",
+      copied: "Odpověď je zkopírovaná.", selected: "Odpověď je označená: stiskněte Ctrl+C.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
       missing: "Co chybělo? (nepovinné)", sendNote: "Odeslat", skip: "Přeskočit",
@@ -143,6 +143,36 @@
     if (cls) node.className = cls;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  // Copies `value`, then `done`. Where the browser refuses the clipboard (an http page, a frame
+  // without clipboard-write) its own copy command; failing that `node` stays selected for Ctrl+C
+  // and `refused` says so, never a silent button (T-4762).
+  function copyText(value, node, done, refused) {
+    var fallback = function () {
+      var area = el("textarea");
+      area.value = value;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      var copied = false;
+      try { copied = document.execCommand("copy"); } catch (error) { copied = false; }
+      area.remove();
+      if (copied) return done();
+      if (node.select) node.select();
+      else {
+        var range = document.createRange();
+        range.selectNodeContents(node);
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      refused();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(value).then(done, fallback);
+    else fallback();
   }
 
   // Every word on the page is bound to its key, so the language switch relabels them in place.
@@ -431,9 +461,7 @@
     var copyIt = el("button", "jc-about-close", text.copy);
     copyIt.type = "button";
     copyIt.addEventListener("click", function () {
-      var done = function () { copied.textContent = text.copied; };
-      if (navigator.clipboard) navigator.clipboard.writeText(config.mcp).then(done, function () { address.select(); });
-      else address.select();
+      copyText(config.mcp, address, function () { copied.textContent = text.copied; }, function () { copied.textContent = text.selected; });
     });
     connect.appendChild(copyIt);
     connect.appendChild(copied);
@@ -727,8 +755,7 @@
     tools.appendChild(by);
     var copy = iconButton("jc-copy", "copy", "copy");
     copy.addEventListener("click", function () {
-      if (!navigator.clipboard) return;
-      navigator.clipboard.writeText(text).then(function () { announce.textContent = w.copied; }, function () {});
+      copyText(text, body, function () { announce.textContent = w.copied; }, function () { announce.textContent = w.selected; });
     });
     tools.appendChild(copy);
     if (turn && config.feedback !== false) thumbs(tools, turn);
