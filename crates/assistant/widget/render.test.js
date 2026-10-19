@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, connector, monogram, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
+const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -528,15 +528,6 @@ test("Retry resends the last question with the history before it, and nothing el
   assert.equal(retry([{ role: "user", text: "  " }]), null);
 });
 
-test("the header's monogram is the first letters of the first two words (T-4283)", () => {
-  assert.equal(monogram("Banská Bystrica"), "BB");
-  assert.equal(monogram("helsinki"), "H");
-  assert.equal(monogram("  Žilina – mesto a univerzita "), "ŽM");
-  assert.equal(monogram("1. obvod Praha"), "OP");
-  assert.equal(monogram(""), "");
-  assert.equal(monogram(undefined), "");
-});
-
 test("the panel asks for the language once, only in ask mode and where there is a choice (T-4283, T-4343)", () => {
   const two = ["sk", "en"];
   const ask = (at) => asksLanguage(Object.assign({ mode: "ask" }, at));
@@ -672,16 +663,18 @@ test("the footer's count takes each language's plural for 1, 2 and 5 (T-4364)", 
   assert.equal(sourceCount(3, "de"), "3 sources");
 });
 
-test("at most three badges, one per site, a letter and a hue that the site alone decides (T-4364)", () => {
+test("the sources show as a page and a table icon, never a letter or a hue per site (T-4740)", () => {
   const { list } = sources([
-    { n: 1, url: "https://www.zilina.sk/a" }, { n: 2, url: "https://zilina.sk/b" },
-    { n: 3, url: "https://3dzilina.sk/" }, { n: 4, tool: "query_entities", endpoint: "parkovanie" },
-    { n: 5, url: "https://kia.sk/" },
+    { n: 1, url: "https://www.bbsk.sk/a" }, { n: 2, url: "https://zilina.sk/b" },
+    { n: 3, tool: "query_entities", endpoint: "bbsk-registre" },
   ]);
-  const got = badges(list);
-  assert.deepEqual(got.map((b) => [b.site, b.letter]), [["zilina.sk", "Z"], ["3dzilina.sk", "3"], ["parkovanie", "P"]]);
-  assert.equal(got[0].hue, badges([{ domain: "zilina.sk" }])[0].hue);
-  assert.ok(got.every((b) => Number.isInteger(b.hue) && b.hue >= 0 && b.hue < 360));
+  assert.deepEqual(badges(list), ["page", "table"]);
+  assert.deepEqual(badges(list.slice(0, 2)), ["page"]);
+  assert.deepEqual(badges(list.slice(2)), ["table"]);
+  // A catalogue's dataset page is a dataset, its other pages are pages.
+  assert.deepEqual(badges([{ url: "https://opendata.example.sk/dataset/mosty?x=1" }]), ["table"]);
+  assert.deepEqual(badges([{ url: "https://opendata.example.sk/organization/bbsk" }]), ["page"]);
+  assert.deepEqual(badges([{ url: "upload:abc/vzn.pdf#page=2" }]), ["page"]);
   assert.deepEqual(badges([]), []);
   assert.deepEqual(badges(undefined), []);
 });
@@ -993,10 +986,10 @@ test("a measured value shows one decimal and a plain number two, in the visitor'
   assert.deepEqual(co.rows.map((r) => r[1]), ["0,042", "0", "-0,5"]);
 });
 
-test("a source badge draws its letter from CSS, so copied or read-out text never gains a stray 'DA' (T-4729)", () => {
+test("a source badge is a drawn icon with no text, so copied or read-out text never gains a stray 'DA' (T-4729, T-4740)", () => {
   const dir = require("node:path").join(__dirname);
   const read = (f) => require("node:fs").readFileSync(require("node:path").join(dir, f), "utf8");
-  assert.doesNotMatch(read("widget.js"), /el\("span", "jc-badge", badge\.letter\)/);
-  assert.match(read("widget.js"), /setAttribute\("data-letter", badge\.letter\)/);
-  assert.match(read("widget.css"), /\.jc-badge::before\s*\{\s*content:\s*attr\(data-letter\)/);
+  assert.doesNotMatch(read("widget.js"), /data-letter|badge\.letter|badge\.hue|JCRender\.monogram/);
+  assert.match(read("widget.js"), /var b = icon\(kind\);/);
+  assert.doesNotMatch(read("widget.css"), /attr\(data-letter\)/);
 });

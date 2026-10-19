@@ -1913,6 +1913,7 @@ async fn the_widget_is_framed_by_the_deployments_origins_alone_and_sets_no_cooki
         title: Some("Hronov <i>".into()),
         primary_color: Some("#0b5394".into()),
         greeting: Some("Dobrý deň \"<b>\"".into()),
+        ..Default::default()
     });
     let w = world("widget", public).await;
     let (status, headers, html) = get(&w.app, "/d/hronov-obcania/widget").await;

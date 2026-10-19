@@ -831,6 +831,13 @@ pub struct Theme {
     /// The first line the chat shows, at most 500 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub greeting: Option<Localised>,
+    /// The line under the title, at most 80 characters; the word Assistant when absent (T-4740).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<Localised>,
+    /// A CSS `font-family` list of family names the chat's text uses, at most 200 characters;
+    /// the system font when absent. No font file is loaded (T-4740).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
 }
 
 /// A text the chat shows: one string in the deployment's first language, or one per language of
@@ -1663,6 +1670,18 @@ impl AssistantDeploymentSpec {
                     ));
                 }
             }
+            // Family names only: nothing that ends the declaration or loads a file, like url(.
+            if let Some(font) = &theme.font {
+                let names = |c: char| c.is_alphanumeric() || " -,'\"".contains(c);
+                if font.trim().is_empty() || font.chars().count() > 200 || !font.chars().all(names)
+                {
+                    return Err(name(
+                        "theme.font",
+                        font.clone(),
+                        "font is a list of family names: letters, digits, spaces, hyphens, commas and quotes, at most 200 characters",
+                    ));
+                }
+            }
             let shown = [
                 (
                     "theme.greeting",
@@ -1675,6 +1694,12 @@ impl AssistantDeploymentSpec {
                     &theme.title,
                     MAX_TITLE_LEN,
                     "title is 1 to 60 characters",
+                ),
+                (
+                    "theme.subtitle",
+                    &theme.subtitle,
+                    80,
+                    "subtitle is 1 to 80 characters",
                 ),
             ];
             for (field, value, max, rule) in shown {
@@ -1689,7 +1714,7 @@ impl AssistantDeploymentSpec {
                     }
                     // A one-string greeting may be empty (no greeting), as before T-4365.
                     let blank =
-                        text.trim().is_empty() && (field == "theme.title" || language.is_some());
+                        text.trim().is_empty() && (field != "theme.greeting" || language.is_some());
                     if blank || text.chars().count() > max {
                         return Err(name(field, String::new(), rule));
                     }
@@ -2395,6 +2420,34 @@ mod deployment_spec_tests {
             refused(with(|s| s["theme"]["greeting"] = json!({"de": "Hallo"})).theme_fields()),
             "theme.greeting"
         );
+        assert_eq!(
+            refused(with(|s| s["theme"]["subtitle"] = json!(" ")).theme_fields()),
+            "theme.subtitle"
+        );
+        assert_eq!(
+            refused(with(|s| s["theme"]["subtitle"] = json!("x".repeat(81))).theme_fields()),
+            "theme.subtitle"
+        );
+        for font in [
+            "",
+            "Arial; color: red",
+            "url(https://evil.example/f.woff)",
+            "a{}",
+        ] {
+            assert_eq!(
+                refused(with(|s| s["theme"]["font"] = json!(font)).theme_fields()),
+                "theme.font",
+                "{font}"
+            );
+        }
+        with(|s| {
+            s["theme"]["font"] =
+                json!("\"Roboto\", \"Helvetica Neue\", Arial, system-ui, sans-serif");
+            s["theme"]["subtitle"] =
+                json!({"sk": "Ukážka · otvorené dáta BBSK a Banskej Bystrice"});
+        })
+        .theme_fields()
+        .unwrap();
     }
 
     #[test]

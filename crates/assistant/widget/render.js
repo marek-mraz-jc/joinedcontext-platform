@@ -896,12 +896,6 @@ var JCRender = (function () {
     return { question: last.text, history: history.slice(0, -1) };
   }
 
-  /** The header's monogram (T-4283): the first letters of the first two words, upper case. */
-  function monogram(title) {
-    var words = String(title || "").trim().split(/[\s\-–]+/).filter(function (word) { return /^\p{L}/u.test(word); });
-    return words.slice(0, 2).map(function (word) { return word.charAt(0).toLocaleUpperCase(); }).join("");
-  }
-
   // The count's noun per plural category; which category a number takes is Intl.PluralRules' (T-4364).
   var SOURCE_FORMS = {
     sk: { one: "zdroj", few: "zdroje", other: "zdrojov" },
@@ -922,22 +916,15 @@ var JCRender = (function () {
   }
 
   /**
-   * The footer's source badges (T-4364): one per site, at most three, each the site's first letter
-   * on a hue derived from its name. A monogram, never a favicon, so the widget asks no third party.
+   * The footer's source kinds (T-4740): "page" when the answer cites a web page or a document,
+   * "table" when it cites a dataset or live data, each once, the page first.
    */
   function badges(list) {
-    var out = [];
-    var seen = {};
+    var kinds = {};
     (list || []).forEach(function (source) {
-      var site = source.domain || source.endpoint || label(source);
-      if (!site || seen[site] || out.length >= 3) return;
-      seen[site] = true;
-      var letter = (String(site).match(/\p{L}|\p{N}/u) || ["?"])[0].toLocaleUpperCase();
-      var hash = 0;
-      for (var i = 0; i < site.length; i++) hash = (hash * 31 + site.charCodeAt(i)) % 360;
-      out.push({ site: site, letter: letter, hue: hash });
+      kinds[source.live || (source.url && DATASET.test(source.url.split(/[?#]/)[0])) ? "table" : "page"] = true;
     });
-    return out;
+    return ["page", "table"].filter(function (kind) { return kinds[kind]; });
   }
 
   /** The language this browser chose before, when the deployment still offers it; else null. */
@@ -1093,7 +1080,7 @@ var JCRender = (function () {
 
   return {
     closeTargets: closeTargets, connector: connector, dataset: dataset, view: view,
-    monogram: monogram, sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
+    sourceCount: sourceCount, badges: badges, chosen: chosen, asksLanguage: asksLanguage, ordered: ordered,
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,

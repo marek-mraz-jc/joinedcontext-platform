@@ -254,6 +254,9 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     expect(line, "the footer line is whole").toEqual({ text: "Please verify important information. · Privacy", wraps: true, cut: false });
     await expect(frame.locator(".jc-disclaimer")).toHaveCount(0);
 
+    // The header shows the chat icon beside the name, never its initials (T-4740).
+    await expect(frame.locator(".jc-avatar svg")).toHaveCount(1);
+    await expect(frame.locator(".jc-avatar")).toHaveText("");
     // The name is whole at every size, on one line or wrapped to two (T-4711), with its subtitle.
     const header = await frame.locator(".jc-title").evaluate((title) => {
       const name = title.querySelector(".jc-name");
@@ -281,10 +284,11 @@ for (const [width, height] of [[1366, 768], [768, 1024], [390, 844], [320, 640]]
     await expect(toggle.locator(".jc-count")).toHaveText("5 sources");
     await expect(toggle).toHaveAccessibleName("5 sources");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
-    // The badge letters are CSS content (T-4729 defect 6): drawn on screen, absent from the text.
-    await expect(toggle.locator(".jc-badge")).toHaveText(["", "", ""]);
-    expect(await toggle.locator(".jc-badge").evaluateAll((bs) =>
-      bs.map((b) => getComputedStyle(b, "::before").content))).toEqual(['"E"', '"S"', '"S"']);
+    // Five web pages: one page icon, no letter and no text (T-4729 defect 6, T-4740).
+    await expect(toggle.locator("svg.jc-badge")).toHaveCount(1);
+    await expect(toggle.locator(".jc-badge")).toHaveAttribute("data-kind", "page");
+    await expect(toggle.locator(".jc-badges")).toHaveText("");
+    await expect(bot.locator(".jc-by svg")).toHaveCount(1);
     const listId = await toggle.getAttribute("aria-controls");
     await expect(bot.locator(`#${listId}`)).toHaveAttribute("aria-labelledby", await toggle.getAttribute("id"));
     // The count is one line beside its badges at every width, 320 px included.

@@ -133,6 +133,10 @@
   if (/^#[0-9a-fA-F]{6}$/.test(config.color || "")) {
     document.documentElement.style.setProperty("--accent", config.color);
   }
+  // The host page's type (T-4740): family names only, as the server checked them.
+  if (/^[\p{L}\p{N} ,'"-]{1,200}$/u.test(config.font || "")) {
+    document.documentElement.style.setProperty("--font", config.font);
+  }
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -172,6 +176,8 @@
     dock: "M4 4h16v16H4zM14 4v16",
     undock: "M4 4h16v16H4zM11 11h6v6h-6z",
     chat: "M4 5h16v11H9l-5 4z",
+    page: "M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6",
+    table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",
     plug: "M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4",
     send: "M5 12h13M12 5l7 7-7 7",
     stop: "M7 7h10v10H7z",
@@ -197,22 +203,24 @@
   var head = el("header", "jc-head");
   var brand = el("div", "jc-brand");
   var named = JCRender.title(config.title, config.languages, lang) !== "";
+  // The chat icon always, never a monogram of the name (T-4740).
   var avatar = el("span", "jc-avatar");
   avatar.setAttribute("aria-hidden", "true");
-  if (!named) avatar.appendChild(icon("chat"));
+  avatar.appendChild(icon("chat"));
   var title = el("h1", "jc-title");
   var name = el("span", "jc-name");
   // The title in the chat's language, again on every language switch (T-4365).
   function retitle() {
     var text = JCRender.title(config.title, config.languages, lang);
-    avatar.textContent = JCRender.monogram(text);
     name.textContent = text;
     name.title = text;
   }
   if (named) {
     retitle();
     title.appendChild(name);
-    title.appendChild(words(el("span", "jc-role"), "assistant"));
+    title.appendChild(words(el("span", "jc-role"), function () {
+      return JCRender.title(config.subtitle, config.languages, lang) || WORDS[lang].assistant;
+    }));
   } else {
     title.appendChild(words(el("span", "jc-name"), "assistant"));
   }
@@ -709,6 +717,7 @@
     // count, which open the cards under the row.
     var tools = el("div", "jc-answer-tools");
     var by = el("span", "jc-by");
+    by.appendChild(icon("chat"));
     by.appendChild(words(el("span"), "bot"));
     var time = when(at === undefined ? Date.now() : at);
     if (time) {
@@ -730,11 +739,11 @@
     open.id = ids + "-toggle";
     var stack = el("span", "jc-badges");
     stack.setAttribute("aria-hidden", "true");
-    JCRender.badges(grouped.list).forEach(function (badge) {
-      // The letter is CSS content, so a copy or a page's text never reads "DA4 zdroje" (T-4729).
-      var b = el("span", "jc-badge");
-      b.setAttribute("data-letter", badge.letter);
-      b.style.setProperty("--badge", "hsl(" + badge.hue + " 45% 38%)");
+    // A page for web sources, a table for data, in the text's colour; no letter, no hue (T-4740).
+    JCRender.badges(grouped.list).forEach(function (kind) {
+      var b = icon(kind);
+      b.setAttribute("class", "jc-icon jc-badge");
+      b.setAttribute("data-kind", kind);
       stack.appendChild(b);
     });
     open.appendChild(stack);

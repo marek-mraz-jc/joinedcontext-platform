@@ -1179,6 +1179,13 @@
       "additionalProperties": false,
       "description": "How the chat looks where it is placed.",
       "properties": {
+        "font": {
+          "description": "A CSS `font-family` list of family names the chat's text uses, at most 200 characters; the system font when absent. No font file is loaded (T-4740).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "greeting": {
           "anyOf": [
             {
@@ -1196,6 +1203,17 @@
             "string",
             "null"
           ]
+        },
+        "subtitle": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Localised"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The line under the title, at most 80 characters; the word Assistant when absent (T-4740)."
         },
         "title": {
           "anyOf": [
