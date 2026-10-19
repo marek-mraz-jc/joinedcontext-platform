@@ -18,6 +18,12 @@
 //! a read of the space followed by the write, with the race window Architecture/11 §1.2 names:
 //! [`claims_of`] and [`unlink`] decide, the enforcement point reads and writes. Reads are not
 //! touched: the computed end is never added to an answer (DM-67, CIM 009).
+//!
+//! Pure decisions over JSON: no I/O, no policy. The gateway's write handlers call it after the
+//! PDP admitted the write and re-export it as `context_gateway::relationships` (T-4771).
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use jc_core::type_of_id;
 use std::collections::{BTreeMap, BTreeSet};

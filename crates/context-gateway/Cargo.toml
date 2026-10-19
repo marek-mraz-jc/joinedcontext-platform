@@ -9,10 +9,10 @@ repository.workspace = true
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["auth", "axum", "logs"] }
 jc-dcat = { path = "../jc-dcat", version = "0.1.0", features = ["dcat-ap-sk", "dcat-ap-cz"] }
 jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
+jc-relationships = { path = "../jc-relationships", version = "0.1.0" }
 arc-swap = "1"
 # base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
-argon2 = "0.5"
 axum = { version = "0.8", features = ["ws"] }
 # The Endpoint's WebSocket (EP-106) is relayed to the broker view's own: the client half of the
 # tungstenite axum's `ws` already links, and the stream split of the futures it already uses.

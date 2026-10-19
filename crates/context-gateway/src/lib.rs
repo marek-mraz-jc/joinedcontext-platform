@@ -31,7 +31,8 @@ pub mod previews;
 pub mod proxy;
 pub mod quality;
 pub mod query;
-pub mod relationships;
+/// The relationship rules of a space's model, in their own crate since T-4771.
+pub use jc_relationships as relationships;
 pub mod resolver;
 pub mod store;
 pub mod telemetry;
