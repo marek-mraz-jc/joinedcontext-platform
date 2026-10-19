@@ -503,3 +503,32 @@ async fn the_endpoints_byte_ceiling_refuses_the_file() {
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+/// T-3141: a typed literal (`{"@type": "DateTime", "@value": …}`, NGSI-LD 4.6.3) is one cell,
+/// its `@value`. Skipping every `@` member dropped the whole attribute: the Žilina KPIs'
+/// `updatedAt` was missing from `file.csv`, so the CKAN DataStore held it empty and the
+/// table's freshness fell back to the statistic's period.
+#[test]
+fn a_typed_literal_is_its_value() {
+    let kpi = json!({
+        "id": "urn:ngsi-ld:KeyPerformanceIndicator:zilina.sk:zilina-kpi:index-starnutia-mesto",
+        "type": "KeyPerformanceIndicator",
+        "updatedAt": { "type": "Property",
+                       "value": { "@type": "DateTime", "@value": "2026-10-19T05:37:50Z" } },
+        "calculationPeriod": { "type": "Property",
+                               "value": { "start": "2025-01-01T00:00:00Z", "end": "2025-12-31T23:59:59Z" } }
+    });
+    let cells = flatten(&kpi);
+    assert!(
+        cells.contains(&("updatedAt.value".to_owned(), json!("2026-10-19T05:37:50Z"))),
+        "{cells:?}"
+    );
+    assert!(
+        cells.iter().all(|(name, _)| !name.contains('@')),
+        "no JSON-LD keyword becomes a column: {cells:?}"
+    );
+    assert!(cells.contains(&(
+        "calculationPeriod.value.start".to_owned(),
+        json!("2025-01-01T00:00:00Z")
+    )));
+}

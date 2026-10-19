@@ -163,6 +163,11 @@ pub fn flatten(entity: &Value) -> Vec<(String, Value)> {
 /// Appends every leaf under `value` to `cells`, named by the path that reaches it.
 fn walk(path: &str, value: &Value, cells: &mut Vec<(String, Value)>) {
     match value {
+        // A typed literal (`{"@type": "DateTime", "@value": …}`) is its value: skipping its
+        // `@` members left the attribute with no cell at all (T-3141).
+        Value::Object(members) if members.contains_key("@value") => {
+            walk(path, &members["@value"], cells)
+        }
         Value::Object(members) if !members.is_empty() => {
             let structural = is_attribute(members);
             for (name, member) in members {
