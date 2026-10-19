@@ -441,6 +441,9 @@ var JCRender = (function () {
     now = typeof now === "number" ? now : Date.now();
     var numbers = new Intl.NumberFormat(lang, { maximumFractionDigits: 3 });
     var units = Array.isArray(data.units) ? data.units : [];
+    // A measured value to one decimal (11,5 µg/m³, never 11,506), a plain number to two (T-4711).
+    var measured = new Intl.NumberFormat(lang, { maximumFractionDigits: 1 });
+    var plainNumber = new Intl.NumberFormat(lang, { maximumFractionDigits: 2 });
     var modelled = Array.isArray(data.labels) ? data.labels : [];
     var enums = Array.isArray(data.enums) ? data.enums : [];
     var raw = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, ROWS);
@@ -458,7 +461,8 @@ var JCRender = (function () {
       if (column === "id" && urn(v)) return String(v).split(":").pop();
       if (typeof v === "number") {
         if (!isFinite(v)) return "";
-        return plain(column) && Number.isInteger(v) ? String(v) : numbers.format(v);
+        if (plain(column) && Number.isInteger(v)) return String(v);
+        return (typeof units[i] === "string" && units[i] ? measured : plainNumber).format(v);
       }
       if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
       if (typeof v === "object") return JSON.stringify(v);

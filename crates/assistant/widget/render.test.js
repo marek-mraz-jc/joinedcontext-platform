@@ -84,15 +84,15 @@ test("citation markers become citations, an unknown number is dropped", () => {
 
 test("the owner's sources: one per address, titled, and live data never by its tool", () => {
   const { list, position } = sources([
-    { n: 1, url: "https://data.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events" },
-    { n: 2, url: "https://data.dev.joinedcontext.com/dataset/helsinki-events" },
-    { n: 3, tool: "query_entities", endpoint: "helsinki-events", url: "https://data.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events" },
+    { n: 1, url: "https://opendata.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events" },
+    { n: 2, url: "https://opendata.dev.joinedcontext.com/dataset/helsinki-events" },
+    { n: 3, tool: "query_entities", endpoint: "helsinki-events", url: "https://opendata.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events" },
     { n: 4, tool: "query_entities", endpoint: "helsinki-events" },
     { n: 5, url: "javascript:alert(1)" },
   ]);
   assert.deepEqual(list, [
-    { url: "https://data.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events", live: false,
-      endpoint: null, domain: "data.dev.joinedcontext.com", numbers: [1, 2, 3], cards: [] },
+    { url: "https://opendata.dev.joinedcontext.com/dataset/helsinki-events", title: "Helsinki events", live: false,
+      endpoint: null, domain: "opendata.dev.joinedcontext.com", numbers: [1, 2, 3], cards: [] },
     { url: null, title: null, live: true, endpoint: "helsinki-events", domain: "", numbers: [4], cards: [] },
   ]);
   assert.deepEqual(position, { 1: 1, 2: 1, 3: 1, 4: 2 });
@@ -183,7 +183,7 @@ test("a data table shows at most 20 rows of text and only http(s) links", () => 
     type: "AirQualityObserved",
     columns: ["name", "pm10", "observedAt"],
     rows: [["Námestie SNP", { value: 21 }], ...rows, "not a row"],
-    dataset: "https://data.dev.joinedcontext.com/dataset/ovzdusie",
+    dataset: "https://opendata.dev.joinedcontext.com/dataset/ovzdusie",
     download: "javascript:alert(1)",
     geojson: "data:application/geo+json,{}",
   }, "en");
@@ -191,7 +191,7 @@ test("a data table shows at most 20 rows of text and only http(s) links", () => 
   assert.deepEqual(shown.rows[0], ["Námestie SNP", '{"value":21}', ""]);
   assert.deepEqual(shown.rows[1], ["Stanica 0", "0", ""]);
   assert.equal(shown.caption, "Air quality (20)");
-  assert.equal(shown.dataset, "https://data.dev.joinedcontext.com/dataset/ovzdusie");
+  assert.equal(shown.dataset, "https://opendata.dev.joinedcontext.com/dataset/ovzdusie");
   assert.equal(shown.download, null);
   assert.equal(shown.geojson, null);
   const area = "https://api.dev.joinedcontext.com/api/endpoint/s/ogc/features/collections/AdministrativeArea/items/urn%3Angsi-ld%3AAdministrativeArea%3Ab";
@@ -231,7 +231,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
   assert.equal(sk.rows[0][1], "21,5");
   assert.equal(sk.rows[0][2], "12");
-  assert.equal(sk.rows[1][1], "9,123");
+  assert.equal(sk.rows[1][1], "9,1", "a measured value to one decimal (T-4711)");
   assert.equal(sk.rows[1][2], "");
   assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
   assert.match(sk.rows[0][5], /^pred 5 min/);
@@ -239,7 +239,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   const en = table(data, "en", now);
   assert.equal(en.caption, "Air quality — first 2 of 12");
   assert.equal(en.columns[5], "Measured");
-  assert.equal(en.rows[1][1], "9.123");
+  assert.equal(en.rows[1][1], "9.1");
   assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
   assert.match(en.rows[0][5], /^5 min\. ago$/);
   // A key the table does not know is spelt out; a language it does not know reads English.
@@ -258,7 +258,7 @@ test("only an http(s) address is a link", () => {
 });
 
 // T-4149: a link is rendered only to an allowlisted host; anything else is its words alone.
-const city = (url) => linkHost(url, ["banskabystrica.sk", "data.dev.joinedcontext.com", "data.gov.sk"]);
+const city = (url) => linkHost(url, ["banskabystrica.sk", "opendata.dev.joinedcontext.com", "data.gov.sk"]);
 
 test("a link off the allowlist is its words alone, never a link", () => {
   assert.deepEqual(
@@ -685,7 +685,7 @@ test("a grid reads by meaning: no URN column, years and codes ungrouped, enums i
   assert.equal(sk.rows[0][1], "1\u00a0651,5".replace("\u00a0", new Intl.NumberFormat("sk").format(1000).charAt(1)));
   assert.equal(sk.rows[0][2], "1953");
   assert.equal(sk.rows[0][3], "12345");
-  assert.equal(sk.rows[1][1], "9,46");
+  assert.equal(sk.rows[1][1], "9,5", "a length in metres to one decimal (T-4711)");
   // An enum reads its words; one the model does not describe stays as written.
   assert.equal(sk.rows[0][4], "nie je chránená");
   assert.equal(table(data, "en").rows[0][4], "not protected");
@@ -814,7 +814,7 @@ test("a chart or a map reaches only the viz origin, in the visitor's language, m
 });
 
 test("the close message goes to the framing page's origin alone, never to any (T-4654)", () => {
-  const framers = ["https://www.banskabystrica.sk", "https://data.dev.joinedcontext.com"];
+  const framers = ["https://www.banskabystrica.sk", "https://opendata.dev.joinedcontext.com"];
   assert.deepEqual(closeTargets(["https://www.banskabystrica.sk"], framers), ["https://www.banskabystrica.sk"]);
   // Without the browser's record (Firefox), each origin that may frame it; the others drop it.
   assert.deepEqual(closeTargets(undefined, framers), framers);
@@ -932,4 +932,16 @@ test("a turn that opened a dataset keeps it, a forged one is dropped (T-4685)", 
     { ...turn, turn: 2, opened: { url: "javascript:alert(1)", title: "x" } }] }));
   assert.deepEqual(kept.turns[0].opened, { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" });
   assert.equal(kept.turns[1].opened, undefined);
+});
+
+test("a measured value shows one decimal and a plain number two, in the visitor's locale (T-4711)", () => {
+  const data = {
+    type: "AirQualityObserved",
+    columns: ["name", "pm10", "ratio", "count"],
+    units: [null, "µg/m³", null, null],
+    rows: [["Žilina, Obežná", 11.506, 0.12345, 42]],
+  };
+  const sk = table(data, "sk");
+  assert.deepEqual(sk.rows[0], ["Žilina, Obežná", "11,5", "0,12", "42"]);
+  assert.deepEqual(table(data, "en").rows[0].slice(1), ["11.5", "0.12", "42"]);
 });
