@@ -54,6 +54,7 @@ fn unrestricted_endpoint() -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![serde_norway::from_str(
             r#"contextSpaceRef: ovzdusie
 assigner: did:web:banskabystrica.sk

@@ -22,6 +22,7 @@ pub mod routed;
 pub(crate) mod scope;
 pub mod script;
 pub mod shape;
+pub mod standard;
 pub mod trace;
 pub mod transcript;
 pub mod usage;

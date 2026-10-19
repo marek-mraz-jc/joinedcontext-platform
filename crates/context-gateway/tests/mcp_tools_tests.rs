@@ -77,6 +77,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![public_grant()],
     }
 }

@@ -43,6 +43,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: Vec::new(),
     }
 }
@@ -316,6 +317,7 @@ information:
             rate_limit: None,
             creates: None,
             policy_names: Vec::new(),
+            manifest_name: String::new(),
             policies: vec![policy],
             ..endpoint(None)
         }),

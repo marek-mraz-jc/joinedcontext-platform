@@ -855,42 +855,61 @@ impl Hub {
 
     /// One Endpoint of the caller's list, whole: today's `list_endpoints` record with its
     /// surface, DCAT, schema and MCP URLs (T-4492).
+    /// One Endpoint, short (T-4748): what it is, its types and every link, about 2 KB. Its
+    /// attributes come with `detail: "attributes"` and one `type`, so an agent asks for the type
+    /// it reads and never gets every attribute of every type (22 KB for bbsk-otvorene-data).
     fn get_endpoint(&self, id: Value, arguments: &Map<String, Value>) -> Value {
-        if let Some(unknown) = arguments.keys().find(|key| *key != "endpoint") {
-            return result(
-                id,
-                refused(
-                    &format!("`{unknown}` is not an argument of get_endpoint"),
-                    &Value::Null,
-                ),
-            );
+        let refuse = |why: &str| result(id.clone(), refused(why, &Value::Null));
+        if let Some(unknown) = arguments
+            .keys()
+            .find(|key| !matches!(key.as_str(), "endpoint" | "detail" | "type"))
+        {
+            return refuse(&format!("`{unknown}` is not an argument of get_endpoint"));
         }
         let Some(named) = arguments.get("endpoint").and_then(Value::as_str) else {
-            return result(
-                id,
-                refused(
-                    "`endpoint` names one Endpoint: its slug, title or space",
-                    &Value::Null,
-                ),
+            return refuse(
+                "`endpoint` names one Endpoint: its slug, {project}/{name}, title or space",
             );
         };
-        match resolve(&self.reach, named) {
-            Ok((endpoint, subject)) => {
-                let mut entry = described(&self.gateway, endpoint, subject);
-                entry["broker"] = json!(self.gateway.broker.broker_of_view(&endpoint.slug));
-                result(id, answered(&entry, "endpoint"))
+        let detail = match arguments.get("detail") {
+            None => None,
+            Some(Value::String(detail)) if detail == "attributes" => Some(detail),
+            Some(_) => return refuse("`detail` is \"attributes\", with one `type`"),
+        };
+        let wanted = arguments.get("type").map(Value::as_str);
+        let (endpoint, subject) = match resolve(&self.reach, named) {
+            Ok(found) => found,
+            Err(near) => {
+                return refuse(&format!(
+                    "no Endpoint you may read is called `{named}`; closest: {}",
+                    near.join(", ")
+                ))
             }
-            Err(near) => result(
-                id,
-                refused(
-                    &format!(
-                        "no Endpoint you may read is called `{named}`; closest: {}",
-                        near.join(", ")
-                    ),
-                    &Value::Null,
-                ),
-            ),
+        };
+        let mut entry = described(&self.gateway, endpoint, subject);
+        entry["broker"] = json!(self.gateway.broker.broker_of_view(&endpoint.slug));
+        let attributes = entry
+            .as_object_mut()
+            .and_then(|e| e.remove("attributes"))
+            .unwrap_or_default();
+        match (detail, wanted) {
+            (None, None) => {}
+            (Some(_), Some(Some(kind))) => match attributes.get(kind) {
+                Some(names) => entry["attributes"] = json!({ kind: names }),
+                None => {
+                    return refuse(&format!(
+                        "`{kind}` is no type of this Endpoint you may read; its types: {}",
+                        entry["types"]
+                    ))
+                }
+            },
+            _ => {
+                return refuse(
+                    "`detail: \"attributes\"` comes with one `type`, a type of this Endpoint",
+                )
+            }
         }
+        result(id, answered(&entry, "endpoint"))
     }
 }
 
@@ -977,8 +996,8 @@ fn lines(rows: &[Value], page: &Value) -> String {
 }
 
 /// The Endpoint of the caller's list that `named` names (T-4491): its slug; else, compared
-/// without case, its title in any language or its context space, when exactly one Endpoint has
-/// it. Only `reach` is searched, so a name never finds an Endpoint the caller may not read
+/// without case, its `{project}/{name}` (T-4748), or its title in any language or its context
+/// space when exactly one Endpoint has it. Only `reach` is searched, so a name never finds an Endpoint the caller may not read
 /// (SP-20). On a miss or a name several Endpoints share: up to three `slug (title)` lines,
 /// the ones sharing it, else the closest by name.
 fn resolve<'a>(
@@ -989,6 +1008,16 @@ fn resolve<'a>(
         return Ok((endpoint, subject));
     }
     let wanted = named.trim().to_lowercase();
+    // The readable `{project}/{name}`, as a Portal or an assistant names it (T-4748).
+    if let Some((project, name)) = wanted.split_once('/') {
+        if let Some((endpoint, subject)) = reach.iter().find(|(e, _)| {
+            !e.manifest_name.is_empty()
+                && e.project.to_lowercase() == project
+                && e.manifest_name.to_lowercase() == name
+        }) {
+            return Ok((endpoint, subject));
+        }
+    }
     let names = |endpoint: &Endpoint| -> Vec<String> {
         endpoint
             .title
@@ -1104,13 +1133,28 @@ fn described(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value
     {
         entry["period"] = json!(period);
     }
-    // The recommended formalism of the newest major, the one describe_schema recommends.
+    // The recommended formalism of the newest major, the one describe_schema recommends, and
+    // the other formalisms beside it (T-4748).
     if let Some(major) = newest {
-        entry["schema"] = json!(format!(
-            "{base}{}/schema/v{major}/{}",
-            endpoint.base_path,
-            crate::middleware::response::Artifact::LinkMl.file_name()
-        ));
+        use crate::middleware::response::Artifact;
+        let at = |artifact: Artifact| {
+            format!(
+                "{base}{}/schema/v{major}/{}",
+                endpoint.base_path,
+                artifact.file_name()
+            )
+        };
+        entry["schema"] = json!(at(Artifact::LinkMl));
+        entry["schemas"] = json!({
+            "index": format!("{base}{}/schema/index.json", endpoint.base_path),
+            "linkml": at(Artifact::LinkMl),
+            "shacl": at(Artifact::Shacl),
+            "jsonSchema": at(Artifact::JsonSchema),
+            "context": at(Artifact::Context),
+        });
+    }
+    if let Some(publisher) = endpoint.catalog.as_ref().and_then(|c| c.publisher.as_ref()) {
+        entry["publisher"] = json!(publisher.name);
     }
     entry
 }
@@ -1200,13 +1244,15 @@ pub(crate) fn list_endpoints_tool() -> Value {
 pub(crate) fn get_endpoint_tool() -> Value {
     json!({
         "name": "get_endpoint",
-        "description": "One Endpoint of list_endpoints, whole: per type the attributes you may \
-                        read, whether history reads answer, each surface's URL, its DCAT record, \
-                        its data model and its MCP URL.",
+        "description": "One Endpoint, short: title, publisher, types, history, and its links \
+                        (surfaces, DCAT, MCP, LinkML, SHACL, JSON Schema, context). With detail \
+                        attributes and a type: that type's attributes.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "endpoint": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Its slug, title or space" },
+                "endpoint": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Its slug, {project}/{name}, title or space" },
+                "detail": { "enum": ["attributes"] },
+                "type": { "type": "string", "maxLength": 256 },
             },
             "required": ["endpoint"],
             "additionalProperties": false,

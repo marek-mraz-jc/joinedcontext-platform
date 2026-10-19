@@ -68,6 +68,7 @@ fn endpoint(slug: &str, project: &str, space: &str, audience: Audience) -> Endpo
         view_mapping: None,
         catalog: Some(Arc::new(complete(project))),
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }

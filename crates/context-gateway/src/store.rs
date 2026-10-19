@@ -689,6 +689,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
                 None => EndpointRoles::of(&project, &id.name, &spec),
             },
             slug: spec.slug.to_string(),
+            manifest_name: id.name.clone(),
             title: language_map(&resource.manifest.metadata.rest, "title"),
             description: language_map(&resource.manifest.metadata.rest, "description"),
             policies: bound,
@@ -871,6 +872,7 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
             endpoint: Arc::new(Endpoint {
                 roles: Default::default(),
                 slug: segment.clone(),
+                manifest_name: String::new(),
                 // The canonical surface is the space itself, so its record reads the
                 // space's own title and description below.
                 title: BTreeMap::new(),
