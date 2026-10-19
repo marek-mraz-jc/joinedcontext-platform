@@ -967,4 +967,7 @@ test("a measured value shows one decimal and a plain number two, in the visitor'
   const sk = table(data, "sk");
   assert.deepEqual(sk.rows[0], ["Žilina, Obežná", "11,5", "0,12", "42"]);
   assert.deepEqual(table(data, "en").rows[0].slice(1), ["11.5", "0.12", "42"]);
+  // A small reading keeps two significant digits and never reads as zero.
+  const co = table({ columns: ["name", "co"], units: [null, "mg/m³"], rows: [["A", 0.0423], ["B", 0], ["C", -0.5]] }, "sk");
+  assert.deepEqual(co.rows.map((r) => r[1]), ["0,042", "0", "-0,5"]);
 });
