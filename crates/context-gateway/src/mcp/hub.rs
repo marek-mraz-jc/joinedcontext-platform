@@ -650,7 +650,7 @@ impl Hub {
             return Answer::Json(self.get_endpoint(id, &arguments));
         }
         if name == "search" {
-            return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments));
+            return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments).await);
         }
         if name == super::documents::NAME {
             if let Some(documents) = &self.gateway.documents {
@@ -683,13 +683,9 @@ impl Hub {
         }
         // The caller's own catalogue, built from `reach` alone (T-4503).
         if catalog::names_catalog(&slug) {
-            return Answer::Json(catalog::call(
-                &self.gateway,
-                &self.reach,
-                id,
-                name,
-                &arguments,
-            ));
+            return Answer::Json(
+                catalog::call(&self.gateway, &self.reach, id, name, &arguments).await,
+            );
         }
 
         // An Endpoint outside the caller's list and one that does not exist are the same answer,

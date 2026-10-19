@@ -1,6 +1,7 @@
-//! `endpoint: catalog` on the hub: each caller's own catalogue of Datasets (context spaces) and
+//! `endpoint: catalog` on the hub: each caller's own catalogue of Datasets, Organizations and
 //! DataServices (Endpoints), built from what the request reaches by the function the Portal
-//! writes the public catalogue with (T-4503, T-4500, ADR-N-025).
+//! writes the public catalogue with, beside the CKAN-named Datasets the Portal wrote (T-4503,
+//! T-4500, T-4746, ADR-N-025, EP-140).
 
 mod common;
 
@@ -16,7 +17,7 @@ use context_gateway::resolver::{DeclaredTypes, Endpoint, Model};
 use jc_core::kinds::{
     Audience, Catalog, PolicySpec, Publisher, QualityRule, RateLimits, Representation,
 };
-use jc_core::ngsi_catalog::{self, Place};
+use jc_core::ngsi_catalog::{self, Ckan, Package, Place};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -252,7 +253,8 @@ async fn the_anonymous_catalog_is_the_public_catalog_entity_for_entity() {
         (AIR.to_owned(), Place::public("mesto-ovzdusie", Some(BBOX))),
         (BIKES.to_owned(), Place::public("mesto-doprava", None)),
     ]);
-    let public = ngsi_catalog::entities(feed["@included"].as_array().expect("nodes"), &places);
+    let public =
+        ngsi_catalog::entities(feed["@included"].as_array().expect("nodes"), &places, None);
     assert_eq!(hub, public);
     assert_eq!(
         hub.len(),
@@ -263,6 +265,187 @@ async fn the_anonymous_catalog_is_the_public_catalog_entity_for_entity() {
     assert!(!serde_json::to_string(&hub)
         .expect("json")
         .contains("Internal"));
+}
+
+/// A dataset of CKAN's `package_search` over the Endpoint `slug`, by `org`; `kind` narrows it to
+/// the rows of one type, as a harvested dataset over a shared Endpoint is.
+fn package(name: &str, slug: &str, org: &str, kind: Option<&str>) -> Package {
+    let read = match kind {
+        Some(kind) => {
+            format!("https://city.example/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}")
+        }
+        None => format!("https://city.example/api/endpoint/{slug}/ngsi-ld/v1/"),
+    };
+    let extras = match kind {
+        Some(_) => json!([]),
+        None => json!([{ "key": "identifier", "value": slug }]),
+    };
+    Package::from_ckan(&json!({
+        "name": name, "title": format!("{name} title"), "notes": "", "private": false,
+        "state": "active", "organization": { "name": org, "title": format!("{org} title") },
+        "tags": [], "extras": extras, "resources": [{ "url": read }],
+    }))
+    .expect("a public dataset")
+}
+
+/// T-4746: the hub takes the CKAN-named Datasets and Organizations the Portal wrote into the
+/// installation's `catalog` Endpoint, read once a minute: the anonymous caller's catalogue is
+/// the public one entity for entity, and one query lists an organization's datasets.
+#[tokio::test]
+async fn the_hub_lists_the_portals_ckan_datasets_and_organizations_with_one_read() {
+    const CATALOG: &str = "kkkkkkkkkkkkkkkkkkkkkkkkkk";
+    let realm = common::Realm::new();
+    let mut endpoints = city();
+    endpoints.push(endpoint(
+        CATALOG,
+        "Open data catalogue",
+        "catalog",
+        Audience::Public,
+        "public",
+    ));
+    let request = Request::builder()
+        .uri("/catalog.jsonld")
+        .body(Body::empty())
+        .expect("a request");
+    let (status, feed) = send(app(&realm, endpoints.clone()), request).await;
+    assert_eq!(status, StatusCode::OK);
+    let places = BTreeMap::from([
+        (AIR.to_owned(), Place::public("mesto-ovzdusie", Some(BBOX))),
+        (BIKES.to_owned(), Place::public("mesto-doprava", None)),
+    ]);
+    let packages = [
+        package("mesto-ovzdusie", AIR, "banskabystrica", None),
+        package(
+            "bbsk-stojany",
+            BIKES,
+            "bbsk",
+            Some("BikeHireDockingStation"),
+        ),
+        package("bbsk-trasy", BIKES, "bbsk", Some("Route")),
+    ];
+    let public = ngsi_catalog::entities(
+        feed["@included"].as_array().expect("nodes"),
+        &places,
+        Some(Ckan {
+            site: "https://opendata.city.example",
+            packages: &packages,
+        }),
+    );
+    // What the broker's `catalog` view holds: the Portal's Datasets and Organizations.
+    let written: Vec<Value> = public
+        .values()
+        .filter(|entity| entity["type"] == "Dataset" || entity["type"] == "Organization")
+        .cloned()
+        .collect();
+    let broker = common::BrokerStub::start(vec![Value::Array(written)]).await;
+    let app = app_on(&broker.url, &realm, endpoints);
+
+    let answer = call(
+        app.clone(),
+        None,
+        "query_entities",
+        json!({ "endpoint": "catalog", "limit": 1000 }),
+    )
+    .await;
+    let hub: BTreeMap<String, Value> = entities(&answer)
+        .into_iter()
+        .map(|e| (e["id"].as_str().unwrap_or_default().to_owned(), e))
+        .collect();
+    assert_eq!(hub, public);
+    assert!(
+        !hub.contains_key(&format!("urn:ngsi-ld:Dataset:{AIR}")),
+        "CKAN names it"
+    );
+
+    let organizations = call(
+        app.clone(),
+        None,
+        "query_entities",
+        json!({ "endpoint": "catalog", "type": "Organization", "format": "keyValues" }),
+    )
+    .await;
+    let counts: BTreeMap<String, Value> = entities(&organizations)
+        .into_iter()
+        .map(|e| {
+            (
+                e["identifier"].as_str().unwrap_or_default().to_owned(),
+                e["datasetCount"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            ("banskabystrica".to_owned(), json!(1)),
+            ("bbsk".to_owned(), json!(2)),
+        ]),
+        "{organizations}"
+    );
+    let of_bbsk = call(
+        app.clone(),
+        None,
+        "query_entities",
+        json!({
+            "endpoint": "catalog", "type": "Dataset",
+            "q": "refPublisher==\"urn:ngsi-ld:Organization:bbsk\"",
+        }),
+    )
+    .await;
+    assert_eq!(
+        ids(&of_bbsk),
+        [
+            "urn:ngsi-ld:Dataset:bbsk-stojany",
+            "urn:ngsi-ld:Dataset:bbsk-trasy"
+        ],
+        "{of_bbsk}"
+    );
+    // A DataService that lists its Datasets in a ListRelationship is still found by its type.
+    let services = call(
+        app.clone(),
+        None,
+        "query_entities",
+        json!({ "endpoint": "catalog", "type": "DataService", "count": true }),
+    )
+    .await;
+    assert_eq!(ids(&services).len(), 2, "{services}");
+    let types = call(
+        app.clone(),
+        None,
+        "list_types",
+        json!({ "endpoint": "catalog" }),
+    )
+    .await;
+    assert_eq!(
+        types["result"]["structuredContent"]["entityTypes"],
+        json!(["DataService", "Dataset", "Organization"])
+    );
+    let reads = broker
+        .hops()
+        .iter()
+        .filter(|hop| hop.path == "/mcp")
+        .count();
+    assert_eq!(
+        reads, 1,
+        "five calls inside a minute read the public catalogue once"
+    );
+
+    // A steward also reaches the organization's Endpoint, which no CKAN dataset can name: its
+    // own Dataset beside the public ones, counted for no organization.
+    let steward = steward(&realm);
+    let signed_in = call(
+        app,
+        Some(&steward),
+        "query_entities",
+        json!({ "endpoint": "catalog", "limit": 1000 }),
+    )
+    .await;
+    let mut listed = ids(&signed_in);
+    listed.sort();
+    let mut expected: Vec<String> = public.keys().cloned().collect();
+    expected.push(format!("urn:ngsi-ld:DataService:{INNER}"));
+    expected.push(format!("urn:ngsi-ld:Dataset:{INNER}"));
+    expected.sort();
+    assert_eq!(listed, expected);
 }
 
 #[tokio::test]
@@ -291,7 +474,8 @@ async fn an_organization_member_sees_its_endpoints_and_why() {
 async fn text_place_and_type_find_the_air_dataset() {
     let realm = common::Realm::new();
     let app = app(&realm, city());
-    let dataset = vec!["urn:ngsi-ld:Dataset:mesto-ovzdusie".to_owned()];
+    // No CKAN dataset names the Endpoint here, so it is a dataset of its own (EP-140).
+    let dataset = vec![format!("urn:ngsi-ld:Dataset:{AIR}")];
     let by_text = call(
         app.clone(),
         None,
@@ -334,7 +518,7 @@ async fn text_place_and_type_find_the_air_dataset() {
     )
     .await;
     assert_eq!(
-        one["result"]["structuredContent"]["entity"]["servesDataset"]["object"],
+        one["result"]["structuredContent"]["entity"]["refDataset"]["objectList"][0]["object"],
         dataset[0]
     );
 }
@@ -445,7 +629,7 @@ async fn a_named_server_lists_only_its_members_whatever_else_the_token_reads() {
         listed,
         [
             format!("urn:ngsi-ld:DataService:{AIR}"),
-            "urn:ngsi-ld:Dataset:mesto-ovzdusie".to_owned(),
+            format!("urn:ngsi-ld:Dataset:{AIR}"),
         ]
     );
     assert_eq!(
@@ -750,8 +934,9 @@ async fn two_calls_find_the_air_dataset_and_read_it_without_a_token() {
     .await;
     let datasets = entities(&found);
     assert_eq!(datasets.len(), 1, "{found}");
-    let endpoint = datasets[0]["dataService"][0]["identifier"]
+    let endpoint = datasets[0]["refDataService"]
         .as_str()
+        .and_then(|service| service.strip_prefix("urn:ngsi-ld:DataService:"))
         .expect("the Dataset names its Endpoint")
         .to_owned();
     assert_eq!(endpoint, AIR);
@@ -942,10 +1127,7 @@ async fn search_ranks_the_dataset_a_question_names_first() {
         let answer = call(app.clone(), None, "search", json!({ "query": question })).await;
         let hit = top(&answer);
         assert_eq!(hit["endpoint"], json!(AIR), "{question}: {answer}");
-        assert_eq!(
-            hit["dataset"],
-            json!("urn:ngsi-ld:Dataset:banskabystrica-ovzdusie")
-        );
+        assert_eq!(hit["dataset"], json!(format!("urn:ngsi-ld:Dataset:{AIR}")));
         assert_eq!(
             hit["nextQuery"]["arguments"]["type"],
             json!(["AirQualityObserved"])
