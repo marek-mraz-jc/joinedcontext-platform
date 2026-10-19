@@ -333,14 +333,8 @@ pub async fn answer(
             .iter()
             .map(|(id, name, arguments)| json!({"id": id, "type": "function", "function": {"name": name, "arguments": arguments}}))
             .collect();
-        let mut turn =
-            json!({"role": "assistant", "content": completion.text, "tool_calls": calls});
-        // The model's reasoning goes back with its turn, as OpenRouter asks of a tool loop: Gemini
-        // otherwise loses it between steps, or refuses the next call (T-4731).
-        if let Some(details) = &completion.details {
-            turn["reasoning_details"] = details.clone();
-        }
-        messages.push(turn);
+        messages
+            .push(json!({"role": "assistant", "content": completion.text, "tool_calls": calls}));
         for (at, (id, name, arguments)) in completion.calls.iter().enumerate() {
             // Every call is answered, so the history stays whole; what is refused is never sent.
             let content = if at >= MAX_CALLS_PER_REPLY

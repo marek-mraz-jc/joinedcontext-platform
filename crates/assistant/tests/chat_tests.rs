@@ -3634,9 +3634,7 @@ async fn a_data_question_reads_again_until_the_model_answers() {
     ], vec![
         completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
     ], vec![
-        completion(json!({"role": "assistant", "content": null, "reasoning_details": [
-            {"type": "reasoning.encrypted", "data": "c2lnbmF0dXJl", "id": "c1", "format": "google-gemini-v1", "index": 0}
-        ], "tool_calls": [
+        completion(json!({"role": "assistant", "content": null, "tool_calls": [
             {"id": "c1", "type": "function", "function": {"name": "ovzdusie__query_entities", "arguments": "{\"type\":[\"AirQualityObserved\"],\"limit\":5}"}},
             {"id": "c2", "type": "function", "function": {"name": "ovzdusie__delete_entity", "arguments": "{}"}}
         ]}), 1_000),
@@ -3688,12 +3686,6 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         ["ovzdusie__query_entities", "more_tools"]
     );
     let last = calls[1]["messages"].as_array().cloned().unwrap_or_default();
-    // T-4731: the step's reasoning goes back with its turn, signature and all.
-    let turn = last
-        .iter()
-        .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
-        .expect("the step's turn");
-    assert_eq!(turn["reasoning_details"][0]["data"], "c2lnbmF0dXJl");
     let tools: Vec<&Value> = last.iter().filter(|m| m["role"] == "tool").collect();
     assert_eq!(tools.len(), 2);
     let read: Value = serde_json::from_str(tools[0]["content"].as_str().unwrap_or_default())

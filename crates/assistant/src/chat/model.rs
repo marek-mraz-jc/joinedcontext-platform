@@ -39,10 +39,6 @@ pub struct Completion {
     /// The model's reasoning text as the provider returned it (`reasoning`, else the texts of
     /// `reasoning_details`), at most [`THOUGHT_BYTES`]; `None` when it returned none (T-4681).
     pub thought: Option<String>,
-    /// The message's `reasoning_details` as the provider returned them, at most
-    /// [`DETAILS_BYTES`]: what the next call of a tool loop sends back on this assistant turn, so
-    /// the model keeps its reasoning (and Gemini its thought signatures) between steps (T-4731).
-    pub details: Option<Value>,
     /// The call's reasoning effort as sent (`low`, `none`, …) and the first 12 hex digits of the
     /// SHA-256 of its system message, which names the prompt's version (T-4681).
     pub effort: Option<String>,
@@ -51,17 +47,6 @@ pub struct Completion {
 
 /// The most bytes of a call's reasoning text kept (T-4681).
 pub const THOUGHT_BYTES: usize = 64 * 1024;
-
-/// The most bytes of a message's `reasoning_details` sent back on its turn (T-4731).
-pub const DETAILS_BYTES: usize = 256 * 1024;
-
-/// A message's `reasoning_details`: a non-empty array of at most [`DETAILS_BYTES`], else none.
-fn details_of(message: &Value) -> Option<Value> {
-    let details = message.get("reasoning_details")?;
-    let kept = details.as_array().is_some_and(|d| !d.is_empty())
-        && details.to_string().len() <= DETAILS_BYTES;
-    kept.then(|| details.clone())
-}
 
 impl Completion {
     /// This completion with the effort and the prompt version of the request `body` it answers.
@@ -606,8 +591,6 @@ impl StreamReader {
             finish: self.finish,
             cached: self.cached,
             thought: (!self.thought.is_empty()).then_some(self.thought),
-            // A streamed call is an answer, never a step a later call continues.
-            details: None,
             effort: None,
             prompt: None,
         })
@@ -661,7 +644,6 @@ pub fn parse(body: &Value) -> Option<Completion> {
             append_thought(&mut kept, &t);
             kept
         }),
-        details: details_of(message),
         effort: None,
         prompt: None,
     })
@@ -827,26 +809,6 @@ mod tests {
             "both waited {:?}",
             started.elapsed()
         );
-    }
-
-    /// T-4731: a step's `reasoning_details` are kept whole to be sent back, an oversized or empty
-    /// list is not, and a message without them has none.
-    #[test]
-    fn a_step_keeps_its_reasoning_details_to_send_back() {
-        let details = json!([{"type": "reasoning.encrypted", "data": "c2ln", "id": "t1", "format": "google-gemini-v1", "index": 0}]);
-        let step = |details: Value| {
-            parse(&json!({"choices": [{"message": {"role": "assistant", "content": null, "reasoning_details": details,
-                "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}]}}]}))
-            .expect("a completion")
-        };
-        assert_eq!(step(details.clone()).details, Some(details));
-        assert_eq!(step(json!([])).details, None);
-        assert_eq!(step(json!("text")).details, None);
-        let big = json!([{"type": "reasoning.text", "text": "x".repeat(DETAILS_BYTES)}]);
-        assert_eq!(step(big).details, None);
-        let plain =
-            parse(&json!({"choices": [{"message": {"content": "a"}}]})).expect("a completion");
-        assert_eq!(plain.details, None);
     }
 
     #[test]
