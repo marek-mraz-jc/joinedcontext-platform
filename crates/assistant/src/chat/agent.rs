@@ -1049,6 +1049,9 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
     if citations.is_empty() || ask.sources.is_empty() {
         return;
     }
+    // After the answer streamed and before the visitor sees its sources: a step of its own, so
+    // the wait is named in the transcript (T-4729).
+    let began = std::time::Instant::now();
     let named: Result<(), crate::Error> = async {
         for citation in citations.iter_mut() {
             // A table names its connector; a passage of an Endpoint's own page names its address,
@@ -1086,6 +1089,12 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
         Ok(())
     }
     .await;
+    let output = match &named {
+        Ok(()) => format!("{} sources named", citations.len()),
+        Err(why) => format!("failed: {why}"),
+    };
+    ask.trace
+        .note("tool", "name_sources", began, None, Some(&output));
     if let Err(why) = named {
         tracing::warn!(deployment = %ask.deployment, %why, "naming the sources failed");
     }
