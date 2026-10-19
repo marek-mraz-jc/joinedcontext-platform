@@ -183,16 +183,6 @@ decides.
 | `jcctl::secrets::openbao::Session::lease_seconds`, `renewable` | lease renewal |
 | `jc_core::qb::observation_local_id`, `LOCAL_ID_SEPARATOR` | the observation id Architecture/03 §2 names; no pipeline mints it yet |
 
-### 3.6 Portal API ahead of the Portal: kept
-
-`jc-core` items a Portal task in flight names; they count until that task lands on the Portal's
-`main`, and the line drops back then. Main carried them from the merge of T-4690 (b1977db),
-which took jc-core from 45 to 48 (T-4682 recorded it).
-
-| Row | The Portal task that names it |
-|---|---|
-| `jc_core::kinds::catalog::DataTheme::ALL`, `DataTheme::LABEL_LANGUAGES`, `DataTheme::label_in` | T-4693, the assistant editor's category picker in 7 languages |
-
 ## 4. Config keys and fallback flags
 
 Env keys the charts set against what the code reads, from the deployment clone
