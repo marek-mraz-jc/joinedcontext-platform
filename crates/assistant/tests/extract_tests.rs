@@ -122,17 +122,21 @@ async fn an_undeclared_language_is_detected() {
 }
 
 #[tokio::test]
-async fn a_heading_of_whitespace_alone_does_not_lose_the_page() {
-    // www.bbsk.sk/uradne-hodiny (T-4688): an empty `<h2>&nbsp;</h2>` of the CMS made the HTML
-    // converter panic, and the page with the office's hours was never indexed.
+async fn a_heading_or_paragraph_of_whitespace_alone_does_not_lose_the_page() {
+    // www.bbsk.sk/uradne-hodiny (T-4688): a block of whitespace alone before a heading, an empty
+    // `<h2>&nbsp;</h2>` or the CMS's `<p><strong>&nbsp;<br></strong></p>`, made the HTML converter
+    // panic, and the page with the office's hours was never indexed.
     for empty in [
         "<h2>&nbsp;</h2>",
         "<h3> </h3>",
         "<h2><span> </span></h2>",
         "<h4><a href=\"/x\">\u{a0}</a></h4>",
+        // The page's real shape: a paragraph of a space in bold before the next heading.
+        "<p>Ústredňa BBSK</p><p><strong>&nbsp;<br></strong></p>",
+        "<p><em> </em></p>",
     ] {
         let html = format!(
-            "<html><body><h1>Úradné hodiny</h1>{empty}<p>Podateľňa je otvorená v pondelok od 7.30 do 15.30.</p></body></html>"
+            "<html><body><h1>Úradné hodiny</h1>{empty}<h2>Podateľňa</h2><p>Podateľňa je otvorená v pondelok od 7.30 do 15.30.</p></body></html>"
         );
         let extracted = extract(html.as_bytes(), "text/html", Some("sk"), 500)
             .await
