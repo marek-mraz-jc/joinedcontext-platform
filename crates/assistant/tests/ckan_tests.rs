@@ -290,3 +290,84 @@ async fn a_catalogue_on_a_private_address_is_not_read() {
     }
     db::drop_database(admin, pool, &name).await;
 }
+
+/// T-4747: the how-to each dataset's interfaces repeat is indexed once, at the catalogue's own
+/// address, so a question about connecting cites the catalogue; it is written again only when
+/// it changes and stays while the catalogue lists a dataset with interfaces.
+#[tokio::test]
+async fn the_interfaces_how_to_is_one_page_at_the_catalogues_address() {
+    let (admin, pool, name) = db::database("ckanconnect").await;
+    let server = MockServer::start().await;
+    let crawler = Crawler::new(
+        Arc::new(Catalogue1(server.address().port())),
+        CrawlPolicy {
+            allow_plain_http: true,
+            ..CrawlPolicy::default()
+        },
+    )
+    .expect("crawler");
+    let base = format!("http://data.example:{}", server.address().port());
+    let site = upsert_site(
+        &pool,
+        "hronov",
+        "hronov.example",
+        "catalogue",
+        Visibility::Public,
+    )
+    .await
+    .expect("site");
+    let with_mcp = |name: &str, slug: &str| {
+        let mut d = dataset(name, "2026-10-01T10:00:00");
+        d["resources"] = json!([{"name": "Model Context Protocol", "format": "MCP",
+            "url": format!("https://gw.example/api/endpoint/{slug}/mcp"),
+            "description": format!("For AI assistants: an MCP server over https://gw.example/api/endpoint/{slug}. Add it to Claude as a connector.")}]);
+        d
+    };
+    listing(
+        &server,
+        0,
+        2,
+        vec![
+            with_mcp("skoly", "bbsk-all"),
+            with_mcp("clenovia", "bbsk-all"),
+        ],
+    )
+    .await;
+    let (report, pages) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
+    assert_eq!(
+        report.expect("first run").datasets,
+        2,
+        "the how-to page is no dataset"
+    );
+    let home = format!("{base}/");
+    let how_to: Vec<&(String, String)> = pages.0.iter().filter(|(u, _)| *u == home).collect();
+    assert_eq!(
+        how_to.len(),
+        1,
+        "{:?}",
+        pages.0.iter().map(|(u, _)| u).collect::<Vec<_>>()
+    );
+    assert!(
+        how_to[0].1.contains("Add it to Claude as a connector.")
+            && !how_to[0].1.contains("bbsk-all")
+    );
+    assert!(pages
+        .0
+        .iter()
+        .filter(|(u, _)| *u != home)
+        .all(|(_, html)| !html.contains("Add it to Claude")));
+
+    // Unchanged: nothing is written again, and the sweep keeps the how-to page.
+    let (report, pages) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
+    assert_eq!(report.expect("second run").removed, 0);
+    assert!(pages.0.is_empty(), "{:?}", pages.0);
+    assert!(stored(&pool).await.contains(&home));
+
+    // A catalogue whose datasets have no interface loses it.
+    server.reset().await;
+    listing(&server, 0, 1, vec![dataset("skoly", "2026-10-02T10:00:00")]).await;
+    let (report, _) = run(&pool, &crawler, site, &base, 1_000, &[]).await;
+    assert_eq!(report.expect("third run").removed, 2);
+    assert!(!stored(&pool).await.contains(&home));
+    db::drop_database(admin, pool, &name).await;
+}

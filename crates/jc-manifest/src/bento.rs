@@ -26,10 +26,19 @@ const GTFS_MESSAGE: &str = "transit_realtime.FeedMessage";
 /// and the longest comment it may carry (PL-72).
 const ZIP_TAIL: &str = "bytes=-65557";
 
-/// A little-endian hex field to an integer. Stock Bloblang has neither a byte reader nor a
-/// hex parser, so the bytes are reversed in pairs and folded digit by digit.
+/// A little-endian hex field to an integer, and an integer to a 2- or 4-byte little-endian
+/// hex field. Stock Bloblang has neither a byte reader nor a hex parser, so the bytes are
+/// reversed in pairs and folded digit by digit.
 const ZIP_INT: &str = r#"map int {
   root = range(0, this.length(), 2).fold("", acc -> this.slice(acc.value, acc.value + 2) + acc.tally).split("").fold(0, acc -> acc.tally * 16 + "0123456789abcdef".index_of(acc.value))
+}
+map le16 {
+  let h = "%04x".format(this.int64())
+  root = $h.slice(2, 4) + $h.slice(0, 2)
+}
+map le32 {
+  let h = "%08x".format(this.int64())
+  root = $h.slice(6, 8) + $h.slice(4, 6) + $h.slice(2, 4) + $h.slice(0, 2)
 }
 "#;
 
@@ -38,7 +47,8 @@ const ZIP_INT: &str = r#"map int {
 /// `MAX_BYTES` are replaced by values `HttpArchive::validate` admitted.
 ///
 /// The directory's sizes may lie: the inflate stops at the size the directory declares
-/// (`INFLATE_MODULE`), so no member inflates past `maxBytes`, whatever its data holds.
+/// (`ZIP_LOCAL`), so no member inflates past `maxBytes`, whatever its data holds. Each entry
+/// keeps its own directory record (`entry`, hex, without the signature) for that archive.
 const ZIP_DIRECTORY: &str = r#"let wanted = MEMBERS
 let max_bytes = MAX_BYTES
 let tail = if content().length() > 65557 { throw("the archive server ignored Range and sent %v bytes".format(content().length())) } else { content() }
@@ -56,6 +66,7 @@ let all = $cd.split("504b0102").slice(1).map_each(e -> {
   "nlen": e.slice(48, 52).apply("int"),
   "elen": e.slice(52, 56).apply("int"),
   "offset": e.slice(76, 84).apply("int"),
+  "entry": e,
   "name": e.slice(84, 84 + e.slice(48, 52).apply("int") * 2).decode("hex").string()
 })
 let found = if $all.length() != $entries { throw("the archive's directory lists %v entries, its end record %v".format($all.length(), $entries)) } else { $all.filter(e -> $wanted.contains(e.name)) }
@@ -72,32 +83,31 @@ meta zip = this.format_json(no_indent: true)
 meta range = "bytes=%v-%v".format(this.offset, this.offset + 30 + this.nlen + this.elen + this.csize + 1024)
 "#;
 
-/// The member's local header to its packed bytes, checked against the directory; a deflated
-/// member also carries the size its inflate may reach (`INFLATE_MODULE`).
+/// The member's local header and packed bytes, checked against the directory, as an archive of
+/// its own: then its directory record at offset 0, without the data-descriptor flag (the sizes
+/// and the CRC-32 are in the record), and an end record. Bento's `unarchive: zip` reads it with
+/// Go's archive/zip, which stops a member that inflates past the size its record declares and
+/// checks its CRC-32 (T-4752). It replaced a `wasm` inflate (T-3953), whose module instances
+/// Bento never freed: every run of an archive read kept its inflated size in the runner.
 const ZIP_LOCAL: &str = r#"let z = @zip.parse_json()
 let read = if content().length() > 30 + $z.nlen + $z.elen + $z.csize + 1025 { throw("%v: the archive server ignored Range".format($z.name)) } else { content() }
 let head = $read.slice(0, 30).encode("hex")
 let nlen = $head.slice(52, 56).apply("int")
 let start = 30 + $nlen + $head.slice(56, 60).apply("int")
 let data = $read.slice($start, $start + $z.csize)
-root = if $head.slice(0, 8) != "504b0304" || $read.slice(30, 30 + $nlen).string() != $z.name || $data.length() != $z.csize { throw("%v: no local header of it at offset %v".format($z.name, $z.offset)) } else { $data }
-meta inflate_limit = if $z.method == 8 { $z.size.int64().string() } else { deleted() }
+let body = if $head.slice(0, 8) != "504b0304" || $read.slice(30, 30 + $nlen).string() != $z.name || $data.length() != $z.csize { throw("%v: no local header of it at offset %v".format($z.name, $z.offset)) } else { $read.slice(0, $start + $z.csize) }
+let flags = $z.entry.slice(8, 12).apply("int")
+let flags = if ($flags / 8).floor() % 2 == 1 { $flags - 8 } else { $flags }
+let entry = "504b0102" + $z.entry.slice(0, 8) + $flags.apply("le16") + $z.entry.slice(12, 76) + "00000000" + $z.entry.slice(84)
+root = $body + ($entry + "504b05060000000001000100" + ($entry.length() / 2).apply("le32") + $body.length().apply("le32") + "0000").decode("hex")
 "#;
 
-/// The module of Bento's `wasm` processor that inflates a deflated member and stops at its
-/// `inflate_limit` (T-3953, joinedcontext-platform tools/bento-inflate). Bloblang's
-/// `decompress` has no output limit, so a lying directory would let it inflate whole before
-/// any check; the runner's ConfigMap carries the module beside the streams.
-const INFLATE_MODULE: &str = "/streams/inflate.wasm";
-
-/// The member's content, checked against the directory: the module's refusal or a size other
-/// than the declared one ends the read.
+/// The member's content, checked against the directory: a size other than the declared one
+/// ends the read.
 const ZIP_CHECK: &str = r#"let z = @zip.parse_json()
-let refused = @inflate_error.or("")
-root = if $refused != "" { throw("%v: %v".format($z.name, $refused)) } else if content().length() != $z.size { throw("%v: inflated to %v bytes, the directory says %v".format($z.name, content().length(), $z.size)) } else { content() }
+root = if content().length() != $z.size { throw("%v: inflated to %v bytes, the directory says %v".format($z.name, content().length(), $z.size)) } else { content() }
 meta zip = deleted()
 meta range = deleted()
-meta inflate_limit = deleted()
 "#;
 
 /// The environment variable a mapping mints the `{orgDomain}` of an id from (PF-44, PF-42).
@@ -286,7 +296,8 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
 /// The input fetched the archive's last 64 KiB; the directory in it becomes one message per
 /// named member, each member is fetched by its own `Range` with the connection's headers,
 /// authorization and TLS, and inflated no further than its declared size. A refused read is logged and dropped, so the author's
-/// steps never see archive bytes. Stock Bento only: `unarchive: zip` would inflate every member.
+/// steps never see archive bytes. Stock Bento only: `unarchive: zip` over the whole archive
+/// would inflate every member, so it reads one member at a time, wrapped by `ZIP_LOCAL`.
 fn archive_processors(
     spec: &DataSourceSpec,
     archive: &HttpArchive,
@@ -313,30 +324,44 @@ fn archive_processors(
     let mut unarchive = Mapping::new();
     unarchive.insert(key("format"), text("json_array"));
     let mut inflate = Mapping::new();
-    inflate.insert(key("module_path"), text(INFLATE_MODULE));
-    inflate.insert(key("function"), text("inflate"));
+    inflate.insert(key("format"), text("zip"));
     let mut log = Mapping::new();
     log.insert(key("level"), text("ERROR"));
-    log.insert(key("message"), text("archive read refused: ${! error() }"));
-    // `try` skips the steps after the first refusal: an unchecked directory must never reach
-    // the member request, whose empty range would fetch the whole archive.
-    let read = vec![
-        one("mapping", text(&format!("{ZIP_INT}{directory}"))),
-        one("unarchive", Value::Mapping(unarchive)),
-        one("mapping", text(ZIP_MEMBER)),
-        one("http", Value::Mapping(member)),
-        one("mapping", text(&format!("{ZIP_INT}{ZIP_LOCAL}"))),
-        one("wasm", Value::Mapping(inflate)),
-        one("mapping", text(ZIP_CHECK)),
-    ];
-    vec![
-        one("try", Value::Sequence(read)),
+    log.insert(
+        key("message"),
+        text("archive read refused (${! @archive_filename.or(\"its directory\") }): ${! error() }"),
+    );
+    let refused = || {
         one(
             "catch",
             Value::Sequence(vec![
-                one("log", Value::Mapping(log)),
+                one("log", Value::Mapping(log.clone())),
                 one("mapping", text("root = deleted()")),
             ]),
+        )
+    };
+    // `try` skips the steps after the first refusal: an unchecked directory must never reach
+    // the member request, whose empty range would fetch the whole archive. Bento's `try` also
+    // stops the rest of the batch after a step refuses one of its messages, so each member is
+    // read as a batch of its own (`for_each`): one refused member never hands another's raw
+    // range to the author's steps (T-4752).
+    let directory = vec![
+        one("mapping", text(&format!("{ZIP_INT}{directory}"))),
+        one("unarchive", Value::Mapping(unarchive)),
+    ];
+    let read = vec![
+        one("mapping", text(ZIP_MEMBER)),
+        one("http", Value::Mapping(member)),
+        one("mapping", text(&format!("{ZIP_INT}{ZIP_LOCAL}"))),
+        one("unarchive", Value::Mapping(inflate)),
+        one("mapping", text(ZIP_CHECK)),
+    ];
+    vec![
+        one("try", Value::Sequence(directory)),
+        refused(),
+        one(
+            "for_each",
+            Value::Sequence(vec![one("try", Value::Sequence(read)), refused()]),
         ),
     ]
 }

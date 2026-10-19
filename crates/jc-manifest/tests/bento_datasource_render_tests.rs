@@ -423,52 +423,47 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let outer = doc["pipeline"]["processors"]
         .as_sequence()
         .expect("processors");
-    assert_eq!(names(outer), ["try", "catch", "unarchive"]);
+    assert_eq!(names(outer), ["try", "catch", "for_each", "unarchive"]);
     // The first refusal skips the rest, so an unchecked directory never reaches a request.
-    let steps = outer[0]["try"].as_sequence().expect("the read");
+    let listing = outer[0]["try"].as_sequence().expect("the directory");
+    assert_eq!(names(listing), ["mapping", "unarchive"]);
+    // Each member is a batch of its own, so a refused one never stops another (T-4752).
+    let each = outer[2]["for_each"].as_sequence().expect("per member");
+    assert_eq!(names(each), ["try", "catch"]);
+    let steps = each[0]["try"].as_sequence().expect("the read");
     assert_eq!(
         names(steps),
-        [
-            "mapping",
-            "unarchive",
-            "mapping",
-            "http",
-            "mapping",
-            "wasm",
-            "mapping"
-        ]
+        ["mapping", "http", "mapping", "unarchive", "mapping"]
     );
-    let directory = steps[0]["mapping"].as_str().unwrap();
+    let directory = listing[0]["mapping"].as_str().unwrap();
     assert!(directory.contains(r#"let wanted = ["agency.txt","stops.txt"]"#));
     assert!(directory.contains("let max_bytes = 1048576"));
     assert!(directory.contains("e.size > $max_bytes || e.csize > $max_bytes"));
     assert!(!directory.contains("MEMBERS") && !directory.contains("MAX_BYTES"));
-    let member = &steps[3]["http"];
+    let member = &steps[1]["http"];
     assert_eq!(member["url"], input["url"]);
     assert_eq!(member["headers"]["Range"].as_str(), Some("${! @range }"));
     assert_eq!(
         member["headers"]["x-key"].as_str(),
         Some("${DS_HSL_GTFS_KEY}")
     );
-    // The directory may lie about sizes, so the inflate stops at the declared one (T-3953):
-    // the local step hands the module its limit, and the check throws the module's refusal.
-    let local = steps[4]["mapping"].as_str().unwrap();
+    // The directory may lie about sizes, so the inflate stops at the declared one: the local
+    // step wraps the one member as an archive of its own, whose record declares the size, and
+    // `unarchive: zip` refuses past it (T-4752; archive_read_bento_tests runs it).
+    let local = steps[2]["mapping"].as_str().unwrap();
     assert!(
-        local.contains(r#"meta inflate_limit = if $z.method == 8 { $z.size.int64().string() }"#)
+        local.contains(r#""504b0102" + $z.entry.slice(0, 8)"#),
+        "{local}"
     );
     assert!(!local.contains("decompress"));
-    assert_eq!(
-        steps[5]["wasm"]["module_path"].as_str(),
-        Some("/streams/inflate.wasm")
-    );
-    assert_eq!(steps[5]["wasm"]["function"].as_str(), Some("inflate"));
-    let check = steps[6]["mapping"].as_str().unwrap();
-    assert!(check.contains(r#"@inflate_error.or("")"#) && check.contains("the directory says"));
-    assert_eq!(
-        outer[1]["catch"][1]["mapping"].as_str(),
-        Some("root = deleted()")
-    );
-    assert_eq!(outer[2]["unarchive"]["format"].as_str(), Some("csv"));
+    assert_eq!(steps[3]["unarchive"]["format"].as_str(), Some("zip"));
+    let check = steps[4]["mapping"].as_str().unwrap();
+    assert!(check.contains("the directory says"));
+    assert!(!out.contains("wasm"), "{out}");
+    for refused in [&outer[1]["catch"], &each[1]["catch"]] {
+        assert_eq!(refused[1]["mapping"].as_str(), Some("root = deleted()"));
+    }
+    assert_eq!(outer[3]["unarchive"]["format"].as_str(), Some("csv"));
 
     // Without `archive` the same connection renders as it did: no range, nothing prepended.
     let plain = source(
