@@ -150,6 +150,20 @@ pub struct Hit {
     pub score: f64,
     /// The source it is from, as `{project}/{source}`.
     pub site: String,
+    /// When its page or document was published, last changed and last read.
+    pub dates: Dates,
+}
+
+/// When a passage's page or document was published, last changed and last read by the crawl,
+/// each an RFC 3339 instant in UTC; left out where unknown (AG-120, T-4749).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Dates {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crawled: Option<String>,
 }
 
 /// The pgvector literal of an embedding, refused unless it is [`DIMENSIONS`] finite numbers.
@@ -214,11 +228,16 @@ semantic AS (
     LIMIT $5
 )
 SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
+       to_char(COALESCE(p.published, d.published) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS published,
+       to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
+       to_char(COALESCE(p.fetched_at, d.fetched_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS crawled,
        ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
         * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score
 FROM lexical FULL OUTER JOIN semantic USING (id)
 JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
 JOIN sites site ON site.id = c.site_id
+LEFT JOIN pages p ON p.id = c.page_id
+LEFT JOIN documents d ON d.id = c.document_id
 CROSS JOIN LATERAL (SELECT c.url ~* '/(aktuality|aktualita|aktualne|novinky|spravy|tlacove-spravy|clanky|news|uutiset|tiedotteet|blog)(/|$|\?|#)' AS item) news
 ORDER BY score DESC, news.item, c.id
 LIMIT $7
@@ -252,6 +271,11 @@ pub async fn hybrid_search(
                 text: row.try_get("text")?,
                 score: row.try_get("score")?,
                 site: row.try_get("site")?,
+                dates: Dates {
+                    published: row.try_get("published")?,
+                    modified: row.try_get("modified")?,
+                    crawled: row.try_get("crawled")?,
+                },
             })
         })
         .collect::<Result<_, sqlx::Error>>()

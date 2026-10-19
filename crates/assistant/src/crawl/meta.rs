@@ -69,6 +69,15 @@ fn linked_data(document: &Html, key: &str) -> Option<String> {
     })
 }
 
+/// The first date the `<meta>` elements `selectors` find, then the JSON-LD `key`, that reads as
+/// an instant: a tag in a form [`instant`] does not read leaves the next one its turn (T-4749).
+fn dated(document: &Html, selectors: &[&str], key: &str) -> Option<String> {
+    selectors
+        .iter()
+        .find_map(|s| meta(document, &[s]).as_deref().and_then(instant))
+        .or_else(|| linked_data(document, key).as_deref().and_then(instant))
+}
+
 /// A date as an RFC 3339 instant in UTC: RFC 3339 itself, a date and time without an offset
 /// (read as UTC), a date alone (its midnight in UTC), or an HTTP date (`Last-Modified`). `None`
 /// for anything else.
@@ -76,6 +85,15 @@ pub fn instant(text: &str) -> Option<String> {
     let text = text.trim();
     let at = OffsetDateTime::parse(text, &Rfc3339)
         .or_else(|_| OffsetDateTime::parse(text, &Rfc2822))
+        // ISO 8601 with its offset written without a colon, as hel.fi's article tags have it.
+        .or_else(|_| {
+            OffsetDateTime::parse(
+                text,
+                format_description!(
+                    "[year]-[month]-[day]T[hour]:[minute]:[second][offset_hour sign:mandatory][offset_minute]"
+                ),
+            )
+        })
         .or_else(|_| {
             PrimitiveDateTime::parse(
                 text,
@@ -183,30 +201,30 @@ pub fn page(html: &str) -> Meta {
             r#"meta[property="og:description"]"#,
         ],
     );
-    let published = meta(
+    let published = dated(
         &document,
         &[
             r#"meta[property="article:published_time"]"#,
             r#"meta[name="dcterms.created" i]"#,
             r#"meta[name="DC.date.created" i]"#,
         ],
-    )
-    .or_else(|| linked_data(&document, "datePublished"));
-    let modified = meta(
+        "datePublished",
+    );
+    let modified = dated(
         &document,
         &[
             r#"meta[property="article:modified_time"]"#,
             r#"meta[name="dcterms.modified" i]"#,
             r#"meta[name="DC.date.modified" i]"#,
         ],
-    )
-    .or_else(|| linked_data(&document, "dateModified"));
+        "dateModified",
+    );
     Meta {
         language: super::links::extract_language(html),
         title: title.map(|t| capped(t, MAX_TITLE)),
         description: description.map(|d| capped(d, MAX_DESCRIPTION)),
-        published: published.as_deref().and_then(instant),
-        modified: modified.as_deref().and_then(instant),
+        published,
+        modified,
     }
 }
 
@@ -304,6 +322,20 @@ mod tests {
         );
     }
 
+    /// T-4749: a tag whose date does not read leaves the JSON-LD its turn.
+    #[test]
+    fn a_date_that_does_not_read_gives_way_to_the_next_that_does() {
+        let stated = page(
+            r#"<html><head>
+            <meta property="article:modified_time" content="22.09.2026">
+            <meta name="dcterms.modified" content="2026-09-21">
+            <script type="application/ld+json">{"datePublished":"včera","dateModified":"2026-01-01"}</script>
+            </head></html>"#,
+        );
+        assert_eq!(stated.modified.as_deref(), Some("2026-09-21T00:00:00Z"));
+        assert_eq!(stated.published, None);
+    }
+
     #[test]
     fn dates_read_in_every_usual_form_and_nothing_else() {
         assert_eq!(
@@ -321,6 +353,10 @@ mod tests {
         assert_eq!(
             instant("2026-09-30T08:12").as_deref(),
             Some("2026-09-30T08:12:00Z")
+        );
+        assert_eq!(
+            instant("2026-09-22T13:58:36+0300").as_deref(),
+            Some("2026-09-22T10:58:36Z")
         );
         for bad in ["", "včera", "2026-13-01", "30.09.2026", "2026"] {
             assert_eq!(instant(bad), None, "{bad}");

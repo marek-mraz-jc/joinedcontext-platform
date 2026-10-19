@@ -523,6 +523,7 @@ async fn recorded(
                 endpoint: Some(endpoint.clone()),
                 title: None,
                 cards: Vec::new(),
+                dates: Default::default(),
             });
             json!({"n": n, "tool": tool, "endpoint": endpoint, "result": cut(&text, STEP_RESULT_CHARS)}).to_string()
         }

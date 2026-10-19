@@ -3300,8 +3300,15 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
             endpoint: None,
             title: None,
             cards: super::cards::of(&hit.text),
+            dates: hit.dates.clone(),
         });
-        passages.push(json!({"n": n, "url": hit.url, "text": hit.text}));
+        let mut passage = json!({"n": n, "url": hit.url, "text": hit.text});
+        if let (Value::Object(passage), Ok(Value::Object(dates))) =
+            (&mut passage, serde_json::to_value(&hit.dates))
+        {
+            passage.extend(dates);
+        }
+        passages.push(passage);
     }
     let mut data = Vec::new();
     for table in tables {
@@ -3315,6 +3322,7 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
             endpoint: Some(table.endpoint.clone()),
             title: table.dataset.is_none().then(|| table.entity_type.clone()),
             cards: Vec::new(),
+            dates: Default::default(),
         });
         let shown = if table.profile.is_some() {
             PROFILE_ROWS
@@ -3702,6 +3710,7 @@ mod tests {
             text: String::new(),
             score,
             site: "bbsk/portal".into(),
+            dates: Default::default(),
         };
         let found = vec![
             hit(1, "https://opendata.dev.example/dataset/cyklotrasy", 0.2),
@@ -4395,6 +4404,7 @@ mod tests {
             text: format!("passage {chunk}"),
             score,
             site: "bb/catalogue".into(),
+            dates: Default::default(),
         }
     }
 
@@ -4404,6 +4414,7 @@ mod tests {
     fn an_answer_sees_at_most_three_website_passages_and_the_data_first() {
         let web = |chunk, score| Hit {
             site: "bbsk/web".into(),
+            dates: Default::default(),
             ..hit(chunk, score)
         };
         let found = [
@@ -5146,6 +5157,7 @@ mod tests {
             ),
             score: BOTH,
             site: "bb/web".into(),
+            dates: Default::default(),
         };
         let follow = follow_messages(
             &[],
