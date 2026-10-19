@@ -1230,8 +1230,12 @@ fn offers(connector: &Connected, tool: &str) -> bool {
 /// none). The lists are asked for at once, each given [`ROUTING_DEADLINE`]; one that fails or
 /// does not come in time keeps its last list, which routing names instead, and is not waited on
 /// again for a while (T-4611, T-4624, T-4683).
-async fn live(ask: &Ask<'_>) -> (Live, Vec<String>) {
-    live_of(ask.cache, ask.http, ask.deployment, ask.connectors).await
+///
+/// `said` is the conversation's last answer: a connector it names by its publisher, as the
+/// could-not-check line does, is asked again with its own whole timeout, once the user follows
+/// up on it (T-4734).
+async fn live(ask: &Ask<'_>, said: Option<&str>) -> (Live, Vec<String>) {
+    live_of(ask.cache, ask.http, ask.deployment, ask.connectors, said).await
 }
 
 async fn live_of(
@@ -1239,6 +1243,7 @@ async fn live_of(
     http: &reqwest::Client,
     deployment: &str,
     connectors: &[Connected],
+    said: Option<&str>,
 ) -> (Live, Vec<String>) {
     let listings = connectors
         .iter()
@@ -1248,11 +1253,20 @@ async fn live_of(
             if let Some(types) = cache.types_of(slug) {
                 return (connector, Some(types));
             }
-            if cache.skipped(slug) {
+            let followed_up = connector
+                .label
+                .as_deref()
+                .is_some_and(|label| !label.trim().is_empty() && said.is_some_and(|said| said.contains(label.trim())));
+            if cache.skipped(slug) && !followed_up {
                 return (connector, cache.last_types_of(slug));
             }
+            let deadline = if followed_up {
+                connector.surface.timeout
+            } else {
+                ROUTING_DEADLINE
+            };
             let listed = tokio::time::timeout(
-                ROUTING_DEADLINE,
+                deadline,
                 connector.surface.call(http, "list_types", json!({})),
             )
             .await;
@@ -1278,7 +1292,14 @@ async fn live_of(
     let mut missing = Vec::new();
     for (connector, types) in futures_util::future::join_all(listings).await {
         let Some(types) = types else {
-            missing.push(connector.label.clone().unwrap_or_default());
+            // By its publisher, and what the catalogue says it offers (T-4734).
+            let label = connector.label.clone().unwrap_or_default();
+            missing.push(match connector.title.as_deref() {
+                Some(title) if !label.is_empty() && !title.trim().is_empty() => {
+                    format!("{label} ({})", title.trim())
+                }
+                _ => label,
+            });
             continue;
         };
         if !types.is_empty() {
@@ -1372,9 +1393,11 @@ fn unanswered(missing: &[String]) -> String {
         names => format!("The data of {names}"),
     };
     format!(
-        "\n\n{which} did not answer in time and is not in what you are given. \
-         Say once, in one sentence and without a citation, that it could not be checked now, and \
-         offer to try again. Never say that the data does not contain, lacks or has nothing on \
+        "\n\n{which} did not answer in time and is not in what you are given; only its live \
+         check is pending. Say once, in one sentence and without a citation, that it could not be \
+         checked now, naming what it offers as written here, and offer to try again. Answer the \
+         rest of the question from what you are given: never answer with that sentence alone. \
+         Never say that the data does not contain, lacks or has nothing on \
          the topic: what that source holds is unknown. Name it only as written here. \
          Point to no API: the answer's panel already offers the dataset and its download."
     )
@@ -2300,7 +2323,12 @@ pub async fn answer(
     // The connectors' type lists and the sources' languages, before the router may start: a step
     // of the turn's own, so their wait is never untracked time (T-4729).
     let began = Instant::now();
-    let (live, missing) = live(ask).await;
+    let said = history
+        .iter()
+        .rev()
+        .find(|turn| turn.role == "assistant")
+        .map(|turn| turn.text.as_str());
+    let (live, missing) = live(ask, said).await;
     let languages = languages(ask).await;
     let listed = format!(
         "{} connectors listed, {} did not answer",
@@ -3457,7 +3485,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let (first, missing) = live_of(&cache, &http, "bb/public", &connectors).await;
+        let (first, missing) = live_of(&cache, &http, "bb/public", &connectors, None).await;
         assert!(first.is_empty());
         assert_eq!(
             missing,
@@ -3466,7 +3494,7 @@ mod tests {
         );
 
         warm(&cache, &http, &connectors).await;
-        let (second, missing) = live_of(&cache, &http, "bb/public", &connectors).await;
+        let (second, missing) = live_of(&cache, &http, "bb/public", &connectors, None).await;
         assert_eq!(
             named(&second),
             [("bb-events".to_owned(), vec!["Event".to_owned()])]
@@ -3480,7 +3508,7 @@ mod tests {
                 .expect("an old instant");
             held.insert("slow".into(), (old, vec!["Event".to_owned()]));
         }
-        let (third, missing) = live_of(&cache, &http, "bb/public", &connectors).await;
+        let (third, missing) = live_of(&cache, &http, "bb/public", &connectors, None).await;
         assert_eq!(
             named(&third),
             [("bb-events".to_owned(), vec!["Event".to_owned()])]
@@ -3607,6 +3635,7 @@ mod tests {
             &http,
             "bbsk/public",
             std::slice::from_ref(&connector),
+            None,
         )
         .await;
         assert_eq!(live.len(), 1, "never left out while its last list is known");
@@ -3629,6 +3658,65 @@ mod tests {
         // A good listing ends it.
         cache.keep_types("bbsk", vec!["CycleRoute".to_owned()]);
         assert!(!cache.waits("bbsk"));
+    }
+
+    /// T-4734: the turn after an answer that named a source as not checked gives that source its
+    /// connector's whole timeout, so "ale veď Helsinki majú data" is answered from its data, not
+    /// with the failure line again; and a source that is still missing is named with what the
+    /// catalogue says it offers.
+    #[tokio::test]
+    async fn the_turn_after_a_missing_source_waits_for_it_and_names_what_it_offers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let types = json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{\"typeList\": [\"GtfsStop\"]}"}]}});
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/hsl/mcp"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(types)
+                    .set_delay(ROUTING_DEADLINE + Duration::from_millis(300)),
+            )
+            .mount(&gateway)
+            .await;
+        let tool = |name: &str| super::super::mcp::Tool {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let connectors = [Connected {
+            endpoint: "helsinki/helsinki-transport".into(),
+            title: Some("HSL public transport: vehicles, stops, departures".into()),
+            surface: super::super::mcp::Surface {
+                gateway: gateway.uri(),
+                slug: "hsl".into(),
+                timeout: Duration::from_secs(10),
+                token: None,
+            },
+            tools: vec![tool("list_types"), tool("query_entities")],
+            label: Some("Helsingin kaupunki".into()),
+            siblings: Vec::new(),
+        }];
+        let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
+        let (first, missing) = live_of(&cache, &http, "bbsk/data", &connectors, None).await;
+        assert!(first.is_empty());
+        assert_eq!(
+            missing,
+            ["Helsingin kaupunki (HSL public transport: vehicles, stops, departures)"]
+        );
+        let rules = unanswered(&missing);
+        assert!(rules.contains("HSL public transport"), "{rules}");
+        assert!(
+            rules.contains("never answer with that sentence alone"),
+            "{rules}"
+        );
+
+        // The next turn, inside the minute a missed list is otherwise left alone.
+        let said = "Dáta od Helsingin kaupunki sa nepodarilo včas overiť.";
+        let (second, missing) = live_of(&cache, &http, "bbsk/data", &connectors, Some(said)).await;
+        assert_eq!(second.len(), 1, "the named source was waited for");
+        assert_eq!(second[0].types, ["GtfsStop"]);
+        assert!(missing.is_empty());
     }
 
     /// T-4683: while a source did not answer, an answer never claims the data holds nothing;
