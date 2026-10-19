@@ -491,6 +491,55 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         Some("https://gw.example/api/endpoint/od-air/schema/index.json"),
         "with no dataset page the Endpoint's own page is still named"
     );
+    tx.rollback().await.expect("rollback");
+    // T-4729: a CKAN dataset page names the Endpoint before any other page that mentions it, an
+    // older one included.
+    site(
+        &pool,
+        "helsinki",
+        "hel-blog",
+        &[(
+            "# Our air data
+
+Read it at https://gw.example/api/endpoint/od-air",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    let ckan = site(
+        &pool,
+        "helsinki",
+        "hel-ckan2",
+        &[(
+            "# Air quality\n\nReadings (API) (https://gw.example/api/endpoint/od-air/ngsi-ld/v1/entities?type=A)",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    sqlx::query(
+        "UPDATE chunks SET url = 'https://opendata.example/dataset/air-quality' WHERE id = $1",
+    )
+    .bind(ckan[0])
+    .execute(&pool)
+    .await
+    .expect("the dataset page's url");
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let blog_and_ckan = ["hel-blog".to_owned(), "hel-ckan2".to_owned()];
+    let first = endpoint_page(&mut tx, "od-air", &blog_and_ckan, true)
+        .await
+        .expect("page");
+    assert_eq!(
+        first.as_deref(),
+        Some("https://opendata.example/dataset/air-quality")
+    );
     // T-4625: rows of type A read through another Endpoint of the space cite the dataset page
     // whose NGSI-LD example serves A from a sibling; another type or no sibling finds nothing.
     let siblings = ["od-all".to_owned(), "od-air".to_owned()];
@@ -509,6 +558,32 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
             .expect("page");
         assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
     }
+    tx.rollback().await.expect("rollback");
+
+    // T-4711: a dataset renamed in the catalogue leaves its old page in the index; the page
+    // indexed later for the same Endpoint and type is the one cited, never the stale 404.
+    site(
+        &pool,
+        "helsinki",
+        "hel-ckan-new",
+        &[(
+            "# Air quality, renamed\n\nReadings (API) (https://gw.example/api/endpoint/od-air/ngsi-ld/v1/entities?type=A)",
+            "en",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let three = ["hel-ckan".to_owned(), "hel-ckan-new".to_owned()];
+    let newest = dataset_page(&mut tx, &siblings, "A", &three, true)
+        .await
+        .expect("page");
+    assert_eq!(newest.as_deref(), Some("https://hel-ckan-new.example/#0"));
     tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }

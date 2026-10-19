@@ -652,9 +652,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         2,
         "a covered first round is not judged, no round for the rows"
     );
-    let router = calls_of(&calls, Some(ROUTER))[0]["messages"][1]["content"]
-        .as_str()
-        .unwrap_or_default();
+    let router = &text_of(&calls_of(&calls, Some(ROUTER))[0]["messages"][1]);
     assert!(
         router.contains("- ovzdusie: AirQualityObserved"),
         "{router}"
@@ -695,13 +693,9 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         // T-4339: every call is told the moment the conversation event names, beside the
         // question and never in the cached rules.
         let told = format!("{}Z).\nThe question:\n", &at[..16]);
+        let asked = text_of(&body["messages"][1]);
         assert!(
-            body["messages"][1]["content"]
-                .as_str()
-                .is_some_and(|asked| asked.starts_with("Now: ") || asked.contains("\nNow: "))
-                && body["messages"][1]["content"]
-                    .as_str()
-                    .is_some_and(|asked| asked.contains(&told)),
+            (asked.starts_with("Now: ") || asked.contains("\nNow: ")) && asked.contains(&told),
             "{body}"
         );
         assert!(!body["messages"][0].to_string().contains(&at[..16]));
@@ -1407,10 +1401,7 @@ async fn a_conversation_continues_with_its_id() {
     // The second question's router reads the first turn.
     let calls = model_calls(&w.proxy).await;
     assert_eq!(calls.len(), 6, "a router, a judgement and an answer each");
-    let history = calls_of(&calls, Some(ROUTER))[1]["messages"][1]["content"]
-        .as_str()
-        .expect("text")
-        .to_owned();
+    let history = text_of(&calls_of(&calls, Some(ROUTER))[1]["messages"][1]);
     assert!(history.contains("<earlier-turn role=\"assistant\">Prvá.</earlier-turn>"));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -1916,6 +1907,23 @@ async fn make_intranet_internal(pool: &PgPool) {
     tx.commit().await.expect("commit");
 }
 
+/// A message's text: its string content, or its parts' texts one after the other (the router's
+/// and the answer's cached part comes first, T-4731).
+fn text_of(message: &Value) -> String {
+    let content = &message["content"];
+    content.as_str().map_or_else(
+        || {
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part["text"].as_str())
+                .collect()
+        },
+        str::to_owned,
+    )
+}
+
 fn offered_tools(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
@@ -2280,9 +2288,7 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert!(answering.get("temperature").is_none());
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
     // The router hears the sources' language.
-    let routed = router["messages"][1]["content"]
-        .as_str()
-        .expect("the router's question");
+    let routed = &text_of(&router["messages"][1]);
     assert!(
         routed.contains("The sources are written in: sk."),
         "{routed}"
@@ -3267,10 +3273,7 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
         data[0]["download"],
         format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
     );
-    let router = model_calls(&w.proxy).await[0].1["messages"][1]["content"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
+    let router = text_of(&model_calls(&w.proxy).await[0].1["messages"][1]);
     assert!(
         router.contains("- bbsk/kraj: AirQualityObserved"),
         "{router}"
@@ -3421,9 +3424,10 @@ async fn a_hanging_and_a_failing_endpoint_cost_the_question_three_seconds_once()
 
     let calls = model_calls(&w.proxy).await;
     let rules = calls_of(&calls, None)[0]["messages"][0].to_string();
-    // T-4683: named by their publishers, never by an Endpoint's name or slug; these name none
+    // T-4729: a page question reads no data, so the sources whose types did not list are no
+    // warning of its answer; T-4683: and never named by an Endpoint's name or slug.
     assert!(
-        rules.contains("Some data sources did not answer in time")
+        !rules.contains("did not answer in time")
             && !rules.contains("ovzdusie")
             && !rules.contains("bbsk/kraj"),
         "{rules}"
@@ -3565,10 +3569,7 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         calls[1].get("tool_choice").is_none(),
         "the model was still free to read"
     );
-    assert!(calls[0]["messages"][0]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("At most 10 tool calls"));
+    assert!(text_of(&calls[0]["messages"][0]).contains("At most 10 tool calls"));
 
     let reads = tool_calls_of(&w.gateway, "query_entities").await;
     assert_eq!(reads.len(), 2);

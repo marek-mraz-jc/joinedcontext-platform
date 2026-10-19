@@ -372,7 +372,19 @@ test("a data table at 400 px shows the name and the first value", async ({ page 
   await expect(table.locator("tbody tr").nth(1).locator("td").nth(1)).toHaveText("");
   // T-4682: the grid's padding comes from the tokens, smaller at a phone's width, and the text
   // answer reads before its visuals.
-  expect(await table.locator("td").first().evaluate((td) => getComputedStyle(td).padding)).toBe("6px 8px");
+  expect(await table.locator("td").first().evaluate((td) => getComputedStyle(td).padding)).toBe("2px 8px");
+  // T-4711: below 600 px each row is a card, nothing scrolls sideways, every value names its
+  // column, and no text is squeezed to a letter a line.
+  const cards = await table.locator(".jc-data-scroll").evaluate((box) => ({
+    sideways: box.scrollWidth > box.clientWidth + 1,
+    labels: [...box.querySelectorAll("tbody tr:first-child td")].slice(1).map((td) => getComputedStyle(td, "::before").content),
+    title: getComputedStyle(box.querySelector("tbody td"), "::before").content,
+    narrowest: Math.min(...[...box.querySelectorAll("tbody td")].map((td) => td.getBoundingClientRect().width)),
+  }));
+  expect(cards.sideways, "no horizontal scroll").toBe(false);
+  expect(cards.labels[0]).toBe('"PM10 (µg/m³)"');
+  expect(cards.title, "the name is the card's title").toBe("none");
+  expect(cards.narrowest, "no column narrower than 8 characters").toBeGreaterThan(8 * 7);
   expect(await page.evaluate(() => {
     const answer = document.querySelector(".jc-bot .jc-answer");
     const visuals = document.querySelector(".jc-bot .jc-visuals");

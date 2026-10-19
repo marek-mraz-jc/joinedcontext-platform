@@ -231,7 +231,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   assert.deepEqual(sk.numeric, [false, true, true, false, false, false]);
   assert.equal(sk.rows[0][1], "21,5");
   assert.equal(sk.rows[0][2], "12");
-  assert.equal(sk.rows[1][1], "9,123");
+  assert.equal(sk.rows[1][1], "9,1", "a measured value to one decimal (T-4711)");
   assert.equal(sk.rows[1][2], "");
   assert.deepEqual([sk.rows[0][3], sk.rows[1][3]], ["Áno", "Nie"]);
   assert.match(sk.rows[0][5], /^pred 5 min/);
@@ -239,7 +239,7 @@ test("a data table reads as a person reads it, in sk and en (T-4650)", () => {
   const en = table(data, "en", now);
   assert.equal(en.caption, "Air quality — first 2 of 12");
   assert.equal(en.columns[5], "Measured");
-  assert.equal(en.rows[1][1], "9.123");
+  assert.equal(en.rows[1][1], "9.1");
   assert.deepEqual([en.rows[0][3], en.rows[1][3]], ["Yes", "No"]);
   assert.match(en.rows[0][5], /^5 min\. ago$/);
   // A key the table does not know is spelt out; a language it does not know reads English.
@@ -405,9 +405,9 @@ test("a kept conversation is read back only in its own shape", () => {
 
 // T-4198: one numeric column beside a time or a name is drawn as a small chart, nothing else is.
 test("a number over time is a line in time order, a number per name is bars", () => {
-  const line = chart({ columns: ["dateObserved", "pm10"], rows: [["2026-10-15T10:00:00Z", 21], ["2026-10-15T09:00:00Z", 18.5]] });
+  const line = chart({ columns: ["dateObserved", "pm10"], rows: [["2026-10-15T10:00:00Z", 21], ["2026-10-15T09:00:00Z", 18.5], ["2026-10-15T11:00:00Z", 19]] });
   assert.equal(line.kind, "line");
-  assert.deepEqual(line.points, [{ label: "2026-10-15T09:00:00Z", value: 18.5 }, { label: "2026-10-15T10:00:00Z", value: 21 }]);
+  assert.deepEqual(line.points.map((p) => p.label), ["2026-10-15T09:00:00Z", "2026-10-15T10:00:00Z", "2026-10-15T11:00:00Z"]);
   assert.equal(line.value, "pm10");
   const bars = chart({ columns: ["name", "pm10", "address"], rows: [["Námestie SNP", 21, "x"], ["Zvolenská", 12, "y"]] });
   assert.equal(bars.kind, "bar");
@@ -422,6 +422,29 @@ test("two numeric columns, text only, one point or no columns draw no chart", ()
   assert.equal(chart({ columns: ["name", "pm10"], rows: [["a", 1]] }), null);
   assert.equal(chart({ columns: [], rows: [] }), null);
   assert.equal(chart(null), null);
+});
+
+// T-4711, owner 04:46Z: no chart unless every check passes; each failed check is no chart.
+test("the chart gate: each failed check draws no chart, never a repaired one (T-4711)", () => {
+  const at = (h) => `2026-10-15T${String(h).padStart(2, "0")}:00:00Z`;
+  // Two moments are neither a line nor categories.
+  assert.equal(chart({ columns: ["observedAt", "pm10"], rows: [[at(9), 1], [at(10), 2]] }), null);
+  // One moment (the owner's district screenshot): categories at that time are bars, not a line.
+  const districts = [["Okres Banská Bystrica", 110000, at(0)], ["Okres Brezno", 60000, at(0)], ["Okres Detva", 30000, at(0)]];
+  const one = chart({ columns: ["name", "population", "observedAt"], rows: districts });
+  assert.equal(one.kind, "bar");
+  assert.equal(one.by, "name");
+  // A slug or an id as the category's name.
+  assert.equal(chart({ columns: ["name", "v"], rows: [["obyvatelstvo-stav-okres-banska", 1], ["obyvatelstvo-stav-okres-brezno", 2]] }), null);
+  assert.equal(chart({ columns: ["name", "v"], rows: [["urn:ngsi-ld:X:1", 1], ["urn:ngsi-ld:X:2", 2]] }), null);
+  // The same category twice.
+  assert.equal(chart({ columns: ["name", "v"], rows: [["Brezno", 1], ["Brezno", 2]] }), null);
+  // The region's total beside its own districts.
+  assert.equal(chart({ columns: ["name", "v"], rows: [["Banskobystrický kraj", 200000], ...districts.map((d) => d.slice(0, 2))] }), null);
+  // The first rows of more: truncated.
+  assert.equal(chart({ columns: ["name", "v"], total: 7742, rows: [["A", 1], ["B", 2]] }), null);
+  // A line of two points, or a single bar.
+  assert.equal(chart({ columns: ["name", "v"], rows: [["A", 1]] }), null);
 });
 
 test("at most 50 points, and a value of NaN, a string or nothing is skipped", () => {
@@ -685,7 +708,7 @@ test("a grid reads by meaning: no URN column, years and codes ungrouped, enums i
   assert.equal(sk.rows[0][1], "1\u00a0651,5".replace("\u00a0", new Intl.NumberFormat("sk").format(1000).charAt(1)));
   assert.equal(sk.rows[0][2], "1953");
   assert.equal(sk.rows[0][3], "12345");
-  assert.equal(sk.rows[1][1], "9,46");
+  assert.equal(sk.rows[1][1], "9,5", "a length in metres to one decimal (T-4711)");
   // An enum reads its words; one the model does not describe stays as written.
   assert.equal(sk.rows[0][4], "nie je chránená");
   assert.equal(table(data, "en").rows[0][4], "not protected");
@@ -932,4 +955,19 @@ test("a turn that opened a dataset keeps it, a forged one is dropped (T-4685)", 
     { ...turn, turn: 2, opened: { url: "javascript:alert(1)", title: "x" } }] }));
   assert.deepEqual(kept.turns[0].opened, { url: "https://opendata.dev.example/dataset/cyklotrasy-bbsk", title: "Cyklotrasy" });
   assert.equal(kept.turns[1].opened, undefined);
+});
+
+test("a measured value shows one decimal and a plain number two, in the visitor's locale (T-4711)", () => {
+  const data = {
+    type: "AirQualityObserved",
+    columns: ["name", "pm10", "ratio", "count"],
+    units: [null, "µg/m³", null, null],
+    rows: [["Žilina, Obežná", 11.506, 0.12345, 42]],
+  };
+  const sk = table(data, "sk");
+  assert.deepEqual(sk.rows[0], ["Žilina, Obežná", "11,5", "0,12", "42"]);
+  assert.deepEqual(table(data, "en").rows[0].slice(1), ["11.5", "0.12", "42"]);
+  // A small reading keeps two significant digits and never reads as zero.
+  const co = table({ columns: ["name", "co"], units: [null, "mg/m³"], rows: [["A", 0.0423], ["B", 0], ["C", -0.5]] }, "sk");
+  assert.deepEqual(co.rows.map((r) => r[1]), ["0,042", "0", "-0,5"]);
 });

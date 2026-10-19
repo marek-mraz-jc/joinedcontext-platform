@@ -441,6 +441,10 @@ var JCRender = (function () {
     now = typeof now === "number" ? now : Date.now();
     var numbers = new Intl.NumberFormat(lang, { maximumFractionDigits: 3 });
     var units = Array.isArray(data.units) ? data.units : [];
+    // A measured value to one decimal (11,5 µg/m³, never 11,506), a plain number to two (T-4711).
+    var measured = new Intl.NumberFormat(lang, { maximumFractionDigits: 1 });
+    var plainNumber = new Intl.NumberFormat(lang, { maximumFractionDigits: 2 });
+    var small = new Intl.NumberFormat(lang, { maximumSignificantDigits: 2 });
     var modelled = Array.isArray(data.labels) ? data.labels : [];
     var enums = Array.isArray(data.enums) ? data.enums : [];
     var raw = (Array.isArray(data.rows) ? data.rows : []).filter(Array.isArray).slice(0, ROWS);
@@ -458,7 +462,10 @@ var JCRender = (function () {
       if (column === "id" && urn(v)) return String(v).split(":").pop();
       if (typeof v === "number") {
         if (!isFinite(v)) return "";
-        return plain(column) && Number.isInteger(v) ? String(v) : numbers.format(v);
+        if (plain(column) && Number.isInteger(v)) return String(v);
+        // Below 1, two significant digits: 0,04 mg/m³ never reads as 0 (integrator, T-4711).
+        if (v !== 0 && Math.abs(v) < 1) return small.format(v);
+        return (typeof units[i] === "string" && units[i] ? measured : plainNumber).format(v);
       }
       if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
       if (typeof v === "object") return JSON.stringify(v);
@@ -564,16 +571,40 @@ var JCRender = (function () {
     var isTime = function (i) {
       return rows.every(function (row) { return typeof row[i] === "string" && TIME.test(row[i]) && isFinite(Date.parse(row[i])); });
     };
+    // T-4711, owner 04:46Z: no chart unless every check passes; a failed check is no chart, never
+    // a repaired one. A line needs time with 3 distinct moments; one moment is categories (bars).
     var time = named.filter(isTime)[0];
+    if (time !== undefined) {
+      var moments = {};
+      rows.forEach(function (row) { moments[Date.parse(row[time])] = true; });
+      var distinct = Object.keys(moments).length;
+      if (distinct === 2) return null;
+      if (distinct < 3) {
+        named = named.filter(function (i) { return i !== time; });
+        time = undefined;
+      }
+    }
     var by = time !== undefined ? time : named[0];
     if (by === undefined) return null;
+    // Nothing truncated: a chart of the first rows of more would mislead.
+    if (typeof data.total === "number" && data.total > rows.length) return null;
     var v = values[0];
     var points = rows.filter(function (row) { return finite(row[v]); }).slice(0, 50).map(function (row) {
       var name = row[by] === null || row[by] === undefined ? "" : String(row[by]);
       return { label: name.slice(0, 40), value: row[v] };
     });
     if (time !== undefined) points.sort(function (a, b) { return Date.parse(a.label) - Date.parse(b.label); });
-    if (points.length < 2) return null;
+    if (points.length < (time !== undefined ? 3 : 2)) return null;
+    if (time === undefined) {
+      // Bars name each category once, by a person's name, never a slug or an id.
+      var labels = points.map(function (p) { return p.label; });
+      var SLUG = /^[a-z0-9]+(-[a-z0-9]+){2,}$|^urn:/i;
+      if (labels.some(function (l) { return !l.trim() || SLUG.test(l); })) return null;
+      if (labels.some(function (l, i) { return labels.indexOf(l) !== i; })) return null;
+      // No total drawn beside its own parts: one bar that is the sum of the others.
+      var sum = points.reduce(function (a, p) { return a + p.value; }, 0);
+      if (points.length > 2 && points.some(function (p) { return Math.abs(p.value * 2 - sum) <= Math.abs(p.value) * 0.005; })) return null;
+    }
     return { kind: time !== undefined ? "line" : "bar", value: String(data.columns[v]), by: String(data.columns[by]), points: points };
   }
 
