@@ -32,6 +32,8 @@ const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
 const REGION_SLUG: &str = "regionabcdefghijklmnopqrstuvwxy";
 /// An Endpoint of a project no deployment's scope names.
 const ELSEWHERE_SLUG: &str = "elsewhereabcdefghijklmnopqrstuv";
+/// The deployment's catalogue Endpoint, `hronov/catalog`.
+const CATALOG_SLUG: &str = "catalogabcdefghijklmnopqrstuvwx";
 const PORTAL_TOKEN: &str = "the-portals-token";
 const PERSON_TOKEN: &str = "the-persons-own-token";
 
@@ -214,6 +216,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 title: None,
             },
         ),
+        (("hronov".into(), "catalog".into()), public(CATALOG_SLUG)),
         (
             ("hronov".into(), "interne".into()),
             EndpointRef {
@@ -600,6 +603,78 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
         named(&events, "followups"),
         [json!({"questions": ["Kde je NO2 najvyššie?"]})],
         "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4746: "which organizations publish?" reads the catalogue's Organizations; a catalogue that
+/// lists none answers "none" in the question's language, and no answer call guesses at it.
+#[tokio::test]
+async fn an_empty_catalogue_answers_none_without_an_answer_call() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[1] = Connector {
+        endpoint: "catalog".into(),
+        tools: vec!["list_types".into(), "query_entities".into()],
+        timeout_seconds: 5,
+    };
+    let w = world("chatcatalognone", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{CATALOG_SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .mount(&w.gateway).await;
+    let types = json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["Dataset", "Organization"]}});
+    let answer = |text: String| {
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}]
+        }}))
+    };
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(answer(types.to_string()))
+        .mount(&w.gateway)
+        .await;
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(answer(json!({"entities": []}).to_string()))
+        .mount(&w.gateway)
+        .await;
+    script_routed(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": [], "data": []}).to_string()}),
+            400,
+        )],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 100)],
+        vec![completion(json!({"role": "assistant", "content": "Publikuje ich mnoho."}), 300)],
+    )
+    .await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Ktoré organizácie publikujú dáta?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let answers: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "answer")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(
+        answers,
+        [&json!({"text": "Katalóg nezverejňuje žiadne organizácie."})],
+        "{events:?}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    assert!(
+        calls_of(&calls, None).is_empty(),
+        "no answer call: {calls:?}"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
