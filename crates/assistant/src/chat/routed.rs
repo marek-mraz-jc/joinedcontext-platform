@@ -23,6 +23,7 @@ use super::agent::{
     Turn,
 };
 use super::model::{Call, CallError, Completion};
+use super::publishers::{catalogue_read, is_catalogue, Publisher};
 use crate::{Hit, Search, CANDIDATES};
 
 /// The most search rounds one question runs.
@@ -1021,6 +1022,8 @@ pub struct AnswerCache {
     models: Mutex<HashMap<String, KeptModel>>,
     /// Each deployment's index digest, by name, for [`DIGEST_LIFE`] (T-4731).
     digests: Mutex<HashMap<String, (Instant, String)>>,
+    /// Each catalogue Endpoint's organizations, by slug, read while warming (T-4746).
+    publishers: Mutex<HashMap<String, (Instant, Vec<Publisher>)>>,
 }
 
 /// When a model was read, and the model.
@@ -1080,6 +1083,30 @@ impl AnswerCache {
             types.insert(slug.to_owned(), (Instant::now(), listed));
         }
         self.answered(slug);
+    }
+
+    /// The catalogue Endpoint's organizations, however old: one more listed since is a name the
+    /// next warming adds.
+    fn publishers_of(&self, slug: &str) -> Vec<Publisher> {
+        self.publishers
+            .lock()
+            .ok()
+            .and_then(|held| held.get(slug).map(|(_, listed)| listed.clone()))
+            .unwrap_or_default()
+    }
+
+    fn publishers_within(&self, slug: &str, life: Duration) -> bool {
+        self.publishers
+            .lock()
+            .ok()
+            .is_some_and(|held| held.get(slug).is_some_and(|(at, _)| at.elapsed() < life))
+    }
+
+    fn keep_publishers(&self, slug: &str, listed: Vec<Publisher>) {
+        if let Ok(mut held) = self.publishers.lock() {
+            // One entry per catalogue Endpoint, so it is bounded by the manifests.
+            held.insert(slug.to_owned(), (Instant::now(), listed));
+        }
     }
 
     /// The Endpoint's public `tools/list`, if it was listed less than `life` ago.
@@ -1395,7 +1422,29 @@ pub async fn warm(cache: &AnswerCache, http: &reqwest::Client, connectors: &[Con
                 }
             }
         });
+    let catalogues = connectors
+        .iter()
+        .filter(|c| is_catalogue(&c.endpoint) && offers(c, "query_entities"))
+        .filter(|c| !cache.publishers_within(&c.surface.slug, TYPES_REFRESH))
+        .map(|connector| async move {
+            let slug = &connector.surface.slug;
+            let listed = connector
+                .surface
+                .call(http, "query_entities", super::publishers::listing())
+                .await
+                .and_then(|text| {
+                    super::publishers::publishers_of(&text)
+                        .ok_or_else(|| "the answer is no list of entities".to_owned())
+                });
+            match listed {
+                Ok(listed) => cache.keep_publishers(slug, listed),
+                Err(why) => {
+                    tracing::warn!(endpoint = %connector.endpoint, %why, "the catalogue's organizations could not be read; the last list stands in")
+                }
+            }
+        });
     futures_util::future::join_all(listings).await;
+    futures_util::future::join_all(catalogues).await;
 }
 
 /// The Endpoint's `tools/list`. A public one (no person's token) is shared by every deployment
@@ -2799,7 +2848,14 @@ async fn opening<'a>(
     };
     let early = match &routed {
         Ok(reply) if !super::scope::routed_out(&reply.text) => {
-            Some(routing(&reply.text, q.question, live))
+            let routing = routing(&reply.text, q.question, live);
+            let read = catalogue_read(
+                q.question,
+                asks_for_datasets(q.question),
+                live,
+                &publishers(q.ask),
+            );
+            Some(super::publishers::routed(routing, read))
         }
         _ => None,
     };
@@ -3002,6 +3058,15 @@ fn first_judgement(
             (false, Vec::new())
         }
     }
+}
+
+/// The organizations of the deployment's catalogue connector, as warming last read them.
+fn publishers(ask: &Ask<'_>) -> Vec<Publisher> {
+    ask.connectors
+        .iter()
+        .find(|c| is_catalogue(&c.endpoint))
+        .map(|c| ask.cache.publishers_of(&c.surface.slug))
+        .unwrap_or_default()
 }
 
 /// The routed reads a connector of the deployment answers, in the router's order.
@@ -3899,6 +3964,76 @@ mod tests {
         // Known now, so a second warming asks neither: one call each in all.
         warm(&cache, &reqwest::Client::new(), &connectors[..1]).await;
         assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(2));
+    }
+
+    /// T-4746: warming reads the catalogue Endpoint's organizations once, through the same MCP
+    /// surface, and a question naming one of them is routed to one read by `refPublisher`.
+    #[tokio::test]
+    async fn warming_reads_the_catalogues_organizations_once_for_routing() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let text = |value: Value| json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": value.to_string()}]}});
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/cat/mcp"))
+            .and(body_partial_json(json!({"params": {"name": "list_types"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text(
+                json!({"typeList": ["DataService", "Dataset", "Organization"]}),
+            )))
+            .mount(&gateway)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/cat/mcp"))
+            .and(body_partial_json(
+                json!({"params": {"name": "query_entities", "arguments": {"type": ["Organization"]}}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(text(json!({"entities": [
+                {"id": "urn:ngsi-ld:Organization:hel-fi", "type": "Organization",
+                 "name": {"type": "Property", "value": "City of Helsinki"}},
+            ]}))))
+            .mount(&gateway)
+            .await;
+        let tool = |name: &str| super::super::mcp::Tool {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let connectors = [Connected {
+            endpoint: "slovensko/catalog".into(),
+            title: None,
+            surface: super::super::mcp::Surface {
+                gateway: gateway.uri(),
+                slug: "cat".into(),
+                timeout: Duration::from_secs(10),
+                token: None,
+            },
+            tools: vec![tool("list_types"), tool("query_entities")],
+            label: None,
+            siblings: Vec::new(),
+        }];
+        let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
+        warm(&cache, &http, &connectors).await;
+        warm(&cache, &http, &connectors).await;
+        assert_eq!(
+            gateway.received_requests().await.map(|r| r.len()),
+            Some(2),
+            "one type list and one organization read, however often warmed"
+        );
+        let (live, _) = live_of(&cache, &http, "sk/data", &connectors, None).await;
+        let read = catalogue_read(
+            "Aké dáta publikuje Helsinki?",
+            true,
+            &live,
+            &cache.publishers_of("cat"),
+        );
+        assert_eq!(
+            read.map(|r| (r.endpoint, r.kind, r.q)),
+            Some((
+                "slovensko/catalog".to_owned(),
+                "Dataset".to_owned(),
+                Some(r#"refPublisher=="urn:ngsi-ld:Organization:hel-fi""#.to_owned())
+            ))
+        );
     }
 
     /// T-4624: a list slower than routing's deadline misses the first question, warming keeps
