@@ -10,6 +10,7 @@
 //! tokenizer while it configures it, and the loaded service sat at 713 MB against 433 MB driven
 //! directly (T-3053), most of the 1 GB the whole service has (ADR-N-040 §3.8).
 
+use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -312,16 +313,56 @@ pub async fn embed_missing(
             break;
         }
         let (ids, texts): (Vec<i64>, Vec<String>) = rows.into_iter().unzip();
-        let vectors = embedder.passages(&texts).await?;
-        for (id, vector) in ids.iter().zip(&vectors) {
+        // A text the project already has a vector for (a footer, a how-to on every page) takes
+        // that vector, and one the batch holds twice is embedded once (T-4749): the model's time
+        // goes to text it has not read.
+        let mut literal: HashMap<String, String> = sqlx::query_as(
+            "SELECT DISTINCT ON (text) text, embedding::text FROM chunks \
+             WHERE embedding IS NOT NULL AND text = ANY($1)",
+        )
+        .bind(&texts)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        let mut fresh: Vec<String> = Vec::new();
+        for text in &texts {
+            if !literal.contains_key(text) && !fresh.contains(text) {
+                fresh.push(text.clone());
+            }
+        }
+        let vectors = embedder.passages(&fresh).await?;
+        for (text, vector) in fresh.into_iter().zip(&vectors) {
+            literal.insert(text, vector_literal(vector)?);
+        }
+        for (id, text) in ids.iter().zip(&texts) {
             sqlx::query("UPDATE chunks SET embedding = $2::vector WHERE id = $1")
                 .bind(id)
-                .bind(vector_literal(vector)?)
+                .bind(literal.get(text))
                 .execute(&mut *tx)
                 .await?;
         }
         tx.commit().await?;
         done += ids.len();
+    }
+    Ok(done)
+}
+
+/// Embeds the chunks of `project` that have none, [`BATCH`] at a time, until none is left or
+/// `until` has passed; how many it embedded. A batch already begun is finished, so the budget
+/// is overrun by at most one batch (T-4749).
+pub async fn embed_until(
+    pool: &PgPool,
+    embedder: &Embedder,
+    project: &str,
+    until: Instant,
+) -> Result<usize, Error> {
+    let mut done = 0;
+    while Instant::now() < until {
+        match embed_missing(pool, embedder, project, BATCH as i64).await? {
+            0 => break,
+            embedded => done += embedded,
+        }
     }
     Ok(done)
 }
