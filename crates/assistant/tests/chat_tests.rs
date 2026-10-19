@@ -3905,6 +3905,84 @@ async fn a_direct_message_is_answered_without_a_search_a_read_or_a_step() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// T-4680: a broad read of a connector that offers `summarize` reads the type's profile beside
+/// its rows and the answer call gets both; a read narrowed by `q` reads the rows alone.
+#[tokio::test]
+async fn a_broad_read_gives_the_answer_the_types_profile_and_a_narrow_one_its_rows() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "summarize".into(),
+    ];
+    let w = world("chatprofile", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}, "q": {"type": "string"}, "limit": {"type": "integer", "maximum": 1000}}}},
+            {"name": "summarize", "description": "Profiles a type.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let profile = "type=AirQualityObserved count=2 basis=2 of 2 (all) computed=2026-10-19T00:00:00Z\nno2: n=2 min=21 max=34 mean=27.5 median=27.5";
+    mcp()
+        .and(body_string_contains("\"summarize\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": profile}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 300),
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"queries\": [], \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\", \"q\": \"no2>30\"}]}"}), 300),
+    ], vec![], vec![
+        streamed(&["Priemer NO2 je 27,5 [1]."], 300, 12),
+        streamed(&["Nad 30 je stanica [1]."], 300, 12),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Aké je priemerné NO2?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(events.iter().any(|(n, _)| n == "data"), "{events:?}");
+    let data = &events.iter().find(|(n, _)| n == "data").expect("data").1;
+    assert!(
+        data.get("profile").is_none(),
+        "the data event carries no profile: {data}"
+    );
+    assert_eq!(tool_calls_of(&w.gateway, "summarize").await.len(), 1);
+    let answers = calls_of(&model_calls(&w.proxy).await, None)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let sent = answers.last().map(ToString::to_string).unwrap_or_default();
+    assert!(sent.contains("mean=27.5"), "{sent}");
+
+    let (status, _, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 30?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tool_calls_of(&w.gateway, "summarize").await.len(),
+        1,
+        "a narrowed read reads no profile"
+    );
+    let answers = calls_of(&model_calls(&w.proxy).await, None)
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let sent = answers.last().map(ToString::to_string).unwrap_or_default();
+    assert!(!sent.contains("mean=27.5"), "{sent}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4680: a public Endpoint's tools are listed once for many questions, not once per question:
 /// a second question within the listing's life asks the gateway nothing to offer the connector.
 #[tokio::test]

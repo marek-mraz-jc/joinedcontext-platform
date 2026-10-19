@@ -171,6 +171,10 @@ pub struct Table {
     /// Each row's location, checked and rounded, for the maps; never sent as it is (T-4657).
     #[serde(skip)]
     pub geometries: Vec<Option<Value>>,
+    /// The broker's profile of the type (`summarize`, T-4680) when the read was broad: the answer
+    /// call reads it beside the first rows; the `data` event does not carry it.
+    #[serde(skip)]
+    pub profile: Option<String>,
 }
 
 /// Everything one question is answered with.

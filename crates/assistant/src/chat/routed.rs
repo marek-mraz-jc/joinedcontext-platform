@@ -64,6 +64,13 @@ const READ_ROWS: usize = 50;
 /// Rows of a table the answer call reads (Architecture/23 §4: data rows of about 600 tokens).
 const MODEL_ROWS: usize = 15;
 
+/// Rows the answer call reads beside a type's profile (T-4680): the profile holds the statistics.
+const PROFILE_ROWS: usize = 5;
+
+/// The longest profile the answer call reads; the broker renders at most 6,000 characters, so a
+/// longer answer is no profile and is left out.
+const PROFILE_CHARS: usize = 8_000;
+
 /// Columns of a table: the name first, then the entity's values in the order they come.
 const MAX_COLUMNS: usize = 8;
 
@@ -120,6 +127,7 @@ const ANSWER_RULES: &str = "You answer the questions of a city's residents from 
 - Name datasets and things in plain words of the question's language, like mosty or železničné zastávky: never a type name such as `Bridge`, an attribute name, a URN, an Endpoint name or the words NGSI-LD.\n\
 - Point only to the catalogue's publishers and their dataset pages; never send the person to other offices, ministries or portals.\n\
 - When some data could not be read in time, say so at most once, and never list what could not be read as if it were a finding.\n\
+- A data table may carry a `profile`: the data server's statistics of the type (count, and per attribute min, max, mean, median, the most common values, the area). Quote a statistic from the profile, never one you compute from the rows; when its `basis` covers fewer entities than all, say over how many, like \"podľa 1 000 z 10 000 záznamov\".\n\
 - A question about which data or datasets there are on a topic is answered with a short list of the matching datasets from the passages, grouped by publisher: each dataset's title, what it holds in a few words, and its link, citing it [n]; never rows of one dataset, never an Endpoint name.\n\
 - When the passages do not answer the question, say so in one sentence and point to the city's official contact; never describe or list the passages, datasets or Endpoint names you were given instead. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
@@ -1185,17 +1193,45 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
     };
     // A `q` the gateway refuses (an attribute the type lacks, a broken expression) costs the
     // narrowing, never the read.
-    let text = match call(wanted.q.as_deref()).await {
-        Err(why) if wanted.q.is_some() => {
-            tracing::info!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a read's q was refused; read without it");
-            call(None).await?
+    let rows = async {
+        match call(wanted.q.as_deref()).await {
+            Err(why) if wanted.q.is_some() => {
+                tracing::info!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a read's q was refused; read without it");
+                call(None).await
+            }
+            other => other,
         }
-        other => other?,
     };
+    let (text, profile) = tokio::join!(rows, profile_of(ask, connector, wanted));
     let asked = asked_of(&json!({ "q": wanted.q }));
-    table(ask, connector, kind, &text, &asked)
+    let mut table = table(ask, connector, kind, &text?, &asked)
         .await
-        .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())
+        .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())?;
+    table.profile = profile;
+    Ok(table)
+}
+
+/// The broker's profile of a broad read's type (`summarize`, T-4680), read beside its rows; `None`
+/// for a read with a `q`, a connector without the tool, a failure or an answer past
+/// [`PROFILE_CHARS`], and the answer then reads the rows alone.
+async fn profile_of(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Option<String> {
+    if wanted.q.is_some() || !offers(connector, "summarize") {
+        return None;
+    }
+    let text = connector
+        .surface
+        .call(ask.http, "summarize", json!({ "type": [wanted.kind] }))
+        .await
+        .map_err(|why| tracing::info!(deployment = %ask.deployment, endpoint = %connector.endpoint, %why, "a type's profile could not be read"))
+        .ok()?;
+    profile_text(&text)
+}
+
+/// A `summarize` answer's text as the answer call reads it; `None` when empty or past
+/// [`PROFILE_CHARS`].
+fn profile_text(answer: &str) -> Option<String> {
+    let text = answer.trim();
+    (!text.is_empty() && text.chars().count() <= PROFILE_CHARS).then(|| text.to_owned())
 }
 
 /// The entity type a `query_entities` call with `arguments` reads; `None` for any other tool.
@@ -1314,6 +1350,7 @@ pub(super) async fn table(
         geojson: None,
         map: None,
         geometries: super::viz::geometries(text, READ_ROWS),
+        profile: None,
     };
     // Polygon rows read their area and perimeter and draw a simpler outline (T-4697).
     if super::shape::measured(&mut table) && table.rows.len() == 1 {
@@ -2216,15 +2253,24 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
             title: None,
             cards: Vec::new(),
         });
-        data.push(json!({
+        let shown = if table.profile.is_some() {
+            PROFILE_ROWS
+        } else {
+            MODEL_ROWS
+        };
+        let mut read = json!({
             "n": n,
             "type": table.entity_type,
             "columns": table.columns,
-            "rows": &table.rows[..table.rows.len().min(MODEL_ROWS)],
+            "rows": &table.rows[..table.rows.len().min(shown)],
             "rowCount": table.rows.len(),
             "total": table.total,
             "endpointUrl": table.download,
-        }));
+        });
+        if let Some(profile) = &table.profile {
+            read["profile"] = json!(profile);
+        }
+        data.push(read);
     }
     (citations, passages, data)
 }
@@ -2633,6 +2679,7 @@ mod tests {
             geojson: None,
             map: None,
             geometries: Vec::new(),
+            profile: None,
         };
         let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table));
         let numbered: Vec<_> = citations
@@ -2658,6 +2705,39 @@ mod tests {
 
         let (citations, passages, data) = evidence(&[], &[]);
         assert!(citations.is_empty() && passages.is_empty() && data.is_empty());
+    }
+
+    /// T-4680: with the type's profile the answer reads it and the first five rows, the row count
+    /// still whole; a profile past its bound or empty is left out.
+    #[test]
+    fn a_profile_goes_to_the_answer_with_five_rows() {
+        let table = Table {
+            endpoint: "air".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["id".into()],
+            rows: (0..MODEL_ROWS + 3).map(|i| vec![json!(i)]).collect(),
+            units: vec![None],
+            labels: Vec::new(),
+            summary: Vec::new(),
+            enums: Vec::new(),
+            total: Some(900),
+            dataset: None,
+            download: None,
+            map: None,
+            geometries: Vec::new(),
+            profile: Some("type=AirQualityObserved count=900".into()),
+        };
+        let (_, _, data) = evidence(&[], std::slice::from_ref(&table));
+        assert_eq!(data[0]["rows"].as_array().map(Vec::len), Some(PROFILE_ROWS));
+        assert_eq!(data[0]["rowCount"], MODEL_ROWS + 3);
+        assert_eq!(data[0]["profile"], "type=AirQualityObserved count=900");
+        assert_eq!(
+            profile_text("  type=X count=1\n"),
+            Some("type=X count=1".into())
+        );
+        assert_eq!(profile_text(" \n "), None);
+        assert_eq!(profile_text(&"x".repeat(PROFILE_CHARS + 1)), None);
+        assert!(profile_text(&"x".repeat(PROFILE_CHARS)).is_some());
     }
 
     const NOW: &str = "Now: Friday 2026-10-16 12:05 UTC (2026-10-16T12:05Z).";

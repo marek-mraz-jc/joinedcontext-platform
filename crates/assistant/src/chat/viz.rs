@@ -439,6 +439,7 @@ mod tests {
                 Some(json!({"type": "Point", "coordinates": [19.12, 48.57]})),
                 None,
             ],
+            profile: None,
         }
     }
 
