@@ -308,7 +308,18 @@ test("a data table at 400 px shows the name and the first value", async ({ page 
   await expect(table.locator("th").nth(1)).toHaveText("PM10 (µg/m³)");
   await expect(table.locator("th").last()).toHaveText("Čas merania");
   await expect(table.locator("tbody tr").first().locator("td").nth(1)).toHaveText("21,5");
-  await expect(table.locator("tbody tr").nth(1).locator("td").nth(1)).toHaveText("–");
+  await expect(table.locator("tbody tr").nth(1).locator("td").nth(1)).toHaveText("");
+  // T-4682: the grid's padding comes from the tokens, smaller at a phone's width, and the text
+  // answer reads before its visuals.
+  expect(await table.locator("td").first().evaluate((td) => getComputedStyle(td).padding)).toBe("6px 8px");
+  expect(await page.evaluate(() => {
+    const answer = document.querySelector(".jc-bot .jc-answer");
+    const visuals = document.querySelector(".jc-bot .jc-visuals");
+    return Boolean(answer && visuals && answer.compareDocumentPosition(visuals) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), "the text comes first").toBe(true);
+  await page.setViewportSize({ width: 1024, height: 800 });
+  expect(await table.locator("td").first().evaluate((td) => getComputedStyle(td).padding)).toBe("8px 12px");
+  expect(await table.locator("th").first().evaluate((th) => getComputedStyle(th).position)).toBe("sticky");
   const scroll = await table.locator(".jc-data-scroll").boundingBox();
   const value = await table.locator("tbody tr").first().locator("td").nth(1).boundingBox();
   expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
@@ -458,7 +469,7 @@ test("the panel expands to the window and back: button, Escape, focus kept, the 
   await page.locator("[data-jc-assistant] .jc-launch").click();
   const chat = page.frameLocator("[data-jc-assistant] iframe");
   const size = chat.locator(".jc-size");
-  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await expect(size).toHaveAttribute("aria-label", "Full screen");
   await page.evaluate(() => window.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
   await page.frames().find((f) => f.url().startsWith("http://localhost")).evaluate(() =>
     window.parent.postMessage({ type: "jc-assistant-size", size: "full" }, "*"));
@@ -469,11 +480,9 @@ test("the panel expands to the window and back: button, Escape, focus kept, the 
   await expect(panel).toHaveClass(/jc-full/);
   await expect(size).toHaveAttribute("aria-label", "Collapse");
   await expect(size).toHaveAttribute("aria-pressed", "true");
+  // Full screen is the whole viewport (T-4682).
   const box = await panel.boundingBox();
-  expect(box.width).toBe(960);
-  expect(Math.round(box.x)).toBe(160);
-  expect(box.y).toBe(20);
-  expect(box.height).toBe(760);
+  expect([box.x, box.y, box.width, box.height]).toEqual(await page.evaluate(() => [0, 0, window.innerWidth, window.innerHeight]));
   await expect(page.locator("[data-jc-assistant] .jc-launch")).toBeHidden();
   // The page behind is inert and does not scroll.
   expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([true, "hidden"]);
@@ -491,7 +500,7 @@ test("the panel expands to the window and back: button, Escape, focus kept, the 
   await expect(panel).toBeVisible();
   expect((await panel.boundingBox()).width).toBe(420);
   expect(await page.evaluate(() => [document.querySelector("p").inert, document.documentElement.style.overflow])).toEqual([false, ""]);
-  await expect(size).toHaveAttribute("aria-label", "Expand");
+  await expect(size).toHaveAttribute("aria-label", "Full screen");
   await chat.locator("textarea").press("Escape");
   await expect(panel).toBeHidden();
 

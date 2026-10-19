@@ -102,6 +102,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
             feedback: true,
             widget: None,
             transcript_retention: None,
+            transcript_redaction: None,
             privacy: None,
         },
     }
@@ -184,6 +185,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         slug: slug.into(),
         audience: "public".into(),
         publisher: None,
+        space: String::new(),
         title: None,
     };
     snapshot.endpoints = BTreeMap::from([
@@ -194,6 +196,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,
+                space: String::new(),
                 title: None,
             },
         ),
@@ -204,6 +207,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: SLUG.into(),
                 audience: "public".into(),
                 publisher: None,
+                space: String::new(),
                 title: None,
             },
         ),
@@ -213,6 +217,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,
+                space: String::new(),
                 title: None,
             },
         ),
@@ -1026,21 +1031,20 @@ async fn budgets_and_failures_reach_the_person_as_sentences() {
         .up_to_n_times(1)
         .mount(&w.proxy)
         .await;
-    // T-4286: a day the proxy refuses is answered as search, never as a refusal.
+    // T-4671: a day the proxy refuses mid-loop is the day's limit, never a quiet switch.
     let (_, events, _) = answer_of(&w.app, ask_looped(json!({"message": "Ahoj"}))).await;
-    assert!(
-        events.iter().all(|(n, _)| n != "error"),
-        "no refusal: {events:?}"
-    );
-    let answer = events
+    let error = &events
         .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("a search answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("denný rozpočet"), "{answer}");
+        .find(|(n, _)| n == "error")
+        .expect("the day's limit")
+        .1;
+    assert_eq!(error["title"], "Daily Limit Reached", "{events:?}");
+    assert!(
+        events
+            .iter()
+            .all(|(n, _)| n != "answer" && n != "citations"),
+        "{events:?}"
+    );
 
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -2637,11 +2641,42 @@ async fn the_owner_s_limits_hold_before_any_model_call() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4149: the provider's cost of each answer adds up per day; once it reaches
-/// `budget.costPerDayUsd` the chat answers as search, the matching pages as citations under a
-/// Slovak sentence, and asks the model nothing more that day.
+/// T-4671: a capped question's whole stream is the limit and `done`: no answer, citation, card,
+/// table, follow-up or step, and no model call or search behind it (owner 2026-10-18).
+fn only_the_limit(events: &[(String, Value)], title: &str) -> String {
+    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["error", "done"], "{events:?}");
+    let error = &events[0].1;
+    assert_eq!(error["title"], title, "{events:?}");
+    without_internals(&events[1].1);
+    assert!(
+        events[1].1["stagesMs"]
+            .as_object()
+            .is_none_or(|s| s.is_empty()),
+        "nothing ran: {events:?}"
+    );
+    let detail = error["detail"].as_str().expect("a sentence").to_owned();
+    for internal in ["USD", "$", "0.01", "cost"] {
+        assert!(!detail.contains(internal), "{detail}");
+    }
+    detail
+}
+
+/// Whether a stream is a limit's refusal.
+fn limited(events: &[(String, Value)]) -> bool {
+    events.iter().any(|(n, d)| {
+        n == "error"
+            && d["title"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("Limit Reached"))
+    })
+}
+
+/// T-4149, T-4671: the provider's cost of each answer adds up per day; once it reaches
+/// `budget.costPerDayUsd` the chat refuses with the day's limit and when it resets, and asks the
+/// model nothing more that day.
 #[tokio::test]
-async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
+async fn past_the_day_s_cost_cap_the_chat_says_the_limit_and_nothing_else() {
     let mut capped = deployment(Channel::Public, 1_000_000, 10);
     if let Some(budget) = capped.spec.budget.as_mut() {
         budget.cost_per_day_usd = 0.01;
@@ -2655,8 +2690,10 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
         }))],
     )
     .await;
+    // A question that already started finishes its answer call past the cap.
     let (status, first, _) = answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
     assert_eq!(status, StatusCode::OK);
+    assert!(!limited(&first), "{first:?}");
     // T-4178, T-4654: the day's cost is kept below; a visitor's stream does not carry it.
     let done = &first.last().expect("a done event").1;
     without_internals(done);
@@ -2673,30 +2710,24 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
 
     let (status, events, _) = answer_of(
         &w.app,
-        ask(
+        ask_from(
             json!({"message": "Dokedy je otvorená knižnica?"}),
             Some(ORIGIN),
+            "203.0.113.9",
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(
-        names,
-        ["conversation", "answer", "citations", "done"],
-        "{events:?}"
+    let detail = only_the_limit(&events, "Daily Limit Reached");
+    assert!(
+        detail.starts_with("Asistent dnes dosiahol denný limit. Skúste to znova "),
+        "{detail}"
     );
-    let answer = events[1].1["text"].as_str().expect("an answer");
-    assert!(answer.contains("denný rozpočet"), "{answer}");
-    let citations = events[2].1.as_array().expect("citations");
-    assert!(!citations.is_empty(), "the search found the library's page");
-    for (at, citation) in citations.iter().enumerate() {
-        assert!(citation["url"]
-            .as_str()
-            .is_some_and(|u| u.starts_with("http")));
-        assert!(answer.contains(&format!("[{}]", at + 1)), "{answer}");
-    }
-    without_internals(&events[3].1);
+    assert!(
+        detail.contains(" po ") && detail.ends_with(":00."),
+        "{detail}"
+    );
+    assert_eq!(events[0].1["status"], 429);
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         before,
@@ -2705,11 +2736,10 @@ async fn past_the_day_s_cost_cap_the_chat_answers_as_search() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4286: at 08:25Z on 2026-10-16 every visitor of the public assistant read "used up today's
-/// answers": the proxy's `tokensPerDay` refused the router call. Such a day now answers as
-/// search with the pages as links, like the cost cap, and nobody reads a refusal.
+/// T-4286, T-4671: a day the proxy's `tokensPerDay` refuses is the same limit, never links and
+/// never the proxy's own words.
 #[tokio::test]
-async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
+async fn a_day_the_proxy_refuses_is_the_day_s_limit() {
     let w = world("chatproxyday", deployment(Channel::Public, 1_000_000, 10)).await;
     Mock::given(method("POST"))
         .and(path("/v1/llm/chat/completions"))
@@ -2727,34 +2757,33 @@ async fn a_day_the_proxy_refuses_answers_with_links_not_a_refusal() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(events.iter().all(|(n, _)| n != "error"), "{events:?}");
-    let answer = events
+    let error = &events
         .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("an answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("Tu sú stránky"), "{answer}");
-    assert!(!answer.contains("vyčerpané"), "{answer}");
-    let citations = &events
-        .iter()
-        .find(|(n, _)| n == "citations")
-        .expect("citations")
+        .find(|(n, _)| n == "error")
+        .expect("the day's limit")
         .1;
+    assert_eq!(error["title"], "Daily Limit Reached", "{events:?}");
     assert!(
-        citations.as_array().is_some_and(|c| !c.is_empty()),
-        "the library's page as a link: {events:?}"
+        !error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tokensPerDay"),
+        "{error}"
     );
+    for kept_out in ["answer", "citations", "followups", "delta"] {
+        assert!(
+            events.iter().all(|(n, _)| n != kept_out),
+            "{kept_out}: {events:?}"
+        );
+    }
     assert_eq!(events.last().map(|(n, _)| n.as_str()), Some("done"));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-4286: a visitor past `perClientPerMonth` gets links and the day it resets, without a model
-/// call, while another visitor is still answered by the model.
+/// T-4286, T-4671: a visitor past `perClientPerMonth` reads the month's limit and the day it
+/// resets, without a model call, while another visitor is still answered by the model.
 #[tokio::test]
-async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
+async fn a_visitor_past_their_month_reads_when_it_resets_and_others_are_answered() {
     let mut monthly = deployment(Channel::Public, 1_000_000, 10);
     if let Some(rate) = monthly.spec.rate_limit.as_mut() {
         rate.per_client_per_month = 1;
@@ -2773,46 +2802,100 @@ async fn a_visitor_past_their_month_gets_links_and_others_are_answered() {
     .await;
     let from =
         |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
-    // Whatever the model makes of it, the first question of the month is the model's.
-    let month_said = |events: &[(String, Value)]| {
-        events.iter().any(|(n, d)| {
-            n == "answer"
-                && d["text"]
-                    .as_str()
-                    .is_some_and(|t| t.contains("Tento mesiac"))
-        })
-    };
     let (status, first, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!month_said(&first), "{first:?}");
+    assert!(!limited(&first), "{first:?}");
     let calls = model_calls(&w.proxy).await.len();
     assert!(calls > 0, "the first question asks the model");
 
     let (status, second, _) =
         answer_of(&w.app, from("203.0.113.7", "Dokedy je otvorená knižnica?")).await;
-    assert_eq!(status, StatusCode::OK, "never a refusal");
-    let answer = second
-        .iter()
-        .find(|(n, _)| n == "answer")
-        .expect("an answer")
-        .1["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_owned();
-    assert!(answer.contains("Tento mesiac"), "{answer}");
-    assert!(answer.contains("znova tak odpovedá od 1. "), "{answer}");
+    assert_eq!(status, StatusCode::OK);
+    let detail = only_the_limit(&second, "Monthly Limit Reached");
     assert!(
-        second.last().expect("done").1.get("modelCalls").is_none(),
-        "T-4654"
+        detail.starts_with("Dosiahli ste mesačný limit otázok. Obnoví sa 1. "),
+        "{detail}"
     );
     assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
 
     let (_, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
-    assert!(!month_said(&other), "{other:?}");
+    assert!(!limited(&other), "{other:?}");
     assert!(
         model_calls(&w.proxy).await.len() > calls,
         "another visitor is answered by the model"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4653, T-4671: a visitor past their tenth of the day's cost is refused `429` until UTC
+/// midnight, under a title the chat offers no retry for; another visitor is still answered.
+#[tokio::test]
+async fn a_visitor_past_their_share_of_the_day_is_refused_until_midnight() {
+    let mut shared = deployment(Channel::Public, 1_000_000, 10);
+    if let Some(budget) = shared.spec.budget.as_mut() {
+        budget.cost_per_day_usd = 1.0;
+    }
+    let w = world("chatshare", shared).await;
+    let answered = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"role": "assistant", "content": "Áno."}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50, "cost": 0.2}
+        }))
+    };
+    script(&w.proxy, vec![answered(), answered(), answered()]).await;
+    let from =
+        |address: &str, message: &str| ask_from(json!({"message": message}), Some(ORIGIN), address);
+    let (status, _, _) = answer_of(&w.app, from("203.0.113.7", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    let calls = model_calls(&w.proxy).await.len();
+
+    let (status, body, headers) = answer_of(&w.app, from("203.0.113.7", "A ešte?")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body:?}");
+    assert_eq!(body[0].1["title"], "Visitor Limit Reached");
+    assert_eq!(
+        body[0].1["detail"],
+        "Dnes ste položili veľa otázok. Skúste to znova neskôr."
+    );
+    let retry: u64 = headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .expect("Retry-After");
+    assert!((1..=86_400).contains(&retry), "{retry}");
+    assert_eq!(model_calls(&w.proxy).await.len(), calls, "no model call");
+
+    let (status, other, _) = answer_of(&w.app, from("203.0.113.8", "Ahoj")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!limited(&other), "{other:?}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4671: today's spend that cannot be read refuses the question (fail closed) rather than
+/// answering past a cap nobody can see.
+#[tokio::test]
+async fn an_unreadable_day_refuses_rather_than_answering() {
+    let w = world("chatspendgone", deployment(Channel::Public, 1_000_000, 10)).await;
+    // The database's owner takes the day's table away, so the service cannot read the spend.
+    let url = std::env::var("JC_ASSISTANT_TEST_DATABASE_URL").expect("the test database");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("a database URL");
+    let owner = PgPool::connect_with(options.database(&w.name))
+        .await
+        .expect("the owner connects");
+    sqlx::query("ALTER TABLE usage RENAME TO usage_gone")
+        .execute(&owner)
+        .await
+        .expect("the usage table is renamed");
+    owner.close().await;
+    let (status, events, _) =
+        answer_of(&w.app, ask(json!({"message": "Ahoj"}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    let detail = only_the_limit(&events, "Assistant Unavailable");
+    assert_eq!(
+        detail,
+        "Asistent je dočasne nedostupný. Skúste to o chvíľu."
+    );
+    assert_eq!(events[0].1["status"], 503);
+    assert!(model_calls(&w.proxy).await.is_empty(), "no model call");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -4056,13 +4139,14 @@ async fn a_visitor_token_is_earned_by_a_proof_and_counts_one_visitor() {
         "a second visitor behind the same address has their own minute"
     );
     // The month is the address's (integrator review): the fourth question of the address spends
-    // it, and a token minted after is answered as search, with no model call.
+    // it, and a token minted after reads the month's limit, with no model call.
     assert_eq!(answer_of(&w.app, with(&second)).await.0, StatusCode::OK);
     // However many calls a question makes (the router, the answer), the four made some.
     let spent = model_calls(&w.proxy).await.len();
     assert!(spent >= 4, "{spent}");
     let (status, body, _) = answer_of(&w.app, with(&third)).await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
+    only_the_limit(&body, "Monthly Limit Reached");
     assert_eq!(
         model_calls(&w.proxy).await.len(),
         spent,

@@ -1,6 +1,8 @@
 //! The stored transcripts of a deployment's conversations (T-4670, AG-99, API/05 §3.1): a turn
 //! and its steps read back as written, every text redacted, a timed-out turn kept with its
-//! steps, the cost of a conversation the sum of its steps, the retention sweep and the erasure.
+//! steps, the cost of a conversation the sum of its steps, the retention sweep and the erasure;
+//! since T-4681 a turn verbatim but for its secrets, every step whole, the turns of the same
+//! question, and the feedback of another project never counted.
 
 #[path = "common/db.rs"]
 mod db;
@@ -75,6 +77,8 @@ fn record<'a>(
         total_ms: 2400,
         timed_out: false,
         days: 30,
+        // The T-4670 cases below are a deployment of `transcriptRedaction: personal`.
+        personal: true,
     }
 }
 
@@ -314,6 +318,185 @@ async fn the_sweep_drops_expired_turns_and_erase_drops_one_conversation() {
         .expect("lists");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["id"], LATE);
+
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-4681: under the default `secrets`, the question and the answer read back as typed and
+/// answered, a secret masked; a model step keeps its cache, reasoning and prompt version, the
+/// visuals and the untracked time are steps; `same` finds the other askings of a question in
+/// this project only; another project's verdict is never counted; a search for SQL
+/// metacharacters matches them literally.
+#[tokio::test]
+async fn a_turn_is_kept_verbatim_with_every_step_and_the_same_question_is_found() {
+    let (admin, pool, name) = db::database("transcript_verbatim").await;
+    let shown = seen(&[Event::Answer(
+        "Píšte na podatelna@hronov.example, tel. 0905 123 456.".into(),
+    )]);
+    let mut thinking = model("answer", Some(900));
+    thinking.cached_tokens = Some(640);
+    thinking.reasoning = Some("Hľadám úradné hodiny; heslo: tajne123".into());
+    thinking.finish_reason = Some("stop".into());
+    thinking.effort = Some("low".into());
+    thinking.prompt_version = Some("0a1b2c3d4e5f".into());
+    let visual = Step {
+        kind: "visual",
+        name: "chart".into(),
+        input: Some("{\"mark\":\"bar\"}".into()),
+        rows: Some(3),
+        status: "ok",
+        start_ms: 1_000,
+        ..Step::default()
+    };
+    let gap = Step {
+        kind: "untracked",
+        name: "untracked".into(),
+        status: "ok",
+        duration_ms: 80,
+        ..Step::default()
+    };
+    let steps = [gap, thinking, visual];
+    let question =
+        "Kedy má úrad otvorené? Moje číslo je 0905 123 456, token Bearer abcdefghijklmnop1234";
+    let first = Record {
+        personal: false,
+        ..record(RAG, question, &shown, &steps)
+    };
+    transcript::store(&pool, &first).await.expect("stored");
+    let again = Record {
+        personal: false,
+        ..record(DATA, "kedy MÁ úrad   otvorene", &shown, &[])
+    };
+    transcript::store(&pool, &again).await.expect("stored");
+    let other = Record {
+        personal: false,
+        ..record(LATE, "Kde je knižnica?", &shown, &[])
+    };
+    transcript::store(&pool, &other).await.expect("stored");
+
+    let back = stored(&pool, RAG).await;
+    let turn = &back["turns"][0];
+    assert_eq!(
+        turn["question"],
+        "Kedy má úrad otvorené? Moje číslo je 0905 123 456, token [token]"
+    );
+    assert_eq!(
+        turn["answer"],
+        "Píšte na podatelna@hronov.example, tel. 0905 123 456."
+    );
+    let steps = turn["steps"].as_array().expect("steps");
+    assert_eq!(
+        steps.iter().map(|s| s["kind"].clone()).collect::<Vec<_>>(),
+        ["untracked", "model", "visual"]
+    );
+    assert_eq!(steps[1]["cachedTokens"], 640);
+    assert_eq!(
+        steps[1]["reasoning"],
+        "Hľadám úradné hodiny; heslo: [heslo]"
+    );
+    assert_eq!(
+        (steps[1]["finishReason"].clone(), steps[1]["effort"].clone()),
+        (json!("stop"), json!("low"))
+    );
+    assert_eq!(steps[1]["promptVersion"], "0a1b2c3d4e5f");
+    assert_eq!(
+        (steps[2]["name"].clone(), steps[2]["rows"].clone()),
+        (json!("chart"), json!(3))
+    );
+
+    let found = transcript::same(&pool, PROJECT, RAG, 1)
+        .await
+        .expect("reads")
+        .expect("the turn is stored");
+    let mut asked: Vec<&str> = found
+        .iter()
+        .filter_map(|t| t["conversation"].as_str())
+        .collect();
+    asked.sort_unstable();
+    // The masked question still has its own words: the token is no part of a different asking.
+    assert_eq!(asked, [RAG], "{found:?}");
+    let found = transcript::same(&pool, PROJECT, DATA, 1)
+        .await
+        .expect("reads")
+        .expect("stored");
+    assert_eq!(
+        found.len(),
+        1,
+        "case, accents and spacing aside it is one question: {found:?}"
+    );
+    let plain = Record {
+        personal: false,
+        ..record(
+            "55555555-5555-4555-8555-555555555555",
+            "Kedy má úrad otvorené?",
+            &shown,
+            &[],
+        )
+    };
+    transcript::store(&pool, &plain).await.expect("stored");
+    let found = transcript::same(&pool, PROJECT, DATA, 1)
+        .await
+        .expect("reads")
+        .expect("stored");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found
+        .iter()
+        .all(|t| t["steps"].is_i64() && t["deployment"] == "obcan"));
+    assert_eq!(
+        transcript::same(&pool, "elsewhere", DATA, 1)
+            .await
+            .expect("reads"),
+        None
+    );
+    assert_eq!(
+        transcript::same(&pool, PROJECT, DATA, 2)
+            .await
+            .expect("reads"),
+        None
+    );
+
+    // Another project's verdict on the same conversation id is not this project's.
+    let owner = sqlx::PgPool::connect_with(
+        std::env::var("JC_ASSISTANT_TEST_DATABASE_URL")
+            .expect("the test database")
+            .parse::<sqlx::postgres::PgConnectOptions>()
+            .expect("parses")
+            .database(&name),
+    )
+    .await
+    .expect("connect as the owner");
+    let mut tx = owner.begin().await.expect("a transaction");
+    sqlx::query("SELECT set_config('jc.project', 'elsewhere', true)")
+        .execute(&mut *tx)
+        .await
+        .expect("scoped");
+    sqlx::query("INSERT INTO feedback (project, deployment, conversation, turn, verdict) VALUES ('elsewhere', 'obcan', $1::uuid, 1, 'up')")
+        .bind(LATE)
+        .execute(&mut *tx)
+        .await
+        .expect("a verdict elsewhere");
+    tx.commit().await.expect("committed");
+    owner.close().await;
+    let (items, _) = transcript::list(&pool, PROJECT, &Filter::default())
+        .await
+        .expect("lists");
+    let late = items.iter().find(|i| i["id"] == LATE).expect("listed");
+    assert_eq!(late["thumbsUp"], 0);
+    assert_eq!(
+        stored(&pool, LATE).await["turns"][0]["verdict"],
+        Value::Null
+    );
+
+    for q in ["' OR 1=1 --", "%%", "__", "\\"] {
+        let filter = Filter {
+            q: Some(q.into()),
+            ..Filter::default()
+        };
+        let (items, _) = transcript::list(&pool, PROJECT, &filter)
+            .await
+            .expect("lists");
+        assert!(items.is_empty(), "{q} matched {items:?}");
+    }
 
     db::drop_database(admin, pool, &name).await;
 }

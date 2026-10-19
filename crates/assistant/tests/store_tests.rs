@@ -13,8 +13,8 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    endpoint_page, hybrid_search, project_scope, search_projects, sources_by_project, titles,
-    Search, DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, endpoint_page, hybrid_search, project_scope,
+    search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -491,6 +491,24 @@ async fn a_citation_is_named_from_the_deployments_own_pages() {
         Some("https://gw.example/api/endpoint/od-air/schema/index.json"),
         "with no dataset page the Endpoint's own page is still named"
     );
+    // T-4625: rows of type A read through another Endpoint of the space cite the dataset page
+    // whose NGSI-LD example serves A from a sibling; another type or no sibling finds nothing.
+    let siblings = ["od-all".to_owned(), "od-air".to_owned()];
+    let typed = dataset_page(&mut tx, &siblings, "A", &both, true)
+        .await
+        .expect("page");
+    assert_eq!(typed.as_deref(), Some("https://hel-ckan.example/#0"));
+    let projects = [("helsinki".to_owned(), both.to_vec())];
+    for (slugs, kind, found) in [
+        (&siblings[..], "A", Some("https://hel-ckan.example/#0")),
+        (&siblings[..], "B", None),
+        (&siblings[..1], "A", None),
+    ] {
+        let page = dataset_page_projects(&pool, slugs, kind, &projects, true)
+            .await
+            .expect("page");
+        assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
+    }
     tx.rollback().await.expect("rollback");
     drop_database(admin, pool, &name).await;
 }

@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use super::agent::Event;
 
 /// What a model call came back with.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Completion {
     /// The answer's text, empty when the model only asked for tools.
     pub text: String,
@@ -33,9 +33,44 @@ pub struct Completion {
     /// Why the call ended (`choices[0].finish_reason`: `stop`, `length`, `content_filter`, …),
     /// when the provider says (T-4370).
     pub finish: Option<String>,
+    /// The prompt tokens the provider read from its cache
+    /// (`usage.prompt_tokens_details.cached_tokens`, T-4681), when it reports them.
+    pub cached: Option<u64>,
+    /// The model's reasoning text as the provider returned it (`reasoning`, else the texts of
+    /// `reasoning_details`), at most [`THOUGHT_BYTES`]; `None` when it returned none (T-4681).
+    pub thought: Option<String>,
+    /// The call's reasoning effort as sent (`low`, `none`, …) and the first 12 hex digits of the
+    /// SHA-256 of its system message, which names the prompt's version (T-4681).
+    pub effort: Option<String>,
+    pub prompt: Option<String>,
 }
 
+/// The most bytes of a call's reasoning text kept (T-4681).
+pub const THOUGHT_BYTES: usize = 64 * 1024;
+
 impl Completion {
+    /// This completion with the effort and the prompt version of the request `body` it answers.
+    fn of(mut self, body: &Value) -> Self {
+        self.effort = match body.get("reasoning") {
+            Some(r) if r.get("enabled") == Some(&Value::Bool(false)) => Some("none".to_owned()),
+            Some(r) => r.get("effort").and_then(Value::as_str).map(str::to_owned),
+            None => None,
+        };
+        self.prompt = body
+            .pointer("/messages/0")
+            .filter(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+            .and_then(|m| m.get("content"))
+            .map(|content| {
+                use sha2::Digest;
+                let text = content
+                    .as_str()
+                    .map_or_else(|| content.to_string(), str::to_owned);
+                let digest = sha2::Sha256::digest(text.as_bytes());
+                digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+            });
+        self
+    }
+
     /// Whether the provider stopped the answer for its content (a safety stop, T-4370).
     pub fn declined(&self) -> bool {
         self.finish.as_deref() == Some("content_filter")
@@ -54,6 +89,38 @@ fn finish_reason(chunk: &Value) -> Option<String> {
         && reason.len() <= 32
         && reason.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
     .then(|| reason.to_owned())
+}
+
+/// `usage.prompt_tokens_details.cached_tokens`, when reported.
+fn cached_tokens(usage: &Value) -> Option<u64> {
+    usage
+        .pointer("/prompt_tokens_details/cached_tokens")?
+        .as_u64()
+}
+
+/// The reasoning text of a message or a stream delta: its `reasoning`, else the `text` (or
+/// `summary`) of each `reasoning_details` entry, joined.
+fn reasoning_text(message: &Value) -> Option<String> {
+    if let Some(text) = message.get("reasoning").and_then(Value::as_str) {
+        return (!text.is_empty()).then(|| text.to_owned());
+    }
+    let joined: String = message
+        .get("reasoning_details")?
+        .as_array()?
+        .iter()
+        .filter_map(|d| d.get("text").or_else(|| d.get("summary"))?.as_str())
+        .collect();
+    (!joined.is_empty()).then_some(joined)
+}
+
+/// `text` with `more` appended, the whole held to [`THOUGHT_BYTES`] on a character boundary.
+fn append_thought(text: &mut String, more: &str) {
+    for c in more.chars() {
+        if text.len() + c.len_utf8() > THOUGHT_BYTES {
+            return;
+        }
+        text.push(c);
+    }
 }
 
 /// `usage.completion_tokens_details.reasoning_tokens`, when reported.
@@ -262,8 +329,8 @@ impl Model {
             }
         }
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let body: Value = answer.json().await.unwrap_or(Value::Null);
-        parse(&body).ok_or_else(|| {
+        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
     }
@@ -279,8 +346,8 @@ impl Model {
     ) -> Result<Completion, CallError> {
         let body = self.body(call, messages, false);
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let body: Value = answer.json().await.unwrap_or(Value::Null);
-        parse(&body).ok_or_else(|| {
+        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
     }
@@ -304,8 +371,8 @@ impl Model {
             }
         }
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let body: Value = answer.json().await.unwrap_or(Value::Null);
-        parse(&body).ok_or_else(|| {
+        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
     }
@@ -338,7 +405,7 @@ impl Model {
         let completion = reader.finish().ok_or_else(|| {
             unavailable(deployment, "the provider's stream ended without an answer")
         })?;
-        Ok((completion, first))
+        Ok((completion.of(&body), first))
     }
 
     fn body(&self, call: &Call<'_>, messages: &[Value], stream: bool) -> Value {
@@ -403,8 +470,8 @@ impl Model {
 pub const MODEL_UNREACHABLE: &str =
     "Asistent sa teraz nevie spojiť so svojím modelom. Skúste to o minútu znova.";
 pub const MODEL_DID_NOT_ANSWER: &str = "Model asistenta neodpovedal. Skúste to o minútu znova.";
-/// Why the proxy refused, for the log: a visitor never reads it, the chat answers as search
-/// instead (T-4286).
+/// Why the proxy refused, for the log: a visitor never reads it, they read the day's limit
+/// (T-4671).
 pub const DAY_SPENT: &str = "the model proxy refused the deployment's day (budget.tokensPerDay)";
 pub const CONVERSATION_SPENT: &str =
     "Tento rozhovor už minul svoj podiel asistenta. Ak sa chcete pýtať ďalej, začnite nový rozhovor.";
@@ -444,6 +511,8 @@ pub struct StreamReader {
     provider: Option<String>,
     reasoning: Option<u64>,
     finish: Option<String>,
+    cached: Option<u64>,
+    thought: String,
     chunks: usize,
 }
 
@@ -486,6 +555,10 @@ impl StreamReader {
             self.total = count("total_tokens").or(self.total);
             self.cost_micros = cost_micros(usage).or(self.cost_micros);
             self.reasoning = reasoning_tokens(usage).or(self.reasoning);
+            self.cached = cached_tokens(usage).or(self.cached);
+        }
+        if let Some(thought) = chunk.pointer("/choices/0/delta").and_then(reasoning_text) {
+            append_thought(&mut self.thought, &thought);
         }
         let piece = chunk.pointer("/choices/0/delta/content")?.as_str()?;
         if piece.is_empty() {
@@ -511,6 +584,10 @@ impl StreamReader {
             provider: self.provider,
             reasoning: self.reasoning,
             finish: self.finish,
+            cached: self.cached,
+            thought: (!self.thought.is_empty()).then_some(self.thought),
+            effort: None,
+            prompt: None,
         })
     }
 }
@@ -556,12 +633,73 @@ pub fn parse(body: &Value) -> Option<Completion> {
         provider: provider_name(body),
         reasoning: usage.and_then(reasoning_tokens),
         finish: finish_reason(body),
+        cached: usage.and_then(cached_tokens),
+        thought: reasoning_text(message).map(|t| {
+            let mut kept = String::new();
+            append_thought(&mut kept, &t);
+            kept
+        }),
+        effort: None,
+        prompt: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4681: the cached prompt tokens and the reasoning text are kept as the provider sent
+    /// them, in a reply and in a stream; none sent is `None`, never invented.
+    #[test]
+    fn a_call_keeps_its_cached_tokens_and_its_reasoning_text() {
+        let usage = json!({"prompt_tokens": 900, "completion_tokens": 40,
+            "prompt_tokens_details": {"cached_tokens": 640}});
+        let reply = parse(
+            &json!({"choices": [{"message": {"content": "Áno.", "reasoning": "Hľadám PM10."}}],
+            "usage": usage}),
+        )
+        .expect("a completion");
+        assert_eq!(reply.cached, Some(640));
+        assert_eq!(reply.thought.as_deref(), Some("Hľadám PM10."));
+        let details = parse(&json!({"choices": [{"message": {"content": "a",
+            "reasoning_details": [{"type": "reasoning.text", "text": "prvé "}, {"type": "reasoning.summary", "summary": "druhé"}]}}]}))
+        .expect("a completion");
+        assert_eq!(details.thought.as_deref(), Some("prvé druhé"));
+        let bare =
+            parse(&json!({"choices": [{"message": {"content": "a"}}]})).expect("a completion");
+        assert_eq!((bare.cached, bare.thought), (None, None));
+        let mut reader = StreamReader::default();
+        reader.feed(b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"Mysl\\u00edm\"}}]}\n");
+        reader.feed(
+            b"data: {\"choices\":[{\"delta\":{\"reasoning\":\".\",\"content\":\"Od 9.\"}}]}\n",
+        );
+        reader.feed(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n");
+        let streamed = reader.finish().expect("a completion");
+        assert_eq!(streamed.thought.as_deref(), Some("Myslím."));
+        assert_eq!(
+            (streamed.text.as_str(), streamed.cached),
+            ("Od 9.", Some(3))
+        );
+        let mut long = String::new();
+        append_thought(&mut long, &"ž".repeat(THOUGHT_BYTES));
+        assert!(long.len() <= THOUGHT_BYTES && long.len() > THOUGHT_BYTES - 2);
+    }
+
+    /// T-4681: the effort sent and the system message's hash travel with the completion.
+    #[test]
+    fn a_completion_names_its_effort_and_its_prompt_version() {
+        let body = json!({"reasoning": {"effort": "low"},
+            "messages": [{"role": "system", "content": "Odpovedaj stručne."}, {"role": "user", "content": "x"}]});
+        let done = Completion::default().of(&body);
+        assert_eq!(done.effort.as_deref(), Some("low"));
+        let version = done.prompt.expect("a version");
+        assert_eq!(version.len(), 12);
+        let other =
+            Completion::default().of(&json!({"messages": [{"role": "system", "content": "Iný."}]}));
+        assert_ne!(other.prompt.as_deref(), Some(version.as_str()));
+        let off = Completion::default().of(&json!({"reasoning": {"enabled": false}, "messages": [{"role": "user", "content": "x"}]}));
+        assert_eq!((off.effort.as_deref(), off.prompt), (Some("none"), None));
+    }
 
     /// T-4370: the reason a call ended is read from the stream's last chunk that names one and
     /// from a reply; only a normal stop (or none said) is whole, `content_filter` is declined.

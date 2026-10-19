@@ -309,12 +309,7 @@ pub async fn endpoint_page(
     sources: &[String],
     public_only: bool,
 ) -> Result<Option<String>, Error> {
-    let label = !slug.is_empty()
-        && slug.len() <= 63
-        && slug
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !label || sources.is_empty() {
+    if !is_slug(slug) || sources.is_empty() {
         return Ok(None);
     }
     let url: Option<String> = sqlx::query_scalar(
@@ -329,6 +324,81 @@ pub async fn endpoint_page(
     .fetch_optional(conn)
     .await?;
     Ok(url)
+}
+
+/// A slug the platform could have minted: a DNS label, so it goes into a pattern as itself.
+fn is_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 63
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// What a page publishing `kind` from one of `slugs` says (T-4625): the CKAN publisher writes
+/// each dataset's NGSI-LD example as `/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}`.
+/// `None` for a type name or slug that is not plain, or no slug at all.
+fn dataset_pattern(slugs: &[String], kind: &str) -> Option<String> {
+    let plain = (1..=100).contains(&kind.len())
+        && kind.starts_with(|c: char| c.is_ascii_alphabetic())
+        && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !plain || slugs.is_empty() || !slugs.iter().all(|s| is_slug(s)) {
+        return None;
+    }
+    Some(format!(
+        "/api/endpoint/({})/ngsi-ld/v1/entities\\?type={kind}([^A-Za-z0-9_]|$)",
+        slugs.join("|")
+    ))
+}
+
+/// The page of `sources`, not an Endpoint's own, that publishes `kind` from one of `slugs`: the
+/// CKAN dataset of the Endpoint over the same space that serves the type (T-4625).
+pub async fn dataset_page(
+    conn: &mut PgConnection,
+    slugs: &[String],
+    kind: &str,
+    sources: &[String],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    let Some(pattern) = dataset_pattern(slugs, kind) else {
+        return Ok(None);
+    };
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let url: Option<String> = sqlx::query_scalar(
+        "SELECT c.url FROM chunks c JOIN sites s ON s.id = c.site_id \
+         WHERE s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+         AND c.url !~ '/api/endpoint/' AND c.text ~ $1 ORDER BY c.id LIMIT 1",
+    )
+    .bind(pattern)
+    .bind(sources)
+    .bind(public_only)
+    .fetch_optional(conn)
+    .await?;
+    Ok(url)
+}
+
+/// [`dataset_page`] across the projects that hold the sources, in their order.
+pub async fn dataset_page_projects(
+    pool: &sqlx::PgPool,
+    slugs: &[String],
+    kind: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    if dataset_pattern(slugs, kind).is_none() {
+        return Ok(None);
+    }
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        let page = dataset_page(&mut tx, slugs, kind, names, public_only).await?;
+        tx.rollback().await?;
+        if page.is_some() {
+            return Ok(page);
+        }
+    }
+    Ok(None)
 }
 
 /// A deployment's sources by the project that holds them, its own project first: a source named
@@ -485,6 +555,33 @@ mod tests {
         assert!(website_sources("bbsk", &[], &sources).is_empty());
     }
     use super::*;
+
+    /// T-4625: the pattern matches a dataset's NGSI-LD example of the type from a sibling, and
+    /// neither another type that starts the same, another slug, nor a name that is not plain.
+    #[test]
+    fn a_dataset_is_found_by_its_type_from_an_endpoint_of_the_same_space() {
+        let slugs = ["bkc4".to_owned(), "w3st".to_owned()];
+        let pattern = dataset_pattern(&slugs, "Organization").expect("plain");
+        let compiled = regex::Regex::new(&pattern).expect("a pattern");
+        let re = |text: &str| compiled.is_match(text);
+        assert!(re("curl 'https://api.dev/api/endpoint/bkc4/ngsi-ld/v1/entities?type=Organization&limit=10'"));
+        assert!(re(
+            "/api/endpoint/w3st/ngsi-ld/v1/entities?type=Organization"
+        ));
+        assert!(!re(
+            "/api/endpoint/bkc4/ngsi-ld/v1/entities?type=OrganizationUnit"
+        ));
+        assert!(!re(
+            "/api/endpoint/other/ngsi-ld/v1/entities?type=Organization"
+        ));
+        assert!(!re(
+            "/api/endpoint/bkc4/ngsi-ld/v1/entitiesXtype=Organization"
+        ));
+        assert_eq!(dataset_pattern(&slugs, "Org.*"), None);
+        assert_eq!(dataset_pattern(&slugs, ""), None);
+        assert_eq!(dataset_pattern(&["a|b".to_owned()], "Organization"), None);
+        assert_eq!(dataset_pattern(&[], "Organization"), None);
+    }
 
     /// T-4663: the scope of a search is inlined into both rankings, never materialized.
     #[test]

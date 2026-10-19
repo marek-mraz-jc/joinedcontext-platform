@@ -38,9 +38,9 @@
     ".jc-panel{position:fixed;right:20px;bottom:88px;z-index:2147483000;width:420px;max-width:calc(100vw - 40px);" +
     "height:min(760px,calc(100vh - 108px));height:min(760px,calc(100dvh - 108px));" +
     "border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.3);background:#fff}" +
-    // Expanded (T-4658): the window less a 20 px gutter and the safe areas, at most 960 px wide.
-    ".jc-panel.jc-full{top:max(20px,env(safe-area-inset-top));bottom:max(20px,env(safe-area-inset-bottom));height:auto;" +
-    "left:max(20px,calc(50vw - 480px));right:max(20px,calc(50vw - 480px));width:auto;max-width:none}" +
+    // Expanded (T-4658, T-4682): the whole viewport, the safe areas as its padding.
+    ".jc-panel.jc-full{inset:0;width:100vw;width:100dvw;height:100vh;height:100dvh;max-width:none;border-radius:0;box-sizing:border-box;" +
+    "padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}" +
     ".jc-full~.jc-launch{display:none}" +
     ".jc-panel[hidden]{display:none}" +
     ".jc-panel iframe{width:100%;height:100%;border:0;display:block}" +
