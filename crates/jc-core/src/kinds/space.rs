@@ -69,10 +69,22 @@ impl Kind for ProjectSpec {
     const SCOPE: Scope = Scope::Organization;
     const PATH_TEMPLATE: &'static str = "projects/{name}/project.yaml";
 
-    fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
+    fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
+        if RESERVED_PROJECT_NAMES.contains(&meta.name.as_str()) {
+            return Err(Error::Name {
+                field: "metadata.name",
+                value: meta.name.clone(),
+                reason: "`d` and `me` are MCP addresses (/api/mcp/d/{publicId}, /api/mcp/me/{name}), never a project name",
+            });
+        }
         self.validate()
     }
 }
+
+/// The first segments of `/api/mcp/{project}/{name}` that address something other than a
+/// project's named server: an assistant's own server and a person's connectors (PF-67,
+/// ADR-N-055 §2.5, EP-123).
+pub const RESERVED_PROJECT_NAMES: &[&str] = &["d", "me"];
 
 impl ProjectSpec {
     /// Validates the organization reference and optional quotas.

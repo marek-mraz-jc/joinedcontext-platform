@@ -225,6 +225,21 @@ fn space_rejects_unknown_fields() {
     assert!(ContextSpace::from_yaml(&bad_space).is_err());
 }
 
+/// PF-67, ADR-N-055 §2.5: `d` and `me` address an assistant's and a person's MCP servers, so no
+/// project takes them; a name that only starts with them is fine.
+#[test]
+fn a_project_never_takes_an_mcp_address_segment() {
+    for reserved in ["d", "me"] {
+        let manifest = GOLDEN_PROJECT.replace("name: ovzdusie", &format!("name: {reserved}"));
+        let project = Project::from_yaml(&manifest).expect("the manifest parses");
+        let refused = project.validate().expect_err(reserved).to_string();
+        assert!(refused.contains("MCP addresses"), "{refused}");
+    }
+    let manifest = GOLDEN_PROJECT.replace("name: ovzdusie", "name: doprava");
+    let project = Project::from_yaml(&manifest).expect("the manifest parses");
+    assert!(project.validate().is_ok());
+}
+
 #[test]
 fn a_space_names_a_model_of_its_own_project_dm_61() {
     let own = GOLDEN_SPACE.replace(

@@ -173,6 +173,17 @@
           ],
           "description": "The router and answer models; the service's default when absent."
         },
+        "privacy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Privacy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whom a visitor asks about their data (T-4670)."
+        },
         "publicId": {
           "description": "The id in the widget's address, `/w/{publicId}`; a DNS label.",
           "type": "string"
@@ -249,6 +260,24 @@
             }
           ],
           "description": "How the chat looks."
+        },
+        "transcriptRedaction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TranscriptRedaction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What is masked in a turn before it is stored; `secrets` when absent (AG-99, T-4681)."
+        },
+        "transcriptRetention": {
+          "description": "How long each turn of a conversation is kept, `P{n}D` with `n` 0 to 365; `P90D` when absent, `P0D` keeps none (AG-99, T-4670, T-4681).",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "widget": {
           "anyOf": [
@@ -763,6 +792,27 @@
         }
       ]
     },
+    "Privacy": {
+      "additionalProperties": false,
+      "description": "Whom a visitor of an assistant asks about their data, shown in the widget's privacy panel (API/05 §1.6, T-4670).",
+      "properties": {
+        "contact": {
+          "description": "An e-mail address, at most 254 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "documentsUrl": {
+          "description": "An `https` page of the operator's privacy documents, at most 2,000 characters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ProviderRouting": {
       "additionalProperties": false,
       "description": "OpenRouter provider routing, sent as its `provider` request field (T-4292, MF-52).",
@@ -1152,6 +1202,25 @@
         }
       },
       "type": "object"
+    },
+    "TranscriptRedaction": {
+      "description": "What a stored turn has masked (AG-99, T-4681).",
+      "oneOf": [
+        {
+          "description": "Access tokens, API keys, passwords, private keys and card numbers; the rest verbatim.",
+          "enum": [
+            "secrets"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Those and e-mail addresses, phone numbers, IBANs and birth numbers.",
+          "enum": [
+            "personal"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "WidgetLanguage": {
       "description": "How the chat picks the language it opens in (T-4343).",

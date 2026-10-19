@@ -179,6 +179,7 @@ async fn world(test: &str) -> World {
         endpoint_base: None,
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,
@@ -355,6 +356,30 @@ async fn only_the_portals_service_account_is_answered() {
             "GET",
             format!("{k}/deployments/{{deployment}}/usage"),
             format!("{BASE}/deployments/obcania/usage"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/conversations"),
+            format!("{BASE}/conversations"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/conversations/{{conversation}}"),
+            format!("{BASE}/conversations/00000000-0000-4000-8000-000000000000"),
+            None,
+        ),
+        (
+            "DELETE",
+            format!("{k}/conversations/{{conversation}}"),
+            format!("{BASE}/conversations/00000000-0000-4000-8000-000000000000"),
+            None,
+        ),
+        (
+            "GET",
+            format!("{k}/conversations/{{conversation}}/turns/{{turn}}/same"),
+            format!("{BASE}/conversations/00000000-0000-4000-8000-000000000000/turns/1/same"),
             None,
         ),
         (
