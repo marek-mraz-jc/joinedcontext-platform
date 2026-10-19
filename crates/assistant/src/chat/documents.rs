@@ -148,6 +148,7 @@ const DESCRIBED: &str = r#"SELECT c.id, COALESCE(p.title, d.title) AS title,
        COALESCE(p.description, d.description) AS description,
        to_char(COALESCE(p.published, d.published) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS published,
        to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
+       to_char(COALESCE(p.fetched_at, d.fetched_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS crawled,
        COALESCE(p.language, c.lang) AS language
 FROM chunks c LEFT JOIN pages p ON p.id = c.page_id LEFT JOIN documents d ON d.id = c.document_id
 WHERE c.id = ANY($1) AND (NOT $2 OR c.visibility = 'public')"#;
@@ -222,6 +223,7 @@ pub(super) async fn ranked(
                 "description": about.description,
                 "published": about.published,
                 "modified": about.modified,
+                "crawled": about.crawled,
                 "language": about.language,
                 "text": hit.text.chars().take(MAX_TEXT).collect::<String>(),
                 "score": hit.score,
@@ -237,6 +239,7 @@ struct About {
     description: Option<String>,
     published: Option<String>,
     modified: Option<String>,
+    crawled: Option<String>,
     language: Option<String>,
 }
 
@@ -270,6 +273,7 @@ async fn described(
                     description: row.try_get("description")?,
                     published: row.try_get("published")?,
                     modified: row.try_get("modified")?,
+                    crawled: row.try_get("crawled")?,
                     language: row.try_get("language")?,
                 },
             );

@@ -1549,3 +1549,220 @@ async fn a_document_on_another_host_answers_to_that_hosts_robots() {
     );
     drop_database(admin, pool, &db_name).await;
 }
+
+/// One run of the removal fixture: the start page links `links`, each path answers `status`.
+async fn mount_site(server: &MockServer, robots: u16, links: &[&str], answers: &[(&str, u16)]) {
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(robots).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(server)
+        .await;
+    let body: String = links
+        .iter()
+        .map(|l| format!(r#"<a href="{l}">{l}</a>"#))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(format!("<html><body>{body}</body></html>")),
+        )
+        .mount(server)
+        .await;
+    for (p, status) in answers {
+        let kind = if p.ends_with(".pdf") {
+            "application/pdf"
+        } else {
+            "text/html; charset=utf-8"
+        };
+        Mock::given(method("GET"))
+            .and(path(*p))
+            .respond_with(
+                ResponseTemplate::new(*status)
+                    .insert_header("content-type", kind)
+                    .set_body_string(format!("%PDF-1.4 <p>{p}</p>")),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
+/// The rows of the site as (path, failed_runs), pages then documents.
+async fn rows(pool: &PgPool) -> Vec<(String, i16)> {
+    let mut tx = project_scope(pool, "bbsk").await.expect("scope");
+    let rows: Vec<(String, i16)> = sqlx::query_as(
+        "SELECT regexp_replace(url, '^http://[^/]+', ''), failed_runs FROM pages \
+         UNION ALL SELECT regexp_replace(url, '^http://[^/]+', ''), failed_runs FROM documents \
+         ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("rows");
+    tx.commit().await.expect("commit");
+    rows
+}
+
+/// T-4749: a page or document the site says is gone (404/410) leaves the index with its chunks
+/// in the same run; one that fails (5xx) or that a complete crawl no longer reaches is kept
+/// until its third run in a row; a run that could not read robots.txt removes nothing.
+#[tokio::test]
+async fn a_page_removed_from_the_site_leaves_the_index_and_a_flaky_one_stays_two_runs() {
+    let (admin, pool, db_name) = database("removal").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    let mut spec = test_spec(&format!("http://www.city.test:{port}/"));
+    spec.sitemap = false;
+    let crawl = || async {
+        let mut sink = RecordingSink::default();
+        crawl_site(&pool, &crawler, "bb", "bbsk", "web", &spec, &mut sink).await
+    };
+
+    let all = ["/a", "/b", "/c", "/doc.pdf", "/gone.pdf"];
+    mount_site(&server, 200, &all, &all.map(|p| (p, 200))).await;
+    let first = crawl().await.expect("crawl 1");
+    assert_eq!((first.pages_fetched, first.documents_fetched), (4, 2));
+    // One chunk of /a, as the indexer would have stored it.
+    let mut tx = project_scope(&pool, "bbsk").await.expect("scope");
+    sqlx::query(
+        "INSERT INTO chunks (site_id, project, page_id, ordinal, url, text, visibility) \
+         SELECT site_id, project, id, 0, url, 'A', 'public' FROM pages WHERE url LIKE '%/a'",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("chunk");
+    tx.commit().await.expect("commit");
+
+    // /a and /gone.pdf are gone, /b fails, /c is no longer linked but still answers.
+    let later = ["/a", "/b", "/doc.pdf", "/gone.pdf"];
+    let answers = [
+        ("/a", 404),
+        ("/b", 503),
+        ("/c", 200),
+        ("/doc.pdf", 200),
+        ("/gone.pdf", 410),
+    ];
+    mount_site(&server, 200, &later, &answers).await;
+    let second = crawl().await.expect("crawl 2");
+    assert_eq!(second.removed, 2, "{second:?}");
+    assert_eq!(
+        rows(&pool).await,
+        [
+            ("/".into(), 0),
+            ("/b".into(), 1),
+            ("/c".into(), 1),
+            ("/doc.pdf".into(), 0)
+        ]
+    );
+    let mut tx = project_scope(&pool, "bbsk").await.expect("scope");
+    let chunks: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("count");
+    tx.commit().await.expect("commit");
+    assert_eq!(chunks, 0, "the chunk of /a went with its page");
+
+    let third = crawl().await.expect("crawl 3");
+    assert_eq!(third.removed, 0);
+
+    // A day robots.txt answers 503 the crawl reads nothing and says nothing about what is gone.
+    mount_site(&server, 503, &later, &answers).await;
+    let blind = crawl().await.expect("blind crawl");
+    assert_eq!(blind.removed, 0);
+    assert_eq!(
+        rows(&pool).await,
+        [
+            ("/".into(), 0),
+            ("/b".into(), 2),
+            ("/c".into(), 2),
+            ("/doc.pdf".into(), 0)
+        ]
+    );
+
+    mount_site(&server, 200, &later, &answers).await;
+    let fourth = crawl().await.expect("crawl 4");
+    assert_eq!(fourth.removed, 2, "{fourth:?}");
+    assert_eq!(rows(&pool).await, [("/".into(), 0), ("/doc.pdf".into(), 0)]);
+    drop_database(admin, pool, &db_name).await;
+}
+
+/// T-4749: a page that states no date of change takes its sitemap's `<lastmod>`; one that states
+/// its own keeps it; both say when they were read.
+#[tokio::test]
+async fn a_page_without_its_own_date_takes_the_sitemaps_lastmod() {
+    let (admin, pool, db_name) = database("lastmod").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    let base = format!("http://www.city.test:{port}");
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/sitemap.xml"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            r#"<urlset><url><loc>{base}/plain</loc><lastmod>2026-03-12</lastmod></url>
+               <url><loc>{base}/stated</loc><lastmod>2026-03-12</lastmod></url></urlset>"#
+        )))
+        .mount(&server)
+        .await;
+    let html = |head: &str| {
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/html; charset=utf-8")
+            .set_body_string(format!("<html><head>{head}</head><body>text</body></html>"))
+    };
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(html(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/plain"))
+        .respond_with(html(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/stated"))
+        .respond_with(html(
+            r#"<meta property="article:modified_time" content="2026-09-22T13:58:36+0300">"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let spec = test_spec(&format!("{base}/"));
+    crawl_site(
+        &pool,
+        &crawler,
+        "za",
+        "zilina",
+        "web",
+        &spec,
+        &mut RecordingSink::default(),
+    )
+    .await
+    .expect("crawl finishes");
+    let mut tx = project_scope(&pool, "zilina").await.expect("scope");
+    let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT regexp_replace(url, '^http://[^/]+', ''), \
+                to_char(modified AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
+                fetched_at IS NOT NULL \
+         FROM pages ORDER BY url",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .expect("pages");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        rows,
+        [
+            ("/".into(), None, true),
+            ("/plain".into(), Some("2026-03-12T00:00:00Z".into()), true),
+            ("/stated".into(), Some("2026-09-22T10:58:36Z".into()), true),
+        ]
+    );
+    drop_database(admin, pool, &db_name).await;
+}

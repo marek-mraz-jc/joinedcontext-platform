@@ -53,6 +53,7 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),
+        manifest_name: format!("{space}-data"),
         policies: vec![grant(role)],
     }
 }
@@ -133,10 +134,11 @@ fn query(endpoint: &str) -> Value {
 }
 
 #[tokio::test]
-async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
+async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
     let mut sizes = Vec::new();
-    for count in [111, 10_000] {
+    let mut bodies = Vec::new();
+    for count in [1, 10_000] {
         let endpoints = (0..count)
             .map(|n| {
                 endpoint(
@@ -150,11 +152,13 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
             .collect();
         let (status, body) = rpc(app("http://127.0.0.1:1", endpoints), list.clone()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(!body.contains(&slug(7)), "no slug is listed");
+        assert!(!body.contains(&slug(0)), "no slug is listed");
         sizes.push(body.len());
+        bodies.push(body);
     }
     eprintln!("tools/list bytes: {sizes:?}");
-    assert_eq!(sizes[0], sizes[1]);
+    // Byte for byte the same tools, whatever the number of Endpoints (T-4748).
+    assert_eq!(bodies[0], bodies[1]);
     // The six read tools of this grant measured 12,162 bytes once the enum went (73,369 for the
     // fourteen tools of dev with it): a ceiling that only comes down, to 12,000 with T-4491's
     // schema trim measured by the agent benchmark. With get_endpoint and search (T-4492, T-4493)
@@ -164,24 +168,27 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
     // ceiling for this tool set is 13,900, and it again only comes down (T-4725). Each tool's
     // human title, at the top and in its annotations as a connector directory requires (T-4732),
     // adds 426 bytes: 14,240. `openWorldHint` as an explicit boolean on each tool, which the
-    // directories also require (T-4732), adds 198: 14,438, so the ceiling is 14,500, and it only
-    // comes down.
-    assert!(sizes[0] < 14_500, "{sizes:?}");
+    // directories also require (T-4732), adds 198: 14,438. get_endpoint's `detail` and `type`
+    // (T-4748), which keep its default answer short instead of every attribute of every type,
+    // add 104: 14,542, so the ceiling is 14,600, and it only comes down.
+    assert!(sizes[0] < 14_600, "{sizes:?}");
 }
 
 #[tokio::test]
 async fn a_call_by_title_or_space_is_the_call_by_slug() {
-    let broker = common::BrokerStub::start(vec![json!([]), json!([]), json!([])]).await;
+    let broker = common::BrokerStub::start(vec![json!([]), json!([]), json!([]), json!([])]).await;
     let mut answers = Vec::new();
-    for name in [AIR, "air quality", " Ovzdusie "] {
+    // T-4748: the readable {project}/{name} too.
+    for name in [AIR, "air quality", " Ovzdusie ", "mesto/ovzdusie-data"] {
         let (status, body) = rpc(city(&broker.url), query(name)).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         answers.push(body);
     }
     assert_eq!(answers[0], answers[1]);
     assert_eq!(answers[0], answers[2]);
+    assert_eq!(answers[0], answers[3]);
     let hops = broker.hops.lock().expect("hops");
-    assert_eq!(hops.len(), 3);
+    assert_eq!(hops.len(), 4);
     assert!(hops.iter().all(|hop| hop.tenant == hops[0].tenant));
 }
 
@@ -203,6 +210,11 @@ async fn an_endpoint_the_caller_may_not_read_is_not_found_by_its_name_either() {
     let (status, body) = rpc(city("http://127.0.0.1:1"), query("Internal registry")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("no Endpoint of yours"), "{body}");
+    let (_, by_name) = rpc(city("http://127.0.0.1:1"), query("mesto/register-data")).await;
+    assert!(
+        by_name.contains("no Endpoint of yours") && !by_name.contains(INNER),
+        "{by_name}"
+    );
     assert!(
         !body.contains(INNER) && !body.contains("register"),
         "{body}"

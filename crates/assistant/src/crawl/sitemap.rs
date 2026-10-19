@@ -1,5 +1,7 @@
 //! Sitemap discovery and XML parsing using `quick-xml` (T-3052).
 
+use std::collections::HashMap;
+
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use reqwest::Client;
@@ -15,57 +17,103 @@ pub struct ParsedSitemap {
     pub urls: Vec<String>,
     /// Sub-sitemaps found in `<sitemapindex><sitemap><loc>`.
     pub sub_sitemaps: Vec<String>,
+    /// The `<lastmod>` of each `<url>` that states one, by its `<loc>` (T-4749).
+    pub lastmod: HashMap<String, String>,
 }
 
-/// Parses `<loc>` elements from `<urlset>` and `<sitemapindex>` XML documents.
+/// The pages a site's sitemaps list, and when each last changed where the sitemap says so.
+#[derive(Debug, Default)]
+pub struct Listed {
+    /// Same-host page URLs, canonical, in sitemap order.
+    pub urls: Vec<Url>,
+    /// Each listed URL's `<lastmod>` as an RFC 3339 instant in UTC, by its canonical URL.
+    pub lastmod: HashMap<String, String>,
+}
+
+/// Where the parser stands in a sitemap: the element it is inside and the text read so far.
+#[derive(Default)]
+struct Cursor {
+    inside_url: bool,
+    inside_sitemap: bool,
+    /// Inside `<loc>` or `<lastmod>`, whose text is collected.
+    reading: bool,
+    text: String,
+    loc: String,
+    lastmod: String,
+}
+
+impl Cursor {
+    fn open(&mut self, name: &str) {
+        match name {
+            "url" => {
+                self.inside_url = true;
+                self.loc.clear();
+                self.lastmod.clear();
+            }
+            "sitemap" => self.inside_sitemap = true,
+            "loc" | "lastmod" => {
+                self.reading = true;
+                self.text.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn close(&mut self, name: &str, into: &mut ParsedSitemap) {
+        let text = std::mem::take(&mut self.text).trim().to_string();
+        match name {
+            "url" => {
+                self.inside_url = false;
+                if !self.loc.is_empty() && !self.lastmod.is_empty() {
+                    into.lastmod.insert(
+                        std::mem::take(&mut self.loc),
+                        std::mem::take(&mut self.lastmod),
+                    );
+                }
+            }
+            "sitemap" => self.inside_sitemap = false,
+            "lastmod" => {
+                self.reading = false;
+                self.lastmod = text;
+            }
+            "loc" => {
+                self.reading = false;
+                if text.is_empty() {
+                    return;
+                }
+                if self.inside_url {
+                    self.loc.clone_from(&text);
+                    into.urls.push(text);
+                } else if self.inside_sitemap {
+                    into.sub_sitemaps.push(text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Parses `<loc>` and `<lastmod>` elements from `<urlset>` and `<sitemapindex>` XML documents.
 pub fn parse_sitemap_xml(xml: &str) -> ParsedSitemap {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
     let mut result = ParsedSitemap::default();
-    let mut inside_url = false;
-    let mut inside_sitemap = false;
-    let mut inside_loc = false;
-    let mut current_text = String::new();
-
+    let mut at = Cursor::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => match e.local_name().as_ref() {
-                "url" => inside_url = true,
-                "sitemap" => inside_sitemap = true,
-                "loc" => {
-                    inside_loc = true;
-                    current_text.clear();
-                }
-                _ => {}
-            },
-            Ok(Event::Text(ref e)) if inside_loc => current_text.push_str(&e.xml10_content()),
+            Ok(Event::Start(ref e)) => at.open(e.local_name().as_ref()),
+            Ok(Event::Text(ref e)) if at.reading => at.text.push_str(&e.xml10_content()),
             // quick-xml 0.42 reports `&amp;` and the other references as events of their own;
             // a sitemap URL with a query string is full of them.
-            Ok(Event::GeneralRef(ref e)) if inside_loc => {
+            Ok(Event::GeneralRef(ref e)) if at.reading => {
                 if let Ok(text) = quick_xml::escape::unescape(&format!("&{};", e.as_ref() as &str))
                 {
-                    current_text.push_str(&text);
+                    at.text.push_str(&text);
                 }
             }
-            Ok(Event::End(ref e)) => match e.local_name().as_ref() {
-                "url" => inside_url = false,
-                "sitemap" => inside_sitemap = false,
-                "loc" => {
-                    inside_loc = false;
-                    let trimmed = current_text.trim();
-                    if !trimmed.is_empty() {
-                        if inside_url {
-                            result.urls.push(trimmed.to_string());
-                        } else if inside_sitemap {
-                            result.sub_sitemaps.push(trimmed.to_string());
-                        }
-                    }
-                    current_text.clear();
-                }
-                _ => {}
-            },
+            Ok(Event::End(ref e)) => at.close(e.local_name().as_ref(), &mut result),
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -81,8 +129,9 @@ pub async fn fetch_sitemap_urls(
     site_host: &str,
     initial_sitemaps: &[String],
     max_pages: u32,
-) -> Vec<Url> {
+) -> Listed {
     let mut collected = Vec::new();
+    let mut lastmod = HashMap::new();
     let max = max_pages as usize;
 
     for sitemap_str in initial_sitemaps {
@@ -115,6 +164,7 @@ pub async fn fetch_sitemap_urls(
             let text = String::from_utf8_lossy(&body);
             let parsed = parse_sitemap_xml(&text);
             add_filtered_urls(&mut collected, &parsed.urls, site_host, policy, max);
+            dated(&mut lastmod, parsed.lastmod);
 
             for sub_str in &parsed.sub_sitemaps {
                 if collected.len() >= max {
@@ -144,12 +194,41 @@ pub async fn fetch_sitemap_urls(
                     let sub_text = String::from_utf8_lossy(&sub_body);
                     let sub_parsed = parse_sitemap_xml(&sub_text);
                     add_filtered_urls(&mut collected, &sub_parsed.urls, site_host, policy, max);
+                    dated(&mut lastmod, sub_parsed.lastmod);
                 }
             }
         }
     }
 
-    collected
+    // Only what was kept: a date of a URL left out is no one's to read.
+    let kept: std::collections::HashSet<&str> = collected.iter().map(Url::as_str).collect();
+    lastmod.retain(|url, _| kept.contains(url.as_str()));
+    Listed {
+        urls: collected,
+        lastmod,
+    }
+}
+
+/// Adds each `<lastmod>` that reads as a date, keyed by its URL in canonical form.
+fn dated(into: &mut HashMap<String, String>, lastmod: HashMap<String, String>) {
+    for (loc, date) in lastmod {
+        let (Ok(url), Some(at)) = (Url::parse(&loc), super::meta::instant(&date)) else {
+            continue;
+        };
+        into.insert(canonical(url).to_string(), at);
+    }
+}
+
+/// The URL without its fragment and its scheme's default port, as the crawl's frontier keys it.
+fn canonical(mut u: Url) -> Url {
+    u.set_fragment(None);
+    if u.scheme() == "http" && u.port() == Some(80) {
+        let _ = u.set_port(None);
+    }
+    if u.scheme() == "https" && u.port() == Some(443) {
+        let _ = u.set_port(None);
+    }
+    u
 }
 
 pub(super) fn add_filtered_urls(
@@ -163,7 +242,7 @@ pub(super) fn add_filtered_urls(
         if target.len() >= max {
             break;
         }
-        let mut u = match Url::parse(u_str) {
+        let u = match Url::parse(u_str) {
             Ok(u) => u,
             Err(_) => continue,
         };
@@ -173,15 +252,46 @@ pub(super) fn add_filtered_urls(
         if !is_url_allowed(&u, policy.allow_plain_http) {
             continue;
         }
-        u.set_fragment(None);
-        if u.scheme() == "http" && u.port() == Some(80) {
-            let _ = u.set_port(None);
-        }
-        if u.scheme() == "https" && u.port() == Some(443) {
-            let _ = u.set_port(None);
-        }
+        let u = canonical(u);
         if !target.contains(&u) {
             target.push(u);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-4749: each `<url>`'s `<lastmod>` is kept by its `<loc>`; a URL without one has none.
+    #[test]
+    fn each_url_keeps_its_own_lastmod() {
+        let parsed = parse_sitemap_xml(
+            r#"<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><lastmod>2026-03-12</lastmod><loc>https://www.city.test/a?x=1&amp;y=2</loc></url>
+            <url><loc>https://www.city.test/b</loc></url>
+            <url><loc>https://www.city.test/c</loc><lastmod>2026-10-01T08:00:00+02:00</lastmod></url>
+            </urlset>"#,
+        );
+        assert_eq!(parsed.urls.len(), 3);
+        assert_eq!(
+            parsed.lastmod,
+            HashMap::from([
+                (
+                    "https://www.city.test/a?x=1&y=2".to_owned(),
+                    "2026-03-12".to_owned()
+                ),
+                (
+                    "https://www.city.test/c".to_owned(),
+                    "2026-10-01T08:00:00+02:00".to_owned()
+                ),
+            ])
+        );
+        let mut into = HashMap::new();
+        dated(&mut into, parsed.lastmod);
+        assert_eq!(
+            into.get("https://www.city.test/c").map(String::as_str),
+            Some("2026-10-01T06:00:00Z")
+        );
     }
 }

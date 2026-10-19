@@ -1,0 +1,886 @@
+[
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Get attribute"
+  },
+  "description": "Describe one Attribute: the types that carry it and how many instances exist (TS 104 175 10.6.8).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "attrId": {
+     "maxLength": 256,
+     "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+     "type": "string"
+    }
+   },
+   "required": [
+    "attrId"
+   ],
+   "type": "object"
+  },
+  "name": "get_attribute",
+  "title": "Get attribute"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Get attribute value"
+  },
+  "description": "Read one Attribute of one Entity (TS 104 175 10.4.4).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "attrId": {
+     "maxLength": 256,
+     "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+     "type": "string"
+    },
+    "id": {
+     "maxLength": 512,
+     "pattern": "^urn:ngsi-ld:[^\\s]+$",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "attrId"
+   ],
+   "type": "object"
+  },
+  "name": "get_attribute_value",
+  "title": "Get attribute value"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Get entity"
+  },
+  "description": "Read one Entity by its id (TS 104 175 10.4.2); attrs, pick and omit narrow what it returns.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "attrs": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "format": {
+     "enum": [
+      "normalized",
+      "concise",
+      "keyValues"
+     ],
+     "type": "string"
+    },
+    "id": {
+     "maxLength": 512,
+     "pattern": "^urn:ngsi-ld:[^\\s]+$",
+     "type": "string"
+    },
+    "join": {
+     "enum": [
+      "flat",
+      "inline"
+     ],
+     "type": "string"
+    },
+    "joinLevel": {
+     "maximum": 3,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "lang": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "omit": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "pick": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "sysAttrs": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "name": "get_entity",
+  "title": "Get entity"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Get type"
+  },
+  "description": "Describe one Entity type: its Attributes and how many Entities it has (TS 104 175 10.6.5).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "type": {
+     "enum": [
+      "AdministrativeArea",
+      "Bridge",
+      "CommitteeSeat",
+      "Contract",
+      "CouncilMeeting",
+      "CouncilVote",
+      "CycleRoute",
+      "Grant",
+      "Invoice",
+      "KeyPerformanceIndicator",
+      "OfficeHours",
+      "Organization",
+      "Person",
+      "Petition",
+      "PointOfInterest",
+      "PublicInvestment",
+      "PublicOrganization",
+      "PublicProcurement",
+      "PurchaseOrder",
+      "RiverBasin",
+      "RoadAccident",
+      "RoadStructure",
+      "Rule",
+      "WaterBodyStatus"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "name": "get_type",
+  "title": "Get type"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "List attribute details"
+  },
+  "description": "List the Attributes with the types that carry each (TS 104 175 10.6.7).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list_attribute_details",
+  "title": "List attribute details"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "List attributes"
+  },
+  "description": "List the names of the Attributes this endpoint serves (TS 104 175 10.6.6).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list_attributes",
+  "title": "List attributes"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "List type details"
+  },
+  "description": "List the Entity types with the Attributes of each (TS 104 175 10.6.4).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list_type_details",
+  "title": "List type details"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "List types"
+  },
+  "description": "List the names of the Entity types this endpoint serves (TS 104 175 10.6.3).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  },
+  "name": "list_types",
+  "title": "List types"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Query entities"
+  },
+  "description": "Query Entities (TS 104 175 10.4.3): by type, id, q, scopeQ or area, a page at a time. Give at least one of type, attrs, q, georel or local.\n\nQuery guide, per type:\nKeyPerformanceIndicator: no time axis. Place location; near a point: type=KeyPerformanceIndicator, georel=near;maxDistance==2000, geometry=Point, coordinates=[longitude,latitude]. Filter on category.\nPointOfInterest: no time axis. Place location; near a point: type=PointOfInterest, georel=near;maxDistance==2000, geometry=Point, coordinates=[longitude,latitude]. Filter on category, name.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "attrs": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "coordinates": {
+     "maxItems": 1000,
+     "type": "array"
+    },
+    "count": {
+     "type": "boolean"
+    },
+    "cursor": {
+     "maxLength": 2048,
+     "type": "string"
+    },
+    "format": {
+     "enum": [
+      "normalized",
+      "concise",
+      "keyValues"
+     ],
+     "type": "string"
+    },
+    "geometry": {
+     "enum": [
+      "Point",
+      "MultiPoint",
+      "LineString",
+      "MultiLineString",
+      "Polygon",
+      "MultiPolygon"
+     ],
+     "type": "string"
+    },
+    "geoproperty": {
+     "maxLength": 256,
+     "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+     "type": "string"
+    },
+    "georel": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "id": {
+     "items": {
+      "maxLength": 512,
+      "pattern": "^urn:ngsi-ld:[^\\s]+$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "type": "array"
+    },
+    "idPattern": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "join": {
+     "enum": [
+      "flat",
+      "inline"
+     ],
+     "type": "string"
+    },
+    "joinLevel": {
+     "maximum": 3,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "lang": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "limit": {
+     "maximum": 1000,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "local": {
+     "type": "boolean"
+    },
+    "omit": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "orderBy": {
+     "maxLength": 1024,
+     "type": "string"
+    },
+    "pick": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "q": {
+     "maxLength": 4096,
+     "type": "string"
+    },
+    "scopeQ": {
+     "maxLength": 1024,
+     "type": "string"
+    },
+    "sysAttrs": {
+     "type": "boolean"
+    },
+    "type": {
+     "items": {
+      "enum": [
+       "AdministrativeArea",
+       "Bridge",
+       "CommitteeSeat",
+       "Contract",
+       "CouncilMeeting",
+       "CouncilVote",
+       "CycleRoute",
+       "Grant",
+       "Invoice",
+       "KeyPerformanceIndicator",
+       "OfficeHours",
+       "Organization",
+       "Person",
+       "Petition",
+       "PointOfInterest",
+       "PublicInvestment",
+       "PublicOrganization",
+       "PublicProcurement",
+       "PurchaseOrder",
+       "RiverBasin",
+       "RoadAccident",
+       "RoadStructure",
+       "Rule",
+       "WaterBodyStatus"
+      ],
+      "type": "string"
+     },
+     "maxItems": 50,
+     "minItems": 1,
+     "type": "array"
+    }
+   },
+   "type": "object"
+  },
+  "name": "query_entities",
+  "title": "Query entities"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Query temporal"
+  },
+  "description": "Query the history of Entities (TS 104 175 11.3.3) between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances.\n\nQuery guide, per type:\nKeyPerformanceIndicator: no time axis. Place location; near a point: type=KeyPerformanceIndicator, georel=near;maxDistance==2000, geometry=Point, coordinates=[longitude,latitude]. Filter on category.\nPointOfInterest: no time axis. Place location; near a point: type=PointOfInterest, georel=near;maxDistance==2000, geometry=Point, coordinates=[longitude,latitude]. Filter on category, name.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "aggrMethods": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "aggrPeriodDuration": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "attrs": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "coordinates": {
+     "maxItems": 1000,
+     "type": "array"
+    },
+    "count": {
+     "type": "boolean"
+    },
+    "cursor": {
+     "maxLength": 2048,
+     "type": "string"
+    },
+    "endTimeAt": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "format": {
+     "enum": [
+      "normalized",
+      "temporalValues",
+      "aggregatedValues"
+     ],
+     "type": "string"
+    },
+    "geometry": {
+     "enum": [
+      "Point",
+      "MultiPoint",
+      "LineString",
+      "MultiLineString",
+      "Polygon",
+      "MultiPolygon"
+     ],
+     "type": "string"
+    },
+    "geoproperty": {
+     "maxLength": 256,
+     "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+     "type": "string"
+    },
+    "georel": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "id": {
+     "items": {
+      "maxLength": 512,
+      "pattern": "^urn:ngsi-ld:[^\\s]+$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "type": "array"
+    },
+    "lastN": {
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "limit": {
+     "maximum": 1000,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "q": {
+     "maxLength": 4096,
+     "type": "string"
+    },
+    "scopeQ": {
+     "maxLength": 1024,
+     "type": "string"
+    },
+    "sysAttrs": {
+     "type": "boolean"
+    },
+    "timeAt": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "timeproperty": {
+     "enum": [
+      "observedAt",
+      "createdAt",
+      "modifiedAt",
+      "deletedAt"
+     ],
+     "type": "string"
+    },
+    "timerel": {
+     "enum": [
+      "before",
+      "after",
+      "between"
+     ],
+     "type": "string"
+    },
+    "type": {
+     "items": {
+      "enum": [
+       "AdministrativeArea",
+       "Bridge",
+       "CommitteeSeat",
+       "Contract",
+       "CouncilMeeting",
+       "CouncilVote",
+       "CycleRoute",
+       "Grant",
+       "Invoice",
+       "KeyPerformanceIndicator",
+       "OfficeHours",
+       "Organization",
+       "Person",
+       "Petition",
+       "PointOfInterest",
+       "PublicInvestment",
+       "PublicOrganization",
+       "PublicProcurement",
+       "PurchaseOrder",
+       "RiverBasin",
+       "RoadAccident",
+       "RoadStructure",
+       "Rule",
+       "WaterBodyStatus"
+      ],
+      "type": "string"
+     },
+     "maxItems": 50,
+     "minItems": 1,
+     "type": "array"
+    }
+   },
+   "required": [
+    "timerel",
+    "timeAt"
+   ],
+   "type": "object"
+  },
+  "name": "query_temporal",
+  "title": "Query temporal"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Retrieve temporal"
+  },
+  "description": "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "aggrMethods": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "aggrPeriodDuration": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "attrs": {
+     "items": {
+      "maxLength": 256,
+      "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+      "type": "string"
+     },
+     "maxItems": 100,
+     "minItems": 1,
+     "type": "array"
+    },
+    "endTimeAt": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "format": {
+     "enum": [
+      "normalized",
+      "temporalValues",
+      "aggregatedValues"
+     ],
+     "type": "string"
+    },
+    "id": {
+     "maxLength": 512,
+     "pattern": "^urn:ngsi-ld:[^\\s]+$",
+     "type": "string"
+    },
+    "lastN": {
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "sysAttrs": {
+     "type": "boolean"
+    },
+    "timeAt": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "timeproperty": {
+     "enum": [
+      "observedAt",
+      "createdAt",
+      "modifiedAt",
+      "deletedAt"
+     ],
+     "type": "string"
+    },
+    "timerel": {
+     "enum": [
+      "before",
+      "after",
+      "between"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "id",
+    "timerel",
+    "timeAt"
+   ],
+   "type": "object"
+  },
+  "name": "retrieve_temporal",
+  "title": "Retrieve temporal"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Summarize"
+  },
+  "description": "Profile one Entity type: its count and, per Attribute, statistics (min, max, mean, median, the most common values, the area) over at most 1,000 of the Entities the caller reads, and five of them. Use it for a broad question; use query_entities for specific Entities.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "coordinates": {
+     "maxItems": 1000,
+     "type": "array"
+    },
+    "geometry": {
+     "enum": [
+      "Point",
+      "MultiPoint",
+      "LineString",
+      "MultiLineString",
+      "Polygon",
+      "MultiPolygon"
+     ],
+     "type": "string"
+    },
+    "geoproperty": {
+     "maxLength": 256,
+     "pattern": "^[A-Za-z][A-Za-z0-9_\\-.:/#]*$",
+     "type": "string"
+    },
+    "georel": {
+     "maxLength": 256,
+     "type": "string"
+    },
+    "lang": {
+     "maxLength": 64,
+     "type": "string"
+    },
+    "q": {
+     "maxLength": 4096,
+     "type": "string"
+    },
+    "scopeQ": {
+     "maxLength": 1024,
+     "type": "string"
+    },
+    "type": {
+     "items": {
+      "enum": [
+       "AdministrativeArea",
+       "Bridge",
+       "CommitteeSeat",
+       "Contract",
+       "CouncilMeeting",
+       "CouncilVote",
+       "CycleRoute",
+       "Grant",
+       "Invoice",
+       "KeyPerformanceIndicator",
+       "OfficeHours",
+       "Organization",
+       "Person",
+       "Petition",
+       "PointOfInterest",
+       "PublicInvestment",
+       "PublicOrganization",
+       "PublicProcurement",
+       "PurchaseOrder",
+       "RiverBasin",
+       "RoadAccident",
+       "RoadStructure",
+       "Rule",
+       "WaterBodyStatus"
+      ],
+      "type": "string"
+     },
+     "maxItems": 50,
+     "minItems": 1,
+     "type": "array"
+    }
+   },
+   "required": [
+    "type"
+   ],
+   "type": "object"
+  },
+  "name": "summarize",
+  "title": "Summarize"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Describe access"
+  },
+  "description": "The caller's effective grants here: operations, attributes, residual constraints. `format` picks the language: `permissions` (AuthZEN, the default), `odrl` (ODRL 2.2) or `grant-ast` (UCAST); the grants are the same in all three (EP-60).",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "format": {
+     "enum": [
+      "permissions",
+      "odrl",
+      "grant-ast"
+     ],
+     "type": "string"
+    }
+   },
+   "type": "object"
+  },
+  "name": "describe_access",
+  "outputSchema": {
+   "properties": {
+    "access": {},
+    "jc:source": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "restricted": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "access"
+   ],
+   "type": "object"
+  },
+  "title": "Describe access"
+ },
+ {
+  "annotations": {
+   "destructiveHint": false,
+   "openWorldHint": false,
+   "readOnlyHint": true,
+   "title": "Describe schema"
+  },
+  "description": "Inspect the data model of this context space, narrowed to the caller's grant. Read linkml first: it carries the classes, their slots and their descriptions in one small document. The default `summary` lists every artifact with its size and digest and says which to read.",
+  "inputSchema": {
+   "additionalProperties": false,
+   "properties": {
+    "entityType": {
+     "description": "One entity type, or the list of the classes you need",
+     "oneOf": [
+      {
+       "maxLength": 256,
+       "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+       "type": "string"
+      },
+      {
+       "items": {
+        "maxLength": 256,
+        "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+        "type": "string"
+       },
+       "maxItems": 64,
+       "minItems": 1,
+       "type": "array"
+      }
+     ]
+    },
+    "format": {
+     "description": "summary (the default) lists the models and every artifact with its format, size and digest, linkml first; the others render one, the text formalisms as {format, mediaType, document}; qb only where the model is a data cube",
+     "enum": [
+      "summary",
+      "json-schema",
+      "context",
+      "linkml",
+      "shacl",
+      "owl",
+      "rdf",
+      "markdown",
+      "qb"
+     ],
+     "type": "string"
+    },
+    "version": {
+     "description": "Model major version",
+     "minimum": 1,
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  },
+  "name": "describe_schema",
+  "outputSchema": {
+   "properties": {
+    "jc:source": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "restricted": {
+     "type": "boolean"
+    },
+    "schema": {}
+   },
+   "required": [
+    "schema"
+   ],
+   "type": "object"
+  },
+  "title": "Describe schema"
+ }
+]

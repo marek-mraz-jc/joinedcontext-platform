@@ -370,6 +370,7 @@ mod visible_tests {
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
             policy_names: Vec::new(),
+            manifest_name: String::new(),
             policies,
         }
     }

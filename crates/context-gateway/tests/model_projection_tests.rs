@@ -86,6 +86,7 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }

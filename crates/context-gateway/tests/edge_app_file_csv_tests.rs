@@ -52,6 +52,7 @@ fn endpoint() -> Endpoint {
         view_mapping: None,
         catalog: None,
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![serde_norway::from_str(PUBLIC_READ).expect("the policy parses")],
     }
 }
@@ -60,6 +61,7 @@ fn with_policy(yaml: &str) -> Endpoint {
     Endpoint {
         roles: Default::default(),
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![serde_norway::from_str(yaml).expect("the policy parses")],
         ..endpoint()
     }

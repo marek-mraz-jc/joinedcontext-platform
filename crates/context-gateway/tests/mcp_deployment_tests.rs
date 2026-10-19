@@ -215,6 +215,7 @@ fn endpoint(slug: &str, audience: Audience, role: &str) -> Endpoint {
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![policy],
     }
 }

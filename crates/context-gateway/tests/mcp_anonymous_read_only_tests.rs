@@ -77,6 +77,7 @@ fn endpoint(slug: &str, space: &str, base_path: String) -> Endpoint {
             context: None,
         }],
         policy_names: Vec::new(),
+        manifest_name: String::new(),
         policies: vec![grant(space, "public"), grant(space, "steward")],
     }
 }
