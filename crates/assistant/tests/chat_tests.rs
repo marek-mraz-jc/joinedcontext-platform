@@ -2640,6 +2640,18 @@ async fn an_english_question_over_slovak_pages_searches_in_slovak_and_a_no_runs_
         ],
         "{events:?}"
     );
+    // The router's two queries are one round, searched at once (T-4729): the second has started
+    // before the first one's search is done.
+    let at =
+        |pick: &dyn Fn(&(String, Value)) -> bool| events.iter().position(pick).expect("the event");
+    let second_started = at(&|(n, d)| n == "stage" && d["topic"] == "knižnica otváracie hodiny");
+    let first_started = at(&|(n, d)| n == "stage" && d["topic"] == "library opening hours");
+    let first_done = first_started
+        + events[first_started..]
+            .iter()
+            .position(|(n, d)| n == "tool" && d["name"] == "search" && d["status"] == "done")
+            .expect("its search is done");
+    assert!(second_started < first_done, "{events:?}");
     let calls = model_calls(&w.proxy).await;
     // Router, two verdicts, the answer: the first round's "no" sent its query into the router's
     // round, and the "yes" after it ended the rounds.
