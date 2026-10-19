@@ -239,8 +239,12 @@ pub async fn answer(
             .sum::<usize>()
             / 4) as u64
             + ask.output_tokens;
+        // At the conversation's budget the loop answers from what it read, with one last call
+        // that offers no tool; the next turn is the one refused (T-4729, od-32 on dev).
+        let over = ask.spent_before + spent.total + estimate > ask.tokens_per_conversation;
         let allow = !tools.is_empty()
             && !forced
+            && !over
             && may_call(steps, started.elapsed(), ask.data_steps, ask.data_time)
             && spent.total + estimate <= QUESTION_TOKENS;
         if !allow && !tools.is_empty() && !forced {
@@ -252,7 +256,7 @@ pub async fn answer(
             let left = ask.data_steps.saturating_sub(steps);
             messages.push(json!({"role": "user", "content": budget(left, ask.data_steps, secs)}));
         }
-        if ask.spent_before + spent.total + estimate > ask.tokens_per_conversation {
+        if over && spent.calls == called_before {
             send(
                 events,
                 Event::Error {
