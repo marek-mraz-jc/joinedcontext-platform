@@ -336,6 +336,86 @@ mod tests {
 }
 
 #[cfg(test)]
+mod edges {
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::super::mcp::{Surface, Tool};
+    use super::*;
+
+    fn connector(endpoint: &str) -> Connected {
+        Connected {
+            endpoint: endpoint.into(),
+            title: None,
+            surface: Surface {
+                gateway: "http://gateway".into(),
+                slug: endpoint.into(),
+                timeout: Duration::from_secs(1),
+                token: None,
+            },
+            tools: vec![Tool {
+                name: "query_entities".into(),
+                description: String::new(),
+                input_schema: json!({"type": "object"}),
+            }],
+            label: None,
+            siblings: Vec::new(),
+        }
+    }
+
+    /// A model the card cannot read still gives the query rules; a type the served model does
+    /// not hold (one the caller may not read) never gets lines; one card per Endpoint, each its own.
+    #[test]
+    fn a_broken_model_an_unserved_type_and_two_endpoints() {
+        let mut given = Given::default();
+        let a = connector("a/one");
+        let broken = given.card(
+            &a,
+            "query_entities",
+            &json!({"type": "School"}),
+            Some("classes: ["),
+        );
+        assert_eq!(
+            broken.as_deref(),
+            Some("NGSI-LD Endpoint a/one, ETSI GS CIM 009 / TS 104 175. Read it with query_entities (type, q, georel, pick).\nq: attr==value; AND, | OR, == != > >= < <= ~= (regex), ranges a..b; a text value in quotes; a Relationship by its target id (refParentArea==\"urn:ngsi-ld:...\").\nGeo: georel near;maxDistance==<metres> or within on location. Units: compare in the unit shown (pm10 is ug/m3; a distance asked in km is sent in m).")
+        );
+        let model =
+            "slots:\n  pupils: { range: integer }\nclasses:\n  School: { slots: [pupils] }\n";
+        let b = connector("b/two");
+        let card = given
+            .card(
+                &b,
+                "query_entities",
+                &json!({"type": ["Payroll"]}),
+                Some(model),
+            )
+            .unwrap();
+        assert!(
+            !card.contains("Payroll") && card.contains("\nSchool: pupils:integer"),
+            "{card}"
+        );
+        assert!(
+            !card.contains("Every type also has"),
+            "one type shares nothing: {card}"
+        );
+        assert_eq!(
+            given.card(
+                &b,
+                "query_entities",
+                &json!({"type": "Payroll"}),
+                Some(model)
+            ),
+            None
+        );
+        assert_eq!(
+            given.card(&a, "query_entities", &json!({}), Some(model)),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod sizes {
     use std::time::Duration;
 
