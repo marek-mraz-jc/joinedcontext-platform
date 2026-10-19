@@ -1053,21 +1053,40 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
     // the wait is named in the transcript (T-4729).
     let began = std::time::Instant::now();
     let named: Result<(), crate::Error> = async {
-        for citation in citations.iter_mut() {
-            // A table names its connector; a passage of an Endpoint's own page names its address,
-            // which a visitor reads as JSON: both cite the dataset's page where one names the
-            // Endpoint (T-4366), and an address stays only when no page does.
-            let slug = match citation.url.as_deref() {
+        // A table names its connector; a passage of an Endpoint's own page names its address,
+        // which a visitor reads as JSON: both cite the dataset's page where one names the
+        // Endpoint (T-4366), and an address stays only when no page does.
+        let slugs: Vec<Option<String>> = citations
+            .iter()
+            .map(|citation| match citation.url.as_deref() {
                 None => ask
                     .connectors
                     .iter()
                     .find(|c| Some(&c.endpoint) == citation.endpoint.as_ref())
                     .map(|c| c.surface.slug.clone()),
                 Some(url) => endpoint_slug(url),
+            })
+            .collect();
+        // Each Endpoint once, all at once (T-4729): one after another, citation by citation, this
+        // step took up to 3.5 s after the answer on dev.
+        let distinct: Vec<&String> = slugs
+            .iter()
+            .flatten()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let looked = futures_util::future::join_all(distinct.iter().map(|slug| {
+            crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
+        }))
+        .await;
+        let mut pages: HashMap<&String, Option<String>> = HashMap::new();
+        for (slug, page) in distinct.into_iter().zip(looked) {
+            pages.insert(slug, page?);
+        }
+        for (citation, slug) in citations.iter_mut().zip(&slugs) {
+            let Some(page) = slug.as_ref().and_then(|slug| pages.get(slug)).cloned() else {
+                continue;
             };
-            let Some(slug) = slug else { continue };
-            let page = crate::endpoint_page_projects(ask.pool, &slug, ask.sources, ask.public_only)
-                .await?;
             if citation.url.is_none() || page.as_deref().is_some_and(|p| endpoint_slug(p).is_none())
             {
                 citation.url = page.or(citation.url.take());
