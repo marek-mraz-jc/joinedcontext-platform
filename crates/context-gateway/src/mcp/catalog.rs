@@ -2,12 +2,16 @@
 //! ADR-N-025).
 //!
 //! An agent's first call names the catalogue and finds a dataset with the ordinary NGSI-LD query;
-//! its second names the Endpoint the dataset lists. The public catalogue is broker data the
-//! Portal writes (T-4500); this one is built per caller from the Endpoints the request reaches,
-//! by the same function from the same DCAT-AP records ([`jc_core::ngsi_catalog`]), so the
-//! anonymous caller's is the public one entity for entity, and a caller with grants sees, beside
-//! it, the Endpoints its token opens and why. Nothing here reads the broker: the records are
-//! built without the schema index, which the catalogue does not list.
+//! its second names the Endpoint the dataset names. The public catalogue is broker data the
+//! Portal writes (T-4500, T-4746); this one is built per caller from the Endpoints the request
+//! reaches, by the same function from the same DCAT-AP records ([`jc_core::ngsi_catalog`]), and
+//! takes the CKAN-named `Dataset` and `Organization` entities from the public one, which only the
+//! Portal can build because only it reads CKAN. [`jc_core::ngsi_catalog::link`] keeps those whose
+//! Endpoint the caller reaches, so the anonymous caller's catalogue is the public one entity for
+//! entity, and a caller with grants sees, beside it, the Endpoints its token opens and why. That
+//! read of the public catalogue, at most once a minute for every caller, is the only broker read
+//! here (EP-87, EP-140): the records are built without the schema index, which the catalogue
+//! does not list.
 //!
 //! An Endpoint outside the request's reach gives no entity, no word of `searchText` and no
 //! count, because the catalogue is computed from `reach` and nothing else; a named server's
@@ -26,6 +30,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// The name a tool call gives the catalogue as its `endpoint`.
 pub(crate) const NAME: &str = "catalog";
@@ -57,6 +62,14 @@ const DEFAULT_LIMIT: usize = 20;
 /// Catalogues kept between requests; past it the cache starts again empty.
 const CACHED: usize = 64;
 
+/// How long the public catalogue's Datasets and Organizations are reused before they are read
+/// again (EP-87).
+const PUBLIC_FOR: Duration = Duration::from_secs(60);
+
+/// Entities per page of that read, and the pages it reads at most.
+const PUBLIC_PAGE: usize = 1000;
+const PUBLIC_PAGES: usize = 20;
+
 /// Whether a tool call's `endpoint` names the catalogue.
 pub(crate) fn names_catalog(named: &str) -> bool {
     named.trim().eq_ignore_ascii_case(NAME)
@@ -67,6 +80,8 @@ struct Catalog {
     /// The Endpoints it was built from, held so that a reload, which builds new ones, is a miss
     /// and no address of them is reused while the entry lives.
     built_from: Vec<Arc<Endpoint>>,
+    /// The public read it took its Datasets and Organizations from.
+    public: Arc<Vec<Value>>,
     entities: Vec<(Value, Value)>,
     /// The Datasets ranked by words, for the hub's `search` (T-4493).
     index: super::search::Index,
@@ -85,6 +100,116 @@ fn core() -> &'static Context {
 /// The space of the broker-backed public catalogue itself, which is not a dataset of its own.
 fn is_catalog_space(endpoint: &Endpoint) -> bool {
     endpoint.space == NAME || endpoint.space == format!("{}-{NAME}", endpoint.project)
+}
+
+/// The public catalogue's CKAN-named `Dataset` and `Organization` entities, read through the
+/// installation's `catalog` Endpoint as the anonymous caller, at most once a minute for every
+/// caller: the one list every caller shares is what anyone may read, never what the first caller
+/// to reach it happened to hold. Without that Endpoint in
+/// reach the list is empty; a read that fails keeps the last one it had.
+async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Vec<Value>> {
+    type Held = (String, Instant, Arc<Vec<Value>>);
+    static HELD: OnceLock<Mutex<Option<Held>>> = OnceLock::new();
+    let Some((endpoint, _)) = reach
+        .iter()
+        .find(|(endpoint, _)| endpoint.space == NAME && endpoint.audience == Audience::Public)
+    else {
+        return Arc::new(Vec::new());
+    };
+    let held = HELD.get_or_init(Mutex::default);
+    // What was read through this Endpoint; a reload that changed its slug reads afresh.
+    let last = held
+        .lock()
+        .ok()
+        .and_then(|held| held.clone())
+        .filter(|(slug, _, _)| *slug == endpoint.slug);
+    if let Some((_, read, entities)) = &last {
+        if read.elapsed() < PUBLIC_FOR {
+            return Arc::clone(entities);
+        }
+    }
+    let anonymous = crate::auth::subject::anonymous_on(endpoint);
+    let read = match read_public(gateway, endpoint, &anonymous).await {
+        Ok(entities) => Arc::new(entities),
+        Err(why) => {
+            tracing::warn!(slug = %endpoint.slug, %why, "the public catalogue did not read");
+            match last {
+                Some((_, _, entities)) => entities,
+                None => Arc::new(Vec::new()),
+            }
+        }
+    };
+    if let Ok(mut held) = held.lock() {
+        *held = Some((endpoint.slug.clone(), Instant::now(), Arc::clone(&read)));
+    }
+    read
+}
+
+/// Every `Dataset` and `Organization` the `catalog` Endpoint holds, a page at a time.
+async fn read_public(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+) -> Result<Vec<Value>, String> {
+    let mut entities = Vec::new();
+    let mut cursor: Option<Value> = None;
+    for _ in 0..PUBLIC_PAGES {
+        let mut arguments = json!({
+            "type": "Dataset,Organization",
+            "format": "normalized",
+            "limit": PUBLIC_PAGE,
+        });
+        if let Some(cursor) = cursor.take() {
+            arguments["cursor"] = cursor;
+        }
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "query_entities", "arguments": arguments },
+        });
+        let answer = super::endpoint::member_call(gateway, endpoint, subject, message).await;
+        let (page, next) = public_page(&answer)?;
+        entities.extend(page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(entities),
+        }
+    }
+    Err(format!(
+        "more than {} entities; the catalogue reads no further",
+        PUBLIC_PAGE * PUBLIC_PAGES
+    ))
+}
+
+/// The Datasets and Organizations of one page of `query_entities`, and its `nextCursor`.
+fn public_page(answer: &Value) -> Result<(Vec<Value>, Option<Value>), String> {
+    if let Some(message) = answer.pointer("/error/message").and_then(Value::as_str) {
+        return Err(message.to_owned());
+    }
+    let result = answer.get("result").unwrap_or(&Value::Null);
+    if result.get("isError") == Some(&Value::Bool(true)) {
+        let why = result.pointer("/content/0/text").and_then(Value::as_str);
+        return Err(why
+            .unwrap_or("the catalog Endpoint refused the read")
+            .to_owned());
+    }
+    let structured = result.get("structuredContent").unwrap_or(&Value::Null);
+    let entities = structured
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or("the catalog Endpoint answered no entities")?
+        .iter()
+        .filter(|entity| matches!(entity["type"].as_str(), Some("Dataset" | "Organization")))
+        .map(|entity| {
+            let mut entity = entity.clone();
+            if let Some(members) = entity.as_object_mut() {
+                members.remove("@context");
+            }
+            entity
+        })
+        .collect();
+    Ok((entities, structured.get("nextCursor").cloned()))
 }
 
 /// Why the caller sees an Endpoint it reaches.
@@ -113,8 +238,10 @@ pub(crate) fn bbox(endpoint: &Endpoint) -> Option<[f64; 4]> {
     })
 }
 
-/// The caller's catalogue, from the cache while the same Endpoints reach the same way.
-fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
+/// The caller's catalogue, from the cache while the same Endpoints reach the same way and the
+/// public catalogue was not read again.
+async fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
+    let public = public_entities(gateway, reach).await;
     let listed: Vec<(&Arc<Endpoint>, &Subject)> = reach
         .iter()
         .filter(|(endpoint, _)| !is_catalog_space(endpoint))
@@ -133,7 +260,8 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
         .ok()
         .and_then(|cache| cache.get(&key).cloned());
     if let Some(catalog) = cached {
-        let same = catalog.built_from.len() == listed.len()
+        let same = Arc::ptr_eq(&catalog.public, &public)
+            && catalog.built_from.len() == listed.len()
             && catalog
                 .built_from
                 .iter()
@@ -190,7 +318,14 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
         .get("@included")
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
-    let entities = ngsi_catalog::entities(nodes, &places)
+    let mut built = ngsi_catalog::entities(nodes, &places, None);
+    built.extend(
+        public
+            .iter()
+            .filter_map(|entity| Some((entity["id"].as_str()?.to_owned(), entity.clone()))),
+    );
+    ngsi_catalog::link(&mut built);
+    let entities = built
         .into_values()
         .map(|entity| {
             let expanded = entity
@@ -206,6 +341,7 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
             .iter()
             .map(|(endpoint, _)| Arc::clone(endpoint))
             .collect(),
+        public,
         entities,
         index,
     });
@@ -219,14 +355,14 @@ fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalog> {
 }
 
 /// The hub's `search` over the caller's catalogue (T-4493).
-pub(crate) fn search(
+pub(crate) async fn search(
     gateway: &Gateway,
     reach: &[(Arc<Endpoint>, Subject)],
     id: Value,
     arguments: &Map<String, Value>,
 ) -> Value {
     tracing::info!(endpoints = reach.len(), "hub search");
-    let catalog = of(gateway, reach);
+    let catalog = of(gateway, reach).await;
     result(
         id,
         catalog
@@ -237,7 +373,7 @@ pub(crate) fn search(
 }
 
 /// One tool call on the catalogue.
-pub(crate) fn call(
+pub(crate) async fn call(
     gateway: &Gateway,
     reach: &[(Arc<Endpoint>, Subject)],
     id: Value,
@@ -255,9 +391,12 @@ pub(crate) fn call(
         );
     }
     tracing::info!(tool = %name, endpoints = reach.len(), "hub catalog call");
-    let catalog = of(gateway, reach);
+    let catalog = of(gateway, reach).await;
     let answer = match name {
-        "list_types" => Ok(answered(&json!(["DataService", "Dataset"]), "entityTypes")),
+        "list_types" => Ok(answered(
+            &json!(["DataService", "Dataset", "Organization"]),
+            "entityTypes",
+        )),
         "get_entity" => get(&catalog, arguments),
         _ => query(&catalog, arguments),
     };
@@ -265,10 +404,9 @@ pub(crate) fn call(
 }
 
 fn get(catalog: &Catalog, arguments: &Map<String, Value>) -> Result<Value, String> {
-    let wanted = arguments
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or("get_entity on the catalog takes the `id` of a Dataset or a DataService")?;
+    let wanted = arguments.get("id").and_then(Value::as_str).ok_or(
+        "get_entity on the catalog takes the `id` of a Dataset, a DataService or an Organization",
+    )?;
     let key_values = key_values_asked(arguments)?;
     let entity = catalog
         .entities
