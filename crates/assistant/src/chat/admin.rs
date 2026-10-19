@@ -111,6 +111,10 @@ pub fn router(state: Arc<ChatState>) -> Router {
             delete(erase),
         )
         .route(
+            "/internal/v1/projects/{project}/knowledge/erasures",
+            post(erase_mentioning),
+        )
+        .route(
             "/internal/v1/projects/{project}/knowledge/conversations/{conversation}/turns/{turn}/same",
             get(same),
         )
@@ -195,6 +199,39 @@ async fn erase(
     match super::transcript::erase(&state.pool, &project, &conversation).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) | Err(crate::Error::Project(_)) => problem(404, "no such conversation"),
+        Err(err) => failed(err),
+    }
+}
+
+/// What a data subject's erasure searches the stored conversations for.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mentions {
+    terms: Vec<String>,
+}
+
+/// Erases the stored conversations that mention a data subject (DM-126, API/01 §46, T-4668):
+/// `{"terms": [...]}`, the Entities' URNs and the subject's own words, answered with
+/// `{"conversations": n}`.
+async fn erase_mentioning(
+    State(state): State<Arc<ChatState>>,
+    Path(project): Path<String>,
+    headers: HeaderMap,
+    body: Result<Json<Mentions>, JsonRejection>,
+) -> Response {
+    if let Err(refused) = the_portal(&state, &headers).await {
+        return *refused;
+    }
+    let Json(Mentions { terms }) = match body {
+        Ok(body) => body,
+        Err(rejection) => return problem(400, rejection.body_text()),
+    };
+    if let Some(why) = super::transcript::terms_refusal(&terms) {
+        return problem(400, why);
+    }
+    match super::transcript::erase_mentioning(&state.pool, &project, &terms).await {
+        Ok(gone) => Json(json!({"conversations": gone})).into_response(),
+        Err(crate::Error::Project(_)) => problem(404, "no such project"),
         Err(err) => failed(err),
     }
 }
