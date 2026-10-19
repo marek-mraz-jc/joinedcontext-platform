@@ -96,10 +96,21 @@ impl Documents {
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
-        let answer = self
-            .http
-            .post(format!("{}{path}", self.url))
-            .json(body)
+        self.send(reqwest::Method::POST, path, Some(body)).await
+    }
+
+    /// One call to the assistant, its answer read as JSON; no redirect is followed.
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
+        let mut request = self.http.request(method, format!("{}{path}", self.url));
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let answer = request
             .send()
             .await
             .map_err(|err| err.without_url().to_string())?;
@@ -110,6 +121,23 @@ impl Documents {
             .json()
             .await
             .map_err(|err| err.without_url().to_string())
+    }
+
+    /// What assistant `public_id` knows, as its context route answers any visitor (API/05
+    /// §1.9); the assistant holds it a minute, so nothing is held here.
+    pub(crate) async fn context(&self, public_id: &str) -> Result<Value, String> {
+        if !public_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("not a publicId".into());
+        }
+        self.send(
+            reqwest::Method::GET,
+            &format!("/api/v1/d/{public_id}/context"),
+            None,
+        )
+        .await
     }
 
     /// What `sources` hold in public, held [`KEEP`]; `None` when the assistant could not say,

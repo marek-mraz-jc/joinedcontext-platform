@@ -178,6 +178,7 @@ async fn world(test: &str) -> World {
         endpoint_base: None,
         viz: None,
         organization: "hronov".into(),
+        contexts: Default::default(),
     });
     World {
         admin,
