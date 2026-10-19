@@ -355,7 +355,9 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
             catalogue: false,
         };
     }
-    if route == "catalogue" || asks_for_datasets(question) {
+    // The wording overrides a page route only: a question the router reads data for keeps its
+    // reads, so its values are still answered (owner capability gate, T-4729).
+    if route == "catalogue" || (route == "rag" && asks_for_datasets(question)) {
         return Routing {
             direct: false,
             rag: true,
@@ -391,7 +393,8 @@ fn missing_for(routing: &Routing, missing: Vec<String>) -> Vec<String> {
 }
 
 /// How a question asking which data there is on a topic starts, in the languages the assistant
-/// answers: the router is told the same, and these go to the catalogue whatever it says (T-4729).
+/// answers: the router is told the same, and these go to the catalogue when it names a page route
+/// (T-4729).
 const ASKS_FOR_DATASETS: &[&str] = &[
     "aké dáta",
     "aké údaje",
@@ -868,13 +871,18 @@ pub const WEB_PASSAGES: usize = 3;
 const CATALOGUE_SEARCH: i64 = CANDIDATES;
 pub const CATALOGUE_PASSAGES: usize = 25;
 
-/// The dataset pages among `found`: a CKAN dataset page (`…/dataset/{name}`) once, at its best
-/// passage, best first, at most [`CATALOGUE_PASSAGES`] (T-4729).
+/// The dataset pages among `found`: a CKAN dataset page (`…/dataset/{name}`) or an Endpoint's
+/// catalogue page (`…/api/endpoint/{slug}/…`, whose link the naming turns into its dataset page)
+/// once, at its best passage, best first, at most [`CATALOGUE_PASSAGES`] (T-4729). An Endpoint
+/// without a CKAN dataset is still listed, so the list is never shorter than the pages' own.
 pub fn dataset_pages(found: &[Hit]) -> Vec<Hit> {
     let mut seen = HashSet::new();
     top(found, found.len())
         .into_iter()
-        .filter(|hit| is_dataset_page(&hit.url) && seen.insert(hit.url.clone()))
+        .filter(|hit| {
+            (is_dataset_page(&hit.url) || super::agent::endpoint_slug(&hit.url).is_some())
+                && seen.insert(hit.url.clone())
+        })
         .take(CATALOGUE_PASSAGES)
         .collect()
 }
@@ -3021,6 +3029,20 @@ mod tests {
             .catalogue
         );
         assert!(!routing(rag, "Kedy je otvorená knižnica?", &[]).catalogue);
+        // A data question keeps its reads, whatever its wording.
+        let live = vec![Shown {
+            endpoint: "ovzdusie".into(),
+            title: None,
+            types: vec!["AirQualityObserved".into()],
+            attributes: Vec::new(),
+        }];
+        let data = r#"{"route": "data", "queries": ["no2"], "data": [{"endpoint": "ovzdusie", "type": "AirQualityObserved"}]}"#;
+        let r = routing(
+            data,
+            "What data shows the air quality in Žilina now?",
+            &live,
+        );
+        assert!(r.data && !r.catalogue && r.reads.len() == 1);
         assert!(!routing(r#"{"route": "direct"}"#, "Ahoj", &[]).catalogue);
     }
 
@@ -3053,7 +3075,7 @@ mod tests {
             hit(7, "https://opendata.dev.example/dataset/", 0.6),
         ];
         let pages = dataset_pages(&found);
-        assert_eq!(pages.iter().map(|h| h.chunk).collect::<Vec<_>>(), [2, 4]);
+        assert_eq!(pages.iter().map(|h| h.chunk).collect::<Vec<_>>(), [3, 2, 4]);
         let many: Vec<Hit> = (0..40)
             .map(|i| hit(i, &format!("https://o.example/dataset/d{i}"), 1.0))
             .collect();
