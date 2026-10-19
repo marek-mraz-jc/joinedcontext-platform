@@ -13,6 +13,7 @@ pub mod schema;
 pub mod schema_routes;
 pub mod space_routes;
 pub mod space_surface;
+pub mod types_list;
 pub mod view_access;
 pub mod writes;
 pub mod ws;
