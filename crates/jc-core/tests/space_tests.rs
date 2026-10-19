@@ -554,3 +554,91 @@ fn freshness_durations_start_at_one_second() {
     assert_eq!(duration_seconds("PT0S"), None);
     assert_eq!(duration_seconds("P3651D"), None);
 }
+
+/// DM-108, DM-109 (ADR-N-054 2.2, T-4669): a type records `every` or `onChange` with a heartbeat,
+/// an attribute may override it, and nothing records on the `*` rule or under `history: off`.
+#[test]
+fn a_retention_rule_records_on_change_with_a_heartbeat_dm_108() {
+    let rule = |rule: &str| {
+        let yaml = GOLDEN_SPACE.replace(
+            "isSandbox: false",
+            &format!("isSandbox: false\n  retention:\n    - {rule}"),
+        );
+        let space = ContextSpace::from_yaml(&yaml).expect("parses");
+        space
+            .spec
+            .validate_with_meta(&space.metadata)
+            .map(|()| space.spec)
+    };
+    let bikes = rule(
+        "{ entityType: BikeHireDockingStation, history: P30D, record: onChange, heartbeat: PT1H }",
+    )
+    .expect("valid");
+    let back: ContextSpaceSpec =
+        serde_json::from_value(serde_json::to_value(&bikes).expect("serialize"))
+            .expect("round trip");
+    assert_eq!(back, bikes);
+    assert_eq!(bikes.retention[0].heartbeat.as_deref(), Some("PT1H"));
+    for valid in [
+        "{ entityType: Spot, history: P90D, record: every, attributes: { status: { record: onChange, heartbeat: PT1H }, location: { record: onChange, minDistance: 5, heartbeat: PT1H } } }",
+        "{ entityType: Spot, history: P90D, record: onChange, heartbeat: PT1H, deadband: 0.5, attributes: { count: { record: every } } }",
+        "{ entityType: Spot, record: onChange, heartbeat: PT15M }",
+    ] {
+        assert!(rule(valid).is_ok(), "{valid}");
+    }
+    for (bad, field) in [
+        (
+            "{ entityType: Spot, record: onchange, heartbeat: PT1H }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, record: onChange }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, record: onChange, heartbeat: PT30S }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, heartbeat: PT1H }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, record: onChange, heartbeat: PT1H, deadband: -1 }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, history: off, record: onChange, heartbeat: PT1H }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: \"*\", history: P7D, record: onChange, heartbeat: PT1H }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, attributes: { status: { record: onChange } } }",
+            "spec.retention.attributes",
+        ),
+        (
+            "{ entityType: Spot, attributes: { count: { deadband: 1 } } }",
+            "spec.retention.attributes",
+        ),
+        (
+            "{ entityType: Spot, attributes: { \" \": { record: every } } }",
+            "spec.retention.attributes",
+        ),
+    ] {
+        match rule(bad) {
+            Err(jc_core::Error::Name { field: got, .. }) => assert_eq!(got, field, "{bad}"),
+            other => panic!("{bad}: {other:?}"),
+        }
+    }
+    let unknown = GOLDEN_SPACE.replace(
+        "isSandbox: false",
+        "isSandbox: false\n  retention:\n    - { entityType: Spot, attributes: { status: { mode: onChange } } }",
+    );
+    assert!(
+        ContextSpace::from_yaml(&unknown).is_err(),
+        "an unknown field is refused"
+    );
+}
