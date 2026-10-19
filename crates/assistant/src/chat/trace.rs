@@ -65,7 +65,8 @@ pub struct Pending<'a> {
     stage: &'static str,
     model: String,
     started: Instant,
-    /// The input tokens guessed from the request's size, four bytes a token.
+    /// The input tokens guessed from the request's size, four bytes a token: for the error
+    /// text only, never summed with the tokens a provider reported.
     estimate: u64,
     settled: bool,
 }
@@ -92,7 +93,6 @@ impl Drop for Pending<'_> {
             "aborted before the reply; about {} input tokens, the price unknown",
             self.estimate
         ));
-        step.tokens_in = Some(self.estimate);
         self.trace.push(step);
     }
 }
@@ -222,8 +222,9 @@ impl Trace {
 
     /// A model call of `stage` on `model` about to be sent with `messages` (T-4728): settle it
     /// with [`Pending::done`]. A call dropped before its reply (a judge cut off by a direct route,
-    /// the turn's timeout) is recorded when the guard drops, as a failed, unpriced call with its
-    /// input tokens estimated, so the turn reads `uncosted`, never a cost it does not know.
+    /// the turn's timeout) is recorded when the guard drops, as a failed, unpriced call without
+    /// tokens (the estimate only in its error), so the turn reads `uncosted`, never a cost or a
+    /// token count it does not know.
     pub fn pending<'a>(
         &'a self,
         stage: &'static str,
@@ -446,12 +447,15 @@ mod tests {
             ("model", Some("judge"), "failed")
         );
         assert_eq!(aborted.cost_micros, None);
-        assert!(aborted.tokens_in.is_some_and(|t| t > 100), "{aborted:?}");
+        assert_eq!(
+            aborted.tokens_in, None,
+            "an estimate is never a measured token: {aborted:?}"
+        );
         assert!(
             aborted
                 .error
                 .as_deref()
-                .is_some_and(|e| e.starts_with("aborted")),
+                .is_some_and(|e| e.starts_with("aborted") && e.contains("input tokens")),
             "{aborted:?}"
         );
         assert_eq!(steps[1].cost_micros, Some(30));
