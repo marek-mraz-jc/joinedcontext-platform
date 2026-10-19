@@ -7,19 +7,23 @@
 //!
 //! ```text
 //! JC_ASSISTANT_TEST_DATABASE_URL=postgres://… JC_ASSISTANT_TEST_MODEL_DIR=… \
-//!   cargo run -p assistant --example rag_recall -- corpus.json bbsk_web_questions.json ranked.json
+//!   cargo run -p assistant --example rag_recall -- corpus.json bbsk_web_questions.json ranked.json [queries.json]
 //! ```
 //!
-//! `corpus.json` is `[{"url", "file", "mime"}]`, the files as the site served them. The run
-//! creates a database of its own on the server and drops it at the end.
+//! `corpus.json` is `[{"url", "file", "mime"}]`, the files as the site served them.
+//! `queries.json`, `{"<question id>": ["<query>", …]}`, adds the searches the router would write
+//! beside a question; each is searched as the chat searches it and the rankings are fused as the
+//! chat fuses them ([`merge`], [`top`]). The run creates a database of its own on the server and
+//! drops it at the end.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 
+use assistant::chat::routed::{merge, top};
 use assistant::crawl::{upsert_site, Sink};
 use assistant::embed::{embed_missing, Embedder};
 use assistant::extract::Indexer;
-use assistant::{hybrid_search, project_scope, Search, CANDIDATES, MIGRATOR};
+use assistant::{hybrid_search, project_scope, Hit, Search, CANDIDATES, MIGRATOR};
 use jc_core::kinds::assistant::Visibility;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -42,8 +46,21 @@ struct Entry {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [corpus, questions, out] = args.as_slice() else {
-        return Err("usage: rag_recall CORPUS.json QUESTIONS.json OUT.json".into());
+    let (corpus, questions, out, queries) = match args.as_slice() {
+        [corpus, questions, out] => (corpus, questions, out, BTreeMap::new()),
+        [corpus, questions, out, queries] => (
+            corpus,
+            questions,
+            out,
+            serde_json::from_str::<BTreeMap<String, Vec<String>>>(&std::fs::read_to_string(
+                queries,
+            )?)?,
+        ),
+        _ => {
+            return Err(
+                "usage: rag_recall CORPUS.json QUESTIONS.json OUT.json [QUERIES.json]".into(),
+            )
+        }
     };
     let corpus: Vec<Entry> = serde_json::from_str(&std::fs::read_to_string(corpus)?)?;
     let questions: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(questions)?)?;
@@ -64,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .max_connections(2)
         .connect_with(admin_options.database(&name).disable_statement_logging())
         .await?;
-    let ranked = measure(&pool, &model, &corpus, &questions).await;
+    let ranked = measure(&pool, &model, &corpus, &questions, &queries).await;
     pool.close().await;
     sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {name}")))
         .execute(&admin)
@@ -78,6 +95,7 @@ async fn measure(
     model: &str,
     corpus: &[Entry],
     questions: &[Value],
+    queries: &BTreeMap<String, Vec<String>>,
 ) -> Result<Value, Box<dyn Error>> {
     MIGRATOR.run(pool).await?;
     let embedder = Embedder::load(std::path::Path::new(model), 4)?;
@@ -137,23 +155,28 @@ async fn measure(
         let (Some(id), Some(asked)) = (question["id"].as_str(), question["q"].as_str()) else {
             continue;
         };
-        let vector = embedder.query(asked).await?;
-        let mut tx = project_scope(pool, PROJECT).await?;
-        let hits = hybrid_search(
-            &mut tx,
-            &Search {
-                text: asked,
-                embedding: &vector,
-                sources: &sources,
-                public_only: true,
-                limit: CANDIDATES,
-                lang: None,
-            },
-        )
-        .await?;
-        tx.rollback().await?;
+        let mut found: Vec<Hit> = Vec::new();
+        let extra = queries.get(id).map_or(&[][..], Vec::as_slice);
+        for text in std::iter::once(asked).chain(extra.iter().map(String::as_str)) {
+            let vector = embedder.query(text).await?;
+            let mut tx = project_scope(pool, PROJECT).await?;
+            let hits = hybrid_search(
+                &mut tx,
+                &Search {
+                    text,
+                    embedding: &vector,
+                    sources: &sources,
+                    public_only: true,
+                    limit: CANDIDATES,
+                    lang: None,
+                },
+            )
+            .await?;
+            tx.rollback().await?;
+            merge(&mut found, hits);
+        }
         let mut urls: Vec<String> = Vec::new();
-        for hit in hits {
+        for hit in top(&found, found.len()) {
             if !urls.contains(&hit.url) {
                 urls.push(hit.url);
             }
