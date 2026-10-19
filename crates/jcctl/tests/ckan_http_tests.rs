@@ -761,6 +761,67 @@ fn a_proxy_error_page_is_unavailable_with_its_status() {
     assert!(message.contains("Bad Gateway"), "{message}");
 }
 
+/// A server that answers every request with `head` and then `body` bytes of `x`.
+fn answering(head: &'static str, body: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let base = format!("http://{}", listener.local_addr().expect("an address"));
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            read_request(&mut stream);
+            let _ = stream.write_all(head.as_bytes());
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut left = body;
+            while left > 0 {
+                let n = left.min(chunk.len());
+                if stream.write_all(&chunk[..n]).is_err() {
+                    break;
+                }
+                left -= n;
+            }
+        }
+    });
+    base
+}
+
+/// T-4776: the instance URL comes from a manifest, so a catalogue that answers with a redirect
+/// to an address inside the cluster (here a loopback service answering like CKAN) or to the
+/// cloud's metadata address is not followed there.
+#[test]
+fn a_redirect_into_the_cluster_or_the_metadata_address_is_not_followed() {
+    let inside = answering(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 43\r\n\r\n\
+         {\"success\":true,\"result\":{\"name\":\"inside\"}}",
+        0,
+    );
+    for location in [
+        format!("{inside}/internal"),
+        "http://169.254.169.254/latest/meta-data/".into(),
+    ] {
+        let head: &'static str = Box::leak(
+            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+                .into_boxed_str(),
+        );
+        let api = client(&answering(head, 0), TOKEN);
+        let error = api
+            .show("package_show", "kvalita-ovzdusia")
+            .expect_err("the redirect is refused");
+        let message = error.to_string();
+        assert!(matches!(error, CkanError::Unavailable(_)), "{message}");
+        assert!(!message.contains(TOKEN), "{message}");
+    }
+}
+
+/// T-4776: an answer past the cap is cut off, not read into the publisher's memory.
+#[test]
+fn an_answer_past_the_cap_is_not_read() {
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+    let api = client(&answering(head, 33 * 1024 * 1024), TOKEN);
+    let error = api
+        .show("package_show", "kvalita-ovzdusia")
+        .expect_err("the answer is too long");
+    assert!(error.to_string().contains("more than"), "{error}");
+}
+
 // --- the DataStore over HTTP ---------------------------------------------------------------
 
 fn page() -> (Vec<String>, Vec<Vec<Value>>) {

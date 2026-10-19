@@ -126,21 +126,10 @@ pub async fn handler(
         .into_response();
     }
 
-    let body = response.bytes().await.unwrap_or_default();
-    if body.len() as u64 > run.max_response_bytes {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            jc_core::ProblemDetails::new(
-                413,
-                "payload-too-large",
-                format!(
-                    "the answer is larger than this run's maxResponseBytes ({})",
-                    run.max_response_bytes
-                ),
-            ),
-        )
-            .into_response();
-    }
+    let body = match body_within(response, run.max_response_bytes, &final_host).await {
+        Ok(body) => body,
+        Err(problem) => return *problem,
+    };
 
     // Counted after the fact and never truncated: a run may cross its budget by one answer,
     // which `maxResponseBytes` already bounds, and the next fetch is the one that is refused.
@@ -239,6 +228,44 @@ pub(crate) fn checked(raw: &str, allowed: &[String]) -> Result<Url, Box<Response
         ));
     }
     Ok(url)
+}
+
+/// The body of an outside host's answer, read only up to `max` bytes (T-4776): a host that streams
+/// without end is cut off at the cap instead of filling the proxy's memory before the size check,
+/// and a body that breaks off is an upstream failure rather than an empty answer.
+pub(crate) async fn body_within(
+    response: reqwest::Response,
+    max: u64,
+    host: &str,
+) -> Result<Vec<u8>, Box<Response>> {
+    let cap = usize::try_from(max).unwrap_or(usize::MAX);
+    jc_core::outbound::read_capped(response, cap)
+        .await
+        .map_err(|error| {
+            Box::new(match error {
+                jc_core::outbound::BodyError::TooLarge(_) => (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    jc_core::ProblemDetails::new(
+                        413,
+                        "payload-too-large",
+                        format!("the answer is larger than this run's maxResponseBytes ({max})"),
+                    ),
+                )
+                    .into_response(),
+                jc_core::outbound::BodyError::Transport(e) => {
+                    tracing::warn!(%host, error = %e.without_url(), "an answer broke off");
+                    jc_core::ProblemDetails::new(
+                        502,
+                        "upstream-unavailable",
+                        "Upstream Unavailable",
+                    )
+                    .with_detail(format!(
+                        "{host} stopped answering; try again or fetch another source"
+                    ))
+                    .into_response()
+                }
+            })
+        })
 }
 
 /// The answer, following redirects by hand so every hop is checked the way the first URL was.
@@ -341,6 +368,39 @@ mod tests {
 
     fn allowed() -> Vec<String> {
         vec!["docs.maplibre.org".to_owned(), "Docs.RS".to_owned()]
+    }
+
+    /// T-4776: an allowed host that streams without end used to be read whole before the size
+    /// check, so the proxy's memory, not `maxResponseBytes`, set the limit.
+    #[tokio::test]
+    async fn an_endless_answer_is_cut_off_at_max_response_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("an address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("a connection");
+            let _ = socket.read(&mut [0u8; 2048]).await;
+            let head =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = format!("400\r\n{}\r\n", "x".repeat(1024));
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        });
+        let response = reqwest::get(format!("http://{addr}/"))
+            .await
+            .expect("an answer");
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            body_within(response, 64 * 1024, "slow.example"),
+        )
+        .await
+        .expect("the cap ends the read");
+        let problem = read.expect_err("a body past the cap is refused");
+        assert_eq!(problem.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
