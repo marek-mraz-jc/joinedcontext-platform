@@ -32,6 +32,8 @@ const HIDDEN_SLUG: &str = "zyxwvutsrqponmlkjihgfedcba765432";
 const REGION_SLUG: &str = "regionabcdefghijklmnopqrstuvwxy";
 /// An Endpoint of a project no deployment's scope names.
 const ELSEWHERE_SLUG: &str = "elsewhereabcdefghijklmnopqrstuv";
+/// The deployment's catalogue Endpoint, `hronov/catalog`.
+const CATALOG_SLUG: &str = "catalogabcdefghijklmnopqrstuvwx";
 const PORTAL_TOKEN: &str = "the-portals-token";
 const PERSON_TOKEN: &str = "the-persons-own-token";
 
@@ -214,6 +216,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 title: None,
             },
         ),
+        (("hronov".into(), "catalog".into()), public(CATALOG_SLUG)),
         (
             ("hronov".into(), "interne".into()),
             EndpointRef {
@@ -600,6 +603,78 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
         named(&events, "followups"),
         [json!({"questions": ["Kde je NO2 najvyššie?"]})],
         "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4746: "which organizations publish?" reads the catalogue's Organizations; a catalogue that
+/// lists none answers "none" in the question's language, and no answer call guesses at it.
+#[tokio::test]
+async fn an_empty_catalogue_answers_none_without_an_answer_call() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[1] = Connector {
+        endpoint: "catalog".into(),
+        tools: vec!["list_types".into(), "query_entities".into()],
+        timeout_seconds: 5,
+    };
+    let w = world("chatcatalognone", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{CATALOG_SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .mount(&w.gateway).await;
+    let types = json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["Dataset", "Organization"]}});
+    let answer = |text: String| {
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}]
+        }}))
+    };
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(answer(types.to_string()))
+        .mount(&w.gateway)
+        .await;
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(answer(json!({"entities": []}).to_string()))
+        .mount(&w.gateway)
+        .await;
+    script_routed(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": [], "data": []}).to_string()}),
+            400,
+        )],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 100)],
+        vec![completion(json!({"role": "assistant", "content": "Publikuje ich mnoho."}), 300)],
+    )
+    .await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Ktoré organizácie publikujú dáta?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let answers: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "answer")
+        .map(|(_, d)| d)
+        .collect();
+    assert_eq!(
+        answers,
+        [&json!({"text": "Katalóg nezverejňuje žiadne organizácie."})],
+        "{events:?}"
+    );
+    let calls = model_calls(&w.proxy).await;
+    assert!(
+        calls_of(&calls, None).is_empty(),
+        "no answer call: {calls:?}"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
@@ -4057,6 +4132,102 @@ async fn a_data_question_reads_again_until_the_model_answers() {
         json!({"type": ["AirQualityObserved"], "limit": 5})
     );
     assert!(tool_calls_of(&w.gateway, "delete_entity").await.is_empty());
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4759: the loop's first call on an Endpoint comes back with its NGSI-LD query card, made from
+/// the LinkML it serves (units, allowed values), never the LinkML itself; its next call does not.
+#[tokio::test]
+async fn the_first_call_on_an_endpoint_carries_its_query_card_once() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "describe_schema".into(),
+    ];
+    let w = world("chatcard", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    // Mounted before the recorded ones: the same priority, so these answer first.
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "q": {"type": "string"}}}},
+            {"name": "describe_schema", "description": "The model.", "inputSchema": {"type": "object", "properties": {"format": {"type": "string"}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let linkml = "slots:\n  name: {}\n  no2:\n    range: float\n    unit: { ucum_code: ug/m3 }\n    description: A long text the card leaves out.\nclasses:\n  AirQualityObserved:\n    slots: [name, no2]\n";
+    mcp()
+        .and(body_string_contains("\"describe_schema\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": json!({"format": "linkml", "mediaType": "text/yaml", "document": linkml}).to_string()}]
+        }})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air(&w.gateway, SLUG).await;
+    let read = |id: &str, q: &str| {
+        completion(
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                {"id": id, "type": "function", "function": {"name": "query_entities", "arguments": format!("{{\"endpoint\":\"ovzdusie\",\"type\":[\"AirQualityObserved\"],\"q\":\"{q}\"}}")}}
+            ]}),
+            1_000,
+        )
+    };
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
+        read("c1", "no2>30"),
+        read("c2", "no2>20"),
+        completion(json!({"role": "assistant", "content": "Jedna stanica má NO2 nad 30 µg/m³ [2]."}), 1_200),
+    ]).await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 30?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let all = model_calls(&w.proxy).await;
+    let calls = calls_of(&all, None);
+    assert_eq!(calls.len(), 3);
+    // The legend is in the rules, once, the same for every question.
+    assert!(text_of(&calls[0]["messages"][0])
+        .contains("`attr:range[unit]` a number stored in that UCUM unit"));
+    let after_tools = |call: &Value| -> Vec<(String, String)> {
+        let messages = call["messages"].as_array().cloned().unwrap_or_default();
+        let at = messages
+            .iter()
+            .position(|m| m["role"] == "tool")
+            .expect("a result");
+        messages[at..]
+            .iter()
+            .map(|m| {
+                (
+                    m["role"].as_str().unwrap_or_default().to_owned(),
+                    m["content"].as_str().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let first = after_tools(calls[1]);
+    // The result stays JSON; the card is the text after it, before the budget line.
+    assert!(first[0].1.starts_with('{'), "{first:?}");
+    assert_eq!(first[1].0, "user");
+    let card = &first[1].1;
+    assert!(card.starts_with("NGSI-LD Endpoint ovzdusie"), "{card}");
+    assert!(
+        card.ends_with("\nAirQualityObserved: name, no2:float[ug/m3]\n  e.g. q=no2>0"),
+        "{card}"
+    );
+    assert!(!card.contains("A long text"), "{card}");
+    assert!(first[2].1.starts_with("Budget:"), "{first:?}");
+    let second = after_tools(calls[2]);
+    let cards = second
+        .iter()
+        .filter(|(_, text)| text.starts_with("NGSI-LD Endpoint"))
+        .count();
+    assert_eq!(cards, 1, "the second read brings no card: {second:?}");
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

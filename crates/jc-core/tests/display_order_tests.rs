@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use jc_core::display_order::{display_order, enum_words, Display, Field};
+use jc_core::display_order::{display_order, enum_words, query_attributes, Display, Field};
 
 const MODEL: &str = r#"
 id: https://example.org/models/city
@@ -264,4 +264,87 @@ enums:
     assert_eq!(enum_words(model, "Bridge", "name"), None);
     assert_eq!(enum_words(model, "Bridge", "missing"), None);
     assert_eq!(enum_words("classes: [", "Bridge", "heritageStatus"), None);
+}
+
+/// T-4759: a served model as the gateway writes it (quoted keys, tag/value annotations) with a
+/// unit, an enum, a Relationship, a link value, several values, a GeoProperty and a parent class.
+const SERVED: &str = r#"
+"name": "city"
+"default_range": "string"
+"enums":
+  "Mode":
+    "permissible_values":
+      "metro": {}
+      "tram": {}
+      "bus": {}
+"slots":
+  "name":
+    "range": "string"
+    "annotations":
+      "ngsi_ld_kind": { "tag": "ngsi_ld_kind", "value": "LanguageProperty" }
+  "location":
+    "annotations":
+      "ngsi_ld_kind": { "tag": "ngsi_ld_kind", "value": "GeoProperty" }
+  "pm10":
+    "range": "float"
+    "unit": { "ucum_code": "ug/m3" }
+  "dateObserved": { "range": "datetime" }
+  "transportMode": { "range": "Mode" }
+  "refArea":
+    "range": "AdministrativeArea"
+    "annotations":
+      "ngsi_ld_kind": { "tag": "ngsi_ld_kind", "value": "Relationship" }
+  "seeAlso": { "range": "uriorcurie", "multivalued": true }
+  "stops": { "range": "integer" }
+"classes":
+  "Located":
+    "slots": ["name", "location"]
+  "AirQualityObserved":
+    "is_a": "Located"
+    "slots": ["dateObserved", "pm10", "refArea", "seeAlso"]
+  "Route":
+    "slots": ["transportMode", "stops"]
+"#;
+
+#[test]
+fn query_attributes_write_units_enums_relationships_and_inherited_slots() {
+    let classes = query_attributes(SERVED).unwrap();
+    let written =
+        |class: &str| -> Vec<String> { classes[class].iter().map(|a| a.written.clone()).collect() };
+    assert_eq!(
+        written("AirQualityObserved"),
+        [
+            "dateObserved:datetime",
+            "pm10:float[ug/m3]",
+            "refArea:AdministrativeArea",
+            "seeAlso:ref[]",
+            "name",
+            "location:GeoJSON"
+        ]
+    );
+    assert_eq!(
+        written("Route"),
+        ["transportMode:metro|tram|bus", "stops:integer"]
+    );
+    let example = |class: &str| classes[class].iter().find_map(|a| a.example.clone());
+    assert_eq!(example("AirQualityObserved").as_deref(), Some("pm10>0"));
+    assert_eq!(
+        example("Route").as_deref(),
+        Some(r#"transportMode=="metro""#)
+    );
+    assert_eq!(example("Located"), None);
+}
+
+#[test]
+fn query_attributes_cut_a_long_enum_and_refuse_a_broken_model() {
+    let values: String = (0..20).map(|i| format!("      v{i}: {{}}\n")).collect();
+    let model = format!(
+        "enums:\n  Many:\n    permissible_values:\n{values}slots:\n  kind: {{ range: Many }}\nclasses:\n  T:\n    slots: [kind]\n"
+    );
+    let classes = query_attributes(&model).unwrap();
+    let kind = &classes["T"][0].written;
+    assert!(kind.starts_with("kind:v0|v1|"), "{kind}");
+    assert!(kind.ends_with("|v11|…"), "{kind}");
+    assert!(query_attributes("classes: [").is_err());
+    assert!(query_attributes("name: empty").unwrap().is_empty());
 }

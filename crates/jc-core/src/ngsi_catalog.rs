@@ -241,6 +241,8 @@ pub fn entities(
                 continue;
             }
             let record = records[package.slug.as_str()];
+            // A CKAN name equal to another Endpoint's slug replaces that Endpoint's own Dataset:
+            // the published dataset wins, and [`link`] clears the DataService's `refDataset`.
             out.insert(
                 format!("urn:ngsi-ld:Dataset:{}", package.name),
                 ckan_dataset(package, record, place, ckan.site),
@@ -1189,6 +1191,51 @@ mod tests {
         let mut empty = BTreeMap::new();
         link(&mut empty);
         assert!(empty.is_empty());
+    }
+
+    /// A CKAN dataset named like another Endpoint's slug takes that id: the published dataset
+    /// wins over the Endpoint's own, whose DataService stays without a `refDataset`.
+    #[test]
+    fn a_ckan_name_equal_to_another_slug_wins_and_nothing_dangles() {
+        let packages = packages(&[harvested("air", "School")]);
+        let built = public_catalogue(&packages);
+        let ids: Vec<&str> = built.keys().map(String::as_str).collect();
+        assert_eq!(
+            ids,
+            [
+                "urn:ngsi-ld:DataService:air",
+                "urn:ngsi-ld:DataService:regions",
+                "urn:ngsi-ld:Dataset:air",
+                "urn:ngsi-ld:Organization:bbsk",
+            ]
+        );
+        assert_linked(&built);
+        let air = &built["urn:ngsi-ld:Dataset:air"];
+        assert_eq!(
+            air["refDataService"]["object"],
+            "urn:ngsi-ld:DataService:regions"
+        );
+        assert_eq!(
+            air["refPublisher"]["object"],
+            "urn:ngsi-ld:Organization:bbsk"
+        );
+        assert!(built["urn:ngsi-ld:DataService:air"]
+            .get("refDataset")
+            .is_none());
+        assert_eq!(
+            built["urn:ngsi-ld:DataService:regions"]["refDataset"]["objectList"],
+            json!([{ "object": "urn:ngsi-ld:Dataset:air" }])
+        );
+        assert_eq!(
+            built["urn:ngsi-ld:Organization:bbsk"]["datasetCount"]["value"],
+            1
+        );
+
+        // The hub's merge of the public catalogue over a caller's own keeps the same rule.
+        let mut merged = entities(&feed(), &places(), None);
+        merged.extend(built.clone());
+        link(&mut merged);
+        assert_eq!(merged, built);
     }
 
     #[test]

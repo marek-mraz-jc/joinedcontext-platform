@@ -16,6 +16,7 @@ pub mod documents;
 pub mod mcp;
 pub mod model;
 pub mod publishers;
+pub mod query_card;
 pub mod redact;
 pub mod resume;
 pub mod routed;

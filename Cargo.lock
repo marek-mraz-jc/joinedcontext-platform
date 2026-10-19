@@ -362,6 +362,7 @@ dependencies = [
  "jsonschema",
  "kreuzberg",
  "lopdf",
+ "ngsild-ql",
  "ort",
  "quick-xml 0.42.0",
  "rcgen",

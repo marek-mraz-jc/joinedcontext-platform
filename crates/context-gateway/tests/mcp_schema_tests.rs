@@ -745,3 +745,45 @@ async fn a_narrowed_call_is_the_brokers_class_description() {
         );
     }
 }
+
+/// T-4760: the query card is listed and reads back as text from the LinkML the caller is served,
+/// naming the read tools its grants cover; another Endpoint's card is an unknown resource.
+#[tokio::test]
+async fn the_query_card_reads_back_from_the_served_model() {
+    let listed = rpc(SLUG, "resources/list", json!({})).await;
+    let uri = format!("card://{SLUG}");
+    assert!(
+        listed["resources"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|r| r["uri"] == json!(uri))),
+        "{listed}"
+    );
+    let read = rpc(SLUG, "resources/read", json!({ "uri": uri })).await;
+    assert_eq!(
+        read["contents"][0]["mimeType"],
+        json!("text/plain"),
+        "{read}"
+    );
+    let card = read["contents"][0]["text"].as_str().unwrap_or_default();
+    assert!(
+        card.starts_with(&format!("NGSI-LD Endpoint {SLUG}, ETSI GS CIM 009")),
+        "{card}"
+    );
+    assert!(
+        card.contains("query_entities (type, q, georel, pick)"),
+        "{card}"
+    );
+    assert!(
+        !card.contains("query_temporal"),
+        "no temporal grant: {card}"
+    );
+    assert!(card.contains("\nUser: "), "{card}");
+    assert!(!card.contains(HIDDEN), "{card}");
+    let elsewhere = rpc(
+        SLUG,
+        "resources/read",
+        json!({ "uri": format!("card://{BIG_SLUG}") }),
+    )
+    .await;
+    assert!(elsewhere.is_null(), "another Endpoint's card: {elsewhere}");
+}

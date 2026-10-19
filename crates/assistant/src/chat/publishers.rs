@@ -187,6 +187,19 @@ pub fn routed(routing: Routing, read: Option<Read>) -> Routing {
     }
 }
 
+/// The answer to a catalogue read that found nothing, in `lang` (English for a language without
+/// its own): written without a model call, which could only guess at what the catalogue lacks.
+pub fn none(lang: &str, kind: &str) -> &'static str {
+    match (lang, kind == "Organization") {
+        ("sk", true) => "Katalóg nezverejňuje žiadne organizácie.",
+        ("sk", false) => "Katalóg neuvádza od tohto vydavateľa žiadne datasety.",
+        ("cs", true) => "Katalog nezveřejňuje žádné organizace.",
+        ("cs", false) => "Katalog neuvádí od tohoto vydavatele žádné datové sady.",
+        (_, true) => "The catalogue lists no organizations.",
+        (_, false) => "The catalogue lists no datasets of this publisher.",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

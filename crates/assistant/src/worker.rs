@@ -14,7 +14,7 @@ use jc_core::reach::{resolve_connectors, EndpointFacts, Resolution};
 use sqlx::PgPool;
 
 use crate::ckan::{sync_ckan, Catalogue};
-use crate::crawl::{crawl_site, queue, Crawler};
+use crate::crawl::{check_sitemap, crawl_site, queue, Crawler};
 use crate::extract::Indexer;
 use crate::{schedule, Error};
 
@@ -399,6 +399,23 @@ pub fn due(
     schedule::matches(spec.schedule.as_deref().unwrap_or(schedule::DEFAULT), now).unwrap_or(false)
 }
 
+/// Whether a website's daily sitemap check is due in the minute `now` (T-4749): it reads its
+/// sitemap, it was crawled before, and `now` is its schedule's minute and hour on a day the
+/// schedule itself does not name; a full crawl that day reads everything anyway.
+pub fn checks(
+    spec: &KnowledgeSourceSpec,
+    last_crawl: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> bool {
+    if spec.source != SourceType::Website || !spec.sitemap || last_crawl.is_none() {
+        return false;
+    }
+    let cron = spec.schedule.as_deref().unwrap_or(schedule::DEFAULT);
+    schedule::daily(cron).is_some_and(|daily| {
+        schedule::matches(&daily, now) == Some(true) && schedule::matches(cron, now) != Some(true)
+    })
+}
+
 /// When the source was last read, `None` before its first crawl.
 async fn last_crawl(
     pool: &PgPool,
@@ -428,17 +445,22 @@ pub async fn enqueue_due(
 ) -> Result<usize, Error> {
     let mut queued = 0;
     for source in sources {
-        if !due(
-            &source.spec,
-            last_crawl(pool, &source.project, &source.name).await?,
-            now,
-        ) {
+        let last = last_crawl(pool, &source.project, &source.name).await?;
+        let sitemap_only = if due(&source.spec, last, now) {
+            false
+        } else if checks(&source.spec, last, now) {
+            true
+        } else {
             continue;
-        }
+        };
         if queue::pending(pool, &source.project, &source.name).await? {
             continue;
         }
-        queue::enqueue(pool, &source.project, &source.name).await?;
+        if sitemap_only {
+            queue::enqueue_check(pool, &source.project, &source.name).await?;
+        } else {
+            queue::enqueue(pool, &source.project, &source.name).await?;
+        }
         queued += 1;
     }
     Ok(queued)
@@ -519,6 +541,25 @@ pub async fn work_one(
         source.spec.pdf.max_pages,
     );
     let outcome = match source.spec.source {
+        SourceType::Website if job.sitemap_only => check_sitemap(
+            pool,
+            crawler,
+            organization,
+            &source.project,
+            &source.name,
+            &source.spec,
+            &mut indexer,
+        )
+        .await
+        .map(|report| {
+            format!(
+                "sitemap check: {} pages fetched, {} unchanged, {} documents, {} removed",
+                report.pages_fetched,
+                report.pages_unchanged,
+                report.documents_fetched,
+                report.removed
+            )
+        }),
         SourceType::Website => crawl_site(
             pool,
             crawler,
@@ -531,8 +572,11 @@ pub async fn work_one(
         .await
         .map(|report| {
             format!(
-                "{} pages fetched, {} unchanged, {} documents",
-                report.pages_fetched, report.pages_unchanged, report.documents_fetched
+                "{} pages fetched, {} unchanged, {} documents, {} removed",
+                report.pages_fetched,
+                report.pages_unchanged,
+                report.documents_fetched,
+                report.removed
             )
         }),
         SourceType::Ckan => match &source.ckan_url {
@@ -701,6 +745,47 @@ fn title_line(title: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4749: a weekly-crawled website with a sitemap is checked at the schedule's minute and
+    /// hour every other day; never before its first crawl, without a sitemap, or for another kind.
+    #[test]
+    fn a_weekly_website_is_checked_on_the_other_days_at_its_hour() {
+        let spec = |json: serde_json::Value| -> KnowledgeSourceSpec {
+            serde_json::from_value(json).expect("a source spec")
+        };
+        let weekly = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://www.bbsk.sk/"],
+            "sitemap": true, "schedule": "0 3 * * 0"}),
+        );
+        let read = Some(time::macros::datetime!(2026-10-18 03:40 UTC));
+        let monday = time::macros::datetime!(2026-10-19 03:00 UTC);
+        let sunday = time::macros::datetime!(2026-10-25 03:00 UTC);
+        assert!(checks(&weekly, read, monday));
+        assert!(
+            !checks(&weekly, read, sunday),
+            "the full crawl reads that day"
+        );
+        assert!(due(&weekly, read, sunday));
+        assert!(!checks(&weekly, read, monday + time::Duration::minutes(1)));
+        assert!(
+            !checks(&weekly, None, monday),
+            "never crawled: the full crawl first"
+        );
+        let mut no_sitemap = weekly.clone();
+        no_sitemap.sitemap = false;
+        assert!(!checks(&no_sitemap, read, monday));
+        let daily = spec(
+            serde_json::json!({"source": "website", "startUrls": ["https://www.bbsk.sk/"],
+            "sitemap": true}),
+        );
+        assert!(
+            !checks(&daily, read, monday),
+            "a daily crawl needs no check"
+        );
+        let catalogue = spec(serde_json::json!({"source": "catalogue", "sitemap": true,
+            "schedule": "0 3 * * 0"}));
+        assert!(!checks(&catalogue, read, monday));
+    }
 
     /// T-4683: the publisher's name an answer calls an unreachable Endpoint by.
     #[test]
