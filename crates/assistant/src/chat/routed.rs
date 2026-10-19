@@ -1269,21 +1269,29 @@ async fn search_up_to(ask: &Ask<'_>, query: &str, limit: i64) -> Result<Vec<Hit>
     let began = Instant::now();
     let found = search_index(ask, query, limit).await;
     let output = match &found {
-        Ok(hits) => hits
+        Ok((hits, took)) => hits
             .iter()
             .map(|hit| format!("{:.3} {}", hit.score, hit.url))
+            .chain([took.clone()])
             .collect::<Vec<_>>()
             .join("\n"),
         Err(why) => format!("failed: {why}"),
     };
     ask.trace
         .note("search", "search", began, Some(query), Some(&output));
-    found
+    found.map(|(hits, _)| hits)
 }
 
-async fn search_index(ask: &Ask<'_>, query: &str, limit: i64) -> Result<Vec<Hit>, crate::Error> {
-    let vector = ask.embedder.query(query).await?;
-    crate::search_projects(
+/// The hits, and where the search's time went (T-4751): the question's wait for the embedding
+/// model, the model itself and the index query, as the step's last output line.
+async fn search_index(
+    ask: &Ask<'_>,
+    query: &str,
+    limit: i64,
+) -> Result<(Vec<Hit>, String), crate::Error> {
+    let (vector, took) = ask.embedder.query_timed(query).await?;
+    let began = Instant::now();
+    let hits = crate::search_projects(
         ask.pool,
         ask.sources,
         &Search {
@@ -1295,7 +1303,14 @@ async fn search_index(ask: &Ask<'_>, query: &str, limit: i64) -> Result<Vec<Hit>
             lang: None,
         },
     )
-    .await
+    .await?;
+    let took = format!(
+        "time: embedding waited {} ms, ran {} ms; index {} ms",
+        took.waited.as_millis(),
+        took.ran.as_millis(),
+        began.elapsed().as_millis()
+    );
+    Ok((hits, took))
 }
 
 fn offers(connector: &Connected, tool: &str) -> bool {
