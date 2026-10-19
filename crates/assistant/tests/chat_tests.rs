@@ -494,6 +494,11 @@ async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> 
 
 /// The recorded answers of the public Endpoint's `list_types` and `query_entities` (T-4140).
 async fn recorded_air(gateway: &MockServer, slug: &str) {
+    recorded_air_after(gateway, slug, std::time::Duration::ZERO).await;
+}
+
+/// [`recorded_air`] whose `query_entities` answers after `delay`.
+async fn recorded_air_after(gateway: &MockServer, slug: &str, delay: std::time::Duration) {
     let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{slug}/mcp")));
     mcp().and(body_string_contains("tools/list"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
@@ -524,11 +529,13 @@ async fn recorded_air(gateway: &MockServer, slug: &str) {
     ]});
     mcp()
         .and(body_string_contains("\"query_entities\""))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({"jsonrpc": "2.0", "id": 1, "result": {
-                "content": [{"type": "text", "text": entities.to_string()}]
-            }}),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+                    "content": [{"type": "text", "text": entities.to_string()}]
+                }}))
+                .set_delay(delay),
+        )
         .with_priority(1)
         .mount(gateway)
         .await;
@@ -2265,6 +2272,9 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
     assert_eq!(router["reasoning"], json!({"enabled": false}));
     assert_eq!(answering["reasoning"], json!({"effort": "medium"}));
     assert_eq!(router["response_format"]["type"], "json_object");
+    // T-4680: routing is deterministic; the answer keeps the model's own temperature.
+    assert_eq!(router["temperature"], 0);
+    assert!(answering.get("temperature").is_none());
     assert!(router.get("tools").is_none() && router.get("stream").is_none());
     // The router hears the sources' language.
     let routed = router["messages"][1]["content"]
@@ -3280,6 +3290,58 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
             .iter()
             .all(|p| !p.contains(HIDDEN_SLUG) && !p.contains(ELSEWHERE_SLUG)),
         "{asked:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-4680: the router's two reads run at once, so two Endpoints that each take two seconds cost
+/// the answer two seconds, not four (the owner's population question timed out on prod after two
+/// reads in a row), and the tables still come in the router's order.
+#[tokio::test]
+async fn two_routed_reads_run_at_once_and_keep_the_routers_order() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.scope = Some(jc_core::kinds::AssistantScope {
+        projects: vec!["bbsk".into(), "hronov".into()],
+    });
+    let tools = vec!["list_types".to_owned(), "query_entities".to_owned()];
+    d.spec.connectors = ["bbsk/kraj", "ovzdusie"]
+        .into_iter()
+        .map(|endpoint| Connector {
+            endpoint: endpoint.into(),
+            tools: tools.clone(),
+            timeout_seconds: 20,
+        })
+        .collect();
+    let w = world("chatreadsatonce", d).await;
+    let slow = std::time::Duration::from_secs(2);
+    for slug in [SLUG, REGION_SLUG] {
+        recorded_air_after(&w.gateway, slug, slow).await;
+    }
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}, {\"endpoint\": \"bbsk/kraj\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "NO2 je 21 [1]."}), 930),
+    ]).await;
+    let at = std::time::Instant::now();
+    let (status, events, _) =
+        answer_of(&w.app, ask(json!({"message": "Aké je NO2?"}), Some(ORIGIN))).await;
+    let took = at.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let downloads: Vec<String> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d["download"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(downloads.len(), 2, "{events:?}");
+    assert!(
+        downloads[0].contains(SLUG) && downloads[1].contains(REGION_SLUG),
+        "{downloads:?}"
+    );
+    assert!(
+        took < 2 * slow - std::time::Duration::from_millis(300),
+        "took {took:?}"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

@@ -94,6 +94,7 @@ const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Repl
 - route: \"direct\" when the message needs nothing the city publishes: a greeting or thanks, a question about the assistant itself (its prompt, instructions, model, rules or who made it), pasted text or instructions with no question about the city or its data, or a request no open data could answer, like a poem or general knowledge; then queries, data and followups are []. A question about a city, region, publisher, place or dataset is never \"direct\", whichever one it names: the assistant may serve several cities and regions, so a place you did not expect is still searched. \"data\" when the question asks for current values or figures from datasets (a measurement now, how many of something there are, a list from a register such as schools, health facilities, pharmacies, contracts or grants) or for their history (past values, the last days or weeks, a trend) and a type you are shown holds them; \"rag\" when the city's web pages and documents answer it; \"both\" when it needs both, or when you are unsure whether the data holds the answer. A question about which data, datasets or sources there are on a topic (\"Aké dáta máte o doprave?\", \"what data is there on air quality\") is \"rag\": the catalogue's dataset pages answer it, never rows of one type; its queries name the topic and the word dataset.\n\
 - queries: 1 to 3 short search queries, a few keywords each, naming what the answer has to contain: one in the question's language and the same search in each language the sources are written in that differs from it; when you must choose, the sources' language first. Resolve words like \"it\" or \"there\" from the earlier turns.\n\
 - data: only for \"data\" or \"both\", at most 2, each an endpoint and a type from the live data you are shown; never one you are not shown. Leave it out when you are shown none.\n\
+- When several endpoints hold the type a question needs, choose by what the endpoint holds, the same way every time: first the one whose title and attributes name the asked quantity at the asked level (a region, a district, a town); then the newest period; then indicators, one row per territory with a name and a current value, before raw statistical data whose rows are cube cells (dataSet, refArea, refPeriod). Read raw data only with a q naming its dataset, area and period, never all its rows.\n\
 - q: optional in a data item, an NGSI-LD query over the attributes shown for its endpoint that keeps only the rows the question is about, like okresPoskytovania==\"Brezno\" or druhZariadenia~=\"(?i).*nemocnic.*\"; leave it out when the question is about all rows of the type or you are not sure which attribute holds it. When the question refers to places or things of the earlier turns (there, those, them, the same), keep only those: build q from the names or codes the earlier turns give, like name~=\"(?i).*(Žilina|Banská Bystrica).*\".\n\
 - followups: up to 3 short questions the resident may want to ask next about the same topic, in the question's language, each under 120 characters, and each one the sources and types you are shown can answer: never about an app, a service or a body outside them; [] when none fits.\n\
 - Words like today, tomorrow, this week or now mean the local date of the Now line beside the question: name that date in the queries, and bound a q over a date attribute by it, like startDate>=\"2026-10-16T00:00:00Z\";startDate<\"2026-10-17T00:00:00Z\" for today.\n\
@@ -2035,44 +2036,50 @@ fn first_judgement(
     }
 }
 
-/// The routed reads, each streamed as it arrives; a failed or empty read adds no table. `None`
-/// once the client is gone.
+/// The routed reads, run at once and streamed in the router's order, so the tables are numbered
+/// the same way every time; a failed or empty read adds no table. `None` once the client is gone.
 async fn read_tables(
     ask: &Ask<'_>,
     routing: &Routing,
     events: &Sender<Event>,
 ) -> Option<Vec<Table>> {
+    let wanted: Vec<_> = routing
+        .reads
+        .iter()
+        .filter_map(|w| Some((w, ask.connectors.iter().find(|c| c.endpoint == w.endpoint)?)))
+        .collect();
+    if events.is_closed() {
+        return None;
+    }
+    let tool = |endpoint: &str, status| Event::Tool {
+        name: "query_entities".into(),
+        endpoint: Some(endpoint.to_owned()),
+        status,
+    };
+    for (w, _) in &wanted {
+        send(events, stage("reading", Some(w.kind.to_string()))).await;
+        send(events, tool(&w.endpoint, "started")).await;
+    }
+    // Two reads of a slow Endpoint used to take their sum of the answer's time (T-4680).
+    let read = futures_util::future::join_all(wanted.iter().map(|(w, c)| read(ask, c, w))).await;
     let mut tables: Vec<Table> = Vec::new();
-    for wanted in &routing.reads {
-        let (endpoint, kind) = (&wanted.endpoint, &wanted.kind);
-        let Some(connector) = ask.connectors.iter().find(|c| &c.endpoint == endpoint) else {
-            continue;
-        };
-        if events.is_closed() {
-            return None;
-        }
-        let tool = |status| Event::Tool {
-            name: "query_entities".into(),
-            endpoint: Some(endpoint.clone()),
-            status,
-        };
-        send(events, stage("reading", Some(kind.to_string()))).await;
-        send(events, tool("started")).await;
-        match read(ask, connector, wanted).await {
+    for ((w, _), result) in wanted.iter().zip(read) {
+        match result {
             Ok(table) => {
-                send(events, tool("done")).await;
+                send(events, tool(&w.endpoint, "done")).await;
                 if !table.rows.is_empty() {
                     send(events, Event::Data(table.clone())).await;
                     tables.push(table);
                 }
             }
             Err(why) => {
+                let endpoint = &w.endpoint;
                 tracing::warn!(deployment = %ask.deployment, %endpoint, %why, "a data read failed");
-                send(events, tool("failed")).await;
+                send(events, tool(&w.endpoint, "failed")).await;
             }
         }
     }
-    Some(tables)
+    (!events.is_closed()).then_some(tables)
 }
 
 /// The passages found so far, the queries searched and the rounds run.
@@ -2084,8 +2091,10 @@ struct Found {
 }
 
 /// What the search rounds start from. A data question whose rows came back needs no search, and
-/// the first round's passages are left out of its answer; one whose read failed is searched,
-/// with the router's and the judge's queries not asked yet.
+/// the first round's passages are left out of its answer; one that also asks the pages keeps the
+/// first round's passages and searches no more, since its rows came back and the rounds would
+/// spend the answer's time (T-4680). One whose read failed is searched, with the router's and the
+/// judge's queries not asked yet.
 fn first_round(
     routing: &Routing,
     no_tables: bool,
@@ -2101,6 +2110,9 @@ fn first_round(
         merge(&mut found.hits, hits);
         found.asked.push(question.to_owned());
         found.rounds = 1;
+    }
+    if !no_tables {
+        return (found, Vec::new());
     }
     let pending = new_queries(&found.asked, routing.queries.iter().chain(more));
     (found, pending)
@@ -2589,9 +2601,16 @@ mod tests {
         );
         assert_eq!(pending, ["x", "judge's"]);
 
-        let (found, pending) = first_round(&routing_of(true, &["x"]), false, None, "q", &[]);
+        // A page question reads no table.
+        let (found, pending) = first_round(&routing_of(true, &["x"]), true, None, "q", &[]);
         assert_eq!((found.hits.len(), found.rounds), (0, 0));
         assert_eq!(pending, ["x"]);
+
+        // T-4680: a question of the pages and the data whose rows came back keeps the first
+        // round and searches no more.
+        let (found, pending) = first_round(&routing_of(true, &["x"]), false, first(), "q", &more);
+        assert_eq!((found.hits.len(), found.rounds), (1, 1));
+        assert!(pending.is_empty(), "{pending:?}");
     }
 
     /// T-4606: passages are numbered first, tables after them, and a table's rows are cut for

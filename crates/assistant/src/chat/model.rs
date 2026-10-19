@@ -421,6 +421,9 @@ impl Model {
         });
         if call.json {
             body["response_format"] = json!({"type": "json_object"});
+            // The router and the judge decide what is read: the same question picks the same
+            // dataset every time (T-4680, a population answered from another cube on each ask).
+            body["temperature"] = json!(0);
         }
         if stream {
             // The proxy adds `stream_options.include_usage`, so the last chunk carries `usage`.
