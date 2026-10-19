@@ -288,6 +288,8 @@ const MCP_READ_TOOLS: &[&str] = &[
     "query_entities",
     "query_temporal",
     "retrieve_temporal",
+    // a profile of what query_entities reads (Antares T-4680)
+    "summarize",
 ];
 
 #[cfg(test)]
