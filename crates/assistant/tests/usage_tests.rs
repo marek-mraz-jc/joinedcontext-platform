@@ -214,6 +214,49 @@ async fn the_summary_adds_up_the_priced_turns_and_counts_the_rest_apart() {
     db::drop_database(admin, pool, &name).await;
 }
 
+/// T-4731: a turn answered from the kept answers counts as a hit, and the time and cost it saved
+/// are estimated against the other turns.
+#[tokio::test]
+async fn the_summary_counts_the_answer_cache_s_hits_and_what_they_saved() {
+    let (admin, pool, name) = db::database("usage_cache").await;
+    fixture(&pool).await;
+    turn(
+        &pool,
+        (PROJECT, 7),
+        "Kde je podateľňa?",
+        &[],
+        ("cached", 200, false),
+    )
+    .await;
+    let s = usage::summary(&pool, PROJECT, &Range::default())
+        .await
+        .expect("the summary reads");
+    let cache = &s["answerCache"];
+    assert_eq!(cache["hits"], 1, "{s}");
+    assert!(close(&cache["hitShare"], 1.0 / 6.0), "{cache}");
+    // the other five turns take 9000 ms on average, the hit 200
+    assert!(close(&cache["savedMs"], 8800.0), "{cache}");
+    // the other priced turns: 500, 4000, 8000 and 12000 micro-dollars
+    assert!(close(&cache["savedUsd"], 0.006125), "{cache}");
+
+    let none = usage::summary(
+        &pool,
+        PROJECT,
+        &Range {
+            route: Some("rag".into()),
+            ..Range::default()
+        },
+    )
+    .await
+    .expect("the rag summary reads");
+    assert_eq!(
+        none["answerCache"],
+        json!({"hits": 0, "hitShare": 0.0, "savedMs": null, "savedUsd": null}),
+        "{none}"
+    );
+    db::drop_database(admin, pool, &name).await;
+}
+
 #[tokio::test]
 async fn an_empty_range_answers_zeros_and_nulls_never_a_made_up_number() {
     let (admin, pool, name) = db::database("usage_empty").await;
@@ -235,6 +278,10 @@ async fn an_empty_range_answers_zeros_and_nulls_never_a_made_up_number() {
         json!({"total": null, "mean": null, "p50": null, "p90": null})
     );
     assert_eq!(s["tokens"]["cachedShare"], Value::Null);
+    assert_eq!(
+        s["answerCache"],
+        json!({"hits": 0, "hitShare": null, "savedMs": null, "savedUsd": null})
+    );
     assert_eq!(s["totalMs"], json!({"p50": null, "p90": null, "max": null}));
     assert_eq!(s["days"], json!([]));
     assert_eq!(s["costByStage"], json!([]));

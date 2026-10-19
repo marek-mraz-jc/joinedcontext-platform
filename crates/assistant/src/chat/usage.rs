@@ -113,6 +113,35 @@ fn days_sql() -> String {
     )
 }
 
+/// The answer cache over the range (T-4731): its hits, all questions, the mean time of the other
+/// turns and of the hits, and the other priced turns' mean cost.
+fn cache_sql() -> String {
+    format!(
+        "SELECT count(*) FILTER (WHERE route = 'cached'), count(*), \
+         avg(total_ms) FILTER (WHERE route <> 'cached')::float8, \
+         avg(total_ms) FILTER (WHERE route = 'cached')::float8, \
+         avg(cost_micros) FILTER (WHERE route <> 'cached' AND uncosted = 0)::float8 \
+         FROM ({TURNS}) t"
+    )
+}
+
+/// `answerCache` from [`cache_sql`]'s row: the estimates are `null` when there is no hit or no
+/// other turn to compare with.
+fn answer_cache(row: &PgRow) -> Result<Value, sqlx::Error> {
+    let (hits, questions): (i64, i64) = (row.try_get(0)?, row.try_get(1)?);
+    let (other_ms, hit_ms, other_cost): (Option<f64>, Option<f64>, Option<f64>) =
+        (row.try_get(2)?, row.try_get(3)?, row.try_get(4)?);
+    let n = hits as f64;
+    let saved_ms = other_ms.zip(hit_ms).map(|(o, h)| n * (o - h));
+    let saved_usd = other_cost.filter(|_| hits > 0).map(|c| n * c / 1_000_000.0);
+    Ok(json!({
+        "hits": hits,
+        "hitShare": (questions > 0).then(|| n / questions as f64),
+        "savedMs": saved_ms,
+        "savedUsd": saved_usd,
+    }))
+}
+
 /// Each stage's share of the cost: a model call's `stage`, else the step's `kind`, so a call
 /// recorded under a new stage (follow-ups, embeddings) shows without a change here.
 fn stages_sql() -> String {
@@ -155,6 +184,7 @@ pub async fn summary(pool: &PgPool, project: &str, range: &Range) -> Result<Valu
     let row = bind(&summary_sql()).fetch_one(&mut *tx).await?;
     let days = bind(&days_sql()).fetch_all(&mut *tx).await?;
     let stages = bind(&stages_sql()).fetch_all(&mut *tx).await?;
+    let cache = bind(&cache_sql()).fetch_one(&mut *tx).await?;
     let _ = tx.rollback().await;
     let total: Option<i64> = row.try_get(4)?;
     let days = days
@@ -192,6 +222,7 @@ pub async fn summary(pool: &PgPool, project: &str, range: &Range) -> Result<Valu
             "in": number(&row, 8)?, "out": number(&row, 9)?, "cached": number(&row, 10)?,
             "cachedShare": number(&row, 11)?,
         },
+        "answerCache": answer_cache(&cache)?,
         "firstTokenMs": spread_json(&row, 12)?,
         "totalMs": spread_json(&row, 15)?,
         "phases": {
