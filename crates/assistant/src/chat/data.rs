@@ -32,7 +32,8 @@ pub const QUESTION_TOKENS: u64 = 60_000;
 /// and stays cached.
 const DATA_RULES: &str = "\n\nYou may read more live data before you answer, with the tools you are given. Call a tool only when the data tables you have do not answer the question; when they do, answer at once without a tool.\n\
 - At most {steps} tool calls per question in all; before each call you are told how many are left. Each result comes back as JSON with its number `n`: cite it like a table, [n].\n\
-- Every number in your answer comes from a table or a tool result you were given, with its [n]. For \"how many\" ask with `count: true` and give `total`.\n\
+- Every number in your answer comes from a table or a tool result you were given, with its [n]. For \"how many\" ask with `count: true` and no `limit`, and give `total`.\n\
+- For a list, `pick` the attributes your answer shows (always `id` and `name`), so each row is short.\n\
 - query_entities takes `type` (a list), `q` (conditions joined with `;` for AND and `|` for OR; == != > >= < <= ~= for a regular expression; a member of a structured value as `address[addressLocality]==\"X\"`), `idPattern` (a regular expression over ids), `georel` (`near;maxDistance==1000`) with `geometry` and `coordinates` (longitude first), `limit` and `count`.\n\
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
 - A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
@@ -585,13 +586,100 @@ async fn recorded(
                 cards: Vec::new(),
                 dates: Default::default(),
             });
-            json!({"n": n, "tool": tool, "endpoint": endpoint, "result": cut(&text, STEP_RESULT_CHARS)}).to_string()
+            json!({"n": n, "tool": tool, "endpoint": endpoint, "result": for_model(&text, STEP_RESULT_CHARS)}).to_string()
         }
         Err(why) => {
             tracing::info!(deployment = %ask.deployment, tool = %tool, endpoint = %endpoint, status = "failed", ms, "data step");
             send(events, tool_event(c, "failed")).await;
             format!("The tool refused or failed ({}). Correct the arguments once, or answer without it and say so.", quoted(&why))
         }
+    }
+}
+
+/// The NGSI-LD attribute types whose `type` member [`compact`] drops, each with the member that
+/// holds its value.
+const ATTRIBUTE_VALUES: &[(&str, &str)] = &[
+    ("Property", "value"),
+    ("GeoProperty", "value"),
+    ("Relationship", "object"),
+    ("LanguageProperty", "languageMap"),
+    ("VocabProperty", "vocab"),
+    ("JsonProperty", "json"),
+    ("ListProperty", "valueList"),
+    ("ListRelationship", "objectList"),
+];
+
+/// A result as the model reads it (T-4763): normalized NGSI-LD made concise, an attribute with
+/// nothing beside its value the bare value, a geometry other than a Point only its type (the
+/// table carries an area, the model never reads a coordinate), no `@context`. Past `max`
+/// characters a page keeps the whole rows that fit and says how many it left out; any other
+/// text is cut at `max` as before. The table is made from the untouched text.
+fn for_model(text: &str, max: usize) -> Value {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return Value::String(cut(text, max));
+    };
+    compact(&mut value);
+    let size = |v: &Value| v.to_string().chars().count();
+    if size(&value) <= max {
+        return value;
+    }
+    if let Some(rows) = value.get_mut("entities").and_then(Value::as_array_mut) {
+        let all = rows.len();
+        let mut used = 2;
+        let fit = rows
+            .iter()
+            .take_while(|row| {
+                used += size(row) + 1;
+                used <= max
+            })
+            .count();
+        rows.truncate(fit);
+        let left = all - fit;
+        value["notShown"] = json!(format!(
+            "{left} of these {all} rows are left out for length; filter with `q` or `pick` fewer attributes to read them"
+        ));
+        if size(&value) <= max + 200 {
+            return value;
+        }
+    }
+    Value::String(cut(&value.to_string(), max))
+}
+
+/// Makes the entities in `value` concise in place: see [`for_model`].
+fn compact(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(compact),
+        Value::Object(map) => {
+            map.remove("@context");
+            let kind = map.get("type").and_then(Value::as_str).unwrap_or_default();
+            if let Some((kind, member)) = ATTRIBUTE_VALUES.iter().find(|(k, _)| *k == kind) {
+                map.remove("type");
+                if *kind == "GeoProperty" {
+                    if let Some(geometry) = map.get_mut("value") {
+                        if geometry.get("type").and_then(Value::as_str) != Some("Point") {
+                            *geometry = json!({"type": geometry.get("type").cloned()});
+                        }
+                    }
+                }
+                // a readable unit says what the code does
+                if map.contains_key("unit") {
+                    map.remove("unitCode");
+                }
+                for (key, inner) in map.iter_mut() {
+                    if key != member {
+                        compact(inner);
+                    }
+                }
+                if map.len() == 1 {
+                    if let Some(only) = map.remove(*member) {
+                        *value = only;
+                    }
+                }
+                return;
+            }
+            map.values_mut().for_each(compact);
+        }
+        _ => {}
     }
 }
 
@@ -768,6 +856,112 @@ mod tests {
             offers.contains("offers no get_type; it offers query_entities"),
             "{offers}"
         );
+    }
+
+    /// T-4763: a count question asks for the total and the smallest page, not the default page
+    /// of rows; a count beside a list keeps the list's limit.
+    #[test]
+    fn a_count_question_reads_the_total_and_one_row() {
+        let connectors = [recorded("bbsk/registre", &["Bridge"])];
+        let read = |args: Value| resolved(&connectors, "query_entities", args).map(|(_, _, a)| a);
+        let count = read(json!({"endpoint": "registre", "type": ["Bridge"], "q": "yearBuilt<1926", "count": true})).unwrap();
+        assert_eq!(
+            count,
+            json!({"type": ["Bridge"], "q": "yearBuilt<1926", "count": true, "limit": 1})
+        );
+        let list = read(json!({"endpoint": "registre", "type": ["Bridge"], "q": "yearBuilt<1926", "count": true, "limit": 20})).unwrap();
+        assert_eq!(list["limit"], 20);
+        let plain =
+            read(json!({"endpoint": "registre", "type": ["Bridge"], "q": "yearBuilt<1926"}))
+                .unwrap();
+        assert!(plain.get("limit").is_none());
+        assert!(DATA_RULES.contains("`count: true` and no `limit`"));
+        assert!(DATA_RULES.contains("`pick` the attributes your answer shows"));
+    }
+
+    /// T-4763: the model reads the 20 bridges of bbsk registre (prod, 2026-10-19) concise, every
+    /// value and unit kept, at about half the characters it read before (17,264 to 8,822).
+    #[test]
+    fn a_result_reaches_the_model_concise_with_its_values() {
+        let text =
+            include_str!("../../tests/fixtures/mcp/query-entities-bridges-bbsk-registre.json");
+        let raw: Value = serde_json::from_str(text).unwrap();
+        let read = for_model(text, usize::MAX);
+        // what the model read before: the text as one escaped JSON string
+        let before = json!(text).to_string().chars().count();
+        let after = read.to_string().chars().count();
+        assert!(after * 10 < before * 6, "{after} of {before} characters");
+        let first = &read["entities"][0];
+        assert_eq!(first["id"], raw["entities"][0]["id"]);
+        assert_eq!(first["type"], "Bridge");
+        assert_eq!(first["yearBuilt"], 1953);
+        assert_eq!(first["bridgedLength"], json!({"unit": "m", "value": 9.46}));
+        assert_eq!(read["entities"].as_array().unwrap().len(), 20);
+        // a relationship, a polygon, a language map and the context
+        let mut other = json!({"@context": "https://x", "entities": [{"id": "urn:a", "type": "District",
+            "location": {"type": "GeoProperty", "value": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}},
+            "seat": {"type": "Relationship", "object": "urn:b", "observedAt": "2026-10-19T00:00:00Z"},
+            "label": {"type": "LanguageProperty", "languageMap": {"sk": "Okres"}}}]});
+        compact(&mut other);
+        assert_eq!(
+            other,
+            json!({"entities": [{"id": "urn:a", "type": "District",
+            "location": {"type": "Polygon"},
+            "seat": {"object": "urn:b", "observedAt": "2026-10-19T00:00:00Z"},
+            "label": {"sk": "Okres"}}]})
+        );
+    }
+
+    /// T-4763: past the step's characters a page keeps whole rows and says how many it left out,
+    /// where the plain cut stopped inside a row; text that is no JSON is cut as before.
+    #[test]
+    fn a_long_page_keeps_whole_rows_and_names_what_it_left_out() {
+        let text =
+            include_str!("../../tests/fixtures/mcp/query-entities-bridges-bbsk-registre.json");
+        let read = for_model(text, 2_000);
+        let rows = read["entities"].as_array().unwrap();
+        assert!(!rows.is_empty() && rows.len() < 20);
+        assert!(rows
+            .iter()
+            .all(|r| r["id"].is_string() && r["name"].is_string()));
+        assert!(read["notShown"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{} of these 20 rows", 20 - rows.len())));
+        assert!(read.to_string().chars().count() <= 2_200);
+        assert_eq!(
+            for_model("no json", 3),
+            json!("no \n[cut: the result went on past 3 characters]")
+        );
+    }
+
+    /// T-4763: an earlier turn reaches the next question as its text alone; its tool results
+    /// were never part of it.
+    #[test]
+    fn an_earlier_turn_keeps_its_answer_and_drops_its_tool_results() {
+        let history = [
+            super::super::agent::Turn {
+                role: "user".into(),
+                text: "Koľko mostov spravuje kraj?".into(),
+            },
+            super::super::agent::Turn {
+                role: "assistant".into(),
+                text: "Kraj spravuje 1 031 mostov [1].".into(),
+            },
+        ];
+        let opening = super::super::agent::opening(
+            None,
+            &history,
+            "A koľko je starších ako 100 rokov?",
+            "2026-10-19",
+        );
+        assert_eq!(opening.len(), 2);
+        assert!(opening
+            .iter()
+            .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none()));
+        let asked = opening[1]["content"].as_str().unwrap();
+        assert!(asked.contains("Kraj spravuje 1 031 mostov [1]."));
+        assert!(!asked.contains("entities"));
     }
 
     /// T-4748: an unfiltered read is a sample of 5 rows with the total; a filtered one, the list
