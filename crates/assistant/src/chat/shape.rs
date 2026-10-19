@@ -342,6 +342,7 @@ mod tests {
             dataset: None,
             download: None,
             geojson: None,
+            profile: None,
             map: None,
             geometries,
         }

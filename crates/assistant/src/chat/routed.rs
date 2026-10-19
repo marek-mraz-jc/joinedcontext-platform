@@ -2723,6 +2723,7 @@ mod tests {
             total: Some(900),
             dataset: None,
             download: None,
+            geojson: None,
             map: None,
             geometries: Vec::new(),
             profile: Some("type=AirQualityObserved count=900".into()),
