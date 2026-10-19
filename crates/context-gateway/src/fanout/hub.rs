@@ -1,16 +1,15 @@
 //! One Endpoint's WebSocket clients served from one broker subscription (ADR-N-049, EP-114).
 //!
-//! A [`Hub`] per Endpoint holds the latest entity per id, every client's filters in one
-//! [`Index`], and one queue per connection. Its upstream is a single WebSocket to the broker
-//! view under the gateway's own account; each change it carries is cut to each candidate
-//! caller's own grant, the same cut a REST read gets, before that caller's filters run on it.
+//! A [`Hub`] per Endpoint and caller identity holds the latest entity per id, every client's
+//! filters in one [`Index`], and one queue per connection. Its upstream is a single WebSocket to
+//! the broker view under that identity, so the broker's view and policy engine have already cut
+//! each change to what the caller may read, as they cut a REST read (T-4755); the clients'
+//! filters only narrow it further.
 
 use super::{changed, compile, FilterId, Index};
-use crate::pdp::evaluator::{Constraints, Request as PdpRequest, Subject, Verdict};
 use crate::pdp::projection;
 use crate::resolver::Endpoint;
 use antares_jsonld::{expand_entity, Context, ExpandOpts};
-use jc_core::kinds::Operation;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -42,34 +41,6 @@ pub fn core() -> &'static Context {
 fn expanded(entity: &Value) -> Option<Value> {
     let members = entity.as_object()?;
     expand_entity(members, core(), ExpandOpts::default()).ok()
-}
-
-/// What `constraints` lets a caller see of `entity`, cut as a REST read cuts it; `None` when
-/// the caller may not see it at all.
-pub fn cut(entity: &Value, constraints: &Constraints) -> Option<Value> {
-    if constraints.empty || !projection::permitted(entity, constraints) {
-        return None;
-    }
-    let mut seen = entity.clone();
-    projection::project_by_type(&mut seen, constraints);
-    Some(seen)
-}
-
-/// The read a connection is decided for: every entity of the Endpoint, as a query decides it.
-pub fn decide(
-    pdp: &dyn crate::pdp::Pdp,
-    subject: &Subject,
-    endpoint: &Endpoint,
-) -> Option<Constraints> {
-    match pdp.decide(
-        subject,
-        Operation::QueryEntity,
-        &PdpRequest::default(),
-        endpoint,
-    ) {
-        Verdict::Rewrite(constraints) => Some(*constraints),
-        _ => None,
-    }
 }
 
 /// One message a connection's writer sends, in order.
@@ -167,9 +138,7 @@ struct Sub {
 /// One open connection.
 struct Conn {
     endpoint: Arc<Endpoint>,
-    subject: Subject,
     principal: String,
-    constraints: Option<Constraints>,
     queue: Arc<Queue>,
     subs: BTreeMap<u32, Sub>,
     next: u32,
@@ -295,14 +264,8 @@ impl Hub {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Opens a connection for `subject`, decided now against `endpoint`.
-    pub fn open(
-        &self,
-        endpoint: Arc<Endpoint>,
-        subject: Subject,
-        principal: String,
-        constraints: Option<Constraints>,
-    ) -> (u64, Arc<Queue>) {
+    /// Opens a connection of `principal` on `endpoint`.
+    pub fn open(&self, endpoint: Arc<Endpoint>, principal: String) -> (u64, Arc<Queue>) {
         let queue = Arc::new(Queue::default());
         let mut state = self.state();
         let id = state.next_conn;
@@ -312,9 +275,7 @@ impl Hub {
             id,
             Conn {
                 endpoint,
-                subject,
                 principal,
-                constraints,
                 queue: Arc::clone(&queue),
                 subs: BTreeMap::new(),
                 next: 1,
@@ -508,16 +469,16 @@ impl Hub {
         self.state().conns.get(&conn).map_or(0, |c| c.subs.len())
     }
 
-    /// Re-decides every connection whose Endpoint was reloaded (a policy changed, R48); a
-    /// connection whose Endpoint is gone or no longer serves the WebSocket is named, to close.
-    pub fn redecide(&self, pdp: &dyn crate::pdp::Pdp, now: Option<&Arc<Endpoint>>) -> Vec<u64> {
+    /// Follows every connection's Endpoint through a reload; a connection whose Endpoint is gone
+    /// or no longer serves the WebSocket is named, to close. A changed Policy needs nothing here:
+    /// the broker decides each delivery under the Policy in force when it is sent (R48).
+    pub fn recheck(&self, now: Option<&Arc<Endpoint>>) -> Vec<u64> {
         let mut state = self.state();
         let mut gone = Vec::new();
         for (id, conn) in &mut state.conns {
             match now {
                 Some(endpoint) if Arc::ptr_eq(endpoint, &conn.endpoint) => {}
                 Some(endpoint) if endpoint.serves(jc_core::kinds::Representation::WebSocket) => {
-                    conn.constraints = decide(pdp, &conn.subject, endpoint);
                     conn.endpoint = Arc::clone(endpoint);
                 }
                 _ => {
@@ -572,8 +533,9 @@ impl Hub {
         self.state().table.len()
     }
 
-    /// One change from the upstream: the table keeps it, and each connection with a candidate
-    /// filter is sent what its own grant and filters make of it (ADR-N-049 §2.5, §2.7).
+    /// One change from the upstream, already cut to this hub's identity by the broker: the table
+    /// keeps it, and each connection with a candidate filter is sent what its filters make of it
+    /// (ADR-N-049 §2.5).
     pub fn apply(&self, entity: Value, at: chrono::DateTime<chrono::Utc>) {
         let Some(id) = entity.get("id").and_then(Value::as_str).map(str::to_owned) else {
             return;
@@ -594,36 +556,22 @@ impl Hub {
         for filter in state.index.candidates(&full, core()) {
             by_conn.entry(filter >> SUB_BITS).or_default().push(filter);
         }
-        // The cut and its two expansions run once per distinct grant, not per connection: the
-        // rig's 1,000 callers of one public Endpoint share one (T-4133).
-        // ponytail: a linear scan of the grants seen in this change; a map when callers with
-        // distinct grants per Endpoint reach the hundreds.
-        let mut views: Vec<(&Constraints, Option<View>)> = Vec::new();
+        if by_conn.is_empty() {
+            return;
+        }
+        let delta = changed(previous.as_ref().and_then(expanded).as_ref(), &full);
         for (conn_id, filters) in by_conn {
             let Some(conn) = state.conns.get(&conn_id) else {
                 continue;
             };
-            let Some(constraints) = &conn.constraints else {
-                continue;
-            };
-            let at_view = match views.iter().position(|(c, _)| *c == constraints) {
-                Some(at) => at,
-                None => {
-                    views.push((constraints, view(&entity, previous.as_ref(), constraints)));
-                    views.len() - 1
-                }
-            };
-            let Some((seen, now, delta)) = &views[at_view].1 else {
-                continue;
-            };
             for filter in filters {
-                if !state.index.decides(filter, now, delta, core()) {
+                if !state.index.decides(filter, &full, &delta, core()) {
                     continue;
                 }
                 let Some(sub) = conn.subs.values().find(|s| s.filter == filter) else {
                     continue;
                 };
-                let mut data = seen.clone();
+                let mut data = entity.clone();
                 if let Some(names) = &sub.attributes {
                     projection::project_entity(&mut data, names, &BTreeSet::new());
                 }
@@ -638,21 +586,6 @@ impl Hub {
             }
         }
     }
-}
-
-/// A change as one grant shows it: the cut entity, its expansion, the names that changed.
-type View = (Value, Value, BTreeSet<String>);
-
-/// What a grant shows of a change: the cut entity, its expansion and the names that changed
-/// against the cut of the previous state; `None` when the grant shows nothing of it.
-fn view(entity: &Value, previous: Option<&Value>, constraints: &Constraints) -> Option<View> {
-    let seen = cut(entity, constraints)?;
-    let now = expanded(&seen)?;
-    let before = previous
-        .and_then(|p| cut(p, constraints))
-        .and_then(|p| expanded(&p));
-    let delta = changed(before.as_ref(), &now);
-    Some((seen, now, delta))
 }
 
 impl State {
@@ -773,7 +706,6 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::endpoint;
     use super::*;
-    use crate::pdp::grants::GrantView;
 
     #[test]
     fn a_closed_debug_never_shows_the_resume_token() {
@@ -801,42 +733,22 @@ mod tests {
         })
     }
 
-    /// Constraints that show `attrs` of every Vehicle (empty: every attribute).
-    fn grant(attrs: &[&str]) -> Constraints {
-        let attrs: BTreeSet<String> = attrs.iter().map(|a| (*a).to_owned()).collect();
-        Constraints {
-            types: ["Vehicle".to_owned()].into(),
-            attrs: attrs.clone(),
-            grants: vec![GrantView {
-                types: ["Vehicle".to_owned()].into(),
-                attrs,
-                ..GrantView::default()
-            }],
-            ..Constraints::default()
-        }
-    }
-
-    fn open(hub: &Hub, constraints: Option<Constraints>) -> (u64, Arc<Queue>) {
-        hub.open(
-            endpoint(),
-            Subject::anonymous(),
-            "anonymous".into(),
-            constraints,
-        )
+    fn open(hub: &Hub) -> (u64, Arc<Queue>) {
+        hub.open(endpoint(), "anonymous".into())
     }
 
     /// A connection whose upgrade failed leaves the hub with its guard; a taken one stays.
     #[test]
     fn a_joined_connection_without_a_session_leaves_the_hub() {
         let hub = Arc::new(Hub::new("s", 10));
-        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (conn, queue) = open(&hub);
         subscribe(&hub, conn, json!({}));
         drop(Joined::new(Arc::clone(&hub), conn, queue));
         assert_eq!(hub.connections(), 0);
         assert!(hub.idle_for().is_some());
         assert!(hub.state().index.is_empty());
 
-        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (conn, queue) = open(&hub);
         let (_, taken, _) = Joined::new(Arc::clone(&hub), conn, queue).take();
         assert_eq!((taken, hub.connections()), (conn, 1));
     }
@@ -866,38 +778,31 @@ mod tests {
             .collect()
     }
 
+    /// The upstream carries what the broker let this hub's identity read; a filter narrows it
+    /// and never sees a change that is no change of what it watches.
     #[test]
-    fn a_caller_never_receives_what_its_grant_does_not_read() {
+    fn a_filter_narrows_what_the_upstream_carries() {
         let hub = Hub::new("s", 100);
-        let (all, all_queue) = open(&hub, Some(grant(&[])));
-        let (narrow, narrow_queue) = open(&hub, Some(grant(&["speed"])));
-        let (none, none_queue) = open(&hub, None);
+        let (all, all_queue) = open(&hub);
+        let (fast, fast_queue) = open(&hub);
         subscribe(&hub, all, json!({}));
-        subscribe(&hub, narrow, json!({}));
-        // A filter on the attribute the grant hides never fires: it sees no such attribute.
-        subscribe(&hub, narrow, json!({"q": "secret==\"x\""}));
-        subscribe(&hub, none, json!({}));
+        subscribe(&hub, fast, json!({"q": "speed>50"}));
         hub.apply(bus("urn:ngsi-ld:Vehicle:1", 10.0, "x"), chrono::Utc::now());
-
         let whole = data(&all_queue);
         assert_eq!(whole.len(), 1);
-        assert_eq!(whole[0]["secret"]["value"], "x");
-        let cut = data(&narrow_queue);
-        assert_eq!(cut.len(), 1, "one notification, not two: {cut:?}");
-        assert!(cut[0].get("secret").is_none(), "{cut:?}");
-        assert_eq!(cut[0]["speed"]["value"], 10.0);
-        assert!(data(&none_queue).is_empty());
-
-        // A change of the hidden attribute alone is no change for the narrow caller.
-        hub.apply(bus("urn:ngsi-ld:Vehicle:1", 10.0, "y"), chrono::Utc::now());
-        assert_eq!(data(&all_queue).len(), 1);
-        assert!(data(&narrow_queue).is_empty());
+        assert_eq!(
+            whole[0]["secret"]["value"], "x",
+            "nothing is cut again: {whole:?}"
+        );
+        assert!(data(&fast_queue).is_empty());
+        hub.apply(bus("urn:ngsi-ld:Vehicle:1", 60.0, "x"), chrono::Utc::now());
+        assert_eq!(data(&fast_queue).len(), 1);
     }
 
     #[test]
     fn notification_attributes_cut_the_entity_further() {
         let hub = Hub::new("s", 100);
-        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (conn, queue) = open(&hub);
         subscribe(
             &hub,
             conn,
@@ -912,7 +817,7 @@ mod tests {
     #[test]
     fn subscriptions_are_capped_updated_and_removed() {
         let hub = Hub::new("s", 100);
-        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (conn, queue) = open(&hub);
         let id = subscribe(&hub, conn, json!({"q": "speed>50"}));
         hub.apply(bus("urn:ngsi-ld:Vehicle:1", 10.0, "x"), chrono::Utc::now());
         assert!(data(&queue).is_empty());
@@ -977,7 +882,7 @@ mod tests {
     #[test]
     fn a_seed_never_replaces_a_newer_notification() {
         let hub = Hub::new("s", 100);
-        let (conn, queue) = open(&hub, Some(grant(&[])));
+        let (conn, queue) = open(&hub);
         subscribe(&hub, conn, json!({"watchedAttributes": ["speed"]}));
         hub.apply(bus("urn:ngsi-ld:Vehicle:1", 20.0, "x"), chrono::Utc::now());
         hub.seed(bus("urn:ngsi-ld:Vehicle:1", 5.0, "x"));
@@ -990,7 +895,7 @@ mod tests {
     #[test]
     fn a_closed_connection_resumes_only_for_its_caller_with_its_token() {
         let hub = Hub::new("s", 100);
-        let (conn, _) = open(&hub, Some(grant(&[])));
+        let (conn, _) = open(&hub);
         let id = subscribe(&hub, conn, json!({}));
         hub.close(
             conn,
