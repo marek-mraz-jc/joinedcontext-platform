@@ -294,9 +294,31 @@ pub fn reply(kind: Brief, lang: &str, chips: bool) -> String {
     }
 }
 
+/// The example questions a clarify line offers, in `lang` else the deployment's `first`
+/// language: trimmed, none empty, at most [`super::routed::MAX_FOLLOWUPS`]; none for small talk.
+fn chips(
+    suggestions: &std::collections::BTreeMap<String, Vec<String>>,
+    kind: Brief,
+    lang: &str,
+    first: &str,
+) -> Vec<String> {
+    if kind != Brief::Clarify {
+        return Vec::new();
+    }
+    suggestions
+        .get(lang)
+        .or_else(|| suggestions.get(first))
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .take(super::routed::MAX_FOLLOWUPS)
+        .collect()
+}
+
 /// Answers a [`brief`] message with its fixed line: no search, no read, no model call. A clarify
 /// line offers the deployment's example questions in the reply's language as chips.
-pub async fn answer(
+pub(super) async fn answer(
     ask: &Ask<'_>,
     question: &str,
     kind: Brief,
@@ -305,19 +327,7 @@ pub async fn answer(
 ) {
     let first = ask.languages.first().map_or("sk", String::as_str);
     let lang = super::scope::language(question, named, first);
-    let chips: Vec<String> = if kind == Brief::Clarify {
-        ask.suggestions
-            .get(lang)
-            .or_else(|| ask.suggestions.get(first))
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .take(super::routed::MAX_FOLLOWUPS)
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let chips = chips(ask.suggestions, kind, lang, first);
     ask.trace
         .note("route", kind.route(), Instant::now(), None, None);
     // A channel that went away stops reading; the turn is over either way.
@@ -367,6 +377,27 @@ mod tests {
         );
         assert_eq!(brief("dobre"), Some((Brief::Closing, None)));
         assert_eq!(brief("Jak se máš?"), Some((Brief::HowAreYou, Some("cs"))));
+    }
+
+    #[test]
+    fn chips_come_in_the_reply_s_language_else_the_first_and_only_for_clarify() {
+        let suggestions = [
+            (
+                "sk".to_owned(),
+                vec![" Kedy je zber? ".to_owned(), "".to_owned()],
+            ),
+            (
+                "en".to_owned(),
+                vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            ),
+        ]
+        .into();
+        assert_eq!(
+            chips(&suggestions, Brief::Clarify, "de", "sk"),
+            ["Kedy je zber?"]
+        );
+        assert_eq!(chips(&suggestions, Brief::Clarify, "en", "sk").len(), 3);
+        assert!(chips(&suggestions, Brief::Greeting, "sk", "sk").is_empty());
     }
 
     #[test]
