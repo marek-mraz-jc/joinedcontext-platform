@@ -713,7 +713,16 @@ fn federated_refusal(
 /// answer is `400 reason-required`. DM-113's other half, every write from the Portal's UI,
 /// turns on with T-4667, which gives the Portal's forms their reason field: enforced before
 /// that, it would refuse every form the Portal sends today.
-fn reason_refusal(operation: Operation, headers: &axum::http::HeaderMap) -> Option<Response<Body>> {
+fn reason_refusal(
+    operation: Operation,
+    subject: &Subject,
+    headers: &axum::http::HeaderMap,
+) -> Option<Response<Body>> {
+    // The Portal's own delete (ui/src/components/entities/filters.ts) asks no reason yet: a
+    // delete through the UI is held to it with the reason field, as every UI write is (DM-113).
+    if tenancy::provenance(subject).0 == "ui" {
+        return None;
+    }
     let deletes = matches!(
         operation,
         Operation::DeleteAttrs
@@ -763,7 +772,7 @@ pub(crate) async fn view_request(
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
         }
     }
-    if let Some(refusal) = reason_refusal(operation, request.headers()) {
+    if let Some(refusal) = reason_refusal(operation, subject, request.headers()) {
         tracing::info!(slug = %endpoint.slug, %operation, "write refused: no reason given");
         return Err(Box::new(refusal));
     }

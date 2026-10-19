@@ -518,6 +518,17 @@ async fn a_delete_without_a_reason_is_refused_before_the_broker() {
     .await;
     assert_ne!(code, StatusCode::BAD_REQUEST);
     assert_eq!(broker.hops().len(), 1);
+
+    // The Portal's UI has no reason field yet; its person's delete still passes (DM-113 waits
+    // for it), and its token, not a header, says it is the UI.
+    let ui = token_of(&realm, "portal-ui");
+    let (code, problem) = answer(
+        app(&broker.url, &realm),
+        request(Method::DELETE, &path, Some(&ui), &[], None),
+    )
+    .await;
+    assert_ne!(code, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(broker.hops().len(), 2);
 }
 
 /// ADR-N-054 2.4, DM-114: the broker answers `versions=all` only when the gateway says the space's
