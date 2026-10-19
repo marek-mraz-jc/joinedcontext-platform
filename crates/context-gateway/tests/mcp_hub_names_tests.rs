@@ -161,8 +161,10 @@ async fn tools_list_is_the_same_small_size_for_111_endpoints_and_for_10000() {
     // and no copy of each description in its outputSchema it measured 12,831; with the `endpoint`
     // sentence and the output members' meanings said once in the instructions, 11,546 (T-4506).
     // The broker's `summarize` (T-4680, the seventh read tool) adds 1,918 bytes: 13,814, so the
-    // ceiling for this tool set is 13,900, and it again only comes down (T-4725).
-    assert!(sizes[0] < 13_900, "{sizes:?}");
+    // ceiling for this tool set is 13,900, and it again only comes down (T-4725). Each tool's
+    // human title, at the top and in its annotations as a connector directory requires (T-4732),
+    // adds 426 bytes: 14,240, so the ceiling is 14,300, and it only comes down.
+    assert!(sizes[0] < 14_300, "{sizes:?}");
 }
 
 #[tokio::test]

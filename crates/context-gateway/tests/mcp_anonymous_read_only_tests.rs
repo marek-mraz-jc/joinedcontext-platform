@@ -241,6 +241,36 @@ async fn without_a_token_no_surface_lists_a_write_or_an_unnamed_tool() {
     }
 }
 
+/// T-4732: on every surface, the broker's tools included, each listed tool has a title of at
+/// most 64 characters, the same in its annotations, and no two share one.
+#[tokio::test]
+async fn every_surface_lists_each_tool_with_its_own_title() {
+    let realm = common::Realm::new();
+    let (url, _) = broker().await;
+    let app = router(Arc::new(gateway(&url, &realm)));
+    for (path, _) in surfaces() {
+        let (status, answer) = send(&app, rpc(&path, None, None, &list())).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+        let mut titles = std::collections::HashSet::new();
+        for tool in answer["result"]["tools"].as_array().into_iter().flatten() {
+            let title = tool["title"].as_str().unwrap_or_default();
+            assert!(
+                !title.trim().is_empty() && title.chars().count() <= 64,
+                "{path}: {tool}"
+            );
+            assert_eq!(
+                tool["annotations"]["title"], tool["title"],
+                "{path}: {tool}"
+            );
+            assert!(
+                titles.insert(title.to_owned()),
+                "{path}: two tools titled {title}"
+            );
+        }
+        assert!(titles.contains("Query entities"), "{path}: {titles:?}");
+    }
+}
+
 #[tokio::test]
 async fn without_a_token_a_write_is_refused_on_every_surface_before_the_broker() {
     let realm = common::Realm::new();
