@@ -545,6 +545,65 @@ async fn recorded_air_after(gateway: &MockServer, slug: &str, delay: std::time::
         .await;
 }
 
+/// T-4741: the owner was offered, right after "the data does not hold it", the question just
+/// asked and one more about the same absent data, beside tables of other indicators. An answer
+/// that cites no table shows no table and offers nothing next; one that cites a table offers the
+/// router's follow-ups, never one the conversation already asked.
+#[tokio::test]
+async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answer() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatnotfound", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let routed = |followups: Value| {
+        completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": [], "data": [{"endpoint": "ovzdusie", "type": "AirQualityObserved"}], "followups": followups}).to_string()}),
+            400,
+        )
+    };
+    script_routed(&w.proxy, vec![
+        routed(json!(["Aký bol prirodzený prírastok v kraji?", "Koľko detí sa narodilo?"])),
+        routed(json!(["Aký bol prirodzený prírastok v kraji?", "Kde je NO2 najvyššie?"])),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
+        completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
+    ], vec![
+        completion(json!({"role": "assistant", "content": "Zverejnené dáta prirodzený prírastok v kraji neobsahujú."}), 300),
+        completion(json!({"role": "assistant", "content": "NO2 na Námestí SNP je 21 [1]."}), 300),
+    ]).await;
+    let named = |events: &[(String, Value)], name: &str| -> Vec<Value> {
+        events
+            .iter()
+            .filter(|(n, _)| n == name)
+            .map(|(_, d)| d.clone())
+            .collect()
+    };
+
+    let asked = "Aký bol prirodzený prírastok v kraji?";
+    let (status, events, _) = answer_of(&w.app, ask(json!({"message": asked}), Some(ORIGIN))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(named(&events, "answer").len(), 1, "{events:?}");
+    assert!(named(&events, "data").is_empty(), "{events:?}");
+    assert!(named(&events, "followups").is_empty(), "{events:?}");
+
+    let history = json!([{"role": "user", "text": asked}, {"role": "assistant", "text": "Zverejnené dáta ho neobsahujú."}]);
+    let (_, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "A aké je NO2?", "history": history}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(named(&events, "data").len(), 1, "{events:?}");
+    assert_eq!(
+        named(&events, "followups"),
+        [json!({"questions": ["Kde je NO2 najvyššie?"]})],
+        "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4140, AG-102, AG-105, AG-106, AG-108: a data question is routed to the public Endpoint's
 /// live values: the router sees the types `list_types` gives, the service reads them with
 /// `query_entities` alone (a write tool the manifest names is never offered or called), the
@@ -580,6 +639,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         Some(ORIGIN)
     );
     let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+    // T-4741: the table comes once the answer is written, which cites it.
     assert_eq!(
         names,
         [
@@ -588,8 +648,8 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "stage",
             "tool",
             "tool",
-            "data",
             "stage",
+            "data",
             "answer",
             "citations",
             "done"
@@ -612,7 +672,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         json!({"name": "query_entities", "status": "done"})
     );
     assert_eq!(
-        events[5].1,
+        events[6].1,
         json!({
             "type": "AirQualityObserved",
             "columns": ["name", "no2", "observedAt"],

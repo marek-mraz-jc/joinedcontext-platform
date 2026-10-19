@@ -224,6 +224,20 @@ fn followups(reply: Option<&Value>, question: &str) -> Vec<String> {
     out
 }
 
+/// The follow-ups no earlier question of the conversation asked (T-4741): the owner was offered
+/// the question the assistant had just answered as absent.
+fn unasked(followups: Vec<String>, history: &[Turn]) -> Vec<String> {
+    let asked: HashSet<String> = history
+        .iter()
+        .filter(|t| t.role == "user")
+        .map(|t| normalized(&t.text))
+        .collect();
+    followups
+        .into_iter()
+        .filter(|f| !asked.contains(&normalized(f)))
+        .collect()
+}
+
 /// The letters Slovak and Czech write and English never does.
 const SK_CS_LETTERS: &str = "áäčďéěíĺľňóôŕřšťúůýž";
 
@@ -2364,9 +2378,15 @@ async fn answer_data(
         ask,
         events,
         question,
+        history,
         ..
     } = q;
-    let Some((text, citations, whole)) = super::data::answer(ask, start, spent, events).await
+    let Some(super::data::Answered {
+        text,
+        citations,
+        whole,
+        tables,
+    }) = super::data::answer(ask, start, spent, events).await
     else {
         return;
     };
@@ -2377,6 +2397,13 @@ async fn answer_data(
     }
     send(events, Event::Answer(text)).await;
     send(events, Event::Citations(citations)).await;
+    // An answer that cites no rows found nothing, and what the router offered next asks for the
+    // same data (T-4741).
+    let followups = if tables == 0 {
+        Vec::new()
+    } else {
+        unasked(followups, history)
+    };
     if !followups.is_empty() {
         send(events, Event::Followups(followups)).await;
     }
@@ -2675,6 +2702,9 @@ async fn answer_routed(
         first_counted(ask.deployment, &mut spent, first, question, true);
         return spent;
     }
+    for table in &tables {
+        send(events, Event::Data(table.clone())).await;
+    }
     let answering = Answering {
         messages,
         citations,
@@ -2970,8 +3000,9 @@ async fn read_all(ask: &Ask<'_>, wanted: &[(Read, &Connected)]) -> Vec<Result<Ta
     futures_util::future::join_all(wanted.iter().map(|(w, c)| read(ask, c, w))).await
 }
 
-/// The reads' steps and tables, streamed in the router's order, so the tables are numbered the
-/// same way every time; a failed or empty read adds no table. `None` once the client is gone.
+/// The reads' steps, streamed in the router's order, and their tables in that order, so the tables
+/// are numbered the same way every time; a failed or empty read adds no table. The tables are sent
+/// later, a data answer's only when it cites them (T-4741). `None` once the client is gone.
 async fn read_tables(
     ask: &Ask<'_>,
     wanted: &[(Read, &Connected)],
@@ -2996,7 +3027,6 @@ async fn read_tables(
             Ok(table) => {
                 send(events, tool(&w.endpoint, "done")).await;
                 if !table.rows.is_empty() {
-                    send(events, Event::Data(table.clone())).await;
                     tables.push(table);
                 }
             }
@@ -3282,6 +3312,7 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
     }
     send(events, Event::Answer(text)).await;
     send(events, Event::Citations(citations)).await;
+    let followups = unasked(followups, q.history);
     if !followups.is_empty() {
         send(events, Event::Followups(followups)).await;
     }
@@ -4492,6 +4523,29 @@ mod tests {
             3
         );
         assert!(!english("Kde je zberny dvor?") && english("What is the NO2 level?"));
+        // T-4741: an earlier question of the conversation is never offered again, whatever its
+        // case, spaces or closing mark; the assistant's own turns are no questions.
+        let history = [
+            Turn {
+                role: "user".into(),
+                text: "Aký bol prirodzený prírastok obyvateľstva v BBSK?".into(),
+            },
+            Turn {
+                role: "assistant".into(),
+                text: "Koľko detí sa narodilo?".into(),
+            },
+        ];
+        assert_eq!(
+            unasked(
+                vec![
+                    "aký bol  prirodzený prírastok obyvateľstva v BBSK".into(),
+                    "Koľko detí sa narodilo?".into()
+                ],
+                &history
+            ),
+            ["Koľko detí sa narodilo?"]
+        );
+        assert!(unasked(Vec::new(), &history).is_empty());
         // An overlong query is no query.
         let long = format!("{{\"queries\": [\"{}\"]}}", "a".repeat(MAX_QUERY_CHARS + 1));
         assert_eq!(routing(&long, "q", &[]).queries, ["q"]);
