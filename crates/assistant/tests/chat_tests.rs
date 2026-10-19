@@ -737,25 +737,62 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     tx.rollback().await.expect("rollback");
     assert_eq!(tokens, 1330);
 
-    // Live values are read again, never answered from the cache; the types are.
-    script_routed(&w.proxy, vec![
-        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
-    ], vec![], vec![
-        completion(json!({"role": "assistant", "content": "21 [1]."}), 930),
-    ]).await;
+    // T-4731: the same first question within LIVE_LIFE is answered from the cache at once, with
+    // no model call and no read: the table, the answer and its citations as they were sent.
+    let calls_before = model_calls(&w.proxy).await.len();
+    let reads_before = tool_calls_of(&w.gateway, "query_entities").await.len();
     let (_, again, _) = answer_of(
         &w.app,
         ask(
-            json!({"message": "Aké je NO2 na Námestí SNP?"}),
+            json!({"message": "aké je NO2 na námestí SNP"}),
             Some(ORIGIN),
         ),
     )
     .await;
     assert_eq!(
         again.last().map(|(_, d)| d["cached"].clone()),
-        Some(json!(false))
+        Some(json!(true))
     );
-    assert_eq!(model_calls(&w.proxy).await.len(), 4);
+    let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        ["conversation", "data", "answer", "citations", "done"]
+    );
+    let first: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "data" || n == "answer" || n == "citations")
+        .map(|(_, d)| d)
+        .collect();
+    let replayed: Vec<&Value> = again[1..4].iter().map(|(_, d)| d).collect();
+    assert_eq!(replayed, first);
+    assert_eq!(model_calls(&w.proxy).await.len(), calls_before);
+    assert_eq!(
+        tool_calls_of(&w.gateway, "query_entities").await.len(),
+        reads_before
+    );
+    // A follow-up in the conversation is never answered from the cache.
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\"}]}"}), 400),
+    ], vec![], vec![
+        completion(json!({"role": "assistant", "content": "21 [1]."}), 930),
+    ]).await;
+    let (_, followed, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké je NO2 na Námestí SNP?", "history": [
+                {"role": "user", "text": "Ahoj"},
+                {"role": "assistant", "text": "Dobrý deň."}
+            ]}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(
+        followed.last().map(|(_, d)| d["cached"].clone()),
+        Some(json!(false)),
+        "{followed:?}"
+    );
+    assert_eq!(model_calls(&w.proxy).await.len(), calls_before + 2);
     let types_listed = w
         .gateway
         .received_requests()
@@ -2334,11 +2371,15 @@ async fn a_sources_only_question_is_routed_searched_and_streamed_once() {
         "the cache made a model call"
     );
     let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["conversation", "answer", "citations", "done"]);
+    // The follow-up chips are replayed too (T-4731).
+    assert_eq!(
+        names,
+        ["conversation", "answer", "citations", "followups", "done"]
+    );
     assert_eq!(again[1].1["text"], answer);
     assert_eq!(again[2].1, events[13].1);
-    assert_eq!(again[3].1["cached"], true);
-    without_internals(&again[3].1);
+    assert_eq!(again[4].1["cached"], true);
+    without_internals(&again[4].1);
     // The skip is counted, so the eval shows how often the judgement is saved (T-4360).
     let mut tx = assistant::project_scope(&w.pool, "hronov")
         .await

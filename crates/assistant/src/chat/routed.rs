@@ -958,14 +958,29 @@ pub fn normalized(question: &str) -> String {
         .to_owned()
 }
 
-/// How long a cached answer is served.
+/// How long an answer from pages alone is served.
 const CACHE_LIFE: Duration = Duration::from_secs(3_600);
+
+/// How long an answer that read live data is served (T-4731): the same question again within it
+/// is answered at once and costs nothing, and a value is at most this old.
+// ponytail: a fixed life, not the Endpoints' data version; read their newest modifiedAt when a
+// feed changes faster than this.
+const LIVE_LIFE: Duration = Duration::from_secs(600);
+
+/// How long a deployment's index digest is reused: its `count(*)` over every passage ran before
+/// each first question, a kept answer's included (T-4731). A crawl reaches the key this much later.
+const DIGEST_LIFE: Duration = Duration::from_secs(60);
+
+/// The most table cells one kept answer holds, so the cache stays a few megabytes.
+const KEPT_CELLS: usize = 20_000;
 
 /// The most answers the cache holds; the oldest goes first.
 const CACHE_ENTRIES: usize = 1_000;
 
 /// Answers to first questions, keyed by the deployment, the normalized question and the digest of
-/// the deployment's index, so a re-index serves no stale answer (Architecture/23 §4).
+/// the deployment's index, so a re-index serves no stale answer (Architecture/23 §4). What is kept
+/// is what the visitor was sent: the tables, the chart, the answer, its citations and the
+/// follow-ups (T-4731).
 // ponytail: in memory, one replica; each replica keeps its own. Move to the database when the
 // assistant runs on more than one.
 #[derive(Default)]
@@ -987,13 +1002,15 @@ pub struct AnswerCache {
     /// Each Endpoint's model as a deployment is served it, by `{deployment}/{slug}`, for
     /// [`TYPES_LIFE`]; `None` when it could not be read (T-4672).
     models: Mutex<HashMap<String, KeptModel>>,
+    /// Each deployment's index digest, by name, for [`DIGEST_LIFE`] (T-4731).
+    digests: Mutex<HashMap<String, (Instant, String)>>,
 }
 
 /// When a model was read, and the model.
 type KeptModel = (Instant, Option<std::sync::Arc<str>>);
 
-/// When an answer was stored, its text and its citations.
-type Cached = (Instant, String, Vec<Citation>);
+/// When an answer was stored, how long it is served, and the events it is replayed as.
+type Cached = (Instant, Duration, Vec<Event>);
 
 impl AnswerCache {
     pub fn key(deployment: &str, question: &str, digest: &str) -> [u8; 32] {
@@ -1005,11 +1022,12 @@ impl AnswerCache {
         hash.finalize().into()
     }
 
-    pub fn get(&self, key: &[u8; 32]) -> Option<(String, Vec<Citation>)> {
+    /// The kept answer's events and how long ago it was kept.
+    pub fn get(&self, key: &[u8; 32]) -> Option<(Vec<Event>, Duration)> {
         let mut entries = self.entries.lock().ok()?;
         match entries.get(key) {
-            Some((at, answer, citations)) if at.elapsed() < CACHE_LIFE => {
-                Some((answer.clone(), citations.clone()))
+            Some((at, life, replay)) if at.elapsed() < *life => {
+                Some((replay.clone(), at.elapsed()))
             }
             Some(_) => {
                 entries.remove(key);
@@ -1146,11 +1164,11 @@ impl AnswerCache {
         }
     }
 
-    pub fn put(&self, key: [u8; 32], answer: String, citations: Vec<Citation>) {
+    pub fn put(&self, key: [u8; 32], replay: Vec<Event>, life: Duration) {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
-        entries.retain(|_, (at, _, _)| at.elapsed() < CACHE_LIFE);
+        entries.retain(|_, (at, life, _)| at.elapsed() < *life);
         if entries.len() >= CACHE_ENTRIES {
             if let Some(oldest) = entries
                 .iter()
@@ -1160,7 +1178,7 @@ impl AnswerCache {
                 entries.remove(&oldest);
             }
         }
-        entries.insert(key, (Instant::now(), answer, citations));
+        entries.insert(key, (Instant::now(), life, replay));
     }
 }
 
@@ -2241,6 +2259,7 @@ async fn answer_direct(
         citations: Vec::new(),
         key,
         keep: true,
+        live: false,
         log: Log {
             direct: true,
             rag: false,
@@ -2265,8 +2284,63 @@ pub fn new_queries<'a>(asked: &[String], next: impl Iterator<Item = &'a String>)
         .collect()
 }
 
+/// How long the answer being written may be kept, once it is whole: `0` while it may not.
+#[derive(Default)]
+struct Keep(std::sync::atomic::AtomicU64);
+
+impl Keep {
+    fn after(&self, life: Duration) {
+        self.0
+            .store(life.as_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn life(&self) -> Option<Duration> {
+        let secs = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (secs > 0).then(|| Duration::from_secs(secs))
+    }
+}
+
+/// The events a kept answer is replayed as: what the visitor reads, never a stage or a delta.
+fn replayed(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Data(_)
+            | Event::Visualization(_)
+            | Event::Script { .. }
+            | Event::Answer(_)
+            | Event::Citations(_)
+            | Event::Followups(_)
+    )
+}
+
+/// Whether the events are small enough to keep: [`KEPT_CELLS`] table cells at most.
+fn small_enough(replay: &[Event]) -> bool {
+    let cells: usize = replay
+        .iter()
+        .map(|event| match event {
+            Event::Data(table) => table.rows.len() * table.columns.len().max(1),
+            _ => 0,
+        })
+        .sum();
+    cells <= KEPT_CELLS
+}
+
+/// Whether a connector reads as the person who asks: what it answers is theirs and never kept for
+/// another visitor (T-4731).
+fn personal(ask: &Ask<'_>) -> bool {
+    ask.connectors.iter().any(|c| c.surface.token.is_some())
+}
+
+/// Whether the answer names the moment it was written, which a later visitor must not read.
+fn tells_time(ask: &Ask<'_>, text: &str) -> bool {
+    super::clock::readings(ask.now, ask.zone)
+        .iter()
+        .any(|at| text.contains(at.as_str()))
+}
+
 /// Answers one question by the routed loop; returns what it spent. Every outcome reaches
-/// `events`: an answer with its citations, or an error a person can act on.
+/// `events`: an answer with its citations, or an error a person can act on. A first question
+/// asked before is answered from the cache at once, with no model call (T-4731).
 pub async fn answer(
     ask: &Ask<'_>,
     history: &[Turn],
@@ -2274,17 +2348,68 @@ pub async fn answer(
     events: &Sender<Event>,
 ) -> Spent {
     let started = Instant::now();
-    let now = super::clock::now_line(ask.now, ask.zone);
-    let mut spent = Spent::default();
-
-    let key = cache_key(ask, history, question).await;
-    if let Some((text, citations)) = key.as_ref().and_then(|k| ask.cache.get(k)) {
-        spent.cached = true;
-        spent.first_token_ms = Some(started.elapsed().as_millis() as u64);
-        send(events, Event::Answer(text)).await;
-        send(events, Event::Citations(citations)).await;
+    let Some(key) = cache_key(ask, history, question).await else {
+        return answer_routed(ask, history, question, events, None, &Keep::default()).await;
+    };
+    if let Some((replay, age)) = ask.cache.get(&key) {
+        let mut spent = Spent {
+            cached: true,
+            first_token_ms: Some(started.elapsed().as_millis() as u64),
+            ..Spent::default()
+        };
+        spent.stages.route = Some(millis(started.elapsed()));
+        let kept = format!("an answer kept {} s ago", age.as_secs());
+        ask.trace
+            .note("route", "cached", started, None, Some(&kept));
+        for event in replay {
+            send(events, event).await;
+        }
         return spent;
     }
+    // What the visitor is sent passes through here, so a whole answer is kept as it was sent.
+    let keep = Keep::default();
+    let keeping = &keep;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(32);
+    let answering = async move {
+        let spent = answer_routed(ask, history, question, &tx, Some(key), keeping).await;
+        drop(tx);
+        spent
+    };
+    let forwarding = async {
+        let mut replay = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if replayed(&event) {
+                replay.push(event.clone());
+            }
+            // A reader who left closes this channel too, so the answer stops as it did.
+            if events.send(event).await.is_err() {
+                rx.close();
+            }
+        }
+        replay
+    };
+    let (spent, replay) = tokio::join!(answering, forwarding);
+    if let Some(life) = keep.life() {
+        if small_enough(&replay) {
+            ask.cache.put(key, replay, life);
+        }
+    }
+    spent
+}
+
+/// [`answer`] past the cache: `key` is the question's cache key when it has one, and `keep` is
+/// told how long a whole answer may be kept.
+async fn answer_routed(
+    ask: &Ask<'_>,
+    history: &[Turn],
+    question: &str,
+    events: &Sender<Event>,
+    key: Option<[u8; 32]>,
+    keep: &Keep,
+) -> Spent {
+    let started = Instant::now();
+    let now = super::clock::now_line(ask.now, ask.zone);
+    let mut spent = Spent::default();
 
     let router = Call {
         model: ask.router_model,
@@ -2316,6 +2441,7 @@ pub async fn answer(
         events,
         languages: &languages,
         now: &now,
+        keep,
     };
     let messages = router_messages(history, question, &live, &languages, &now);
     if !within(ask, &spent, &messages, ROUTER_TOKENS) {
@@ -2409,8 +2535,20 @@ pub async fn answer(
             steps: routing.reads.len(),
             started,
         };
-        if let Some((text, citations)) = super::data::answer(ask, start, &mut spent, events).await {
+        if let Some((text, citations, whole)) =
+            super::data::answer(ask, start, &mut spent, events).await
+        {
             let text = without_invented_absence(&text, &missing);
+            // A whole answer of live data, read as anyone, with every source answering (T-4731).
+            if key.is_some()
+                && whole
+                && missing.is_empty()
+                && !personal(ask)
+                && worth_text(&text)
+                && !tells_time(ask, &text)
+            {
+                keep.after(LIVE_LIFE);
+            }
             send(events, Event::Answer(text)).await;
             send(events, Event::Citations(citations)).await;
             if !routing.followups.is_empty() {
@@ -2423,8 +2561,10 @@ pub async fn answer(
         messages,
         citations,
         key,
-        // an answer written while a source did not answer is never replayed
-        keep: tables.is_empty() && missing.is_empty(),
+        // an answer written while a source did not answer is never replayed, nor live values
+        // read as the person who asks (T-4731)
+        keep: missing.is_empty() && (tables.is_empty() || !personal(ask)),
+        live: !tables.is_empty(),
         log: Log {
             direct: false,
             rag: routing.rag,
@@ -2450,6 +2590,8 @@ struct Question<'a, 'b> {
     events: &'a Sender<Event>,
     languages: &'a [String],
     now: &'a str,
+    /// Told how long the answer may be kept, once it is whole.
+    keep: &'a Keep,
 }
 
 /// Whether a call that writes `out` tokens after `messages` stays inside the conversation's
@@ -2463,7 +2605,22 @@ async fn cache_key(ask: &Ask<'_>, history: &[Turn], question: &str) -> Option<[u
     if !history.is_empty() {
         return None;
     }
-    match digest(ask).await {
+    let kept = ask.cache.digests.lock().ok().and_then(|digests| {
+        digests
+            .get(ask.deployment)
+            .filter(|(at, _)| at.elapsed() < DIGEST_LIFE)
+            .map(|(_, digest)| digest.clone())
+    });
+    let read = match kept {
+        Some(digest) => Ok(digest),
+        None => digest(ask).await.inspect(|digest| {
+            if let Ok(mut digests) = ask.cache.digests.lock() {
+                // One entry per deployment, so it is bounded by the manifests.
+                digests.insert(ask.deployment.to_owned(), (Instant::now(), digest.clone()));
+            }
+        }),
+    };
+    match read {
         // The local day is part of the key, so an answer about "today" is not kept past it.
         Ok(digest) => Some(AnswerCache::key(
             ask.deployment,
@@ -2774,8 +2931,10 @@ struct Answering {
     messages: Vec<Value>,
     citations: Vec<Citation>,
     key: Option<[u8; 32]>,
-    /// No table went into it, so it may be kept in the cache.
+    /// It may be kept in the cache: every source answered, and no live value is the person's.
     keep: bool,
+    /// A table went into it: it is kept for [`LIVE_LIFE`] rather than [`CACHE_LIFE`].
+    live: bool,
     log: Log,
     followups: Vec<String>,
     started: Instant,
@@ -2792,6 +2951,7 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         mut citations,
         key,
         keep,
+        live,
         log,
         followups,
         started,
@@ -2851,13 +3011,10 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         cited = citations.len(),
         "routed answer"
     );
-    // Live values change; only an answer from the pages is kept, and never one that told the time.
-    let told_time = super::clock::readings(ask.now, ask.zone)
-        .iter()
-        .any(|at| text.contains(at.as_str()));
-    let keep = keep && !told_time && worth_keeping(&completion, &text);
-    if let (Some(key), true) = (key, keep) {
-        ask.cache.put(key, text.clone(), citations.clone());
+    // Live values change: an answer that read them is kept for a short while, and never one
+    // that told the time.
+    if key.is_some() && keep && !tells_time(ask, &text) && worth_keeping(&completion, &text) {
+        q.keep.after(if live { LIVE_LIFE } else { CACHE_LIFE });
     }
     send(events, Event::Answer(text)).await;
     send(events, Event::Citations(citations)).await;
@@ -2871,10 +3028,13 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
 /// own and it is at least a sentence, so a cut stream, a length stop or a bare "I cannot" is
 /// never replayed.
 pub fn worth_keeping(completion: &Completion, text: &str) -> bool {
+    completion.whole() && worth_text(text)
+}
+
+/// Whether an answer's text is at least a sentence: three words, ending as one or twelve long.
+fn worth_text(text: &str) -> bool {
     let words = text.split_whitespace().count();
-    completion.whole()
-        && words >= 3
-        && (words >= 12 || text.trim_end().ends_with(['.', '!', '?', '…', ']', ')']))
+    words >= 3 && (words >= 12 || text.trim_end().ends_with(['.', '!', '?', '…', ']', ')']))
 }
 
 #[cfg(test)]
@@ -4107,8 +4267,74 @@ mod tests {
         );
         let cache = AnswerCache::default();
         assert_eq!(cache.get(&key), None);
-        cache.put(key, "Od 9:00 [1].".into(), Vec::new());
-        assert_eq!(cache.get(&key).map(|(a, _)| a), Some("Od 9:00 [1].".into()));
+        let answer = vec![Event::Answer("Od 9:00 [1].".into())];
+        cache.put(key, answer.clone(), CACHE_LIFE);
+        assert_eq!(cache.get(&key).map(|(a, _)| a), Some(answer));
+    }
+
+    /// T-4731: a kept answer is the events the visitor was sent, tables and follow-ups included,
+    /// for its own life; a stage, a delta or an error is never replayed, and a page of more than
+    /// [`KEPT_CELLS`] cells is never kept.
+    #[test]
+    fn a_kept_answer_replays_what_was_sent_for_its_own_life() {
+        let table = Table {
+            endpoint: "ovzdusie".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["name".into(), "no2".into()],
+            rows: vec![vec![json!("Námestie SNP"), json!(21)]],
+            ..Table::default()
+        };
+        let sent = [
+            stage("understanding", None),
+            Event::Data(table.clone()),
+            Event::Delta("NO2 ".into()),
+            Event::Answer("NO2 je 21 [1].".into()),
+            Event::Citations(Vec::new()),
+            Event::Followups(vec!["A PM10?".into()]),
+        ];
+        let replay: Vec<Event> = sent.iter().filter(|e| replayed(e)).cloned().collect();
+        assert_eq!(replay.len(), 4);
+        assert!(matches!(replay[0], Event::Data(_)) && matches!(replay[3], Event::Followups(_)));
+        assert!(!replayed(&conversation_spent()));
+
+        let cache = AnswerCache::default();
+        let live = AnswerCache::key("bb/public", "Aké je NO2?", "1:1@2026-10-19");
+        let gone = AnswerCache::key("bb/public", "Aké je PM10?", "1:1@2026-10-19");
+        cache.put(live, replay.clone(), LIVE_LIFE);
+        cache.put(gone, replay.clone(), Duration::ZERO);
+        let (again, age) = cache.get(&live).expect("kept");
+        assert_eq!(again, replay);
+        assert!(age < LIVE_LIFE);
+        assert_eq!(cache.get(&gone), None, "past its life");
+        // Another deployment, language-free key or day never reads it.
+        assert_eq!(
+            cache.get(&AnswerCache::key(
+                "zilina/public",
+                "Aké je NO2?",
+                "1:1@2026-10-19"
+            )),
+            None
+        );
+        assert_eq!(
+            cache.get(&AnswerCache::key(
+                "bb/public",
+                "Aké je NO2?",
+                "1:1@2026-10-20"
+            )),
+            None
+        );
+
+        assert!(small_enough(&replay));
+        let big = Table {
+            rows: vec![vec![json!(1), json!(2)]; KEPT_CELLS / 2 + 1],
+            ..table
+        };
+        assert!(!small_enough(&[Event::Data(big)]));
+        // A whole answer is kept for the life it is told; nothing told keeps nothing.
+        let keep = Keep::default();
+        assert_eq!(keep.life(), None);
+        keep.after(LIVE_LIFE);
+        assert_eq!(keep.life(), Some(LIVE_LIFE));
     }
 
     #[test]
@@ -4144,8 +4370,8 @@ mod tests {
         for n in 0..CACHE_ENTRIES + 5 {
             cache.put(
                 AnswerCache::key("d", &n.to_string(), "1:1"),
-                n.to_string(),
-                Vec::new(),
+                vec![Event::Answer(n.to_string())],
+                CACHE_LIFE,
             );
         }
         assert_eq!(
