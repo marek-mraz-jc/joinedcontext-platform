@@ -4,7 +4,7 @@
 //! answer with one fixed template, in the question's language, with the deployment's own example
 //! questions. A script in an answer may name only this deployment's hosts.
 
-use super::agent::{send, Ask, Citation, Event};
+use super::agent::{Ask, Citation, Event};
 use jc_core::kinds::Localised;
 use std::time::Instant;
 use tokio::sync::mpsc::Sender;
@@ -361,8 +361,11 @@ pub async fn refuse(ask: &Ask<'_>, question: &str, router: Option<&str>, events:
         .or_else(|| ask.suggestions.get(first))
         .map_or(&[][..], Vec::as_slice);
     ask.trace.note("route", "out", Instant::now(), None, None);
-    send(events, Event::Answer(refusal(lang, publisher, examples))).await;
-    send(events, Event::Citations(Vec::new())).await;
+    // A channel that went away stops reading; the turn is over either way.
+    let _ = events
+        .send(Event::Answer(refusal(lang, publisher, examples)))
+        .await;
+    let _ = events.send(Event::Citations(Vec::new())).await;
 }
 
 /// An answer's text with every script that names a host outside this deployment, or outside the

@@ -16,7 +16,7 @@ platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 20
 platform | modularity-file-cycle | 25
 platform | modularity-server-as-library | 1
-platform | security-fetch-from-route | 24
+platform | security-fetch-from-route | 23
 platform | security-log-secret-field | 0
 platform | security-mcp-write-unguarded | 0
 portal | links-unmatched | 0
