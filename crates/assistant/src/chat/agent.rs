@@ -647,6 +647,7 @@ pub async fn answer(
             messages.push(json!({"role": "user", "content": ANSWER_NOW}));
         }
         let at = std::time::Instant::now();
+        let pending = ask.trace.pending("agent", ask.model.name(), at, &messages);
         let completed = ask
             .model
             .complete(
@@ -657,8 +658,7 @@ pub async fn answer(
                 allow_tools,
             )
             .await;
-        ask.trace
-            .model("agent", ask.model.name(), at, completed.as_ref());
+        pending.done(completed.as_ref());
         let completion = match completed {
             Ok(completion) => completion,
             // The day ran out between the calls: the limit, never a quiet switch (T-4671).

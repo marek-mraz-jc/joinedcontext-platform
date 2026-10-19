@@ -58,6 +58,45 @@ pub struct Step {
     pub rows: Option<u64>,
 }
 
+/// A model call on its way; see [`Trace::pending`].
+#[derive(Debug)]
+pub struct Pending<'a> {
+    trace: &'a Trace,
+    stage: &'static str,
+    model: String,
+    started: Instant,
+    /// The input tokens guessed from the request's size, four bytes a token.
+    estimate: u64,
+    settled: bool,
+}
+
+impl Pending<'_> {
+    /// The call's reply or failure, recorded as [`Trace::model`] does.
+    pub fn done(mut self, result: Result<&Completion, &CallError>) {
+        self.settled = true;
+        self.trace
+            .model(self.stage, &self.model, self.started, result);
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let mut step = self.trace.timed("model", self.stage, self.started);
+        step.stage = Some(self.stage);
+        step.model = Some(std::mem::take(&mut self.model));
+        step.status = "failed";
+        step.error = Some(format!(
+            "aborted before the reply; about {} input tokens, the price unknown",
+            self.estimate
+        ));
+        step.tokens_in = Some(self.estimate);
+        self.trace.push(step);
+    }
+}
+
 /// The steps of one turn, written by the answer loop and read once the turn ends.
 #[derive(Debug)]
 pub struct Trace {
@@ -179,6 +218,28 @@ impl Trace {
             }
         }
         self.push(step);
+    }
+
+    /// A model call of `stage` on `model` about to be sent with `messages` (T-4728): settle it
+    /// with [`Pending::done`]. A call dropped before its reply (a judge cut off by a direct route,
+    /// the turn's timeout) is recorded when the guard drops, as a failed, unpriced call with its
+    /// input tokens estimated, so the turn reads `uncosted`, never a cost it does not know.
+    pub fn pending<'a>(
+        &'a self,
+        stage: &'static str,
+        model: &str,
+        started: Instant,
+        messages: &[Value],
+    ) -> Pending<'a> {
+        let bytes = serde_json::to_string(messages).map_or(0, |text| text.len());
+        Pending {
+            trace: self,
+            stage,
+            model: model.to_owned(),
+            started,
+            estimate: u64::try_from(bytes / 4).unwrap_or(u64::MAX),
+            settled: false,
+        }
     }
 
     /// A tool call that started at `started`.
@@ -366,6 +427,35 @@ mod tests {
             (KEPT_ROWS, Some(19))
         );
         assert_eq!(size, u64::try_from(rows.len()).ok());
+    }
+
+    #[test]
+    fn a_call_dropped_before_its_reply_is_an_unpriced_failed_step_and_a_settled_one_is_not() {
+        let trace = Trace::default();
+        let messages = [json!({"role": "user", "content": "x".repeat(400)})];
+        drop(trace.pending("judge", "google/x", Instant::now(), &messages));
+        let done = completion(Some(30));
+        trace
+            .pending("router", "google/x", Instant::now(), &messages)
+            .done(Ok(&done));
+        let steps = trace.steps();
+        assert_eq!(steps.len(), 2);
+        let aborted = &steps[0];
+        assert_eq!(
+            (aborted.kind, aborted.stage, aborted.status),
+            ("model", Some("judge"), "failed")
+        );
+        assert_eq!(aborted.cost_micros, None);
+        assert!(aborted.tokens_in.is_some_and(|t| t > 100), "{aborted:?}");
+        assert!(
+            aborted
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("aborted")),
+            "{aborted:?}"
+        );
+        assert_eq!(steps[1].cost_micros, Some(30));
+        assert_eq!(super::super::transcript::priced(&steps), (30, 1));
     }
 
     fn at(kind: &'static str, start_ms: u64, duration_ms: u64) -> Step {

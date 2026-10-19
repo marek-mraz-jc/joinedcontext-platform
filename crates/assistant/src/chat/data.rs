@@ -224,6 +224,12 @@ pub async fn answer(
             .await;
         }
         let at = Instant::now();
+        let pending = ask.trace.pending(
+            "data",
+            call.model.unwrap_or(ask.model.name()),
+            at,
+            &messages,
+        );
         let stepped = ask
             .model
             .step(
@@ -235,8 +241,7 @@ pub async fn answer(
                 allow,
             )
             .await;
-        let model = call.model.unwrap_or(ask.model.name());
-        ask.trace.model("data", model, at, stepped.as_ref());
+        pending.done(stepped.as_ref());
         super::agent::Stages::add(&mut spent.stages.answer, at);
         let completion = match stepped {
             Ok(completion) => completion,

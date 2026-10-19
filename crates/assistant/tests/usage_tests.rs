@@ -175,6 +175,16 @@ async fn the_summary_adds_up_the_priced_turns_and_counts_the_rest_apart() {
     assert!(close(&s["phases"]["route"]["p50"], 900.0), "{s}");
     assert!(close(&s["phases"]["work"]["max"], 900.0), "{s}");
     assert!(close(&s["phases"]["answer"]["p90"], 900.0), "{s}");
+    // every model call by stage, the timed-out turn's 500 included, the unpriced call named
+    assert_eq!(
+        s["costByStage"],
+        json!([
+            {"stage": "answer", "calls": 4, "costUsd": 0.023, "uncostedCalls": 1},
+            {"stage": "router", "calls": 1, "costUsd": 0.001, "uncostedCalls": 0},
+            {"stage": "data", "calls": 1, "costUsd": 0.0005, "uncostedCalls": 0},
+        ]),
+        "{s}"
+    );
     let days = s["days"].as_array().cloned().unwrap_or_default();
     assert_eq!(days.len(), 1, "{s}");
     assert_eq!(days[0]["questions"], 5);
@@ -227,6 +237,7 @@ async fn an_empty_range_answers_zeros_and_nulls_never_a_made_up_number() {
     assert_eq!(s["tokens"]["cachedShare"], Value::Null);
     assert_eq!(s["totalMs"], json!({"p50": null, "p90": null, "max": null}));
     assert_eq!(s["days"], json!([]));
+    assert_eq!(s["costByStage"], json!([]));
     db::drop_database(admin, pool, &name).await;
 }
 

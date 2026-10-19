@@ -113,6 +113,17 @@ fn days_sql() -> String {
     )
 }
 
+/// Each stage's share of the cost: a model call's `stage`, else the step's `kind`, so a call
+/// recorded under a new stage (follow-ups, embeddings) shows without a change here.
+fn stages_sql() -> String {
+    format!(
+        "SELECT coalesce(stage, kind), count(*), sum(cost_micros)::bigint, \
+         count(*) FILTER (WHERE cost_micros IS NULL) FROM turn_steps \
+         WHERE kind = 'model' AND turn_id IN (SELECT id FROM ({TURNS}) t) \
+         GROUP BY 1 ORDER BY 3 DESC NULLS LAST, 1"
+    )
+}
+
 /// A float column as a JSON number, `null` when SQL had none (no turn, or no priced turn).
 fn number(row: &PgRow, i: usize) -> Result<Value, sqlx::Error> {
     Ok(row
@@ -143,6 +154,7 @@ pub async fn summary(pool: &PgPool, project: &str, range: &Range) -> Result<Valu
     };
     let row = bind(&summary_sql()).fetch_one(&mut *tx).await?;
     let days = bind(&days_sql()).fetch_all(&mut *tx).await?;
+    let stages = bind(&stages_sql()).fetch_all(&mut *tx).await?;
     let _ = tx.rollback().await;
     let total: Option<i64> = row.try_get(4)?;
     let days = days
@@ -154,6 +166,16 @@ pub async fn summary(pool: &PgPool, project: &str, range: &Range) -> Result<Valu
                 "costUsd": cost.map(usd), "uncostedQuestions": d.try_get::<i64, _>(3)?,
                 "p50TotalMs": number(d, 4)?, "timeouts": d.try_get::<i64, _>(5)?,
                 "errors": d.try_get::<i64, _>(6)?,
+            }))
+        })
+        .collect::<Result<Vec<Value>, sqlx::Error>>()?;
+    let stages = stages
+        .iter()
+        .map(|r| {
+            let cost: Option<i64> = r.try_get(2)?;
+            Ok(json!({
+                "stage": r.try_get::<String, _>(0)?, "calls": r.try_get::<i64, _>(1)?,
+                "costUsd": cost.map(usd), "uncostedCalls": r.try_get::<i64, _>(3)?,
             }))
         })
         .collect::<Result<Vec<Value>, sqlx::Error>>()?;
@@ -176,6 +198,7 @@ pub async fn summary(pool: &PgPool, project: &str, range: &Range) -> Result<Valu
             "route": spread_json(&row, 18)?, "work": spread_json(&row, 21)?,
             "answer": spread_json(&row, 24)?,
         },
+        "costByStage": stages,
         "days": days,
     }))
 }

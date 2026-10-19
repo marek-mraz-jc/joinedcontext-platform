@@ -1970,12 +1970,13 @@ async fn route_beside_search(
     let ask = q.ask;
     let route = async {
         let at = Instant::now();
+        let model = router.model.unwrap_or(ask.model.name());
+        let pending = ask.trace.pending("router", model, at, messages);
         let reply = ask
             .model
             .ask(ask.deployment, ask.tokens_per_day, router, messages)
             .await;
-        let model = router.model.unwrap_or(ask.model.name());
-        ask.trace.model("router", model, at, reply.as_ref());
+        pending.done(reply.as_ref());
         (reply, at.elapsed())
     };
     let search = search_first(q, spent, judge, reserve);
@@ -2305,13 +2306,14 @@ async fn search_first(
             );
             if within(q.ask, spent, &messages, reserve + ROUTER_TOKENS) {
                 let at = Instant::now();
+                let model = judge.model.unwrap_or(q.ask.model.name());
+                let pending = q.ask.trace.pending("judge", model, at, &messages);
                 let reply = q
                     .ask
                     .model
                     .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
                     .await;
-                let model = judge.model.unwrap_or(q.ask.model.name());
-                q.ask.trace.model("judge", model, at, reply.as_ref());
+                pending.done(reply.as_ref());
                 Some((reply, at.elapsed()))
             } else {
                 None
@@ -2478,13 +2480,14 @@ async fn search_rounds(
             break;
         }
         let at = Instant::now();
+        let model = judge.model.unwrap_or(q.ask.model.name());
+        let call = q.ask.trace.pending("judge", model, at, &messages);
         let reply = q
             .ask
             .model
             .ask(q.ask.deployment, q.ask.tokens_per_day, judge, &messages)
             .await;
-        let model = judge.model.unwrap_or(q.ask.model.name());
-        q.ask.trace.model("judge", model, at, reply.as_ref());
+        call.done(reply.as_ref());
         Stages::add(&mut spent.stages.judge, at);
         match reply {
             Ok(reply) => {
@@ -2603,13 +2606,13 @@ async fn stream_answer(q: Question<'_, '_>, mut spent: Spent, answering: Answeri
         reasoning: ask.reasoning.answer.unwrap_or_default(),
     };
     let at = Instant::now();
+    let model = call.model.unwrap_or(ask.model.name());
+    let pending = ask.trace.pending("answer", model, at, &messages);
     let streamed = ask
         .model
         .stream(ask.deployment, ask.tokens_per_day, &call, &messages, events)
         .await;
-    let model = call.model.unwrap_or(ask.model.name());
-    ask.trace
-        .model("answer", model, at, streamed.as_ref().map(|(done, _)| done));
+    pending.done(streamed.as_ref().map(|(done, _)| done));
     Stages::add(&mut spent.stages.answer, at);
     let (completion, first) = match streamed {
         Ok(streamed) => streamed,
