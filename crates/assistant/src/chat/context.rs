@@ -40,9 +40,13 @@ pub fn router(state: Arc<ChatState>) -> Router {
         .with_state(state)
 }
 
-/// The documents computed in the last minute, by `publicId`.
+/// The documents computed in the last minute, by `publicId`, and the entities of each public
+/// Endpoint a deployment reads, by slug, as the minute's [`count`] left them.
 #[derive(Default)]
-pub struct Held(HashMap<String, (Instant, Arc<Context>)>);
+pub struct Held {
+    documents: HashMap<String, (Instant, Arc<Context>)>,
+    counts: HashMap<String, u64>,
+}
 
 /// One Endpoint as a visitor sees it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -110,18 +114,11 @@ pub struct Asked {
     lang: Option<String>,
 }
 
-/// The language of the answer: the asked one when the deployment answers in it, else its first
-/// one the category labels exist in, else its first.
+/// The language of the answer: the asked one when the deployment answers in it, else its first.
 fn language<'a>(deployment: &'a Deployment, asked: Option<&'a str>) -> &'a str {
     let languages = &deployment.spec.languages;
     asked
         .filter(|lang| languages.iter().any(|l| l == lang))
-        .or_else(|| {
-            languages
-                .iter()
-                .map(String::as_str)
-                .find(|lang| DataTheme::LABEL_LANGUAGES.contains(lang))
-        })
         .or_else(|| languages.first().map(String::as_str))
         .unwrap_or("sk")
 }
@@ -168,43 +165,78 @@ fn hosts<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     hosts
 }
 
-/// The deployment's own document from `snapshot`, the store and the gateway's counts.
+/// Counts, once a minute and outside any request, the entities of every public Endpoint a
+/// published deployment reads, as an anonymous caller counts them; a page only reads the
+/// result. An Endpoint with a type that did not come back has no total: a part is not its count.
+pub async fn count(state: Arc<ChatState>) {
+    let Ok(snapshot) = state.snapshot.read().map(|s| Arc::clone(&s)) else {
+        return;
+    };
+    let Ok(gateway) = url::Url::parse(&state.gateway) else {
+        return;
+    };
+    let mut slugs: Vec<&str> = Vec::new();
+    for deployment in snapshot
+        .deployments
+        .iter()
+        .filter(|d| d.spec.enabled && d.spec.channel.is_anonymous())
+    {
+        for resolved in snapshot.reach(deployment).endpoints {
+            if let Some((slug, _)) = snapshot.pages.get_key_value(&resolved.slug) {
+                if !slugs.contains(&slug.as_str()) {
+                    slugs.push(slug);
+                }
+            }
+        }
+    }
+    let counted = futures_util::future::join_all(slugs.iter().map(|slug| {
+        let page = &snapshot.pages[*slug].page;
+        let gateway = &gateway;
+        let http = &state.http;
+        async move {
+            let counts = tokio::time::timeout(
+                COUNT_DEADLINE,
+                crate::catalogue::counts(http, gateway, page),
+            )
+            .await
+            .unwrap_or_default();
+            (!counts.is_empty() && counts.len() == page.types.len())
+                .then(|| (page.slug.clone(), counts.values().sum::<u64>()))
+        }
+    }))
+    .await;
+    if let Ok(mut held) = state.contexts.lock() {
+        held.counts = counted.into_iter().flatten().collect();
+    }
+}
+
+/// The deployment's own document from `snapshot`, the store and the minute's counts.
 async fn compute(
     state: &ChatState,
     snapshot: &Snapshot,
     deployment: &Deployment,
 ) -> Result<Context, crate::Error> {
     let resolution = snapshot.reach(deployment);
-    let gateway = url::Url::parse(&state.gateway).ok();
-    let endpoints =
-        futures_util::future::join_all(resolution.endpoints.iter().filter_map(|resolved| {
-            let page = snapshot.pages.get(&resolved.slug)?;
-            let gateway = gateway.as_ref();
-            Some(async move {
-                let counts = match gateway {
-                    Some(gateway) => tokio::time::timeout(
-                        COUNT_DEADLINE,
-                        crate::catalogue::counts(&state.http, gateway, &page.page),
-                    )
-                    .await
-                    .unwrap_or_default(),
-                    None => BTreeMap::new(),
-                };
-                Shown {
-                    slug: page.page.slug.clone(),
-                    title: page.page.title.clone(),
-                    publisher: page.project.clone(),
-                    themes: page.themes.clone(),
-                    types: page.page.types.iter().map(|t| t.class.clone()).collect(),
-                    // Every type counted, or no total: a part is not the Endpoint's count.
-                    entities: (!counts.is_empty() && counts.len() == page.page.types.len())
-                        .then(|| counts.values().sum()),
-                    modified: None,
-                    catalogue: page.page.ckan_dataset.clone(),
-                }
-            })
-        }))
-        .await;
+    let counts = state
+        .contexts
+        .lock()
+        .map(|held| held.counts.clone())
+        .unwrap_or_default();
+    let endpoints = resolution
+        .endpoints
+        .iter()
+        .filter_map(|resolved| snapshot.pages.get(&resolved.slug))
+        .map(|page| Shown {
+            slug: page.page.slug.clone(),
+            title: page.page.title.clone(),
+            publisher: page.project.clone(),
+            themes: page.themes.clone(),
+            types: page.page.types.iter().map(|t| t.class.clone()).collect(),
+            entities: counts.get(&page.page.slug).copied(),
+            modified: None,
+            catalogue: page.page.ckan_dataset.clone(),
+        })
+        .collect();
 
     let mut sources = Vec::new();
     for source in snapshot.sources_of(deployment) {
@@ -275,7 +307,7 @@ async fn held(
     };
     let now = Instant::now();
     if let Ok(held) = state.contexts.lock() {
-        if let Some((at, context)) = held.0.get(public_id) {
+        if let Some((at, context)) = held.documents.get(public_id) {
             if now.duration_since(*at) < KEEP {
                 return Ok(Some((deployment, Arc::clone(context))));
             }
@@ -283,10 +315,10 @@ async fn held(
     }
     let context = Arc::new(compute(state, &snapshot, &deployment).await?);
     if let Ok(mut held) = state.contexts.lock() {
-        if held.0.len() >= MAX_HELD {
-            held.0.clear();
+        if held.documents.len() >= MAX_HELD {
+            held.documents.clear();
         }
-        held.0
+        held.documents
             .insert(public_id.to_owned(), (now, Arc::clone(&context)));
     }
     Ok(Some((deployment, context)))

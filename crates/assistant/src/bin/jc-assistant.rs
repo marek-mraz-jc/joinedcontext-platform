@@ -224,6 +224,8 @@ impl Minute {
         }
         // Routing's type lists, ahead of the first question (T-4611).
         tokio::spawn(chat::warm_types(Arc::clone(&self.chat_state)));
+        // The context pages' entity counts, so no visitor's request asks the gateway (T-4692).
+        tokio::spawn(chat::context::count(Arc::clone(&self.chat_state)));
         let sources = &snapshot.sources;
         self.ready.store(true, Ordering::Relaxed);
         let pool = &self.pool;
