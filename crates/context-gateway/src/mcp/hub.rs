@@ -1157,6 +1157,13 @@ fn attributes_of(
 
 /// The tool that answers the caller's list (ADR-N-025 2.1).
 pub(crate) fn list_endpoints_tool() -> Value {
+    // The codes an agent may filter by, each with its English label (AG-124).
+    let themes = jc_core::kinds::DataTheme::ALL
+        .iter()
+        .map(|theme| format!("{} {}", theme.code(), theme.label_in("en")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let themes = format!("An EU data theme code: {themes}");
     json!({
         "name": "list_endpoints",
         "description": "The Endpoints you may read, open ones without a login. One line each: \
@@ -1172,7 +1179,7 @@ pub(crate) fn list_endpoints_tool() -> Value {
                 "space": { "type": "string", "minLength": 1, "maxLength": 200, "description": "The context space" },
                 "access": { "type": "string", "enum": ["public", "internal"] },
                 "domain": { "type": "string", "minLength": 1, "maxLength": 200, "description": "A Smart Data Model domain, e.g. Environment" },
-                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": "An EU data theme code, e.g. ENVI" },
+                "theme": { "type": "string", "minLength": 1, "maxLength": 200, "description": themes },
                 "lang": { "type": "string", "minLength": 2, "maxLength": 8, "description": "The language of the titles, e.g. sk; English otherwise" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
                 "cursor": { "type": "string", "maxLength": 20, "description": "The previous page's nextCursor, passed back as given" },
