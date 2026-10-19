@@ -548,6 +548,7 @@ mod tests {
                 download: None,
                 map: None,
                 geometries: vec![],
+                profile: None,
             }),
             Event::Citations(vec![Citation {
                 n: 1,
