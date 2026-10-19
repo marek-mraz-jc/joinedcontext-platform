@@ -389,6 +389,12 @@ async fn only_the_portals_service_account_is_answered() {
             Some(json!({"terms": ["urn:ngsi-ld:BikeTrip:t-0"]})),
         ),
         (
+            "DELETE",
+            format!("{k}/deployments/{{deployment}}/answers"),
+            format!("{BASE}/deployments/obcania/answers"),
+            None,
+        ),
+        (
             "POST",
             format!("{k}/deployments/{{deployment}}/chat"),
             format!("{BASE}/deployments/obcania/chat"),
@@ -431,6 +437,10 @@ async fn only_the_portals_service_account_is_answered() {
             "{method} {uri} answers the Portal"
         );
     }
+    // A purge of a deployment that kept nothing forgets nothing (T-4731).
+    let purge = format!("{BASE}/deployments/obcania/answers");
+    let (status, body) = call(&w.app, "DELETE", &purge, Some(PORTAL_TOKEN), None).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"forgotten": 0})));
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 

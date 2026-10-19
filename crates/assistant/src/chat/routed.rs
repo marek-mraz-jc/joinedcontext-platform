@@ -1009,8 +1009,9 @@ pub struct AnswerCache {
 /// When a model was read, and the model.
 type KeptModel = (Instant, Option<std::sync::Arc<str>>);
 
-/// When an answer was stored, how long it is served, and the events it is replayed as.
-type Cached = (Instant, Duration, Vec<Event>);
+/// When an answer was stored, how long it is served, the deployment (`{project}/{name}`) it was
+/// given in, and the events it is replayed as.
+type Cached = (Instant, Duration, String, Vec<Event>);
 
 impl AnswerCache {
     pub fn key(deployment: &str, question: &str, digest: &str) -> [u8; 32] {
@@ -1026,7 +1027,7 @@ impl AnswerCache {
     pub fn get(&self, key: &[u8; 32]) -> Option<(Vec<Event>, Duration)> {
         let mut entries = self.entries.lock().ok()?;
         match entries.get(key) {
-            Some((at, life, replay)) if at.elapsed() < *life => {
+            Some((at, life, _, replay)) if at.elapsed() < *life => {
                 Some((replay.clone(), at.elapsed()))
             }
             Some(_) => {
@@ -1164,21 +1165,35 @@ impl AnswerCache {
         }
     }
 
-    pub fn put(&self, key: [u8; 32], replay: Vec<Event>, life: Duration) {
+    pub fn put(&self, key: [u8; 32], deployment: &str, replay: Vec<Event>, life: Duration) {
         let Ok(mut entries) = self.entries.lock() else {
             return;
         };
-        entries.retain(|_, (at, life, _)| at.elapsed() < *life);
+        entries.retain(|_, (at, life, _, _)| at.elapsed() < *life);
         if entries.len() >= CACHE_ENTRIES {
             if let Some(oldest) = entries
                 .iter()
-                .min_by_key(|(_, (at, _, _))| *at)
+                .min_by_key(|(_, (at, _, _, _))| *at)
                 .map(|(k, _)| *k)
             {
                 entries.remove(&oldest);
             }
         }
-        entries.insert(key, (Instant::now(), life, replay));
+        entries.insert(key, (Instant::now(), life, deployment.to_owned(), replay));
+    }
+
+    /// Forgets every answer kept for `deployment` (`{project}/{name}`) and its index digest, so
+    /// the next question is answered afresh (T-4731); how many answers were dropped.
+    pub fn forget(&self, deployment: &str) -> usize {
+        if let Ok(mut digests) = self.digests.lock() {
+            digests.remove(deployment);
+        }
+        let Ok(mut entries) = self.entries.lock() else {
+            return 0;
+        };
+        let before = entries.len();
+        entries.retain(|_, (_, _, owner, _)| owner != deployment);
+        before - entries.len()
     }
 }
 
@@ -2431,7 +2446,7 @@ pub async fn answer(
     let (spent, (replay, whole)) = tokio::join!(answering, forwarding);
     if let Some(life) = keep.life() {
         if keepable(&replay, whole) {
-            ask.cache.put(key, replay, life);
+            ask.cache.put(key, ask.deployment, replay, life);
         }
     }
     spent
@@ -4289,7 +4304,7 @@ mod tests {
         let cache = AnswerCache::default();
         assert_eq!(cache.get(&key), None);
         let answer = vec![Event::Answer("Od 9:00 [1].".into())];
-        cache.put(key, answer.clone(), CACHE_LIFE);
+        cache.put(key, "bb/public", answer.clone(), CACHE_LIFE);
         assert_eq!(cache.get(&key).map(|(a, _)| a), Some(answer));
     }
 
@@ -4324,8 +4339,8 @@ mod tests {
         let cache = AnswerCache::default();
         let live = AnswerCache::key("bb/public", "Aké je NO2?", "1:1@2026-10-19");
         let gone = AnswerCache::key("bb/public", "Aké je PM10?", "1:1@2026-10-19");
-        cache.put(live, replay.clone(), LIVE_LIFE);
-        cache.put(gone, replay.clone(), Duration::ZERO);
+        cache.put(live, "bb/public", replay.clone(), LIVE_LIFE);
+        cache.put(gone, "bb/public", replay.clone(), Duration::ZERO);
         let (again, age) = cache.get(&live).expect("kept");
         assert_eq!(again, replay);
         assert!(age < LIVE_LIFE);
@@ -4347,6 +4362,16 @@ mod tests {
             )),
             None
         );
+        // A purge drops only its own deployment's answers, and a second purge finds none.
+        let other = AnswerCache::key("zilina/public", "Aké je NO2?", "1:1@2026-10-19");
+        cache.put(other, "zilina/public", replay.clone(), LIVE_LIFE);
+        assert_eq!(cache.forget("bb/public"), 1);
+        assert_eq!(cache.get(&live), None, "forgotten");
+        assert!(
+            cache.get(&other).is_some(),
+            "another deployment keeps its answers"
+        );
+        assert_eq!(cache.forget("bb/public"), 0);
 
         assert!(small_enough(&replay));
         let big = Table {
@@ -4394,6 +4419,7 @@ mod tests {
         for n in 0..CACHE_ENTRIES + 5 {
             cache.put(
                 AnswerCache::key("d", &n.to_string(), "1:1"),
+                "p/d",
                 vec![Event::Answer(n.to_string())],
                 CACHE_LIFE,
             );
