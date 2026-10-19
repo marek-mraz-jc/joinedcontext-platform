@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
+const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view, machineUrl } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -255,6 +255,38 @@ test("only an http(s) address is a link", () => {
   for (const bad of ["javascript:alert(1)", "upload:subory/a.md", "/relative", "data:text/html,x", "https://a b", 42, undefined]) {
     assert.equal(safeUrl(bad), null, String(bad));
   }
+});
+
+test("a machine address is never a link a person clicks (T-4761)", () => {
+  const schema = "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/schema/index.json";
+  const machines = [
+    schema,
+    "https://api.smartcity.joinedcontext.com/api/endpoint/x/schema",
+    "https://api.smartcity.joinedcontext.com/api/endpoint/x/mcp",
+    "https://api.smartcity.joinedcontext.com/api/endpoint/x/ngsi-ld/v1/entities?type=Bridge",
+    "https://api.example.sk/data/mosty.geojson",
+    "https://api.example.sk/data/ctx.jsonld#x",
+    "https://api.example.sk/collections/mosty/items?f=json",
+    "https://api.example.sk/x?limit=5&format=geojson"
+  ];
+  for (const url of machines) {
+    assert.equal(safeUrl(url), null, url);
+    assert.equal(machineUrl(url), url, url);
+    assert.ok(!linkHost(url, ["api.smartcity.joinedcontext.com", "api.example.sk"]), url);
+  }
+  const page = "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty-v-banskobystrickom-kraji-public-view-3b4675";
+  assert.equal(safeUrl(page), page);
+  assert.equal(machineUrl(page), null);
+  assert.ok(linkHost(page, ["opendata.smartcity.joinedcontext.com"]));
+  // A table's dataset address for programs is text to copy, its CKAN page the link.
+  const shown = table({ columns: ["name"], rows: [["Most"]], dataset: schema, geojson: "https://api.example.sk/m.geojson" }, "sk");
+  assert.equal(shown.dataset, null);
+  assert.equal(shown.geojson, null);
+  assert.equal(shown.address, schema);
+  assert.equal(table({ columns: ["name"], rows: [["Most"]], dataset: page }, "sk").dataset, page);
+  // A source and a markdown link to it stay words.
+  assert.deepEqual(markdown("[schéma](" + schema + ")", null, (u) => linkHost(u, ["api.smartcity.joinedcontext.com"])),
+    markdown("[schéma](" + schema + ")", null, () => false));
 });
 
 // T-4149: a link is rendered only to an allowlisted host; anything else is its words alone.

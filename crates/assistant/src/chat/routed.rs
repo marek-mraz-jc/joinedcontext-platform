@@ -60,7 +60,7 @@ const ANSWER_TURNS: usize = 6;
 const MAX_READS: usize = 2;
 
 /// Entities one read asks for; the person sees them all, the model the first [`MODEL_ROWS`].
-const READ_ROWS: usize = 50;
+pub(super) const READ_ROWS: usize = 50;
 
 /// Rows of a table the answer call reads (Architecture/23 §4: data rows of about 600 tokens).
 const MODEL_ROWS: usize = 15;

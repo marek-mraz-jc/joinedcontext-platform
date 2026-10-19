@@ -10,8 +10,9 @@
   --shadow: 0 1px 2px rgb(16 24 40 / 6%);
 }
 @media (prefers-color-scheme: dark) {
-  /* Text in the accent would be too dark on a dark page: links and chips take a light blue (AA). */
-  :root { --fg: #eef1f5; --muted: #aab4c0; --bg: #15181c; --line: #343b44; --soft: #1f242a; --bubble: #23292f;
+  /* Text in the accent would be too dark on a dark page: links and chips take a light blue (AA).
+     A host that asks for ?scheme=light keeps the light palette (T-4761). */
+  :root:not([data-scheme="light"]) { --fg: #eef1f5; --muted: #aab4c0; --bg: #15181c; --line: #343b44; --soft: #1f242a; --bubble: #23292f;
     --link: #9cc3ff; --shadow: none; }
 }
 * { box-sizing: border-box; }
@@ -193,6 +194,7 @@ body { font: 15px/1.5 var(--font, system-ui, -apple-system, "Segoe UI", Roboto, 
 .jc-chart-text { fill: var(--muted); font-size: 10px; }
 .jc-data-links { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 0; font-size: 13px; }
 .jc-data-links a { color: var(--link); }
+.jc-address code { overflow-wrap: anywhere; user-select: all; }
 .jc-steps { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .jc-steps summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 6px; }
 .jc-steps summary::before { content: "▸"; }
