@@ -16,6 +16,8 @@ does not fit: it carries `@type`, `types`, `attributes`, `default_range` and the
   down `typeof` to the built-in it specialises, and one that never reaches one is refused;
 - an annotation value is text, `true`/`false` for a boolean, as the broker's flags read it;
 - a unit keeps `ucum_code`, `symbol` and `exact_mappings`;
+- a permissible value keeps its annotations, so its `label` names it in each language (T-4803);
+  a broker older than Antares T-4803 refuses that key, so the broker is released first;
 - a slot's `rank` and `title`, the display order and name a table reads (DM-98, T-4672), stay.
 
 The Portal's reconciler sends the result to the broker of a Context Space whose `dataModelRef`
@@ -186,6 +188,9 @@ def compile_broker_schema(source: str | Path) -> dict[str, Any]:
                 value["description"] = str(pv.description)
             if pv.meaning:
                 value["meaning"] = str(pv.meaning)
+            annotations = _annotations(pv)
+            if annotations:
+                value["annotations"] = annotations
             values[str(text)] = value
         entry = {"name": name, "permissible_values": values}
         if enum.description:

@@ -30,7 +30,7 @@ SLOT_KEYS = {
 }
 UNIT_KEYS = {"ucum_code", "symbol", "exact_mappings"}
 ENUM_KEYS = {"name", "description", "permissible_values"}
-VALUE_KEYS = {"text", "description", "meaning"}
+VALUE_KEYS = {"text", "description", "meaning", "annotations"}
 
 #: A custom type, a narrowed inherited slot, a mixin, two same-named attributes that differ, and
 #: annotations of every YAML scalar type.
@@ -233,3 +233,35 @@ classes:
     assert usage["annotations"]["summary"]["value"] == "true"
     assert json.loads(usage["annotations"]["label"]["value"]) == {"sk": "Začiatok", "en": "Start"}
     assert document["slots"]["name"]["title"] == "Name"
+
+
+def test_a_permissible_value_keeps_its_label_for_each_language():
+    """T-4803: the broker serves an enum value's label, so a Slovak table reads "cesta III. triedy"."""
+    model = """
+id: https://example.org/ns/roads
+name: roads
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports: [linkml:types]
+slots:
+  roadClass: { range: RoadClass }
+classes:
+  Bridge:
+    slots: [roadClass]
+enums:
+  RoadClass:
+    permissible_values:
+      thirdClass:
+        description: A third-class road (cesta III. triedy).
+        annotations:
+          label: { tag: label, value: { sk: "cesta III. triedy", en: "third-class road" } }
+      local: {}
+"""
+    document = compile_broker_schema(model)
+    check_subset(document)
+    values = document["enums"]["RoadClass"]["permissible_values"]
+    label = values["thirdClass"]["annotations"]["label"]
+    assert label["tag"] == "label"
+    assert json.loads(label["value"]) == {"sk": "cesta III. triedy", "en": "third-class road"}
+    assert "annotations" not in values["local"]
