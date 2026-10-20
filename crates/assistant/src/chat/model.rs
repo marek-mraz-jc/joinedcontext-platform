@@ -194,6 +194,13 @@ pub struct Model {
 /// waits on it, so a stalled realm must fail it in seconds, not in the client's 120 s (T-4325).
 const TOKEN_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The waits before the token request is asked again (T-4809).
+const TOKEN_RETRIES: [Duration; 2] = [Duration::from_millis(500), Duration::from_millis(1500)];
+
+/// The wait before a completion is sent again after the proxy refused the connection: nothing
+/// reached it, so nothing is spent twice (T-4809).
+const PROXY_RETRY: Duration = Duration::from_millis(500);
+
 /// The longest answer one call may write. A reasoning model counts its thinking inside it, so
 /// a `low` reasoning effort keeps the thinking short and the room is the answer's (T-3203).
 pub const MAX_ANSWER_TOKENS: u64 = 3_000;
@@ -227,20 +234,39 @@ impl Model {
             .form(&self.config.client_id)
             .map_err(unavailable)?;
         form.push(("grant_type", "client_credentials".to_owned()));
-        let answer = self
-            .http
-            .post(&self.config.token_url)
-            .timeout(self.token_deadline)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|err| unavailable(err.without_url().to_string()))?;
-        if !answer.status().is_success() {
-            return Err(unavailable(format!(
-                "the realm answered {}",
-                answer.status()
-            )));
-        }
+        // A send error, a 5xx or a 429 is asked again after a short wait, inside the one deadline;
+        // any other refusal, a 401 above all, fails at once (T-4809: a rollout's dropped call).
+        let deadline = Instant::now() + self.token_deadline;
+        let mut attempt = 0;
+        let answer = loop {
+            let why = match self
+                .http
+                .post(&self.config.token_url)
+                .timeout(deadline.saturating_duration_since(Instant::now()))
+                .form(&form)
+                .send()
+                .await
+            {
+                Ok(answer) if answer.status().is_success() => break answer,
+                Ok(answer) => {
+                    let status = answer.status();
+                    let why = format!("the realm answered {status}");
+                    if !(status.is_server_error() || status.as_u16() == 429) {
+                        return Err(unavailable(why));
+                    }
+                    why
+                }
+                Err(err) => err.without_url().to_string(),
+            };
+            match TOKEN_RETRIES.get(attempt) {
+                Some(wait) if Instant::now() + *wait < deadline => {
+                    attempt += 1;
+                    tracing::warn!(attempt, %why, "the service token request failed; asking again");
+                    tokio::time::sleep(*wait).await;
+                }
+                _ => return Err(unavailable(why)),
+            }
+        };
         let body: Value = answer
             .json()
             .await
@@ -440,16 +466,26 @@ impl Model {
         body: &Value,
     ) -> Result<reqwest::Response, CallError> {
         let token = self.token().await?;
-        let answer = self
-            .http
-            .post(format!("{}/v1/llm/chat/completions", self.config.proxy))
-            .bearer_auth(token)
-            .header("x-jc-assistant-deployment", deployment)
-            .header("x-jc-assistant-tokens-per-day", tokens_per_day.to_string())
-            .json(body)
-            .send()
-            .await
-            .map_err(|err| unavailable(deployment, &err.without_url().to_string()))?;
+        let post = || {
+            self.http
+                .post(format!("{}/v1/llm/chat/completions", self.config.proxy))
+                .bearer_auth(&token)
+                .header("x-jc-assistant-deployment", deployment)
+                .header("x-jc-assistant-tokens-per-day", tokens_per_day.to_string())
+                .json(body)
+                .send()
+        };
+        // Only a refused connection is sent again: once the proxy has the call, a second send
+        // could pay the model twice.
+        let answer = match post().await {
+            Err(err) if err.is_connect() => {
+                tracing::warn!(%deployment, why = %err.without_url(), "the model proxy refused the connection; sending once more");
+                tokio::time::sleep(PROXY_RETRY).await;
+                post().await
+            }
+            sent => sent,
+        }
+        .map_err(|err| unavailable(deployment, &err.without_url().to_string()))?;
         let status = answer.status();
         if status.as_u16() == 429 {
             return Err(CallError::DaySpent(DAY_SPENT.into()));
@@ -809,6 +845,188 @@ mod tests {
             "both waited {:?}",
             started.elapsed()
         );
+    }
+
+    fn a_model(realm: &str, proxy: &str) -> Model {
+        Model::new(
+            ModelConfig {
+                proxy: proxy.into(),
+                token_url: format!("{realm}/token"),
+                client_id: "jc-assistant".into(),
+                credential: jc_core::ClientCredential::Secret(jc_core::Secret::new("s3cret")),
+                model: "m".into(),
+            },
+            reqwest::Client::new(),
+        )
+    }
+
+    /// The log lines written while `run` runs on this thread.
+    #[derive(Clone, Default)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("the log").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Log {
+        fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+            let log = Self::default();
+            let writer = log.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            (log, tracing::subscriber::set_default(subscriber))
+        }
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().expect("the log")).into_owned()
+        }
+    }
+
+    fn token_answer() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({"access_token": "tok-123", "expires_in": 300}))
+    }
+
+    /// A free port nobody listens on yet.
+    fn a_free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a port")
+            .port()
+    }
+
+    /// A mock server that starts listening on `port` 150 ms from now, inside a retry's wait.
+    async fn listening_soon(port: u16) -> wiremock::MockServer {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port");
+        wiremock::MockServer::builder()
+            .listener(listener)
+            .start()
+            .await
+    }
+
+    /// T-4809: a realm unreachable once (a rollout) is asked again, with one WARN that names the
+    /// attempt and holds no credential.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_token_request_whose_send_fails_once_is_asked_again() {
+        use wiremock::{matchers::method, Mock};
+        let port = a_free_port();
+        let model = a_model(&format!("http://127.0.0.1:{port}"), "http://127.0.0.1:9");
+        let realm = tokio::spawn(async move {
+            let realm = listening_soon(port).await;
+            Mock::given(method("POST"))
+                .respond_with(token_answer())
+                .mount(&realm)
+                .await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            realm
+        });
+        let (log, _guard) = Log::capture();
+        assert_eq!(model.token().await.expect("a token"), "tok-123");
+        let text = log.text();
+        assert_eq!(text.matches(" WARN ").count(), 1, "{text}");
+        assert!(text.contains("attempt=1"), "{text}");
+        assert!(
+            !text.contains("s3cret") && !text.contains("tok-123"),
+            "{text}"
+        );
+        drop(realm);
+    }
+
+    /// T-4809: a 503 is asked again and the 200 after it is the token.
+    #[tokio::test]
+    async fn a_token_request_answered_503_is_asked_again() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let realm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&realm)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(token_answer())
+            .mount(&realm)
+            .await;
+        let model = a_model(&realm.uri(), "http://127.0.0.1:9");
+        assert_eq!(model.token().await.expect("a token"), "tok-123");
+        assert_eq!(realm.received_requests().await.map(|r| r.len()), Some(2));
+    }
+
+    /// T-4809: a 401 is the realm's verdict on the credential; it is never asked again.
+    #[tokio::test]
+    async fn a_token_request_answered_401_is_not_asked_again() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let realm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&realm)
+            .await;
+        let model = a_model(&realm.uri(), "http://127.0.0.1:9");
+        let got = model.token().await;
+        assert!(
+            matches!(&got, Err(CallError::Unavailable(why)) if why == MODEL_UNREACHABLE),
+            "{got:?}"
+        );
+    }
+
+    /// T-4809: three failed attempts are the visitor's MODEL_UNREACHABLE.
+    #[tokio::test]
+    async fn a_token_request_failing_every_attempt_is_model_unreachable() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let realm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(3)
+            .mount(&realm)
+            .await;
+        let model = a_model(&realm.uri(), "http://127.0.0.1:9");
+        let got = model.token().await;
+        assert!(
+            matches!(&got, Err(CallError::Unavailable(why)) if why == MODEL_UNREACHABLE),
+            "{got:?}"
+        );
+    }
+
+    /// T-4809: a proxy that refuses the connection (a rollout) gets the call once more, and the
+    /// model is called once.
+    #[tokio::test]
+    async fn a_completion_the_proxy_refused_to_connect_is_sent_once_more() {
+        use wiremock::{matchers::method, matchers::path, Mock, MockServer, ResponseTemplate};
+        let realm = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(token_answer())
+            .mount(&realm)
+            .await;
+        // The proxy comes up during the retry's wait.
+        let port = a_free_port();
+        let model = a_model(&realm.uri(), &format!("http://127.0.0.1:{port}"));
+        let proxy = tokio::spawn(async move {
+            let proxy = listening_soon(port).await;
+            Mock::given(method("POST"))
+                .and(path("/v1/llm/chat/completions"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
+                })))
+                .expect(1)
+                .mount(&proxy)
+                .await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            proxy
+        });
+        let answer = model
+            .send("data", 1000, &json!({"messages": []}))
+            .await
+            .expect("an answer");
+        assert!(answer.status().is_success());
+        let proxy = proxy.await.expect("the proxy");
+        assert_eq!(proxy.received_requests().await.map(|r| r.len()), Some(1));
     }
 
     #[test]
