@@ -196,7 +196,7 @@ pub(crate) fn anonymous_bounds(
     let averaged = window > chrono::Duration::days(1)
         && !arguments.contains_key("format")
         && !arguments.contains_key("aggrMethods");
-    anonymous_page(arguments, averaged)?;
+    crate::mcp::limits::anonymous_page(arguments, averaged)?;
     if arguments.contains_key("aggrMethods") {
         let period = arguments
             .get("aggrPeriodDuration")
@@ -210,37 +210,6 @@ pub(crate) fn anonymous_bounds(
         }
     }
     Ok(())
-}
-
-/// The page part of [`anonymous_bounds`]: `lastN` within the broker's maximum, its default
-/// when absent unless the read is `averaged`, and `limit` within the broker's page maximum.
-fn anonymous_page(arguments: &mut Map<String, Value>, averaged: bool) -> Result<(), String> {
-    let limits = crate::mcp::limits::current();
-    match arguments.get("lastN") {
-        None if averaged => {}
-        None => {
-            arguments.insert("lastN".to_owned(), Value::from(limits.temporal_default));
-        }
-        Some(n)
-            if n.as_u64()
-                .is_some_and(|n| (1..=limits.temporal_max).contains(&n)) => {}
-        Some(_) => {
-            return Err(format!(
-                "`lastN` without a token is 1 to {}",
-                limits.temporal_max
-            ))
-        }
-    }
-    match arguments.get("limit") {
-        Some(limit)
-            if !limit
-                .as_u64()
-                .is_some_and(|n| (1..=limits.max_limit).contains(&n)) =>
-        {
-            Err(format!("`limit` is 1 to {}", limits.max_limit))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// The seconds of an ISO 8601 duration (`P1DT2H`, `PT1.5H`, `P2W`), a year taken as 365 days
@@ -409,14 +378,8 @@ fn schema_of(kind: Kind) -> Value {
             json!({"type": "array", "maxItems": max, "items": input_schema(args)})
         }
         Kind::Endpoint => json!({"type": "string", "maxLength": 2048}),
-        Kind::Limit => {
-            let l = crate::mcp::limits::current();
-            json!({"type": "integer", "minimum": 1, "maximum": l.max_limit, "default": l.default_limit})
-        }
-        Kind::LastN => {
-            let l = crate::mcp::limits::current();
-            json!({"type": "integer", "minimum": 1, "maximum": l.temporal_max, "default": l.temporal_default})
-        }
+        Kind::Limit => crate::mcp::limits::current().schema(false),
+        Kind::LastN => crate::mcp::limits::current().schema(true),
     }
 }
 

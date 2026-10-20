@@ -38,6 +38,52 @@ impl Default for Limits {
 
 static LIMITS: OnceLock<Limits> = OnceLock::new();
 
+impl Limits {
+    /// The JSON schema of `limit` (`temporal` false) or `lastN` (`temporal` true).
+    pub fn schema(self, temporal: bool) -> Value {
+        let (max, default) = if temporal {
+            (self.temporal_max, self.temporal_default)
+        } else {
+            (self.max_limit, self.default_limit)
+        };
+        serde_json::json!({"type": "integer", "minimum": 1, "maximum": max, "default": default})
+    }
+}
+
+/// The page part of `tools::anonymous_bounds`: `lastN` within the broker's maximum, its default
+/// when absent unless the read is `averaged`, and `limit` within the broker's page maximum.
+pub fn anonymous_page(
+    arguments: &mut serde_json::Map<String, Value>,
+    averaged: bool,
+) -> Result<(), String> {
+    let limits = current();
+    match arguments.get("lastN") {
+        None if averaged => {}
+        None => {
+            arguments.insert("lastN".to_owned(), Value::from(limits.temporal_default));
+        }
+        Some(n)
+            if n.as_u64()
+                .is_some_and(|n| (1..=limits.temporal_max).contains(&n)) => {}
+        Some(_) => {
+            return Err(format!(
+                "`lastN` without a token is 1 to {}",
+                limits.temporal_max
+            ))
+        }
+    }
+    match arguments.get("limit") {
+        Some(limit)
+            if !limit
+                .as_u64()
+                .is_some_and(|n| (1..=limits.max_limit).contains(&n)) =>
+        {
+            Err(format!("`limit` is 1 to {}", limits.max_limit))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The broker's limits once read, its defaults before.
 ///
 /// ponytail: read once at start, as the broker reads its settings; a broker redeployed with
