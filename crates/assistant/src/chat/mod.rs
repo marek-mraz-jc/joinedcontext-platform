@@ -1023,7 +1023,7 @@ async fn lent(
         match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
-                title: None,
+                title: endpoint.title,
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
