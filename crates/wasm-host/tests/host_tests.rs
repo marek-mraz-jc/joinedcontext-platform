@@ -1034,13 +1034,18 @@ async fn an_app_that_answers_and_runs_on_holds_its_place_until_its_instance_ends
     );
     let app = world.place("lingers", guest());
     assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
-    assert_eq!(
-        world
-            .get(&app, "/api/answer-then-spin", None)
-            .await
-            .unwrap(),
-        (200, "answered".into())
-    );
+    // hello's own instance holds the one place until it ends, a moment after its answer: on a
+    // loaded runner the next call can still meet it (ci-full 39365195786), so wait for it to end.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let spun = loop {
+        match world.get(&app, "/api/answer-then-spin", None).await {
+            Err(Failure::Busy) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await
+            }
+            other => break other,
+        }
+    };
+    assert_eq!(spun.unwrap(), (200, "answered".into()));
     assert_eq!(
         world.get(&app, "/api/hello", None).await.unwrap_err(),
         Failure::Busy,
