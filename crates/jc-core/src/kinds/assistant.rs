@@ -65,7 +65,9 @@ pub const MAX_DISCLAIMER_LEN: usize = 400;
 /// What a suggested question may not ask about (T-4801, owner 2026-10-20: "all question that are
 /// provided needs to be positive and not aiming for something bad"): failures, damage, danger,
 /// accidents, crime, complaints, blame or a place ranked as bad, as word stems in Slovak, Czech
-/// and English, written without diacritics (a question is compared folded).
+/// and English, written without diacritics (a question is compared folded; `ä` folds to `ae`, so
+/// Slovak "spätne" is not Czech "špatně", and the noun "škoda" alone is no stem, so the make
+/// Škoda passes while "škody" and "poškodený" do not).
 const NEGATIVE_STEMS: &[&str] = &[
     // sk, cs
     "havarij",
@@ -80,7 +82,9 @@ const NEGATIVE_STEMS: &[&str] = &[
     "poruch",
     "poskod",
     "poskoz",
-    "skod",
+    "skody",
+    "skodam",
+    "skodach",
     "kriminal",
     "kradez",
     "zlocin",
@@ -127,14 +131,15 @@ const NEGATIVE_STEMS: &[&str] = &[
     "repair",
 ];
 
-/// Whether a suggested question asks for something bad ([`NEGATIVE_STEMS`]); a starter or a
+/// Whether a suggested question asks for something bad (one of the `NEGATIVE_STEMS`); a starter or a
 /// follow-up that does is never shown.
 pub fn negative_question(question: &str) -> bool {
     let folded: String = question
         .to_lowercase()
+        .replace('ä', "ae")
         .chars()
         .map(|c| match c {
-            'á' | 'ä' => 'a',
+            'á' => 'a',
             'č' => 'c',
             'ď' => 'd',
             'é' | 'ě' => 'e',
@@ -2493,6 +2498,8 @@ mod deployment_spec_tests {
             "KDE SU NAJHORSIE CESTY?",
             "Kolik bylo dopravních nehod?",
             "Where are the potholes?",
+            "Jsou silnice ve špatném stavu?",
+            "Aké škody spôsobila búrka?",
         ] {
             assert_eq!(
                 refused(with(|s| s["suggestions"] = json!({"sk": [bad]})).text_fields()),
@@ -2505,6 +2512,8 @@ mod deployment_spec_tests {
             "Aké sú úradné hodiny Úradu BBSK a kde sídli?",
             "Aká je kvalita ovzdušia v Banskej Bystrici?",
             "Which schools are in Zvolen?",
+            "Aké údaje sú dostupné spätne?",
+            "Koľko autobusov Škoda jazdí v meste?",
         ] {
             assert!(!negative_question(good), "{good}");
         }

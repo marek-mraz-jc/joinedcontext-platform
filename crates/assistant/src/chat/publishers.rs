@@ -154,6 +154,7 @@ pub fn catalogue_read(
             endpoint: catalogue.endpoint.clone(),
             kind: "Organization".into(),
             q: None,
+            order: None,
         });
     }
     let about = asks_for_datasets
@@ -169,6 +170,7 @@ pub fn catalogue_read(
             endpoint: catalogue.endpoint.clone(),
             kind: "Dataset".into(),
             q: Some(format!("refPublisher==\"{}\"", publisher.id)),
+            order: None,
         })
 }
 
@@ -252,7 +254,8 @@ mod tests {
                 Some(Read {
                     endpoint: "slovensko/catalog".into(),
                     kind: "Organization".into(),
-                    q: None
+                    q: None,
+                    order: None,
                 }),
                 "{question}"
             );
@@ -267,6 +270,7 @@ mod tests {
                 endpoint: "slovensko/catalog".into(),
                 kind: "Dataset".into(),
                 q: Some(format!("refPublisher==\"urn:ngsi-ld:Organization:{org}\"")),
+                order: None,
             })
         };
         assert_eq!(read("Aké dáta publikuje Helsinki?", true), by("hel-fi"));
@@ -315,6 +319,7 @@ mod tests {
             endpoint: "catalog".into(),
             kind: "Organization".into(),
             q: None,
+            order: None,
         };
         let r = routed(routing.clone(), Some(read.clone()));
         assert!(r.data && !r.rag && !r.catalogue && r.reads == [read.clone()]);

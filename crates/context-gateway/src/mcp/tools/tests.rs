@@ -75,6 +75,22 @@ fn an_anonymous_last_n_is_100_when_absent_and_more_is_refused() {
         bounded("query_temporal", json!({ "lastN": 7 })).expect("ok")["lastN"],
         json!(7)
     );
+    // T-4800: a window over a day asking no raw values keeps lastN absent, so the broker
+    // answers hourly averages; asking raw (format) or naming aggrMethods keeps the cap
+    let week = json!({ "endTimeAt": "2026-10-19T00:00:00Z" });
+    assert!(!bounded("query_temporal", week)
+        .expect("ok")
+        .contains_key("lastN"));
+    let raw = json!({ "endTimeAt": "2026-10-19T00:00:00Z", "format": "temporalValues" });
+    assert_eq!(
+        bounded("query_temporal", raw).expect("ok")["lastN"],
+        json!(100)
+    );
+    let own = json!({ "endTimeAt": "2026-10-19T00:00:00Z", "aggrMethods": "avg", "aggrPeriodDuration": "PT1H" });
+    assert_eq!(
+        bounded("retrieve_temporal", own).expect("ok")["lastN"],
+        json!(100)
+    );
     for n in [json!(1000), json!(101), json!(0), json!("5")] {
         let refused = bounded("query_temporal", json!({ "lastN": n })).expect_err("refused");
         assert!(
