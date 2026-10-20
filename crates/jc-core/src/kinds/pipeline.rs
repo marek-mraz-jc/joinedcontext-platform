@@ -97,6 +97,10 @@ pub struct PipelineSpec {
     /// Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<Expiry>,
+    /// When entities of a written type, or chosen attributes of them, end (PL-80…PL-83): the
+    /// rendered stream writes their `expiresAt` after the author's steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
 }
 
 /// The longest expiry window, in hours: a year (PL-64).
@@ -1003,6 +1007,7 @@ impl PipelineSpec {
                 });
             }
         }
+        super::pipeline_lifetime::validate(self)?;
 
         Ok(())
     }
@@ -1201,7 +1206,7 @@ fn nested_refused(value: &serde_json::Value) -> Option<&'static str> {
 /// A processor carries Bloblang in two places: a `mapping` or `mutation` body, and the
 /// `${! … }` interpolation any field may hold. Both are strings, so both are scanned with the
 /// same eye as an inline mapping.
-fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
+pub(super) fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) => found.push(text.clone()),
         serde_json::Value::Array(items) => {

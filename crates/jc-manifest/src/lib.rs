@@ -7,6 +7,7 @@
 pub mod assemble;
 pub mod bento;
 pub mod foreign_models;
+pub mod lifetime;
 pub mod loader;
 pub mod model_schema;
 pub mod pipeline_identity;
