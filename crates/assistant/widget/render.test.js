@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view, machineUrl } = require("./render.js");
+const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -271,18 +271,17 @@ test("a machine address is never a link a person clicks (T-4761)", () => {
   ];
   for (const url of machines) {
     assert.equal(safeUrl(url), null, url);
-    assert.equal(machineUrl(url), url, url);
     assert.ok(!linkHost(url, ["api.smartcity.joinedcontext.com", "api.example.sk"]), url);
   }
   const page = "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty-v-banskobystrickom-kraji-public-view-3b4675";
   assert.equal(safeUrl(page), page);
-  assert.equal(machineUrl(page), null);
   assert.ok(linkHost(page, ["opendata.smartcity.joinedcontext.com"]));
-  // A table's dataset address for programs is text to copy, its CKAN page the link.
-  const shown = table({ columns: ["name"], rows: [["Most"]], dataset: schema, geojson: "https://api.example.sk/m.geojson" }, "sk");
+  // A table's dataset address for programs is shown nowhere, its CKAN page the link (T-4799).
+  const shown = table({ columns: ["name"], rows: [["Most"]], dataset: schema, download: schema, geojson: "https://api.example.sk/m.geojson" }, "sk");
   assert.equal(shown.dataset, null);
+  assert.equal(shown.download, null);
   assert.equal(shown.geojson, null);
-  assert.equal(shown.address, schema);
+  assert.doesNotMatch(JSON.stringify(shown), /https:\/\/api\./);
   assert.equal(table({ columns: ["name"], rows: [["Most"]], dataset: page }, "sk").dataset, page);
   // A source and a markdown link to it stay words.
   assert.deepEqual(markdown("[schéma](" + schema + ")", null, (u) => linkHost(u, ["api.smartcity.joinedcontext.com"])),
