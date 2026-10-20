@@ -142,9 +142,10 @@ const ANONYMOUS_AGGR_SECONDS: f64 = 3600.0;
 
 /// Bounds what one anonymous temporal read makes the broker read (T-4261, Architecture/07 §2):
 /// a window of at most 31 days, `type` or `id`, `lastN` within the broker's maximum and its
-/// default when absent, `limit` within the broker's page maximum (T-4804: the owner's 1,000 for
-/// every caller; the body cap and the per-caller rate stay the bound), and aggregation periods of an hour or more. Any other tool
-/// passes untouched; the error names the bound it broke.
+/// default when absent, `limit` within the broker's page maximum (T-4804: the owner's 1,000
+/// for every caller; the body cap and the per-caller rate stay the bound), and aggregation
+/// periods of an hour or more. Any other tool passes untouched; the error names the bound it
+/// broke.
 pub(crate) fn anonymous_bounds(
     name: &str,
     arguments: &mut Map<String, Value>,
@@ -192,10 +193,29 @@ pub(crate) fn anonymous_bounds(
     // A window over a day that asks neither raw values (`format`) nor its own aggregation
     // answers the broker's hourly or daily averages (T-4800), periods the PT1H floor below
     // allows; every other read keeps the broker's default of newest instances.
-    let limits = crate::mcp::limits::current();
     let averaged = window > chrono::Duration::days(1)
         && !arguments.contains_key("format")
         && !arguments.contains_key("aggrMethods");
+    anonymous_page(arguments, averaged)?;
+    if arguments.contains_key("aggrMethods") {
+        let period = arguments
+            .get("aggrPeriodDuration")
+            .and_then(Value::as_str)
+            .and_then(duration_seconds);
+        if !period.is_some_and(|seconds| seconds >= ANONYMOUS_AGGR_SECONDS) {
+            return Err(
+                "`aggrMethods` without a token needs an aggrPeriodDuration of at least PT1H"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The page part of [`anonymous_bounds`]: `lastN` within the broker's maximum, its default
+/// when absent unless the read is `averaged`, and `limit` within the broker's page maximum.
+fn anonymous_page(arguments: &mut Map<String, Value>, averaged: bool) -> Result<(), String> {
+    let limits = crate::mcp::limits::current();
     match arguments.get("lastN") {
         None if averaged => {}
         None => {
@@ -211,27 +231,16 @@ pub(crate) fn anonymous_bounds(
             ))
         }
     }
-    if let Some(limit) = arguments.get("limit") {
-        if !limit
-            .as_u64()
-            .is_some_and(|n| (1..=limits.max_limit).contains(&n))
+    match arguments.get("limit") {
+        Some(limit)
+            if !limit
+                .as_u64()
+                .is_some_and(|n| (1..=limits.max_limit).contains(&n)) =>
         {
-            return Err(format!("`limit` is 1 to {}", limits.max_limit));
+            Err(format!("`limit` is 1 to {}", limits.max_limit))
         }
+        _ => Ok(()),
     }
-    if arguments.contains_key("aggrMethods") {
-        let period = arguments
-            .get("aggrPeriodDuration")
-            .and_then(Value::as_str)
-            .and_then(duration_seconds);
-        if !period.is_some_and(|seconds| seconds >= ANONYMOUS_AGGR_SECONDS) {
-            return Err(
-                "`aggrMethods` without a token needs an aggrPeriodDuration of at least PT1H"
-                    .to_owned(),
-            );
-        }
-    }
-    Ok(())
 }
 
 /// The seconds of an ISO 8601 duration (`P1DT2H`, `PT1.5H`, `P2W`), a year taken as 365 days
