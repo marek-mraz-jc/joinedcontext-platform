@@ -59,6 +59,23 @@ jobs:
           JC_ASSISTANT_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
       - run: cargo doc --workspace --no-deps
         env: { RUSTDOCFLAGS: "-D warnings" }
+  wasm-host-fuzz:
+    # The sandbox of server WASM Apps under cargo-fuzz (T-4777): arbitrary bytes as a component
+    # through the production engine, and arbitrary input to the checks behind every host function.
+    # Five minutes each from the corpus kept in crates/wasm-host/fuzz/corpus; a crash fails the lane.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with: { toolchain: nightly }
+      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with: { tool: "cargo-fuzz" }
+      - working-directory: crates/wasm-host/fuzz
+        run: |
+          for target in host_inputs component; do
+            cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu "$target" "corpus/$target" -- -max_total_time=300 -timeout=10 -rss_limit_mb=4096
+          done
   readme:
     # Every command the README tells a newcomer to type is run here (T-2144, TS-19). A
     # renamed crate, a moved script or a flag that no longer exists then fails a lane rather
