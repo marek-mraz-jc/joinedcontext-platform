@@ -333,3 +333,145 @@ async fn a_public_endpoint_is_counted_anonymously_and_each_page_cites_where_a_vi
 fn source_owned(sources: &[Source], name: &str) -> Source {
     source(sources, name).clone()
 }
+
+/// One chunk of a CKAN dataset page of `project`'s site `site`, at `visibility`.
+async fn dataset_chunk(pool: &sqlx::PgPool, project: &str, site: i64, url: &str, text: &str) {
+    let mut tx = assistant::project_scope(pool, project)
+        .await
+        .expect("scope");
+    let visibility: String = sqlx::query_scalar("SELECT visibility FROM sites WHERE id = $1")
+        .bind(site)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("site");
+    let page: i64 = sqlx::query_scalar(
+        "INSERT INTO pages (site_id, project, url, depth) VALUES ($1, $2, $3, 0) RETURNING id",
+    )
+    .bind(site)
+    .bind(project)
+    .bind(url)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("page");
+    sqlx::query(
+        "INSERT INTO chunks (site_id, project, page_id, ordinal, url, text, lang, visibility) \
+         VALUES ($1, $2, $3, 0, $4, $5, 'sk', $6)",
+    )
+    .bind(site)
+    .bind(project)
+    .bind(page)
+    .bind(url)
+    .bind(text)
+    .bind(visibility)
+    .execute(&mut *tx)
+    .await
+    .expect("chunk");
+    tx.commit().await.expect("commit");
+}
+
+/// T-4793: an Endpoint with no dataset of its own whose type one CKAN dataset of the project
+/// publishes (named by its OData address, as a harvested dataset names it): the type's passage
+/// is indexed at that dataset's page, and the Endpoint's page names it. An internal dataset is
+/// never named for a public Endpoint.
+#[tokio::test]
+async fn a_type_one_dataset_publishes_is_indexed_and_cited_at_that_dataset() {
+    let (admin, pool, name) = db::database("catalogue_type_datasets").await;
+    let reader = Reader {
+        http: reqwest::Client::new(),
+        gateway: None,
+        endpoint_base: Url::parse("https://platform.example.org/").ok(),
+        portal: None,
+    };
+    let ckan_public = upsert_site(&pool, "bb", "data.example.org", "ckan", Visibility::Public)
+        .await
+        .expect("site");
+    let ckan_internal = upsert_site(
+        &pool,
+        "bb",
+        "data.example.org",
+        "ckan-staff",
+        Visibility::Internal,
+    )
+    .await
+    .expect("site");
+    let stations = "https://data.example.org/dataset/stanice-ovzdusia";
+    dataset_chunk(&pool, "bb", ckan_public, stations, &format!(
+        "# Stanice ovzdušia\n\nOData: https://platform.example.org/api/endpoint/{PRIVATE_SLUG}/odata/v4/AirQualityStation"
+    )).await;
+    let internal = "https://data.example.org/dataset/merania-interne";
+    dataset_chunk(&pool, "bb", ckan_internal, internal, &format!(
+        "# Merania interné\n\nhttps://platform.example.org/api/endpoint/{PRIVATE_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+    )).await;
+    // A page that names the address but is no dataset page is never a type's dataset.
+    dataset_chunk(
+        &pool,
+        "bb",
+        ckan_public,
+        "https://data.example.org/news/1",
+        &format!("# News\n\n/api/endpoint/{PRIVATE_SLUG}/odata/v4/AirQualityStation"),
+    )
+    .await;
+
+    let sources = worker::sources(&checkout("type_datasets")).expect("reads");
+    let source = source_owned(&sources, "staff");
+    let site = upsert_site(
+        &pool,
+        "bb",
+        "example.org",
+        &source.name,
+        Visibility::Internal,
+    )
+    .await
+    .expect("site");
+    let mut pages = Pages::default();
+    sync_catalogue(
+        &pool,
+        &reader,
+        "bb",
+        site,
+        &source.catalogue,
+        Some("sk"),
+        &mut pages,
+    )
+    .await
+    .expect("indexed");
+    let html = |url: &str| &pages.0.iter().find(|(u, _)| u == url).expect(url).1;
+    let own = html(&format!(
+        "https://platform.example.org/api/endpoint/{PRIVATE_SLUG}/schema/index.json"
+    ));
+    assert!(
+        own.contains(&format!(
+            "<li>Type AirQualityStation: Stanice ovzdušia ({stations})</li>"
+        )),
+        "{own}"
+    );
+    assert!(
+        own.contains(&format!(
+            "<li>Type AirQualityObserved: Merania interné ({internal})</li>"
+        )),
+        "an internal Endpoint names its internal dataset: {own}"
+    );
+    assert!(
+        !own.contains("<h2>AirQualityStation</h2>"),
+        "the type moved: {own}"
+    );
+    let station = html(stations);
+    assert!(station.contains("<h1>Stanice ovzdušia</h1>"), "{station}");
+    assert!(station.contains("<h2>AirQualityStation</h2>"));
+    assert!(!station.contains("<h2>AirQualityObserved</h2>"));
+    assert!(pages.0.iter().all(|(u, _)| !u.contains("/news/")));
+
+    // A public Endpoint reads public dataset pages alone.
+    let kinds = [
+        "AirQualityObserved".to_owned(),
+        "AirQualityStation".to_owned(),
+    ];
+    let mut tx = assistant::project_scope(&pool, "bb").await.expect("scope");
+    let public = assistant::type_datasets(&mut tx, PRIVATE_SLUG, &kinds, site, true)
+        .await
+        .expect("read");
+    tx.rollback().await.expect("rollback");
+    let urls: Vec<&str> = public.iter().map(|d| d.url.as_str()).collect();
+    assert_eq!(urls, [stations]);
+    db::drop_database(admin, pool, &name).await;
+}

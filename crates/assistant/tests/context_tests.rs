@@ -107,6 +107,7 @@ fn endpoint(
             }
             .into(),
             ckan_dataset: Some(format!("https://data.example/dataset/{name}")),
+            datasets: Vec::new(),
             types: types
                 .iter()
                 .map(|class| EntityType {
