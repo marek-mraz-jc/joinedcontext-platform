@@ -240,12 +240,14 @@ async fn a_text_seen_before_takes_its_vector_without_the_model() {
 }
 
 /// T-4749: the worker's minute embeds until its time budget is spent, not up to a count, and a
-/// budget already spent embeds nothing.
+/// budget already spent embeds nothing. The budget is three batches as this machine embeds them
+/// (T-4807: a fixed 1.5 s let a fast runner embed all 400 passages), the corpus thirty.
 #[tokio::test]
 async fn passages_are_embedded_until_the_budget_is_spent() {
     let embedder = Embedder::load(&model::model_dir(), 2).expect("the pinned model loads");
     let (admin, pool, name) = db::database("embedbudget").await;
-    let texts: Vec<String> = (0..400)
+    let total = 30 * assistant::embed::BATCH;
+    let texts: Vec<String> = (0..total)
         .map(|i| format!("Odstavec číslo {i} o meste a jeho úrade, ktorý je otvorený."))
         .collect();
     let pages: Vec<(String, &str, &str)> = texts
@@ -264,14 +266,25 @@ async fn passages_are_embedded_until_the_budget_is_spent() {
             .expect("none"),
         0
     );
-    let budget = std::time::Duration::from_millis(1500);
+    let batch = assistant::embed::BATCH as i64;
+    embed_missing(&pool, &embedder, "hronov", batch)
+        .await
+        .expect("warm-up batch");
+    let one = std::time::Instant::now();
+    embed_missing(&pool, &embedder, "hronov", batch)
+        .await
+        .expect("timed batch");
+    let budget = one.elapsed() * 3;
     let began = std::time::Instant::now();
     let embedded = embed_until(&pool, &embedder, "hronov", began + budget)
         .await
         .expect("some");
     let took = began.elapsed();
     assert!(embedded >= assistant::embed::BATCH, "{embedded}");
-    assert!(embedded < 400, "it stopped at the budget: {embedded}");
+    assert!(
+        embedded < total - 2 * assistant::embed::BATCH,
+        "it stopped at the budget: {embedded} in {took:?}"
+    );
     assert!(
         took < budget + std::time::Duration::from_secs(5),
         "at most one batch past the budget: {took:?}"

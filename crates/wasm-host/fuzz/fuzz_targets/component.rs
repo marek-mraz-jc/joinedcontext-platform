@@ -1,6 +1,7 @@
 //! Arbitrary bytes as an App's component, through the shard's own path: fetched by digest,
 //! compiled by the production engine and linker, and when it compiles, served one request under a
-//! short wall time. Any outcome but a panic, an abort or a hang of the host is fine.
+//! short wall time. Any outcome but a panic, an abort or a hang of the host is fine. Each run waits
+//! until its instance has ended, so none runs on into the next run's leak check (T-4807).
 
 #![no_main]
 
@@ -36,6 +37,7 @@ fn world() -> &'static World {
             memory_bytes: 16 << 20,
             cached_components: 1,
             pooled_instances: 16,
+            per_app_concurrency: 1,
             ..Limits::default()
         };
         let host = runtime
@@ -73,6 +75,11 @@ fuzz_target!(|bytes: &[u8]| {
                 .body(Bytes::new())
                 .expect("request");
             let _ = world.host.serve(&app, request, None).await;
+            // The App's one place comes back once its instance ends; libFuzzer's -timeout reports
+            // one that never does.
+            while world.host.admit(&app).is_err() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
     });
     let _ = std::fs::remove_file(&file);
