@@ -22,6 +22,7 @@ LAYER = {
     "jc-core": "core-base",
     "jc-manifest": "core",
     "jc-dcat": "core",
+    "jc-relationships": "core",
     "wasm-host": "runtime",
     "functions": "runtime",
     "context-gateway": "service",

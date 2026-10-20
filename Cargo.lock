@@ -1240,6 +1240,7 @@ dependencies = [
  "jc-core",
  "jc-dcat",
  "jc-manifest",
+ "jc-relationships",
  "jcctl",
  "jsonschema",
  "jsonwebtoken",
@@ -3589,6 +3590,14 @@ dependencies = [
  "tracing",
  "utoipa",
  "walkdir",
+]
+
+[[package]]
+name = "jc-relationships"
+version = "0.1.0"
+dependencies = [
+ "jc-core",
+ "serde_json",
 ]
 
 [[package]]
