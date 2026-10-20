@@ -1086,7 +1086,6 @@ fn catalog_extras(record: &Value, language: Option<&str>) -> Vec<Value> {
     out
 }
 
-/// A `dcat:mediaType` as CKAN's `mimetype`: the record names the IANA IRI (EP-78).
 /// A plain entity type name: what a URL path segment carries as itself.
 fn is_type_name(kind: &str) -> bool {
     (1..=100).contains(&kind.len())
@@ -1105,6 +1104,7 @@ fn entity_sets(address: &str, kinds: &[&str]) -> String {
     format!("Its entity sets: {}.\n\n", sets.join(", "))
 }
 
+/// A `dcat:mediaType` as CKAN's `mimetype`: the record names the IANA IRI (EP-78).
 fn mimetype(media_type: &Value) -> Value {
     match media_type.as_str() {
         Some(iri) => json!(iri
