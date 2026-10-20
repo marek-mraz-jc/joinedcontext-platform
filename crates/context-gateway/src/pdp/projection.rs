@@ -4,29 +4,17 @@
 //! less than that, and the difference must never reach the wire: an attribute omitted
 //! from a grant is not a display preference, it is data the caller has no right to.
 //!
-//! Projection preserves NGSI-LD shape. `id`, `type` and the JSON-LD keywords stay, because
-//! an entity without them is not an entity; every other member survives only if the
-//! constraint set names it.
+//! Projection preserves NGSI-LD shape. The system members of DM-130 (`id`, `type`, `scope`,
+//! `@context`, the broker's timestamps and `expiresAt`) stay, because an entity without them is
+//! not an entity and a grant is about data, not about when it was written or how long it lives
+//! (EP-71, DM-131); every other member survives only if the constraint set names it.
 
+use jc_core::system_members::is_entity_system_member;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// The members every entity keeps, whatever the grants say: without them the answer is
-/// not a valid NGSI-LD entity.
-const STRUCTURAL: &[&str] = &["id", "type", "@context", "@id", "@type", "scope"];
-
-/// The members the broker generates rather than the author writing them, which a read keeps
-/// whatever the grants name (EP-71, CIM 009 clause 4.8).
-///
-/// A grant is a statement about the data a caller may see, not about whether they may know
-/// when it was written or which registered source answered. On a federated endpoint that
-/// distinction is the whole of provenance: strip these and a merged answer stops saying where
-/// any of it came from, which is what EP-71 exists to prevent.
-///
-/// A read only. [`ungranted`] deliberately does not know about this list, so a write that
-/// carries one of these members is still refused: they are the broker's to set, never a
-/// client's to send.
-const SYSTEM: &[&str] = &["createdAt", "modifiedAt", "deletedAt", "expiresAt"];
+/// The system members only the broker sets (CIM 009 clause 4.8).
+const BROKER_SET: [&str; 3] = ["createdAt", "modifiedAt", "deletedAt"];
 
 /// Strips from one entity every attribute the grants do not name and every attribute the
 /// endpoint hides (R9, EP-61).
@@ -43,8 +31,7 @@ pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &B
         return;
     };
     members.retain(|name, _| {
-        STRUCTURAL.contains(&name.as_str())
-            || SYSTEM.contains(&name.as_str())
+        is_entity_system_member(name)
             || ((granted.is_empty() || granted.contains(name)) && !hidden.contains(name))
     });
 }
@@ -52,7 +39,10 @@ pub fn project_entity(entity: &mut Value, granted: &BTreeSet<String>, hidden: &B
 /// The attributes an entity carries that the grants do not cover (R9, GW17).
 ///
 /// A read strips them; a write that touches any of them is denied whole, because silently
-/// dropping an attribute from a write would store something the caller did not ask for.
+/// dropping an attribute from a write would store something the caller did not ask for. A system
+/// member is no attribute, so no grant needs to name it: who may write the entity may set its
+/// `expiresAt` (DM-131, PL-84). The timestamps the broker sets are not a client's to send, so a
+/// write carrying one is still outside a whitelist (GW17).
 pub fn ungranted<'a>(entity: &'a Value, granted: &BTreeSet<String>) -> Vec<&'a str> {
     if granted.is_empty() {
         return Vec::new();
@@ -63,7 +53,10 @@ pub fn ungranted<'a>(entity: &'a Value, granted: &BTreeSet<String>) -> Vec<&'a s
     members
         .keys()
         .map(String::as_str)
-        .filter(|name| !STRUCTURAL.contains(name) && !granted.contains(*name))
+        .filter(|name| {
+            (!is_entity_system_member(name) || BROKER_SET.contains(name))
+                && !granted.contains(*name)
+        })
         .collect()
 }
 

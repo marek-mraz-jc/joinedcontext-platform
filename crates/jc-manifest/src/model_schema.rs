@@ -15,6 +15,9 @@
 //! so DM-92's 64 KiB for a quality rule would refuse it. A class whose schema does not compile
 //! under the limit is held to its id and type only.
 
+use jc_core::system_members::{
+    is_attribute_system_member, is_entity_system_member, INSTANT_MEMBERS,
+};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -383,7 +386,7 @@ impl ModelSchema {
             .unwrap_or_default();
         let mut normalized = Map::new();
         for (name, value) in object {
-            if matches!(name.as_str(), "id" | "type" | "@context") {
+            if is_entity_system_member(name) {
                 normalized.insert(name.clone(), value.clone());
                 continue;
             }
@@ -851,6 +854,17 @@ fn normalized(
     properties.insert("id".into(), json!({ "type": "string" }));
     properties.insert("type".into(), json!({ "const": class }));
     properties.insert("@context".into(), json!({}));
+    // The other system members pass a closed class in their own form (DM-130, DM-131).
+    properties.insert(
+        "scope".into(),
+        json!({ "type": ["string", "array"], "items": { "type": "string" } }),
+    );
+    for member in INSTANT_MEMBERS
+        .iter()
+        .filter(|m| is_entity_system_member(m))
+    {
+        properties.insert((*member).into(), instant());
+    }
     let mut required = vec![json!("id"), json!("type")];
 
     let declared = definition
@@ -859,7 +873,7 @@ fn normalized(
         .cloned()
         .unwrap_or_default();
     for (name, slot) in &declared {
-        if name == "id" || name == "type" {
+        if is_entity_system_member(name) {
             continue;
         }
         properties.insert(name.clone(), attribute(slot, require_units));
@@ -918,6 +932,12 @@ fn attribute(slot: &Value, require_units: bool) -> Value {
             member: value,
         },
     });
+    for member in INSTANT_MEMBERS
+        .iter()
+        .filter(|m| is_attribute_system_member(m))
+    {
+        shape["properties"][*member] = instant();
+    }
     if let Some(code) = unit_code(slot).filter(|_| kind == "Property") {
         shape["properties"]["unitCode"] = json!({ "const": code });
         if require_units {
@@ -927,6 +947,11 @@ fn attribute(slot: &Value, require_units: bool) -> Value {
         }
     }
     shape
+}
+
+/// The form of a system member that holds an instant: an RFC 3339 date-time (DM-131).
+fn instant() -> Value {
+    json!({ "type": "string", "format": "date-time" })
 }
 
 /// The UN/CEFACT code a key-value slot's `x-unit` names, and the `unece:` spelling older models
@@ -1478,5 +1503,73 @@ mod tests {
         let mut record = valid();
         record["colour"] = json!({ "type": "Property", "value": "blue" });
         assert!(model(true).check(&record).is_empty());
+    }
+
+    /// DM-130, DM-131: every system member passes a closed class at both levels, an undeclared
+    /// attribute is still refused, and an instant member is held to RFC 3339.
+    #[test]
+    fn system_members_pass_a_closed_class_and_keep_their_own_form() {
+        let at = json!("2026-10-21T06:00:00Z");
+        for member in jc_core::system_members::ENTITY_SYSTEM_MEMBERS {
+            let mut record = valid();
+            if !record.as_object().is_some_and(|o| o.contains_key(member)) {
+                record[member] = match member {
+                    "scope" => json!("/fi/helsinki"),
+                    "@context" => {
+                        json!(["https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld"])
+                    }
+                    _ => at.clone(),
+                };
+            }
+            assert_eq!(rules(&record), [], "entity member {member}");
+        }
+        for member in jc_core::system_members::ATTRIBUTE_SYSTEM_MEMBERS {
+            let mut record = valid();
+            if record["pm10"].get(member).is_none() {
+                record["pm10"][member] = match member {
+                    "datasetId" => json!("urn:ngsi-ld:Dataset:a"),
+                    "instanceId" => json!("urn:ngsi-ld:Instance:1"),
+                    m if jc_core::system_members::INSTANT_MEMBERS.contains(&m) => at.clone(),
+                    _ => continue,
+                };
+            }
+            assert_eq!(rules(&record), [], "attribute member {member}");
+        }
+        // Another case, a prefix or the expanded IRI is an attribute name like any other.
+        for name in [
+            "ExpiresAt",
+            "ngsi-ld:expiresAt",
+            "https://uri.etsi.org/ngsi-ld/expiresAt",
+        ] {
+            let mut record = valid();
+            record[name] = at.clone();
+            assert_eq!(rules(&record), [("sh:closed".into(), name.into())]);
+        }
+        for bad in [json!("tomorrow"), json!("2026-13-01T00:00:00Z"), json!(17)] {
+            let mut record = valid();
+            record["expiresAt"] = bad.clone();
+            assert_eq!(
+                rules(&record),
+                [("sh:datatype".into(), "expiresAt".into())],
+                "{bad}"
+            );
+            let mut record = valid();
+            record["pm10"]["expiresAt"] = bad.clone();
+            assert_eq!(
+                rules(&record),
+                [("sh:datatype".into(), "pm10".into())],
+                "{bad}"
+            );
+        }
+        // The key-value form a mapping writes passes the entity's expiresAt through as it is.
+        let kv = json!({
+            "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:ovzdusie:station-1",
+            "type": "AirQualityObserved",
+            "dateObserved": "2026-09-01T06:00:00Z",
+            "expiresAt": at,
+        });
+        let normalized = model(false).normalize("AirQualityObserved", &kv);
+        assert_eq!(normalized["expiresAt"], at);
+        assert_eq!(rules(&normalized), []);
     }
 }

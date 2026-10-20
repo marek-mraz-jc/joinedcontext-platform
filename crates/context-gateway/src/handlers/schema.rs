@@ -13,22 +13,9 @@ use crate::pdp::evaluator::{
 };
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
+use jc_core::system_members::is_entity_system_member;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
-
-/// Members of an NGSI-LD entity that are the format rather than the data: no grant lists
-/// them and no projection may remove them, or the schema stops describing NGSI-LD.
-const STRUCTURAL: &[&str] = &[
-    "id",
-    "type",
-    "@id",
-    "@type",
-    "@context",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-];
 
 /// What one caller may read here: the union of the permissions in force, less whatever a
 /// prohibition takes back (GW8, EP-47).
@@ -89,7 +76,7 @@ impl Visible {
     /// The `@context` is one document for the whole model, so a term is in it when any class
     /// the caller reads carries it; a class definition is narrowed by [`Self::covers_slot`].
     fn covers_attr(&self, name: &str) -> bool {
-        STRUCTURAL.contains(&name)
+        is_entity_system_member(name)
             || (!self.denied_attrs.contains(name)
                 && (self.attrs.is_empty() || self.attrs.contains(name)))
     }
@@ -100,7 +87,7 @@ impl Visible {
             return false;
         }
         match self.slots.get(class) {
-            Some(slots) => STRUCTURAL.contains(&name) || slots.contains(name),
+            Some(slots) => is_entity_system_member(name) || slots.contains(name),
             // No projection: the grant's own attribute set is the whole of the narrowing, as
             // it was before a projection could disagree with it.
             None => true,

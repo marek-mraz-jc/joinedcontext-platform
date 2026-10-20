@@ -16,9 +16,9 @@ fn granted(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
-/// GW17: the broker's own members are not a client's to send, so a payload carrying one is
-/// outside the grant like any other attribute. `project_entity` keeps them on a **read**; this is
-/// the other direction and it deliberately does not know that list.
+/// GW17: the broker's own timestamps are not a client's to send, so a payload carrying one is
+/// outside the grant like any other attribute. `project_entity` keeps them on a **read**. The
+/// entity's `expiresAt` is the writer's to set and needs no grant (DM-131, PL-84).
 #[test]
 fn a_write_that_carries_a_broker_generated_member_is_not_granted_it() {
     let entity = json!({
@@ -33,7 +33,7 @@ fn a_write_that_carries_a_broker_generated_member_is_not_granted_it() {
 
     assert_eq!(
         ungranted(&entity, &granted(&["weight"])),
-        vec!["createdAt", "deletedAt", "expiresAt", "modifiedAt"],
+        vec!["createdAt", "deletedAt", "modifiedAt"],
         "a client that sets a timestamp is writing outside its grant"
     );
 }
