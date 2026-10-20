@@ -288,11 +288,6 @@ var JCRender = (function () {
     return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) && !machine(url) ? url : null;
   }
 
-  /** An `http(s)` address for programs, shown as text to copy and never as a link (T-4761). */
-  function machineUrl(url) {
-    return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) && machine(url) ? url : null;
-  }
-
   /**
    * The complete Server-Sent Events in `buffer` (T-4138): each `{name, data}` with its data parsed
    * as JSON, a malformed one skipped, and the unfinished tail returned as `rest` for the next read.
@@ -530,9 +525,8 @@ var JCRender = (function () {
       rows: rows,
       dataset: safeUrl(data.dataset),
       download: safeUrl(data.download),
-      geojson: safeUrl(data.geojson),
-      // The data's address for programs, where the table names one: copyable text (T-4761).
-      address: machineUrl(data.dataset) || machineUrl(data.download) || machineUrl(data.geojson)
+      // An address for programs is neither a link nor text: the dataset page names it (T-4799).
+      geojson: safeUrl(data.geojson)
     };
   }
 
@@ -1107,7 +1101,7 @@ var JCRender = (function () {
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
     markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
-    safeUrl: safeUrl, machineUrl: machineUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
+    safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry,
     vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst
   };
