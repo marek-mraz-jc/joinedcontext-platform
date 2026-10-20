@@ -767,9 +767,11 @@ impl Host {
             .new_response_outparam(sender)
             .map_err(|err| Failure::Failed(err.to_string()))?;
         // The admission lives as long as the instance, not the answer: an App that answers and runs
-        // on keeps its place until its wall time ends it (T-4777).
+        // on keeps its place until its wall time ends it (T-4777), and its store is dropped before
+        // the place is given back (T-4807).
         let task = tokio::spawn(async move {
             let _admission = admission;
+            let mut store = store;
             let proxy = pre.instantiate_async(&mut store).await?;
             proxy
                 .wasi_http_incoming_handler()
