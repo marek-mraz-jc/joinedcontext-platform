@@ -586,7 +586,11 @@
       first.focus();
     }
   });
-  about.addEventListener("close", function () { privacyOpen.focus(); });
+  // The close event comes a task later: focus the visitor already moved (the question box) stays.
+  about.addEventListener("close", function () {
+    var at = document.activeElement;
+    if (!at || at === document.body || about.contains(at)) privacyOpen.focus();
+  });
 
   function perLanguage(map) {
     if (!map) return null;
@@ -1349,7 +1353,7 @@
   function follow(item) {
     var target = docking && following() && input.value.trim() === "" ? JCRender.dataset(item.cited) : null;
     if (!target) return;
-    opening = { item: item, target: target };
+    opening = { item: item, target: target, at: Date.now() };
     toParent({ type: "jc-assistant-dataset", url: target.url, title: target.title });
   }
   function openedLine(item, target) {
@@ -1361,6 +1365,10 @@
     line.appendChild(back);
     item.appendChild(line);
   }
+  function noteOpened(done) {
+    (kept ? kept.turns : []).forEach(function (t) { if (t.turn === done.item.turn) t.opened = done.target; });
+    keep();
+  }
   window.addEventListener("message", function (event) {
     var data = event.data || {};
     if (!embedded || event.source !== window.parent || data.type !== "jc-assistant-opened" ||
@@ -1369,8 +1377,7 @@
     var done = opening;
     opening = null;
     openedLine(done.item, done.target);
-    (kept ? kept.turns : []).forEach(function (t) { if (t.turn === done.item.turn) t.opened = done.target; });
-    keep();
+    noteOpened(done);
     announce.textContent = w.changed.replace("{title}", done.target.title || done.target.url);
   });
 
@@ -1554,6 +1561,9 @@
         text: live.text || "", askedAt: live.askedAt };
     }
     try { sessionStorage.setItem(VIEW, JSON.stringify(now)); } catch (e) { /* not kept */ }
+    // The host answers `jc-assistant-opened` and changes the page at once, so the page can go
+    // before that answer arrives; a page that goes within 2 s of the request is that change.
+    if (opening && Date.now() - opening.at < 2000) noteOpened(opening);
   });
   function resume(s) {
     greeted();

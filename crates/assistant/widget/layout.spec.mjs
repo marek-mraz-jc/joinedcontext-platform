@@ -72,6 +72,8 @@ const STREAMED = ["## Doprava", "", "Máme **tri** zdroje [1, 2]:", "", "- **`ty
   "Pozor na <script>alert(1)</script> a <img src=x onerror=alert(1)> [docs](https://example.sk/a).", ""].join("\n");
 let SLOW = false;
 let DOCKED = false;
+// A page change faster than the host's answer: the old panel never reads `jc-assistant-opened`.
+let LOST = false;
 async function slow(res) {
   res.writeHead(200, { "Content-Type": "text/event-stream" });
   const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -102,7 +104,7 @@ const DOCK_HOST = (name) => `<!doctype html><html lang="sk" style="overflow:hidd
   if (d.type === "jc-assistant-dataset") {
     const to = new URL(d.url);
     if (to.origin !== location.origin || !/^[/]dataset[/][a-z0-9_-]+$/.test(to.pathname) || to.pathname === location.pathname) return;
-    frame.contentWindow.postMessage({ type: "jc-assistant-opened", url: d.url }, e.origin);
+    ${LOST ? "" : 'frame.contentWindow.postMessage({ type: "jc-assistant-opened", url: d.url }, e.origin);'}
     location.assign(to.pathname);
   }
   if (d.type === "jc-assistant-back") history.back();
@@ -686,6 +688,14 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
   await expect(dialog).toBeHidden();
   await expect(page.locator("#jc-question")).toBeVisible();
   await expect(open).toBeFocused();
+  // The close event comes a task later; focus moved at once (a visitor typing on) stays there.
+  await open.click();
+  await page.evaluate(() => {
+    document.querySelector("dialog.jc-about:not(.jc-connect) .jc-about-close").click();
+    document.getElementById("jc-question").focus();
+  });
+  await page.evaluate(() => new Promise((done) => setTimeout(done, 50)));
+  await expect(page.locator("#jc-question")).toBeFocused();
 
   const KEY = "jc-chat-remember:bb";
   expect(await page.evaluate((k) => localStorage.getItem(k), KEY)).toBeNull();
@@ -721,7 +731,7 @@ test("the privacy dialog holds focus, closes on Escape, and its switch keeps or 
 
 test.describe("docked beside the catalogue (T-4685)", () => {
   test.beforeEach(() => { DOCKED = true; CHATS = 0; RESUMES = 0; WIDGET = undefined; });
-  test.afterEach(() => { DOCKED = false; TITLE = undefined; });
+  test.afterEach(() => { DOCKED = false; LOST = false; TITLE = undefined; });
 
   test("an answer about one dataset opens it behind the panel, which keeps its conversation, draft and Back", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -772,6 +782,18 @@ test.describe("docked beside the catalogue (T-4685)", () => {
     await page.waitForTimeout(300);
     expect(new URL(page.url()).pathname).toBe("/dataset/start");
     await expect(chat.locator(".jc-opened")).toHaveCount(0);
+  });
+
+  test("a page change before the host's answer reaches the panel still shows the opened line", async ({ page }) => {
+    LOST = true;
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${base}/dataset/start`);
+    const chat = page.frameLocator("#jc");
+    await chat.locator("#jc-question").fill("Aké cyklotrasy sú v kraji?");
+    await chat.locator("#jc-question").press("Enter");
+    await page.waitForURL(`${base}/dataset/cyklotrasy-bbsk`);
+    await expect(chat.locator(".jc-bot .jc-answer")).toHaveCount(1);
+    await expect(chat.locator(".jc-opened")).toHaveText("Otvoril som dataset Cyklotrasy BBSK · Späť");
   });
 
   test("an answer streaming when a link is clicked finishes on the next page, never asked again or shown twice", async ({ page }) => {
