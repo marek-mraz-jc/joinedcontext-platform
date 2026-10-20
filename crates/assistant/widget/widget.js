@@ -1201,6 +1201,9 @@
       // The stages by name and duration replace the progress lines (T-4729).
       item.timed = data.stagesMs;
       if (item.cited) stepsPanel(item);
+    } else if (name === "step") {
+      // A read of the answer, listed under it by its source, query and count (T-4801).
+      (item.reads = item.reads || []).push(data);
     } else if (name === "followups") {
       chips(item, JCRender.followups(data));
       // Kept with the answer, so a page change shows them again under the last one (T-4685).
@@ -1216,14 +1219,21 @@
 
   // The collapsed list of the steps an answer took, made again when its stage times arrive.
   function stepsPanel(item) {
-    var took = JCRender.steps(item.stages, lang, item.timed);
+    var took = JCRender.steps(item.stages, lang, item.timed, item.reads);
     if (item.stepsList) item.stepsList.remove();
     item.stepsList = null;
     if (!took) return;
     var list = el("details", "jc-steps");
     list.appendChild(el("summary", "", took.summary));
     var ol = el("ol");
-    took.lines.forEach(function (line) { ol.appendChild(el("li", "", line)); });
+    took.lines.forEach(function (line, i) {
+      var li = ol.appendChild(el("li", "", line));
+      var page = took.links && took.links[i];
+      if (page) {
+        li.appendChild(document.createTextNode(" "));
+        li.appendChild(link(page, w.dataset));
+      }
+    });
     list.appendChild(ol);
     item.insertBefore(list, item.chips || null);
     item.stepsList = list;
