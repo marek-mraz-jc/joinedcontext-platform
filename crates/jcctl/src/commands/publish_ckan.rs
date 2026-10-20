@@ -406,14 +406,7 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
         message: format!("the record is not JSON: {e}"),
     })?;
     let (kind, served) = example_type(&base);
-    if let Some(members) = record.as_object_mut() {
-        if let Some(kind) = kind {
-            members.insert(ckan::EXAMPLE_TYPE.to_owned(), Value::String(kind));
-        }
-        if let Some(served) = served.filter(|served| !served.is_empty()) {
-            members.insert(ckan::SERVED_TYPES.to_owned(), json!(served));
-        }
-    }
+    with_types(&mut record, kind, served);
     Ok(record)
 }
 
@@ -443,6 +436,20 @@ fn example_type(base: &str) -> (Option<String>, Option<Vec<String>>) {
     let guide = read("ws", reqwest::StatusCode::UPGRADE_REQUIRED).and_then(|g| guide_type(&g));
     let served = read("ngsi-ld/v1/types", reqwest::StatusCode::OK).map(|list| served_types(&list));
     (example_of(guide, served.clone()), served)
+}
+
+/// `record` with the private members the usage texts read: the example type and the types the
+/// Endpoint serves, each only when known.
+fn with_types(record: &mut Value, kind: Option<String>, served: Option<Vec<String>>) {
+    let Some(members) = record.as_object_mut() else {
+        return;
+    };
+    if let Some(kind) = kind {
+        members.insert(ckan::EXAMPLE_TYPE.to_owned(), Value::String(kind));
+    }
+    if let Some(served) = served.filter(|served| !served.is_empty()) {
+        members.insert(ckan::SERVED_TYPES.to_owned(), json!(served));
+    }
 }
 
 /// The short names of an NGSI-LD `EntityTypeList`; none for any other answer.
@@ -1050,7 +1057,7 @@ fn table_word(outcome: datastore::Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{example_of, guide_type, served_types};
+    use super::{example_of, guide_type, served_types, with_types};
     use serde_json::json;
 
     /// T-4802: the example names a type the Endpoint serves, never the model's first class.
@@ -1085,6 +1092,21 @@ mod tests {
         assert_eq!(example_of(None, None), None);
         assert!(served_types(&json!({"typeList": [1, ""]})).is_empty());
         assert!(served_types(&json!([])).is_empty());
+
+        let mut record = json!({"dct:title": "Mosty"});
+        with_types(
+            &mut record,
+            Some("Bridge".into()),
+            Some(vec!["Bridge".into()]),
+        );
+        assert_eq!(record["jc:exampleType"], "Bridge");
+        assert_eq!(record["jc:servedTypes"], json!(["Bridge"]));
+        let mut bare = json!({});
+        with_types(&mut bare, None, Some(Vec::new()));
+        assert_eq!(bare, json!({}), "nothing known, nothing added");
+        let mut list = json!([]);
+        with_types(&mut list, Some("Bridge".into()), None);
+        assert_eq!(list, json!([]));
     }
 
     /// T-4132: the guide's example names the type; a guide without one names none.
