@@ -557,7 +557,8 @@ pub const CATALOG: &[Entry] = &[
     entry(
         "spec.limits.mqtt.messagesPerSecond",
         Section::Mqtt,
-        Some(1000),
+        // One broker at its own defaults, 1000 connections × 10 a second, fits.
+        Some(10_000),
         0,
         Some(100_000),
         BoundKind::Number,

@@ -341,11 +341,12 @@ mod tests {
         let allowance = on();
         assert_eq!(allowance.limit("brokers"), 1);
         assert_eq!(allowance.limit("connections"), 1000);
-        assert_eq!(allowance.limit("messagesPerSecond"), 1000);
+        assert_eq!(allowance.limit("messagesPerSecond"), 10_000);
         assert_eq!(allowance.limit("maxMessageBytes"), 65536);
         assert_eq!(allowance.modes(), vec![MqttMode::Ingest]);
+        // A broker at its own defaults fits the default allowance.
         assert_eq!(
-            allowance.refusal("helsinki", &MqttUsage::default(), &broker(100, 10), None),
+            allowance.refusal("helsinki", &MqttUsage::default(), &broker(1000, 10), None),
             None
         );
     }
