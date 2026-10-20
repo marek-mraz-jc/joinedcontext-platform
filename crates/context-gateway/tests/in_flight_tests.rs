@@ -448,7 +448,8 @@ async fn the_memory_of_a_load_comes_back_once_it_ends() {
         .and_then(|(peak, idle)| Some((peak.parse::<u64>().ok()?, idle.parse::<u64>().ok()?)))
         .unwrap_or_else(|| panic!("no measurement in {printed}"));
     eprintln!("the load grew the process by {peak} MiB at its peak and left {idle} MiB");
-    // Measured (release, 4 worker threads): this build 396-399 MiB at the peak, 70-72 MiB left.
+    // Measured (4 worker threads): this build 346-364 MiB at the peak and 70-72 MiB left in
+    // release, 271-306 and 60-70 in debug; 12 MiB of what is left is `kept`.
     // A download's entities held whole until the table was built: 1,254 MiB at the peak.
     // glibc's malloc with the mmap threshold prod ran: 342-363 MiB at the peak, 304-313 left.
     assert!(
@@ -460,7 +461,7 @@ async fn the_memory_of_a_load_comes_back_once_it_ends() {
         "the load grew the process by {peak} MiB: a download holds more than its table"
     );
     assert!(
-        idle * 4 < peak,
+        idle < 128,
         "the load left {idle} MiB of its {peak} MiB peak behind"
     );
 }

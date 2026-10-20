@@ -198,18 +198,26 @@ async fn paged_view(
     // Each page goes into the table as it arrives and its entities are dropped (T-4782); the
     // rows outside the caller's window count against the ceiling and are not kept.
     let (offset, limit) = window;
-    let mut table = tabular::Builder::default();
     let mut seen: usize = 0;
-    let mut keep = |page: Vec<Value>| {
+    let mut kept = |page: Vec<Value>| {
+        let mut inside = Vec::new();
         for entity in page {
             if seen >= offset && seen - offset < limit {
-                table.push(&entity);
+                inside.push(entity);
             }
             seen += 1;
         }
-        seen
+        (Value::Array(inside), seen)
     };
-    let mut count = keep(page);
+    let (first, mut count) = kept(page);
+    let mut table = tabular::table(&first, limits).map_err(|_| Box::new(too_large()))?;
+    drop(first);
+    let mut keep = |page: Vec<Value>| {
+        let (inside, count) = kept(page);
+        table.append(&inside);
+        count
+    };
+
     let mut further = Vec::new();
     if full {
         match total {
@@ -253,7 +261,7 @@ async fn paged_view(
             return Err(Box::new(too_large()));
         }
     }
-    Ok((table.finish(), restricted))
+    Ok((table, restricted))
 }
 
 /// The `offset` and `limit` a download asks for (T-4591), none the whole answer; a value that is

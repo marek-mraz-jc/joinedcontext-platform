@@ -93,78 +93,62 @@ pub struct Table {
 /// entity, or nothing at all. An empty answer is an empty table with no columns, which is
 /// a header-only CSV: nothing to show is not an error.
 pub fn table(entities: &Value, limits: &Limits) -> Result<Table, TooLarge> {
-    let entities: Vec<&Value> = match entities {
+    if entities_of(entities).len() as u64 > u64::from(limits.max_rows) {
+        return Err(TooLarge);
+    }
+    let mut table = Table::default();
+    table.append(entities);
+    Ok(table)
+}
+
+/// The entities of an answer: an array, a single entity, or nothing at all.
+fn entities_of(entities: &Value) -> Vec<&Value> {
+    match entities {
         Value::Array(entities) => entities.iter().collect(),
         entity if entity.is_object() => vec![entity],
         _ => Vec::new(),
-    };
-    if entities.len() as u64 > u64::from(limits.max_rows) {
-        return Err(TooLarge);
     }
-    let mut builder = Builder::default();
-    for entity in entities {
-        builder.push(entity);
-    }
-    Ok(builder.finish())
 }
 
-/// A [`Table`] built one entity at a time, so a download keeps the leaves of the pages it read
-/// and not their entities: an entity's parsed tree is about fifteen times its JSON, and a whole
-/// download of them held whole put the gateway past its 1 Gi limit (T-4782).
-#[derive(Debug, Default)]
-pub struct Builder {
-    columns: Vec<String>,
-    // Each column's position by name, so placing a cell is a lookup rather than a scan of the
-    // header, and each value moves into its row instead of being cloned there (T-4107).
-    positions: HashMap<String, usize>,
-    flattened: Vec<Vec<(usize, Value)>>,
-}
-
-impl Builder {
-    /// Adds `entity` as the next row.
-    pub fn push(&mut self, entity: &Value) {
-        let cells = flatten(entity)
-            .into_iter()
-            .map(|(name, value)| {
-                let next = self.columns.len();
-                let index = *self.positions.entry(name).or_insert_with_key(|name| {
-                    self.columns.push(name.clone());
-                    next
-                });
-                (index, value)
-            })
-            .collect();
-        self.flattened.push(cells);
-    }
-
-    /// The rows added so far.
-    pub fn len(&self) -> usize {
-        self.flattened.len()
-    }
-
-    /// Whether no row was added.
-    pub fn is_empty(&self) -> bool {
-        self.flattened.is_empty()
-    }
-
-    /// The table of every row added, each aligned to the columns all of them named.
-    pub fn finish(self) -> Table {
+impl Table {
+    /// Adds the rows of `entities` (as [`table`] reads them), widening every row when they name
+    /// a column the table has not seen. A download appends each page as it arrives and drops
+    /// it, so it keeps the leaves of its pages and not their parsed entities, which are about
+    /// fifteen times their JSON: a whole download held at once put the gateway past its 1 Gi
+    /// limit (T-4782).
+    pub fn append(&mut self, entities: &Value) {
         let width = self.columns.len();
-        let rows = self
-            .flattened
-            .into_iter()
-            .map(|cells| {
-                let mut row = vec![Value::Null; width];
-                // Reversed, so of two leaves on one path the first one written is the one kept.
-                for (index, value) in cells.into_iter().rev() {
-                    row[index] = value;
-                }
-                row
-            })
+        // Each column's position by name, so placing a cell is a lookup rather than a scan of
+        // the header, and each value moves into its row instead of being cloned there (T-4107).
+        let mut positions: HashMap<String, usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index))
             .collect();
-        Table {
-            columns: self.columns,
-            rows,
+        for entity in entities_of(entities) {
+            let cells: Vec<(usize, Value)> = flatten(entity)
+                .into_iter()
+                .map(|(name, value)| {
+                    let next = self.columns.len();
+                    let index = *positions.entry(name).or_insert_with_key(|name| {
+                        self.columns.push(name.clone());
+                        next
+                    });
+                    (index, value)
+                })
+                .collect();
+            let mut row = vec![Value::Null; self.columns.len()];
+            // Reversed, so of two leaves on one path the first one written is the one kept.
+            for (index, value) in cells.into_iter().rev() {
+                row[index] = value;
+            }
+            self.rows.push(row);
+        }
+        if self.columns.len() > width {
+            for row in &mut self.rows {
+                row.resize(self.columns.len(), Value::Null);
+            }
         }
     }
 }
