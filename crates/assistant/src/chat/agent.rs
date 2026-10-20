@@ -895,13 +895,15 @@ async fn run_tool(
                 // Rows of a type cite the dataset a visitor can open (T-4625); when no dataset page
                 // publishes the type, its own listing, named by the type (T-4747).
                 let (url, title) = match kind.as_deref() {
-                    Some(kind) => match super::routed::dataset_of(ask, connector, kind).await {
-                        Some(page) => (Some(page), None),
-                        None => (
-                            super::routed::type_listing(ask, &connector.surface.slug, kind),
-                            Some(kind.to_owned()),
-                        ),
-                    },
+                    Some(kind) => {
+                        match super::routed::dataset_of(ask, connector, kind, &text).await {
+                            Some(page) => (Some(page), None),
+                            None => (
+                                super::routed::type_listing(ask, &connector.surface.slug, kind),
+                                Some(kind.to_owned()),
+                            ),
+                        }
+                    }
                     None => (None, None),
                 };
                 let n = citations.len() + 1;

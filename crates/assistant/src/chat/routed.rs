@@ -1829,16 +1829,49 @@ pub(super) fn queried_type(tool: &str, arguments: &Value) -> Option<String> {
         .flatten()
 }
 
-/// The page a visitor opens about the rows of `kind` read from `connector`: the CKAN dataset
-/// page of an Endpoint over the same space that publishes the type (T-4625), else the page the
-/// sources hold about the connector's own Endpoint; `None` when neither is found.
-pub(super) async fn dataset_of(ask: &Ask<'_>, connector: &Connected, kind: &str) -> Option<String> {
+/// The one `isPartOf` every entity of a `query_entities` answer names (a Property's value, a
+/// Relationship's object or a key-value), when it is an https URL; `None` when they differ, one
+/// names none, or the answer holds no entity.
+pub(super) fn part_of(text: &str) -> Option<String> {
+    let answer: Value = serde_json::from_str(text).ok()?;
+    let entities = match &answer {
+        Value::Array(list) => list,
+        other => other.get("entities")?.as_array()?,
+    };
+    let mut named = entities.iter().map(|entity| {
+        let part = entity.get("isPartOf")?;
+        part.as_str()
+            .or_else(|| part.get("value").and_then(Value::as_str))
+            .or_else(|| part.get("object").and_then(Value::as_str))
+    });
+    let first = named.next()??;
+    (named.all(|other| other == Some(first))
+        && url::Url::parse(first).is_ok_and(|url| url.scheme() == "https"))
+    .then(|| first.to_owned())
+}
+
+/// The page a visitor opens about the rows of `kind` read from `connector`: the dataset every
+/// row of `text` names as its `isPartOf` when the sources hold its page (T-4793: two datasets
+/// publish PointOfInterest, the rows say which), else the CKAN dataset page of an Endpoint over
+/// the same space that publishes the type (T-4625), else the page the sources hold about the
+/// connector's own Endpoint; `None` when none is found.
+pub(super) async fn dataset_of(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+    text: &str,
+) -> Option<String> {
     // Its own slug always, so an Endpoint with no space recorded still finds its type's page.
     let mut slugs = connector.siblings.clone();
     if !slugs.contains(&connector.surface.slug) {
         slugs.push(connector.surface.slug.clone());
     }
     let found = async {
+        if let Some(part) = part_of(text) {
+            if crate::held_page_projects(ask.pool, &part, ask.sources, ask.public_only).await? {
+                return Ok(Some(part));
+            }
+        }
         match crate::dataset_page_projects(ask.pool, &slugs, kind, ask.sources, ask.public_only)
             .await?
         {
@@ -1935,7 +1968,7 @@ pub(super) async fn table(
     let enums = enums_of(model.as_deref(), kind, &columns);
     let slug = connector.surface.slug.as_str();
     let began = Instant::now();
-    let dataset = dataset_of(ask, connector, kind).await;
+    let dataset = dataset_of(ask, connector, kind, text).await;
     ask.trace.note(
         "tool",
         "dataset_page",
@@ -5425,6 +5458,32 @@ mod tests {
         assert!(type_names("{}").is_empty());
         let many: Vec<String> = (0..50).map(|n| format!("T{n}")).collect();
         assert_eq!(type_names(&json!(many).to_string()).len(), MAX_TYPES);
+    }
+
+    #[test]
+    fn the_rows_dataset_is_the_one_they_all_name() {
+        let page = "https://opendata.example.org/dataset/bbsk-kontaktne-miesta-2128a0";
+        let normalized = json!({"entities": [
+            {"id": "urn:ngsi-ld:PointOfInterest:a", "isPartOf": {"type": "Property", "value": page}},
+            {"id": "urn:ngsi-ld:PointOfInterest:b", "isPartOf": {"type": "Relationship", "object": page}},
+        ]})
+        .to_string();
+        assert_eq!(part_of(&normalized).as_deref(), Some(page));
+        let plain = json!([{"isPartOf": page}, {"isPartOf": page}]).to_string();
+        assert_eq!(part_of(&plain).as_deref(), Some(page));
+        let mixed = json!([{"isPartOf": page}, {"isPartOf": "https://x.org/dataset/other"}]);
+        assert_eq!(part_of(&mixed.to_string()), None, "two datasets name none");
+        assert_eq!(part_of(&json!([{"isPartOf": page}, {}]).to_string()), None);
+        assert_eq!(
+            part_of(&json!([{"isPartOf": "javascript:alert(1)"}]).to_string()),
+            None
+        );
+        assert_eq!(
+            part_of(&json!([{"isPartOf": "http://x.org/d"}]).to_string()),
+            None
+        );
+        assert_eq!(part_of(&json!({"entities": []}).to_string()), None);
+        assert_eq!(part_of("not json"), None);
     }
 
     #[test]

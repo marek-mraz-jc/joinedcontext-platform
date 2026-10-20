@@ -20,7 +20,7 @@ use sqlx::PgPool;
 use url::Url;
 
 use crate::crawl::Sink;
-use crate::Error;
+use crate::{Error, TypeDataset};
 
 /// One attribute of an entity type, as the space's model describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +54,9 @@ pub struct EndpointPage {
     /// The CKAN dataset page, when the Endpoint publishes to a catalogue of the project.
     pub ckan_dataset: Option<String>,
     pub types: Vec<EntityType>,
+    /// The CKAN datasets that publish its types, read from the index at sync when it publishes
+    /// none of its own (T-4793).
+    pub datasets: Vec<TypeDataset>,
 }
 
 impl EndpointPage {
@@ -292,8 +295,41 @@ pub fn pages_of(
                         .collect()
                 })
                 .unwrap_or_default(),
+            datasets: Vec::new(),
         });
     }
+    pages
+}
+
+/// An Endpoint with no dataset of its own, as the pages a passage cites (T-4793): each type
+/// exactly one of `datasets` publishes gets a page of its own at that dataset's address, titled
+/// as the dataset, so a passage about it links the dataset and never the Endpoint's schema. The
+/// Endpoint's own page keeps every other type and names each type's datasets. A page with a
+/// dataset of its own, or with none found, comes back as it is.
+pub fn split_by_dataset(page: &EndpointPage, datasets: &[TypeDataset]) -> Vec<EndpointPage> {
+    if page.ckan_dataset.is_some() || datasets.is_empty() {
+        return vec![page.clone()];
+    }
+    let mut own = EndpointPage {
+        types: Vec::new(),
+        datasets: datasets.to_vec(),
+        ..page.clone()
+    };
+    let mut pages = Vec::new();
+    for entity_type in &page.types {
+        let mut publishing = datasets.iter().filter(|d| d.class == entity_type.class);
+        match (publishing.next(), publishing.next()) {
+            (Some(dataset), None) => pages.push(EndpointPage {
+                title: Some(dataset.title.clone()),
+                ckan_dataset: Some(dataset.url.clone()),
+                types: vec![entity_type.clone()],
+                datasets: Vec::new(),
+                ..page.clone()
+            }),
+            _ => own.types.push(entity_type.clone()),
+        }
+    }
+    pages.insert(0, own);
     pages
 }
 
@@ -335,6 +371,18 @@ pub fn page_html(
     ));
     if let Some(dataset) = &page.ckan_dataset {
         html.push_str(&format!("<p>Open data catalogue: {}</p>", escape(dataset)));
+    }
+    if !page.datasets.is_empty() {
+        html.push_str("<p>Datasets in the open data catalogue:</p><ul>");
+        for dataset in &page.datasets {
+            html.push_str(&format!(
+                "<li>Type {}: {} ({})</li>",
+                escape(&dataset.class),
+                escape(&dataset.title),
+                escape(&dataset.url)
+            ));
+        }
+        html.push_str("</ul>");
     }
     for entity_type in &page.types {
         html.push_str(&format!("<h2>{}</h2>", escape(&entity_type.class)));
@@ -462,11 +510,6 @@ pub async fn sync_catalogue(
     ));
     let mut listed: BTreeSet<String> = BTreeSet::new();
     for page in pages {
-        let url = page.citation(endpoint_base)?;
-        // Two Endpoints publishing one dataset share its page; the first written keeps it.
-        if !listed.insert(url.clone()) {
-            continue;
-        }
         let address = endpoint_base
             .join(&format!("api/endpoint/{}", page.slug))
             .map(String::from)
@@ -493,10 +536,28 @@ pub async fn sync_catalogue(
             };
             &shown
         };
-        let html = page_html(page, &address, &counts, counted_at.as_deref());
-        let hash = hex::encode(Sha256::digest(html.as_bytes()));
-        let mut tx = crate::project_scope(pool, project).await?;
-        let page_id: i64 = sqlx::query_scalar(
+        // The datasets of its types, read from the project's other sources (T-4793).
+        let datasets = if page.ckan_dataset.is_some() {
+            Vec::new()
+        } else {
+            let kinds: Vec<String> = page.types.iter().map(|t| t.class.clone()).collect();
+            let mut tx = crate::project_scope(pool, project).await?;
+            let found =
+                crate::type_datasets(&mut tx, &page.slug, &kinds, site_id, page.is_public())
+                    .await?;
+            tx.rollback().await?;
+            found
+        };
+        for page in split_by_dataset(page, &datasets) {
+            let url = page.citation(endpoint_base)?;
+            // Two Endpoints publishing one dataset share its page; the first written keeps it.
+            if !listed.insert(url.clone()) {
+                continue;
+            }
+            let html = page_html(&page, &address, &counts, counted_at.as_deref());
+            let hash = hex::encode(Sha256::digest(html.as_bytes()));
+            let mut tx = crate::project_scope(pool, project).await?;
+            let page_id: i64 = sqlx::query_scalar(
             "INSERT INTO pages (site_id, project, url, depth, status, content_hash, language, included, fetched_at) \
              VALUES ($1, $2, $3, 0, 'fetched', $4, $5, true, now()) \
              ON CONFLICT (site_id, url) DO UPDATE SET status = 'fetched', content_hash = EXCLUDED.content_hash, \
@@ -510,8 +571,9 @@ pub async fn sync_catalogue(
         .bind(language)
         .fetch_one(&mut *tx)
         .await?;
-        tx.commit().await?;
-        sink.page(page_id, &url, language, &html).await;
+            tx.commit().await?;
+            sink.page(page_id, &url, language, &html).await;
+        }
     }
     let listed: Vec<String> = listed.into_iter().collect();
     let mut tx = crate::project_scope(pool, project).await?;
@@ -590,7 +652,57 @@ mod tests {
             audience: audience.into(),
             ckan_dataset: None,
             types: types_of(&schema()),
+            datasets: Vec::new(),
         }
+    }
+
+    /// T-4793: an Endpoint with no dataset of its own and two types, one published by one
+    /// dataset and one by two. The first moves to a page at its dataset's address, so a passage
+    /// about it cites the dataset; the other stays, and the Endpoint's page names every dataset.
+    #[test]
+    fn a_multi_type_page_names_each_types_dataset_and_cites_it() {
+        let base = Url::parse("https://data.example.org/").expect("url");
+        let mut endpoint = page("public");
+        let mut hours = endpoint.types[0].clone();
+        hours.class = "OfficeHours".into();
+        let mut place = endpoint.types[0].clone();
+        place.class = "PointOfInterest".into();
+        endpoint.types = vec![hours, place];
+        let dataset = |class: &str, name: &str, title: &str| TypeDataset {
+            class: class.into(),
+            url: format!("https://opendata.example.org/dataset/{name}"),
+            title: title.into(),
+        };
+        let datasets = [
+            dataset("OfficeHours", "uradne-hodiny", "Úradné hodiny <BBSK>"),
+            dataset("PointOfInterest", "kontaktne-miesta", "Kontaktné miesta"),
+            dataset("PointOfInterest", "kultura", "Kultúra"),
+        ];
+        let pages = split_by_dataset(&endpoint, &datasets);
+        assert_eq!(pages.len(), 2);
+        let (own, hours) = (&pages[0], &pages[1]);
+        assert_eq!(
+            own.citation(&base).expect("citation"),
+            "https://data.example.org/api/endpoint/k7m2qz4tv6xh3n5jb2ryd3wcfa/schema/index.json"
+        );
+        let kept: Vec<&str> = own.types.iter().map(|t| t.class.as_str()).collect();
+        assert_eq!(kept, ["PointOfInterest"], "two datasets: the type stays");
+        let html = page_html(own, "https://x/api/endpoint/k", &BTreeMap::new(), None);
+        assert!(html.contains("<li>Type OfficeHours: Úradné hodiny &lt;BBSK&gt; (https://opendata.example.org/dataset/uradne-hodiny)</li>"), "{html}");
+        assert!(html.contains(
+            "<li>Type PointOfInterest: Kultúra (https://opendata.example.org/dataset/kultura)</li>"
+        ));
+        assert_eq!(
+            hours.citation(&base).expect("citation"),
+            "https://opendata.example.org/dataset/uradne-hodiny"
+        );
+        assert_eq!(hours.title.as_deref(), Some("Úradné hodiny <BBSK>"));
+        assert_eq!(hours.types.len(), 1);
+        assert_eq!(hours.types[0].class, "OfficeHours");
+        // A page with a dataset of its own, or none found, is left as it is.
+        assert_eq!(split_by_dataset(&endpoint, &[]), [endpoint.clone()]);
+        endpoint.ckan_dataset = Some("https://opendata.example.org/dataset/own".into());
+        assert_eq!(split_by_dataset(&endpoint, &datasets), [endpoint.clone()]);
     }
 
     #[test]

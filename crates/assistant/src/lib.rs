@@ -366,8 +366,10 @@ fn is_slug(slug: &str) -> bool {
 }
 
 /// What a page publishing `kind` from one of `slugs` says (T-4625): the CKAN publisher writes
-/// each dataset's NGSI-LD example as `/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}`.
-/// `None` for a type name or slug that is not plain, or no slug at all.
+/// each dataset's NGSI-LD example as `/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}`, and
+/// a harvested dataset names its type by its OData address `/api/endpoint/{slug}/odata/v4/{kind}`
+/// (T-4793: its NGSI-LD link carries no type). `None` for a type name or slug that is not plain,
+/// or no slug at all.
 fn dataset_pattern(slugs: &[String], kind: &str) -> Option<String> {
     let plain = (1..=100).contains(&kind.len())
         && kind.starts_with(|c: char| c.is_ascii_alphabetic())
@@ -376,7 +378,7 @@ fn dataset_pattern(slugs: &[String], kind: &str) -> Option<String> {
         return None;
     }
     Some(format!(
-        "/api/endpoint/({})/ngsi-ld/v1/entities\\?type={kind}([^A-Za-z0-9_]|$)",
+        "/api/endpoint/({})/(ngsi-ld/v1/entities\\?type=|odata/v4/){kind}([^A-Za-z0-9_]|$)",
         slugs.join("|")
     ))
 }
@@ -409,6 +411,85 @@ pub async fn dataset_page(
     .fetch_optional(conn)
     .await?;
     Ok(url)
+}
+
+/// One CKAN dataset page of the index that publishes a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDataset {
+    pub class: String,
+    pub url: String,
+    /// The heading of its first passage; the URL's last segment when it opens with none.
+    pub title: String,
+}
+
+/// The dataset pages of the project in scope, outside the site `except`, that publish each of
+/// `kinds` from the Endpoint `slug` (T-4793): what a catalogue page of an Endpoint with no
+/// dataset of its own names per type. Public pages alone when `public_only`.
+pub async fn type_datasets(
+    conn: &mut PgConnection,
+    slug: &str,
+    kinds: &[String],
+    except: i64,
+    public_only: bool,
+) -> Result<Vec<TypeDataset>, Error> {
+    let mut found = Vec::new();
+    for kind in kinds {
+        let Some(pattern) = dataset_pattern(&[slug.to_owned()], kind) else {
+            continue;
+        };
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "WITH named AS (SELECT DISTINCT c.url FROM chunks c \
+                 WHERE c.site_id <> $2 AND (NOT $3 OR c.visibility = 'public') \
+                 AND c.url ~ '/dataset/[^/]+/?$' AND c.url !~ '/api/endpoint/' AND c.text ~ $1) \
+             SELECT DISTINCT ON (c.url) c.url, c.text FROM chunks c JOIN named n ON n.url = c.url \
+             WHERE c.site_id <> $2 AND (NOT $3 OR c.visibility = 'public') \
+             ORDER BY c.url, c.ordinal, c.id",
+        )
+        .bind(pattern)
+        .bind(except)
+        .bind(public_only)
+        .fetch_all(&mut *conn)
+        .await?;
+        found.extend(rows.into_iter().map(|(url, text)| TypeDataset {
+            class: kind.clone(),
+            title: heading(&text).unwrap_or_else(|| {
+                url.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            }),
+            url,
+        }));
+    }
+    Ok(found)
+}
+
+/// Whether the deployment's sources hold a page at `url`: a dataset an entity names as its
+/// `isPartOf` is linked only when a visitor can read it there (T-4793).
+pub async fn held_page_projects(
+    pool: &sqlx::PgPool,
+    url: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<bool, Error> {
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        let held: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM chunks c JOIN sites s ON s.id = c.site_id \
+             WHERE c.url = $1 AND s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public'))",
+        )
+        .bind(url)
+        .bind(names)
+        .bind(public_only)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        if held {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// [`dataset_page`] across the projects that hold the sources, in their order.
@@ -609,6 +690,13 @@ mod tests {
         assert!(!re(
             "/api/endpoint/bkc4/ngsi-ld/v1/entitiesXtype=Organization"
         ));
+        // T-4793: a harvested dataset names its type by the OData address alone.
+        assert!(re(
+            "https://api.dev/api/endpoint/bkc4/odata/v4/Organization"
+        ));
+        assert!(re("/api/endpoint/w3st/odata/v4/Organization?$top=5"));
+        assert!(!re("/api/endpoint/bkc4/odata/v4/OrganizationUnit"));
+        assert!(!re("/api/endpoint/bkc4/ngsi-ld/v1/entities"));
         assert_eq!(dataset_pattern(&slugs, "Org.*"), None);
         assert_eq!(dataset_pattern(&slugs, ""), None);
         assert_eq!(dataset_pattern(&["a|b".to_owned()], "Organization"), None);
