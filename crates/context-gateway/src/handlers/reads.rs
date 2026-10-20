@@ -195,29 +195,10 @@ async fn paged_view(
     // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
     let mut held = bytes as u64;
     let full = page.len() >= PAGE;
-    // Each page goes into the table as it arrives and its entities are dropped (T-4782); the
-    // rows outside the caller's window count against the ceiling and are not kept.
-    let (offset, limit) = window;
+    // Each page goes into the table as it arrives and its entities are dropped (T-4782).
     let mut seen: usize = 0;
-    let mut kept = |page: Vec<Value>| {
-        let mut inside = Vec::new();
-        for entity in page {
-            if seen >= offset && seen - offset < limit {
-                inside.push(entity);
-            }
-            seen += 1;
-        }
-        (Value::Array(inside), seen)
-    };
-    let (first, mut count) = kept(page);
-    let mut table = tabular::table(&first, limits).map_err(|_| Box::new(too_large()))?;
-    drop(first);
-    let mut keep = |page: Vec<Value>| {
-        let (inside, count) = kept(page);
-        table.append(&inside);
-        count
-    };
-
+    let mut table = tabular::table(&in_window(page, window, &mut seen), limits)
+        .map_err(|_| Box::new(too_large()))?;
     let mut further = Vec::new();
     if full {
         match total {
@@ -237,8 +218,8 @@ async fn paged_view(
                     restricted |= narrowed_page;
                     held += bytes as u64;
                     let fetched = page.len();
-                    count = keep(page);
-                    if count as u64 > wanted || held > MAX_COLLECTED {
+                    table.append(&in_window(page, window, &mut seen));
+                    if seen as u64 > wanted || held > MAX_COLLECTED {
                         return Err(Box::new(too_large()));
                     }
                     if fetched < PAGE {
@@ -249,7 +230,7 @@ async fn paged_view(
             }
         }
     }
-    if count as u64 > wanted || held > MAX_COLLECTED {
+    if seen as u64 > wanted || held > MAX_COLLECTED {
         return Err(Box::new(too_large()));
     }
     let mut pages = stream::iter(further).map(read).buffered(PARALLEL_PAGES);
@@ -257,11 +238,30 @@ async fn paged_view(
         let (page, narrowed_page, bytes, _) = page?;
         restricted |= narrowed_page;
         held += bytes as u64;
-        if keep(page) as u64 > wanted || held > MAX_COLLECTED {
+        table.append(&in_window(page, window, &mut seen));
+        if seen as u64 > wanted || held > MAX_COLLECTED {
             return Err(Box::new(too_large()));
         }
     }
     Ok((table, restricted))
+}
+
+/// The entities of `page` inside the caller's `(offset, limit)` window, `seen` the rows read
+/// before it and counted on: a row outside the window counts against the ceiling and is not kept.
+fn in_window(page: Vec<Value>, (offset, limit): (usize, usize), seen: &mut usize) -> Value {
+    let first = *seen;
+    *seen += page.len();
+    Value::Array(
+        page.into_iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                (first + index)
+                    .checked_sub(offset)
+                    .is_some_and(|at| at < limit)
+            })
+            .map(|(_, entity)| entity)
+            .collect(),
+    )
 }
 
 /// The `offset` and `limit` a download asks for (T-4591), none the whole answer; a value that is
