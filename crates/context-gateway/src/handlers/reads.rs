@@ -137,7 +137,7 @@ pub(crate) async fn paged_entities(
     (params, view): (&[(String, String)], &str),
     request: &mut Request,
     limits: &tabular::Limits,
-) -> Result<(Value, bool), Box<Response<Body>>> {
+) -> Result<(tabular::Table, bool), Box<Response<Body>>> {
     if !has_view(view) {
         return Err(Box::new(no_view(endpoint)));
     }
@@ -155,7 +155,7 @@ async fn paged_view(
     (params, view): (&[(String, String)], &str),
     request: &mut Request,
     limits: &tabular::Limits,
-) -> Result<(Value, bool), Box<Response<Body>>> {
+) -> Result<(tabular::Table, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
     let window = window(params)?;
     view_hop(endpoint, subject, request)?;
@@ -167,7 +167,7 @@ async fn paged_view(
         .cloned()
         .collect();
     let Some(types) = selector(gateway, view, &windowless, request.headers()).await? else {
-        return Ok((Value::Array(Vec::new()), false));
+        return Ok((tabular::Table::default(), false));
     };
     let narrowed = query::view_read(&windowless, &types);
 
@@ -195,7 +195,21 @@ async fn paged_view(
     // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
     let mut held = bytes as u64;
     let full = page.len() >= PAGE;
-    let mut rows = page;
+    // Each page goes into the table as it arrives and its entities are dropped (T-4782); the
+    // rows outside the caller's window count against the ceiling and are not kept.
+    let (offset, limit) = window;
+    let mut table = tabular::Builder::default();
+    let mut seen: usize = 0;
+    let mut keep = |page: Vec<Value>| {
+        for entity in page {
+            if seen >= offset && seen - offset < limit {
+                table.push(&entity);
+            }
+            seen += 1;
+        }
+        seen
+    };
+    let mut count = keep(page);
     let mut further = Vec::new();
     if full {
         match total {
@@ -215,8 +229,8 @@ async fn paged_view(
                     restricted |= narrowed_page;
                     held += bytes as u64;
                     let fetched = page.len();
-                    rows.extend(page);
-                    if rows.len() as u64 > wanted || held > MAX_COLLECTED {
+                    count = keep(page);
+                    if count as u64 > wanted || held > MAX_COLLECTED {
                         return Err(Box::new(too_large()));
                     }
                     if fetched < PAGE {
@@ -227,7 +241,7 @@ async fn paged_view(
             }
         }
     }
-    if rows.len() as u64 > wanted || held > MAX_COLLECTED {
+    if count as u64 > wanted || held > MAX_COLLECTED {
         return Err(Box::new(too_large()));
     }
     let mut pages = stream::iter(further).map(read).buffered(PARALLEL_PAGES);
@@ -235,14 +249,11 @@ async fn paged_view(
         let (page, narrowed_page, bytes, _) = page?;
         restricted |= narrowed_page;
         held += bytes as u64;
-        rows.extend(page);
-        if rows.len() as u64 > wanted || held > MAX_COLLECTED {
+        if keep(page) as u64 > wanted || held > MAX_COLLECTED {
             return Err(Box::new(too_large()));
         }
     }
-    let (offset, limit) = window;
-    let rows: Vec<Value> = rows.into_iter().skip(offset).take(limit).collect();
-    Ok((Value::Array(rows), restricted))
+    Ok((table.finish(), restricted))
 }
 
 /// The `offset` and `limit` a download asks for (T-4591), none the whole answer; a value that is
