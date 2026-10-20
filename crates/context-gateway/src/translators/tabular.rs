@@ -93,47 +93,62 @@ pub struct Table {
 /// entity, or nothing at all. An empty answer is an empty table with no columns, which is
 /// a header-only CSV: nothing to show is not an error.
 pub fn table(entities: &Value, limits: &Limits) -> Result<Table, TooLarge> {
-    let entities: Vec<&Value> = match entities {
+    if entities_of(entities).len() as u64 > u64::from(limits.max_rows) {
+        return Err(TooLarge);
+    }
+    let mut table = Table::default();
+    table.append(entities);
+    Ok(table)
+}
+
+/// The entities of an answer: an array, a single entity, or nothing at all.
+fn entities_of(entities: &Value) -> Vec<&Value> {
+    match entities {
         Value::Array(entities) => entities.iter().collect(),
         entity if entity.is_object() => vec![entity],
         _ => Vec::new(),
-    };
-    if entities.len() as u64 > u64::from(limits.max_rows) {
-        return Err(TooLarge);
     }
+}
 
-    // Each column's position by name, so placing a cell is a lookup rather than a scan of
-    // the header, and each value moves into its row instead of being cloned there (T-4107).
-    let mut columns: Vec<String> = Vec::new();
-    let mut positions: HashMap<String, usize> = HashMap::new();
-    let mut flattened: Vec<Vec<(usize, Value)>> = Vec::with_capacity(entities.len());
-    for entity in entities {
-        let cells = flatten(entity)
-            .into_iter()
-            .map(|(name, value)| {
-                let next = columns.len();
-                let index = *positions.entry(name).or_insert_with_key(|name| {
-                    columns.push(name.clone());
-                    next
-                });
-                (index, value)
-            })
+impl Table {
+    /// Adds the rows of `entities` (as [`table`] reads them), widening every row for a new column.
+    /// A download appends each page and drops it: its parsed entities, about fifteen times their
+    /// JSON, held whole put the gateway past its 1 Gi limit (T-4782).
+    pub fn append(&mut self, entities: &Value) {
+        let width = self.columns.len();
+        // Each column's position by name, so placing a cell is a lookup rather than a scan of
+        // the header, and each value moves into its row instead of being cloned there (T-4107).
+        let mut positions: HashMap<String, usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), index))
             .collect();
-        flattened.push(cells);
-    }
-
-    let rows = flattened
-        .into_iter()
-        .map(|cells| {
-            let mut row = vec![Value::Null; columns.len()];
+        for entity in entities_of(entities) {
+            let cells: Vec<(usize, Value)> = flatten(entity)
+                .into_iter()
+                .map(|(name, value)| {
+                    let next = self.columns.len();
+                    let index = *positions.entry(name).or_insert_with_key(|name| {
+                        self.columns.push(name.clone());
+                        next
+                    });
+                    (index, value)
+                })
+                .collect();
+            let mut row = vec![Value::Null; self.columns.len()];
             // Reversed, so of two leaves on one path the first one written is the one kept.
             for (index, value) in cells.into_iter().rev() {
                 row[index] = value;
             }
-            row
-        })
-        .collect();
-    Ok(Table { columns, rows })
+            self.rows.push(row);
+        }
+        if self.columns.len() > width {
+            for row in &mut self.rows {
+                row.resize(self.columns.len(), Value::Null);
+            }
+        }
+    }
 }
 
 /// One entity flattened to its leaf values, in document order (EP-08).

@@ -7,7 +7,8 @@ FROM rust:1.97-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33
 WORKDIR /src
 # g++: the tokenizer behind the assistant's embedder links C++ (esaxx, oniguruma; T-3053).
 # libclang-dev: jc-wasm-host reads an App's SQL with libpg_query, whose bindings bindgen makes (T-3364).
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ libclang-dev && rm -rf /var/lib/apt/lists/*
+# make: the gateway's allocator, jemalloc, is built from its C source (T-4782).
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ libclang-dev make && rm -rf /var/lib/apt/lists/*
 # The PDFium the assistant crate links, pinned and checked (scripts/ci/pdfium.sh, T-3052).
 COPY scripts/ci/pdfium.sh /tmp/pdfium.sh
 RUN sh /tmp/pdfium.sh /opt/pdfium
@@ -89,6 +90,10 @@ COPY --from=build /src/target/release/jc-assistant /usr/local/bin/jc-assistant
 COPY --from=build /opt/e5-small /opt/e5-small
 COPY --from=build /opt/onnxruntime/libonnxruntime.so /usr/local/lib/libonnxruntime.so
 ENV JC_ASSISTANT_MODEL_DIR=/opt/e5-small ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+# The gateway's jemalloc (T-4782): a background thread purges freed pages after a second, so the
+# memory of a load comes back when it ends; four arenas, whatever the node's core count. Measured
+# in context-gateway's tests/in_flight_tests.rs, which reads this line.
+ENV _RJEM_MALLOC_CONF=background_thread:true,narenas:4,dirty_decay_ms:1000,muzzy_decay_ms:0
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/context-gateway"]

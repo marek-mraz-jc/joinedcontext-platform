@@ -23,7 +23,8 @@ a crate with fewer is red too until the line is lowered, so the baseline only go
 
 A function a serde attribute names by string (`default = "f"`, `skip_serializing_if = "f"`,
 `deserialize_with`, `serialize_with`) anywhere in its crate is reached, and so is a constant a
-format string of its crate captures (`"{PAGE_LIMIT}"`): cg has no edge for a string.
+format string of its crate captures (`"{PAGE_LIMIT}"`): cg has no edge for a string. A
+`#[global_allocator]` static is an entry point, as `main` is: the compiler calls it.
 The other blind spots, a `macro_rules!` body or a closure stored in a field, stay rows; the doc
 checks each row with GREP before a delete.
 """
@@ -58,6 +59,8 @@ SERDE_FN = re.compile(
     r'\b(?:default|skip_serializing_if|deserialize_with|serialize_with)\s*=\s*"(?:[\w:]*?(\w+)::)?(\w+)(?:::<[^"]*>)?"')
 # A const named only as an inline format capture (`"{PAGE_LIMIT}"`) has no edge in the graph.
 CAPTURE = re.compile(r'\{([A-Z][A-Z0-9_]*)[}:]')
+# The allocator a binary declares (T-4782): nothing names it, the compiler links it.
+ALLOCATOR = re.compile(r'#\[global_allocator\]\s*(?:pub(?:\([^)]*\))?\s+)?static\s+(\w+)')
 # jc-manifest too: the Portal names its modules through jcctl's re-exports (T-4604).
 PORTAL_LINKS = ("jc-core", "jcctl", "jc-manifest")
 
@@ -98,6 +101,7 @@ def string_named(root: pathlib.Path) -> set[tuple[str, str]]:
         for owner, name in SERDE_FN.findall(text):
             found.add((crate, f"{owner}::{name}") if owner else (str(rel), name))
         found |= {(crate, name) for name in CAPTURE.findall(text)}
+        found |= {(str(rel), name) for name in ALLOCATOR.findall(text)}
     return found
 
 
@@ -211,6 +215,7 @@ def selftest() -> None:
         == [("", "default_mode"), ("x", "is_unset")]
     assert SERDE_FN.findall('skip_serializing_if = "crate::kinds::Limits::is_unset"') == [("Limits", "is_unset")]
     assert SERDE_FN.findall('deserialize_with = "de_kind::<S, _>"') == [("", "de_kind")]
+    assert ALLOCATOR.findall("#[global_allocator]\nstatic ALLOCATOR: Jemalloc = Jemalloc;") == ["ALLOCATOR"]
     assert CAPTURE.findall('format!("limit={LIMIT}&w={WIDTH:>4}", x = "{lower}")') == ["LIMIT", "WIDTH"]
     assert sorted(s["s.path"] for s in rows) == ["g::Thing::is_empty", "g::cg_fixture_unreachable",
                                                 "jc_core::Kind::quiet"], rows

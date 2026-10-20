@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tower::ServiceExt;
 
+/// The binary's allocator (`main.rs`), so the memory test below measures what is deployed.
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 const SLUG: &str = "k7r2m4xq9vbn3tdw6hcy5pajfe";
 const SPACE: &str = "ovzdusie";
 const DOMAIN: &str = "banskabystrica.sk";
@@ -27,7 +31,8 @@ const DOMAIN: &str = "banskabystrica.sk";
 const ENTITIES: usize = 1_000;
 
 /// A broker that holds every read until `release` hands it a permit, then answers a page of
-/// [`ENTITIES`] entities of about 1 KiB each; it counts the reads it holds at once.
+/// [`ENTITIES`] entities of about 1 KiB each, of `total` it says it holds; it counts the reads it
+/// holds at once.
 struct Slow {
     url: String,
     release: Arc<Semaphore>,
@@ -36,15 +41,20 @@ struct Slow {
     reads: Arc<AtomicUsize>,
 }
 
-async fn slow_broker() -> Slow {
+async fn slow_broker(total: usize) -> Slow {
     let page: Vec<_> = (0..ENTITIES)
         .map(|n| {
-            json!({
+            let mut entity = json!({
                 "id": format!("urn:ngsi-ld:AirQualityObserved:{DOMAIN}:{SPACE}:st-{n}"),
                 "type": "AirQualityObserved",
-                "name": { "type": "Property", "value": "x".repeat(900) },
-                "pm10": { "type": "Property", "value": n, "observedAt": "2026-10-19T22:00:00Z" }
-            })
+            });
+            // Twelve measured Properties of about 75 bytes each, as a real observation holds.
+            for attribute in 0..12 {
+                entity[format!("a{attribute}")] = json!({
+                    "type": "Property", "value": n + attribute, "observedAt": "2026-10-19T22:00:00Z"
+                });
+            }
+            entity
         })
         .collect();
     let page = axum::body::Bytes::from(serde_json::to_vec(&page).expect("the page"));
@@ -60,6 +70,7 @@ async fn slow_broker() -> Slow {
     let app = Router::new().fallback(any(move |_: Request| {
         let (gate, holding, most, reads) = state.clone();
         let page = page.clone();
+        let total = total.to_string();
         async move {
             reads.fetch_add(1, Ordering::SeqCst);
             let now = holding.fetch_add(1, Ordering::SeqCst) + 1;
@@ -68,8 +79,8 @@ async fn slow_broker() -> Slow {
             holding.fetch_sub(1, Ordering::SeqCst);
             (
                 [
-                    ("content-type", "application/json"),
-                    ("ngsild-results-count", "1000"),
+                    ("content-type", "application/json".to_owned()),
+                    ("ngsild-results-count", total),
                 ],
                 page,
             )
@@ -141,7 +152,9 @@ fn read(address: &str) -> Request<Body> {
 
 fn download(address: &str) -> Request<Body> {
     Request::builder()
-        .uri(format!("/api/endpoint/{SLUG}/file.csv"))
+        .uri(format!(
+            "/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"
+        ))
         .header("x-forwarded-for", address)
         .body(Body::empty())
         .expect("a request")
@@ -196,7 +209,7 @@ fn peak_kib() -> u64 {
 async fn a_slow_broker_fills_the_slots_and_not_the_memory() {
     const CAP: usize = 16;
     const SENT: usize = 512;
-    let broker = slow_broker().await;
+    let broker = slow_broker(ENTITIES).await;
     let app = gateway(&broker, CAP, 4);
     let before = peak_kib();
 
@@ -251,7 +264,7 @@ async fn a_slow_broker_fills_the_slots_and_not_the_memory() {
 
 #[tokio::test]
 async fn one_caller_past_its_share_is_refused_while_another_is_served() {
-    let broker = slow_broker().await;
+    let broker = slow_broker(ENTITIES).await;
     let app = gateway(&broker, 8, 2);
     let held: Vec<_> = (0..2)
         .map(|_| tokio::spawn(app.clone().oneshot(read("192.0.2.1"))))
@@ -290,7 +303,7 @@ async fn one_caller_past_its_share_is_refused_while_another_is_served() {
 
 #[tokio::test]
 async fn a_download_past_its_slots_is_refused_and_a_read_still_served() {
-    let broker = slow_broker().await;
+    let broker = slow_broker(ENTITIES).await;
     let app = gateway(&broker, 8, 8);
     let first = tokio::spawn(app.clone().oneshot(download("192.0.2.1")));
     holding(&broker, 1).await;
@@ -330,80 +343,125 @@ fn resident_kib() -> u64 {
         .expect("VmRSS")
 }
 
-/// Waves of full-page reads from 64 callers through the gateway's default caps, every answer read
-/// whole; returns how many KiB more this process holds once they are answered and it went idle.
-async fn a_load_of_full_pages() -> u64 {
-    let broker = slow_broker().await;
+/// Entities the broker says it holds for the load below: a `file.csv` of 40 pages, 40 MiB of
+/// broker JSON held whole while the table is built.
+const DOWNLOADED: usize = 40 * ENTITIES;
+
+/// Waves of full-page reads from 64 callers and of `file.csv` downloads through the gateway's
+/// default caps (128 in flight, 32 per caller, 2 downloads), every answer read whole; returns the
+/// MiB this process grew by at the peak and the MiB it still holds once it went quiet.
+async fn a_load_of_reads_and_downloads() -> (u64, u64) {
+    let broker = slow_broker(DOWNLOADED).await;
     broker.release.add_permits(Semaphore::MAX_PERMITS);
-    let app = gateway(&broker, 128, 32);
+    let app = router(Arc::new(
+        Gateway::new(Broker::new(broker.url.clone()), Box::new(PolicyPdp), DOMAIN)
+            .limit_in_flight(128, 32, 2)
+            .serve([endpoint()]),
+    ));
     let before = resident_kib();
-    for wave in 0..8 {
-        let answers: Vec<_> = (0..400)
+    // What a gateway keeps from a busy minute (connection pools, the rate limiter's buckets, a
+    // reloaded Endpoint table): small blocks allocated between the answers that outlive them.
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for wave in 0..6 {
+        let answers: Vec<_> = (0..200)
             .map(|n| {
                 let caller = format!("192.0.2.{}", (n + wave) % 64);
-                tokio::spawn(app.clone().oneshot(read(&caller)))
+                let request = if n % 25 == 0 {
+                    download(&caller)
+                } else {
+                    read(&caller)
+                };
+                tokio::spawn(app.clone().oneshot(request))
             })
             .collect();
         for answer in answers {
             let answer = answer.await.expect("joined").expect("answered");
             if answer.status() == StatusCode::OK {
-                axum::body::to_bytes(answer.into_body(), 64 << 20)
+                axum::body::to_bytes(answer.into_body(), 256 << 20)
                     .await
-                    .expect("the page");
+                    .expect("the answer");
             } else {
                 assert_busy(answer).await;
             }
         }
+        // A reload of the Endpoint table between two waves: 2 MiB of small blocks, kept.
+        kept.extend((0..2_000).map(|_| vec![1; 1024]));
     }
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    resident_kib().saturating_sub(before)
+    let peak = peak_kib().saturating_sub(before) / 1024;
+    // jemalloc purges what was freed after `dirty_decay_ms`, on its background thread.
+    // A quiet gateway still answers a probe now and then.
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::hint::black_box(vec![0u8; 4096]);
+    }
+    let idle = resident_kib().saturating_sub(before) / 1024;
+    drop(kept);
+    (peak, idle)
 }
 
-/// Set in the child processes of the test below, which run the load and print what it left.
+/// Set in the child process of the test below, which runs the load and prints what it left.
 const LOAD_CHILD: &str = "JC_GATEWAY_TEST_LOAD_CHILD";
 
-/// T-4782 (reopened): after prod's 100 req/s run the gateway idled at 929 Mi of its 1 Gi. glibc
-/// raises its mmap threshold to the largest block freed, so every later page body comes from the
-/// heap and stays there. The deployment fixes the threshold at 128 KiB
-/// (`MALLOC_MMAP_THRESHOLD_` in the gateway's base values, beside `MALLOC_ARENA_MAX`): the same
-/// load then leaves almost nothing behind. Without it the growth stays, which makes this test red
-/// when the setting goes. The load runs in a child process of its own (this test, `LOAD_CHILD`
-/// set), so neither the setting nor its memory reaches the other tests of this binary.
+/// The allocator settings the image starts the gateway with (`_RJEM_MALLOC_CONF` in the
+/// Dockerfile), read from there so this test measures what is deployed.
+fn deployed_malloc_conf() -> String {
+    let dockerfile = include_str!("../../../Dockerfile");
+    dockerfile
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("_RJEM_MALLOC_CONF="))
+        .expect("the Dockerfile sets _RJEM_MALLOC_CONF")
+        .to_owned()
+}
+
+/// T-4782 (reopened twice): prod's gateway went 328 -> 966 Mi in the first minute of a 100 req/s
+/// run and idled at 928 Mi of its 1 Gi after it, with glibc's malloc and a fixed mmap threshold.
+/// A download held every entity of its 40 MiB of broker JSON parsed, about 600 MiB of small
+/// blocks, until it built the table; glibc gives back only the top of its heap, so they stayed.
+/// Now the table takes each page as it arrives, and the binary allocates with jemalloc
+/// (`main.rs`, as this test binary does), whose background thread returns freed pages. The load
+/// runs in a child process of its own (this test, `LOAD_CHILD` set) with the image's allocator
+/// settings, so its memory is no other test's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_memory_of_a_load_comes_back_with_the_deployed_malloc_setting() {
-    const NAME: &str = "the_memory_of_a_load_comes_back_with_the_deployed_malloc_setting";
+async fn the_memory_of_a_load_comes_back_once_it_ends() {
+    const NAME: &str = "the_memory_of_a_load_comes_back_once_it_ends";
     if std::env::var_os(LOAD_CHILD).is_some() {
-        eprintln!("idle growth KiB {}", a_load_of_full_pages().await);
+        let (peak, idle) = a_load_of_reads_and_downloads().await;
+        eprintln!("load MiB {peak} {idle}");
         return;
     }
-    let idle_growth_mib = |mmap_threshold: Option<&str>| {
-        let mut child = std::process::Command::new(std::env::current_exe().expect("this test"));
-        child
-            .args(["--exact", NAME, "--nocapture"])
-            .env(LOAD_CHILD, "1")
-            .env("MALLOC_ARENA_MAX", "2")
-            .env_remove("MALLOC_MMAP_THRESHOLD_");
-        if let Some(threshold) = mmap_threshold {
-            child.env("MALLOC_MMAP_THRESHOLD_", threshold);
-        }
-        let output = child.output().expect("the load ran");
-        let printed = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "{printed}");
-        printed
-            .lines()
-            .find_map(|line| line.strip_prefix("idle growth KiB "))
-            .and_then(|kib| kib.trim().parse::<u64>().ok())
-            .unwrap_or_else(|| panic!("no measurement in {printed}"))
-            / 1024
-    };
-    let deployed = idle_growth_mib(Some("131072"));
-    let dynamic = idle_growth_mib(None);
-    eprintln!("idle growth after the load: {deployed} MiB with the deployed threshold, {dynamic} MiB with glibc's dynamic one");
-    // Measured (debug build, 3,200 reads of 1 MiB pages, MALLOC_ARENA_MAX=2): 9 MiB with the
-    // deployed threshold, 98-103 MiB without; release build 9 and 102 MiB.
-    assert!(deployed < 32, "the load left {deployed} MiB behind");
     assert!(
-        dynamic > deployed + 32,
-        "glibc's dynamic threshold kept only {dynamic} MiB: the setting may no longer be needed"
+        include_str!("../src/main.rs").contains("static ALLOCATOR: tikv_jemallocator::Jemalloc"),
+        "the binary no longer allocates with jemalloc, which this test measures"
+    );
+    let output = std::process::Command::new(std::env::current_exe().expect("this test"))
+        .args(["--exact", NAME, "--nocapture"])
+        .env(LOAD_CHILD, "1")
+        .env("_RJEM_MALLOC_CONF", deployed_malloc_conf())
+        .output()
+        .expect("the load ran");
+    let printed = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{printed}");
+    let (peak, idle) = printed
+        .lines()
+        .find_map(|line| line.strip_prefix("load MiB "))
+        .and_then(|mib| mib.trim().split_once(' '))
+        .and_then(|(peak, idle)| Some((peak.parse::<u64>().ok()?, idle.parse::<u64>().ok()?)))
+        .unwrap_or_else(|| panic!("no measurement in {printed}"));
+    eprintln!("the load grew the process by {peak} MiB at its peak and left {idle} MiB");
+    // Measured (4 worker threads): this build 346-364 MiB at the peak and 70-72 MiB left in
+    // release, 271-306 and 60-70 in debug; 12 MiB of what is left is `kept`.
+    // A download's entities held whole until the table was built: 1,254 MiB at the peak.
+    // glibc's malloc with the mmap threshold prod ran: 342-363 MiB at the peak, 304-313 left.
+    assert!(
+        peak > 64,
+        "the load held only {peak} MiB: it no longer measures anything"
+    );
+    assert!(
+        peak < 640,
+        "the load grew the process by {peak} MiB: a download holds more than its table"
+    );
+    assert!(
+        idle < 128,
+        "the load left {idle} MiB of its {peak} MiB peak behind"
     );
 }

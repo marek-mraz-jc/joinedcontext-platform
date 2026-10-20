@@ -64,6 +64,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "tls1
 rustls-pki-types = "1"
 # a published Mapping's specification is served as YAML (EP-53); jc-manifest's loader links it already
 serde_norway = "0.9"
+# The binary's allocator (T-4782): glibc kept a 100 req/s load's memory, 928 Mi of the 1 Gi
+# limit, after it ended; jemalloc with a background thread gives it back. Antares runs the same.
+tikv-jemallocator = "0.7"
 
 [dev-dependencies]
 # `bench_org` writes the synthetic organization the store tests and scale_bench load.
