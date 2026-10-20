@@ -43,6 +43,10 @@ pub fn card(
     if offers("query_entities") || offers("query_temporal") {
         card.push_str("\nq: attr==value; AND, | OR, == != > >= < <= ~= (regex), ranges a..b; a text value in quotes; a Relationship by its target id (refParentArea==\"urn:ngsi-ld:...\").");
     }
+    if offers("query_temporal") {
+        // the broker's default ceilings (ANTARES_TEMPORAL_INSTANCE_LIMIT, ANTARES_MAX_LIMIT; T-4800)
+        card.push_str("\nHistory: at most 1,000 values per Attribute per call (1,000 Entities per page); a window over a day answers hourly averages unless format or lastN asks raw values; a cut answer carries more.next, the window to call next.");
+    }
     if offers("query_entities") {
         card.push_str("\nGeo: georel near;maxDistance==<metres> or within on location. Units: compare in the unit shown (pm10 is ug/m3; a distance asked in km is sent in m).");
     }
