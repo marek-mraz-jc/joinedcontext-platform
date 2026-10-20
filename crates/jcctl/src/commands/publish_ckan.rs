@@ -405,31 +405,68 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
         url,
         message: format!("the record is not JSON: {e}"),
     })?;
-    if let (Some(kind), Some(members)) = (example_type(&base), record.as_object_mut()) {
-        members.insert(ckan::EXAMPLE_TYPE.to_owned(), Value::String(kind));
+    let (kind, served) = example_type(&base);
+    if let Some(members) = record.as_object_mut() {
+        if let Some(kind) = kind {
+            members.insert(ckan::EXAMPLE_TYPE.to_owned(), Value::String(kind));
+        }
+        if let Some(served) = served.filter(|served| !served.is_empty()) {
+            members.insert(ckan::SERVED_TYPES.to_owned(), json!(served));
+        }
     }
     Ok(record)
 }
 
-/// The type the gateway's `426` guide of `{endpoint}/ws` subscribes its example to: the type a
-/// usage text names (T-4132). `None` for an Endpoint without a WebSocket, or any other failure:
-/// the texts then say how to list the types.
-fn example_type(base: &str) -> Option<String> {
-    let client = reqwest::blocking::Client::builder()
+/// The type a usage text names (T-4132): the one the gateway's `426` guide of `{endpoint}/ws`
+/// subscribes its example to, when the Endpoint's own `/ngsi-ld/v1/types` lists it, else the
+/// first type that list names (T-4802: the guide of the Bridge-only bbsk-mosty named
+/// AdministrativeArea, so its dataset page sent readers, and the assistant, to a type it does
+/// not serve). `None` when neither answers: the texts then say how to list the types. With it
+/// the types the list names, `None` when it could not be read.
+fn example_type(base: &str) -> (Option<String>, Option<Vec<String>>) {
+    let Ok(client) = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(FETCH_TIMEOUT)
         .user_agent(ckan::GENERATOR)
         .build()
-        .ok()?;
-    let response = client
-        .get(format!("{base}/ws"))
-        .header("Accept", "application/json")
-        .send()
-        .ok()?;
-    if response.status() != reqwest::StatusCode::UPGRADE_REQUIRED {
-        return None;
+    else {
+        return (None, None);
+    };
+    let read = |path: &str, expected: reqwest::StatusCode| -> Option<Value> {
+        let response = client
+            .get(format!("{base}/{path}"))
+            .header("Accept", "application/json")
+            .send()
+            .ok()?;
+        (response.status() == expected).then(|| response.json().ok())?
+    };
+    let guide = read("ws", reqwest::StatusCode::UPGRADE_REQUIRED).and_then(|g| guide_type(&g));
+    let served = read("ngsi-ld/v1/types", reqwest::StatusCode::OK).map(|list| served_types(&list));
+    (example_of(guide, served.clone()), served)
+}
+
+/// The short names of an NGSI-LD `EntityTypeList`; none for any other answer.
+fn served_types(list: &Value) -> Vec<String> {
+    list.get("typeList")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The guide's type when the Endpoint serves it, else the first it serves; the guide's alone
+/// when the type list could not be read.
+fn example_of(guide: Option<String>, served: Option<Vec<String>>) -> Option<String> {
+    match served {
+        Some(served) => match guide {
+            Some(kind) if served.contains(&kind) => Some(kind),
+            _ => served.into_iter().next(),
+        },
+        None => guide,
     }
-    guide_type(&response.json().ok()?)
 }
 
 /// The type of a guide's example subscription.
@@ -1013,8 +1050,42 @@ fn table_word(outcome: datastore::Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::guide_type;
+    use super::{example_of, guide_type, served_types};
     use serde_json::json;
+
+    /// T-4802: the example names a type the Endpoint serves, never the model's first class.
+    #[test]
+    fn the_example_is_a_type_the_endpoint_serves() {
+        let list = json!({"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList",
+                          "typeList": ["Bridge"]});
+        let served = Some(served_types(&list));
+        let guide = || Some("AdministrativeArea".to_owned());
+        assert_eq!(
+            example_of(guide(), served.clone()).as_deref(),
+            Some("Bridge")
+        );
+        assert_eq!(
+            example_of(Some("Bridge".to_owned()), served).as_deref(),
+            Some("Bridge")
+        );
+        let both = Some(vec!["AdministrativeArea".to_owned(), "Bridge".to_owned()]);
+        assert_eq!(
+            example_of(guide(), both).as_deref(),
+            Some("AdministrativeArea")
+        );
+        assert_eq!(
+            example_of(guide(), None).as_deref(),
+            Some("AdministrativeArea")
+        );
+        assert_eq!(
+            example_of(guide(), Some(Vec::new())),
+            None,
+            "it serves no type"
+        );
+        assert_eq!(example_of(None, None), None);
+        assert!(served_types(&json!({"typeList": [1, ""]})).is_empty());
+        assert!(served_types(&json!([])).is_empty());
+    }
 
     /// T-4132: the guide's example names the type; a guide without one names none.
     #[test]

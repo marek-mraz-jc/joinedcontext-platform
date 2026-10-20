@@ -18,7 +18,7 @@
       busy: "Položili ste veľa otázok naraz. Počkajte chvíľu a skúste to znova.",
       paused: "Asistent teraz neodpovedá. Skúste to neskôr.", limit: "Asistent dosiahol svoj limit. Skúste to znova neskôr.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý deň! Na čo sa chcete opýtať?",
-      reading: "Čítam", live: "Živé dáta", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
+      reading: "Čítam", live: "Živé dáta", unlisted: "nie je v katalógu otvorených dát", source: "Zdroj", allRows: "Zobraziť všetky v datasete", fresh: "Nová konverzácia", expand: "Celá obrazovka", collapse: "Zmenšiť", copy: "Kopírovať",
       copied: "Odpoveď je skopírovaná.", selected: "Odpoveď je označená: stlačte Ctrl+C.", close: "Zavrieť", suggested: "Môžete sa opýtať",
       dataset: "Otvoriť dataset", download: "Stiahnuť údaje", geojson: "Stiahnuť GeoJSON", language: "Jazyk",
       table: "Údaje, z ktorých asistent odpovedá", up: "Užitočná odpoveď", down: "Neužitočná odpoveď",
@@ -49,7 +49,7 @@
       busy: "You asked many questions at once. Wait a moment and try again.",
       paused: "The assistant is not answering right now. Try again later.", limit: "The assistant has reached its limit. Try again later.", you: "You", assistant: "Assistant", bot: "AI assistant",
       hello: "Hello! What would you like to ask?",
-      reading: "Reading", live: "Live data", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
+      reading: "Reading", live: "Live data", unlisted: "not in the open data catalogue", source: "Source", allRows: "Show all in the dataset", fresh: "New conversation", expand: "Full screen", collapse: "Collapse", copy: "Copy",
       copied: "The answer is copied.", selected: "The answer is selected: press Ctrl+C.", close: "Close", suggested: "You can ask",
       dataset: "Open the dataset", download: "Download the data", geojson: "Download GeoJSON", language: "Language",
       table: "The data the assistant answers from", up: "Helpful answer", down: "Not helpful",
@@ -80,7 +80,7 @@
       busy: "Položili jste mnoho otázek najednou. Chvíli počkejte a zkuste to znovu.",
       paused: "Asistent teď neodpovídá. Zkuste to později.", limit: "Asistent dosáhl svého limitu. Zkuste to znovu později.", you: "Vy", assistant: "Asistent", bot: "AI asistent",
       hello: "Dobrý den! Na co se chcete zeptat?",
-      reading: "Čtu", live: "Živá data", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
+      reading: "Čtu", live: "Živá data", unlisted: "není v katalogu otevřených dat", source: "Zdroj", allRows: "Zobrazit všechny v datové sadě", fresh: "Nová konverzace", expand: "Celá obrazovka", collapse: "Zmenšit", copy: "Kopírovat",
       copied: "Odpověď je zkopírovaná.", selected: "Odpověď je označená: stiskněte Ctrl+C.", close: "Zavřít", suggested: "Můžete se zeptat",
       dataset: "Otevřít dataset", download: "Stáhnout data", geojson: "Stáhnout GeoJSON", language: "Jazyk",
       table: "Data, ze kterých asistent odpovídá", up: "Užitečná odpověď", down: "Neužitečná odpověď",
@@ -800,6 +800,8 @@
       li.appendChild(el("span", "jc-card-n", String(i + 1)));
       li.appendChild(heading);
       if (source.domain && !source.live) li.appendChild(el("span", "jc-domain", source.domain));
+      // Rows of a type no dataset publishes: said in words, nothing to open (T-4802).
+      if (JCRender.unlisted(source)) li.appendChild(el("span", "jc-domain", w.unlisted));
       source.cards.forEach(function (card) { li.appendChild(showCard(card)); });
       list.appendChild(li);
     });

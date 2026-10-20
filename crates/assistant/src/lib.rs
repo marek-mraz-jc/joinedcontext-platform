@@ -614,6 +614,32 @@ pub async fn endpoint_page_projects(
     Ok(None)
 }
 
+/// The dataset page rows of `kind` read from the Endpoint `own` cite, whatever the deployment
+/// (T-4802): a dataset of `own` itself that publishes the type, else one of an Endpoint of
+/// `siblings` (its project's Endpoints over the same space), else the one dataset page that
+/// names `own`; `None` when there is none, and the answer then links nothing.
+pub async fn rows_dataset_projects(
+    pool: &sqlx::PgPool,
+    own: &str,
+    siblings: &[String],
+    kind: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<Option<String>, Error> {
+    let alone = [own.to_owned()];
+    if let Some(page) = dataset_page_projects(pool, &alone, kind, sources, public_only).await? {
+        return Ok(Some(page));
+    }
+    let others: Vec<String> = siblings.iter().filter(|s| *s != own).cloned().collect();
+    if !others.is_empty() {
+        if let Some(page) = dataset_page_projects(pool, &others, kind, sources, public_only).await?
+        {
+            return Ok(Some(page));
+        }
+    }
+    endpoint_page_projects(pool, own, sources, public_only).await
+}
+
 #[cfg(test)]
 mod tests {
 

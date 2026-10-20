@@ -14,7 +14,8 @@
 
 use assistant::{
     dataset_page, dataset_page_projects, endpoint_page, held_page_projects, hybrid_search,
-    project_scope, search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
+    project_scope, rows_dataset_projects, search_projects, sources_by_project, titles, Search,
+    DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -894,5 +895,149 @@ async fn an_endpoint_named_by_two_dataset_pages_lends_neither() {
         "the type finds its own page"
     );
     tx.rollback().await.expect("rollback");
+    drop_database(admin, pool, &name).await;
+}
+
+/// T-4802, prod bbsk-demo 2026-10-20: the assistant reads Bridge rows through the multi-type
+/// "Registre kraja" (lws6dd…), which no dataset names; the dataset bbsk-mosty publishes the same
+/// Bridge entities of the space through its own Endpoint (omto6q…). Its page names the type the
+/// publisher now takes from the Endpoint's type list: Bridge rows cite it, a type no dataset
+/// publishes cites none, and a type the page does not name (the guide's old AdministrativeArea)
+/// never borrows it.
+#[tokio::test]
+async fn rows_of_an_unpublished_endpoint_cite_the_dataset_of_its_sibling() {
+    let (admin, pool, name) = database("sibling_dataset").await;
+    let v = || embedding(0, None);
+    let api = "https://api.example.org/api/endpoint/omto6qk5sfn5ft7zl5pdiaxunj2ljnae";
+    let pages = site(
+        &pool,
+        "bbsk",
+        "bbsk-ckan",
+        &[(
+            &format!(
+                "# Mosty — Banskobystrický kraj\n\nNGSI-LD API ({api}/ngsi-ld/v1/) \
+                 ({api}/ngsi-ld/v1/entities?type=Bridge&limit=10)\n\nOData v4 ({api}/odata/v4/)"
+            ),
+            "sk",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    sqlx::query(
+        "UPDATE chunks SET url = 'https://opendata.example/dataset/bbsk-mosty' WHERE id = $1",
+    )
+    .bind(pages[0])
+    .execute(&pool)
+    .await
+    .expect("the dataset page's url");
+    let siblings = [
+        "lws6dd7o56veegwxsjtvak3goeta4mfn".to_owned(),
+        "omto6qk5sfn5ft7zl5pdiaxunj2ljnae".to_owned(),
+    ];
+    let projects = [("bbsk".to_owned(), vec!["bbsk-ckan".to_owned()])];
+    for (kind, found) in [
+        (
+            "Bridge",
+            Some("https://opendata.example/dataset/bbsk-mosty"),
+        ),
+        ("PointOfInterest", None),
+        ("AdministrativeArea", None),
+    ] {
+        let page = dataset_page_projects(&pool, &siblings, kind, &projects, true)
+            .await
+            .expect("page");
+        assert_eq!(page.as_deref(), found, "{kind}");
+    }
+    // The space's other Endpoint alone does not reach the sibling's dataset.
+    let alone = dataset_page_projects(&pool, &siblings[..1], "Bridge", &projects, true)
+        .await
+        .expect("page");
+    assert_eq!(alone, None);
+    drop_database(admin, pool, &name).await;
+}
+
+/// T-4802, the owner's sweep: every public Endpoint x type of prod (deployment
+/// scripts/smoke-source-links.py, smartcity 2026-10-20), with the CKAN pages as the assistant
+/// indexes them. Each page of an Endpoint's one dataset carries the entity sets jcctl's OData text
+/// now names (publish/ckan.rs `entity_sets`); a harvested page of a shared Endpoint stays as it
+/// is. Rows of each (Endpoint, type) cite one of the datasets that publish their space and type,
+/// the way `dataset_of` looks them up, and none when no dataset does.
+#[tokio::test]
+async fn every_public_endpoint_and_type_of_prod_cites_its_dataset() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/sweep/smoke-source-links-smartcity-20261020.json"
+    ))
+    .expect("the sweep's fixture");
+    let (admin, pool, name) = database("sweep_links").await;
+    let owners = fixture["owners"].as_object().expect("owners");
+    let served = &fixture["served"];
+    let pages: Vec<(String, String)> = fixture["pages"]
+        .as_array()
+        .expect("pages")
+        .iter()
+        .map(|page| {
+            let url = page["url"].as_str().expect("url").to_owned();
+            let mut text = page["text"].as_str().expect("text").to_owned();
+            let sole = owners.iter().find(|(_, urls)| {
+                urls.as_array()
+                    .is_some_and(|urls| urls.len() == 1 && urls[0] == url.as_str())
+            });
+            if let Some((slug, _)) = sole {
+                let base =
+                    format!("https://api.smartcity.joinedcontext.com/api/endpoint/{slug}/odata/v4");
+                let sets: Vec<String> = served[slug.as_str()]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(|kind| format!("{base}/{kind}"))
+                    .collect();
+                if !sets.is_empty() {
+                    text.push_str(&format!("\nIts entity sets: {}.", sets.join(", ")));
+                }
+            }
+            (url, text)
+        })
+        .collect();
+    let chunks: Vec<(&str, &str, &str, Vec<f32>)> = pages
+        .iter()
+        .map(|(_, text)| (text.as_str(), "sk", "public", embedding(0, None)))
+        .collect();
+    let ids = site(&pool, "smartcity", "ckan", &chunks).await;
+    for (id, (url, _)) in ids.iter().zip(&pages) {
+        sqlx::query("UPDATE chunks SET url = $2 WHERE id = $1")
+            .bind(id)
+            .bind(url)
+            .execute(&pool)
+            .await
+            .expect("the dataset page's url");
+    }
+    let projects = [("smartcity".to_owned(), vec!["ckan".to_owned()])];
+    let rows = fixture["rows"].as_array().expect("rows");
+    assert!(rows.len() > 100, "the sweep covers prod");
+    let mut misses = Vec::new();
+    for row in rows {
+        let slug = row["endpoint"].as_str().expect("endpoint");
+        let kind = row["type"].as_str().expect("type");
+        let siblings: Vec<String> = row["siblings"]
+            .as_array()
+            .expect("siblings")
+            .iter()
+            .filter_map(|s| s.as_str().map(str::to_owned))
+            .collect();
+        let expected = row["expected"].as_str().expect("expected");
+        let found = rows_dataset_projects(&pool, slug, &siblings, kind, &projects, true)
+            .await
+            .expect("page");
+        let good = match found.as_deref() {
+            None => expected == "-",
+            Some(page) => expected.split(',').any(|url| url == page),
+        };
+        if !good {
+            misses.push(format!("{slug} {kind}: {found:?}, expected {expected}"));
+        }
+    }
+    assert!(misses.is_empty(), "{}", misses.join("\n"));
     drop_database(admin, pool, &name).await;
 }
