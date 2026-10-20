@@ -1015,6 +1015,11 @@ async fn lent(
             true => routed::listing(&state.answers, &state.http, &surface).await,
             false => Ok(Vec::new()),
         };
+        let near = state
+            .snapshot
+            .read()
+            .map(|snapshot| siblings_of(&snapshot.endpoints, &endpoint.slug))
+            .unwrap_or_default();
         match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
@@ -1022,7 +1027,7 @@ async fn lent(
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
-                siblings: Vec::new(),
+                siblings: near,
             }),
             Ok(_) => {}
             Err(why) => {
@@ -1040,6 +1045,19 @@ fn publisher_of(state: &ChatState, slug: &str) -> Option<String> {
         .values()
         .find(|endpoint| endpoint.slug == slug)
         .and_then(|endpoint| endpoint.publisher.clone())
+}
+
+/// The siblings of the Endpoint with `slug` (T-4802): a named server's Endpoint finds the
+/// dataset another Endpoint of its project and space publishes, as a deployment's own does.
+fn siblings_of(
+    endpoints: &std::collections::BTreeMap<(String, String), crate::worker::EndpointRef>,
+    slug: &str,
+) -> Vec<String> {
+    endpoints
+        .iter()
+        .find(|(_, endpoint)| endpoint.slug == slug)
+        .map(|((project, _), endpoint)| siblings(endpoints, project, &endpoint.space))
+        .unwrap_or_default()
 }
 
 /// The slugs of `project`'s Endpoints over `space` (T-4625); none when the space is unknown.
@@ -2175,6 +2193,11 @@ mod tests {
         ]);
         assert_eq!(siblings(&endpoints, "bb", "verejne"), ["bkc4", "rpfq"]);
         assert!(siblings(&endpoints, "bb", "").is_empty());
+        // T-4802: an Endpoint a named server lends, known by its slug alone.
+        assert_eq!(siblings_of(&endpoints, "rpfq"), ["bkc4", "rpfq"]);
+        assert_eq!(siblings_of(&endpoints, "6b4y"), ["6b4y"]);
+        assert!(siblings_of(&endpoints, "unknown").is_empty());
+        assert!(siblings_of(&endpoints, "none").is_empty());
     }
 
     #[test]

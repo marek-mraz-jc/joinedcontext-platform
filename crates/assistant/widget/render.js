@@ -270,6 +270,14 @@ var JCRender = (function () {
   }
 
   /**
+   * Whether a source is rows of a type no catalogue dataset publishes (T-4802): live data named
+   * by its type with no page a person can open. Its card says so instead of linking anything.
+   */
+  function unlisted(source) {
+    return Boolean(source && source.live && source.title && !safeUrl(source.url));
+  }
+
+  /**
    * Whether `url` is an address for programs (T-4761): a schema, an MCP or NGSI-LD path, a JSON,
    * JSON-LD or GeoJSON file, or a JSON format parameter. A person who clicks it gets raw JSON.
    */
@@ -1100,7 +1108,7 @@ var JCRender = (function () {
     followups: followups, restore: restore, remember: remember, stamp: stamp,
     lasting: lasting, recalled: recalled, privacyLines: privacyLines,
     cards: cards, stage: stage, steps: steps, tel: tel, mailto: mailto,
-    markdown: markdown, streamable: streamable, sources: sources, label: label, linkHost: linkHost,
+    markdown: markdown, streamable: streamable, sources: sources, label: label, unlisted: unlisted, linkHost: linkHost,
     safeUrl: safeUrl, events: events, language: language, table: table, chart: chart, greeting: greeting, title: title,
     suggestions: suggestions, trouble: trouble, retryable: retryable, said: said, retry: retry,
     vizOrigin: vizOrigin, vizSpec: vizSpec, mapFirst: mapFirst

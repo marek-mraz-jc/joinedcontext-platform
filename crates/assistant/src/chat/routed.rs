@@ -1879,40 +1879,30 @@ pub(super) fn part_of(text: &str) -> Option<String> {
 
 /// The page a visitor opens about the rows of `kind` read from `connector`: the dataset every
 /// row of `text` names as its `isPartOf` when the sources hold its page (T-4793: two datasets
-/// publish PointOfInterest, the rows say which), else the CKAN dataset page of an Endpoint over
-/// the same space that publishes the type (T-4625), else the page the sources hold about the
-/// connector's own Endpoint; `None` when none is found.
+/// publish PointOfInterest, the rows say which), else [`crate::rows_dataset_projects`]: the
+/// dataset of the connector's own Endpoint, of an Endpoint over the same space that publishes
+/// the type (T-4625, T-4802), or the page about its own Endpoint; `None` when none is found.
 pub(super) async fn dataset_of(
     ask: &Ask<'_>,
     connector: &Connected,
     kind: &str,
     text: &str,
 ) -> Option<String> {
-    // Its own slug always, so an Endpoint with no space recorded still finds its type's page.
-    let mut slugs = connector.siblings.clone();
-    if !slugs.contains(&connector.surface.slug) {
-        slugs.push(connector.surface.slug.clone());
-    }
     let found = async {
         if let Some(part) = part_of(text) {
             if crate::held_page_projects(ask.pool, &part, ask.sources, ask.public_only).await? {
                 return Ok(Some(part));
             }
         }
-        match crate::dataset_page_projects(ask.pool, &slugs, kind, ask.sources, ask.public_only)
-            .await?
-        {
-            Some(page) => Ok(Some(page)),
-            None => {
-                crate::endpoint_page_projects(
-                    ask.pool,
-                    &connector.surface.slug,
-                    ask.sources,
-                    ask.public_only,
-                )
-                .await
-            }
-        }
+        crate::rows_dataset_projects(
+            ask.pool,
+            &connector.surface.slug,
+            &connector.siblings,
+            kind,
+            ask.sources,
+            ask.public_only,
+        )
+        .await
     }
     .await;
     found.unwrap_or_else(|why: crate::Error| {

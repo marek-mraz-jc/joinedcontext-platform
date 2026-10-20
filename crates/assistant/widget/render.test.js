@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
+const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, unlisted, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -102,6 +102,21 @@ test("the owner's sources: one per address, titled, and live data never by its t
   // T-4184: an uploaded file is its file name, never a link.
   assert.equal(label({ url: "upload:subory/Návod.md#page=1", title: null }), "Návod.md");
   assert.doesNotMatch(JSON.stringify(list), /query_entities/);
+});
+
+test("rows of a type no dataset publishes say so and link nothing (T-4802)", () => {
+  const { list } = sources([
+    { n: 1, tool: "query_entities", endpoint: "lws6dd7o56veegwxsjtvak3goeta4mfn", title: "PointOfInterest",
+      url: "https://api.example.org/api/endpoint/lws6dd7o56veegwxsjtvak3goeta4mfn/ngsi-ld/v1/entities?type=PointOfInterest" },
+    { n: 2, tool: "query_entities", endpoint: "lws6dd7o56veegwxsjtvak3goeta4mfn",
+      url: "https://opendata.example.org/dataset/bbsk-mosty" },
+    { n: 3, tool: "describe_schema", endpoint: "other" },
+    { n: 4, url: "https://www.bbsk.sk/" },
+  ]);
+  assert.deepEqual(list.map(unlisted), [true, false, false, false]);
+  assert.equal(label(list[0]), "PointOfInterest");
+  assert.equal(safeUrl(list[0].url), null, "an address for programs is no link");
+  assert.equal(unlisted(null), false);
 });
 
 test("nothing to show for no answer and no citations", () => {
