@@ -538,6 +538,8 @@ impl Ended {
             Self::Closing(reason) => reason,
             Self::NoPong => "no-pong",
             Self::Refused => "refused",
+            Self::Broken(1007, _) => "not-utf8",
+            Self::Broken(..) => "protocol-error",
         }
     }
 }
