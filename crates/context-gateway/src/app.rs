@@ -11,6 +11,7 @@ use crate::handlers::{
     catalog, files, mappings, ngsi_ld, ogc, openapi_doc, schema_routes, space_routes, view_access,
     ws,
 };
+use crate::middleware::in_flight;
 use crate::middleware::rate_limit::{self, RateLimiter};
 use crate::pdp::Pdp;
 use crate::proxy::Broker;
@@ -133,6 +134,8 @@ pub struct Gateway {
     /// The budget `writes` was made with, in KiB: what one write may take at most.
     write_budget_kib: u32,
     write_wait: std::time::Duration,
+    /// The requests and `file.csv` downloads in flight, in total and per caller (T-4782).
+    pub(crate) in_flight: crate::middleware::in_flight::InFlight,
 }
 
 /// The MiB of write bodies in the gateway at once unless the deployment names another
@@ -209,7 +212,15 @@ impl Gateway {
             writes: Arc::new(tokio::sync::Semaphore::new(WRITE_BUDGET_MIB * 1024)),
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
             write_wait: WRITE_WAIT,
+            in_flight: Default::default(),
         }
+    }
+
+    /// Works on at most `total` requests at once, `per_caller` of them one caller's, and builds
+    /// at most `downloads` `file.csv` answers at once (T-4782).
+    pub fn limit_in_flight(mut self, total: usize, per_caller: usize, downloads: usize) -> Self {
+        self.in_flight = in_flight::InFlight::new(total, per_caller, downloads);
+        self
     }
 
     /// Holds at most `mib` MiB of write bodies at once (T-4077).
@@ -606,6 +617,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&gateway),
             rate_limit::enforce,
+        ))
+        // Outside the limiter, so a request the full gateway refuses spends no quota; inside
+        // `admit`, so a freshly minted anonymous token is no fresh caller (T-4782).
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&gateway),
+            in_flight::enforce,
         ))
         // Outside the limiter: the gateway's own anonymous token is taken off before the
         // limiter picks a bucket, so minting tokens never buys one (ADR-N-052 §2.2.5).
