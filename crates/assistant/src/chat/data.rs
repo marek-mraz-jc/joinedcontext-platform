@@ -85,14 +85,8 @@ fn tool_specs(connectors: &[Connected], viz: bool) -> Vec<Value> {
     tools
 }
 
-/// The first entity type a call names, for its stage line and its table.
-pub fn type_of(arguments: &Value) -> Option<String> {
-    match arguments.get("type")? {
-        Value::String(one) => Some(one.clone()),
-        Value::Array(many) => many.first()?.as_str().map(str::to_owned),
-        _ => None,
-    }
-}
+/// The first entity type a call names, kept with the agent's steps, which name it too (T-4801).
+pub use super::agent::type_of;
 
 /// The stage a tool's step shows, and its topic.
 fn stage_of(tool: &str, endpoint: &str, arguments: &Value) -> (&'static str, Option<String>) {

@@ -154,6 +154,15 @@ pub struct Step {
     pub url: Option<String>,
 }
 
+/// The first entity type a call names, for its stage line, its table and its step.
+pub fn type_of(arguments: &Value) -> Option<String> {
+    match arguments.get("type")? {
+        Value::String(one) => Some(one.clone()),
+        Value::Array(many) => many.first()?.as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 /// The longest `q` a step shows, in characters.
 const STEP_Q_CHARS: usize = 200;
 
@@ -165,7 +174,7 @@ impl Step {
         let count = super::routed::total_of(text);
         Self::new(
             connector,
-            super::data::type_of(arguments),
+            type_of(arguments),
             arguments.get("q").and_then(Value::as_str),
             count,
             url,
