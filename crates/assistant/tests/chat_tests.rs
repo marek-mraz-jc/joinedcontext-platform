@@ -757,7 +757,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             ],
             // The model gives none of the three a unit.
             "units": [null, null, null],
-            "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
+            "download": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved&limit=1000")
         })
     );
     // No page of the sources publishes the type: the rows cite their own listing, named by the
@@ -765,7 +765,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     assert_eq!(
         events[8].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie", "title": "AirQualityObserved",
-                "url": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")}])
+                "url": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved&limit=1000")}])
     );
     let done = &events[9].1;
     // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
@@ -1632,7 +1632,7 @@ async fn each_type_of_a_shared_endpoint_cites_its_own_page_or_its_listing() {
     assert_eq!(
         cited[2],
         (
-            format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=CycleRoute").as_str(),
+            format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=CycleRoute&limit=1000").as_str(),
             "CycleRoute"
         ),
         "{citations}"
@@ -3712,7 +3712,7 @@ async fn a_scoped_project_s_public_endpoint_is_read_and_nothing_else_of_it() {
     assert!(data[0].get("endpoint").is_none(), "{:?}", data[0]);
     assert_eq!(
         data[0]["download"],
-        format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved")
+        format!("https://data.hronov.example/api/endpoint/{REGION_SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved&limit=1000")
     );
     let router = text_of(&model_calls(&w.proxy).await[0].1["messages"][1]);
     assert!(

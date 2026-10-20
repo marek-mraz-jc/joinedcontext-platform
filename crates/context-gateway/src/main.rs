@@ -107,6 +107,8 @@ async fn main() -> ExitCode {
             }
         },
     };
+    // The hub's `limit` and `lastN` defaults and maxima are the broker's own (T-4804).
+    tokio::spawn(context_gateway::mcp::limits::follow(broker.clone()));
     let gateway = Gateway::new(broker, Box::new(PolicyPdp), config.org_domain.clone())
         .budget_writes(config.write_budget_mib)
         .limit_in_flight(
