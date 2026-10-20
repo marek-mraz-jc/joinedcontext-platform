@@ -17,13 +17,18 @@ pub const ENTITY_SYSTEM_MEMBERS: [&str; 8] = [
     "expiresAt",
 ];
 
-/// The members of an Attribute that are no sub-Attribute of it (DM-130).
-pub const ATTRIBUTE_SYSTEM_MEMBERS: [&str; 12] = [
+/// The members of an Attribute that are no sub-Attribute of it (DM-130), with the value members of
+/// a JsonProperty, ListProperty and ListRelationship (TS 104 175 4.5).
+pub const ATTRIBUTE_SYSTEM_MEMBERS: [&str; 16] = [
     "type",
     "value",
     "object",
+    "objectType",
     "languageMap",
     "vocab",
+    "json",
+    "valueList",
+    "objectList",
     "observedAt",
     "unitCode",
     "datasetId",
