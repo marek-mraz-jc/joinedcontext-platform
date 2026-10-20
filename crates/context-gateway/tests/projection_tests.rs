@@ -112,3 +112,36 @@ fn an_endpoint_can_hide_an_attribute_the_grant_allows() {
     assert_eq!(everything["pm25"]["value"], json!(12.0));
     assert_eq!(everything["type"], json!("AirQualityObserved"));
 }
+
+/// DM-131, PL-84: an attribute-listing grant never needs to name a system member a writer sets,
+/// so a write carrying the entity's own `expiresAt` passes; a broker timestamp, an undeclared
+/// attribute and a look-alike name are still refused.
+#[test]
+fn a_system_member_needs_no_grant_and_a_look_alike_still_does() {
+    let grant = granted(&["pm10"]);
+    for member in [
+        "id",
+        "type",
+        "scope",
+        "@context",
+        "expiresAt",
+        "@id",
+        "@type",
+    ] {
+        let mut entity = json!({ "id": "urn:ngsi-ld:AirQualityObserved:x", "type": "AirQualityObserved",
+            "pm10": { "type": "Property", "value": 34.2 } });
+        entity[member] = json!("2026-10-21T06:00:00Z");
+        assert_eq!(ungranted(&entity, &grant), Vec::<&str>::new(), "{member}");
+        project_entity(&mut entity, &grant, &nothing());
+        assert!(entity.get(member).is_some(), "a read keeps {member}");
+    }
+    for name in [
+        "pm25",
+        "ExpiresAt",
+        "ngsi-ld:expiresAt",
+        "https://uri.etsi.org/ngsi-ld/expiresAt",
+    ] {
+        let entity = json!({ "id": "urn:ngsi-ld:AirQualityObserved:x", "type": "AirQualityObserved", name: 1 });
+        assert_eq!(ungranted(&entity, &grant), [name]);
+    }
+}
