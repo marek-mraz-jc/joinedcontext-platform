@@ -1147,6 +1147,17 @@ async fn holdings_linked(ask: &Ask<'_>, held: Vec<(String, Hit)>) -> Vec<(String
         .collect()
 }
 
+/// The passages of a catalogue question (T-4810): the deployment's live data, linked, beside the
+/// catalogue's dataset pages its queries find, as [`with_holdings`] joins them.
+async fn catalogue_passages(ask: &Ask<'_>, queries: &[String], live: &[Shown]) -> Vec<Hit> {
+    let held = ask
+        .endpoint_base
+        .map(|base| holdings(ask.connectors, live, base))
+        .unwrap_or_default();
+    let (held, pages) = tokio::join!(holdings_linked(ask, held), datasets(ask, queries));
+    with_holdings(held, pages)
+}
+
 /// The passages of a catalogue question: the live data first, then the dataset pages that are
 /// none of it (by the Endpoint a page names or by its link), so nothing is listed twice.
 pub fn with_holdings(held: Vec<(String, Hit)>, pages: Vec<Hit>) -> Vec<Hit> {
@@ -3147,13 +3158,8 @@ async fn answer_routed(
     };
     let (best, rounds, searches) = if routing.catalogue {
         send(events, stage("searching", Some(routing.queries.join(", ")))).await;
-        let held = match ask.endpoint_base {
-            Some(base) => holdings(ask.connectors, &live, base),
-            None => Vec::new(),
-        };
-        let (held, pages) =
-            tokio::join!(holdings_linked(ask, held), datasets(ask, &routing.queries));
-        (with_holdings(held, pages), 1, routing.queries.len())
+        let pages = catalogue_passages(ask, &routing.queries, &live).await;
+        (pages, 1, routing.queries.len())
     } else {
         let (mut found, pending) =
             first_round(&routing, tables.is_empty(), first_hits, question, &more);
