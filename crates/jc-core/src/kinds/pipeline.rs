@@ -97,6 +97,10 @@ pub struct PipelineSpec {
     /// Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expiry: Option<Expiry>,
+    /// When entities of a written type, or chosen attributes of them, end (PL-80…PL-83): the
+    /// rendered stream writes their `expiresAt` after the author's steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
 }
 
 /// The longest expiry window, in hours: a year (PL-64).
@@ -874,6 +878,25 @@ impl PipelineSpec {
             .map(|out| out.target_endpoint)
     }
 
+    /// Every Bloblang text and processor string of the author's steps, the routes' included:
+    /// what the lifetime's scan for `expiresAt` assignments reads (PL-83).
+    fn author_texts(&self) -> Vec<String> {
+        let mut texts = Vec::new();
+        let mut steps = self.steps();
+        steps.extend(self.routes.iter().flat_map(|route| route.steps.clone()));
+        for step in &steps {
+            match step {
+                Step::Compute(compute) => texts.extend(compute.bloblang.clone()),
+                Step::Processor(processor) => {
+                    for config in processor.processor.values() {
+                        config_strings(config, &mut texts);
+                    }
+                }
+            }
+        }
+        texts
+    }
+
     /// The runner variables this pipeline declares for its own steps: the `envVar` of each of
     /// its `secretRefs` (PL-15, T-3163).
     pub fn own_variables(&self) -> Vec<&str> {
@@ -1002,6 +1025,18 @@ impl PipelineSpec {
                         .to_owned(),
                 });
             }
+        }
+        if !self.lifetime.is_empty() {
+            let outputs = self.outputs();
+            let context = super::pipeline_lifetime::Context {
+                written: outputs
+                    .iter()
+                    .map(|out| out.entity_type.as_deref())
+                    .collect(),
+                expiry_types: self.expiry.as_ref().map_or(&[], |e| e.types.as_slice()),
+                author_texts: &self.author_texts(),
+            };
+            super::pipeline_lifetime::validate(&self.lifetime, &context)?;
         }
 
         Ok(())

@@ -2,6 +2,58 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AttributeLifetime": {
+      "additionalProperties": false,
+      "description": "The lifetime of chosen attributes of a type (PL-80): `names` and one mode.",
+      "properties": {
+        "at": {
+          "description": "See [`LifetimeMode::at`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "description": "See [`LifetimeMode::from`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "names": {
+          "description": "One to 64 slots of the type.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "notAfter": {
+          "description": "See [`LifetimeMode::not_after`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plus": {
+          "description": "See [`LifetimeMode::plus`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rolling": {
+          "description": "See [`LifetimeMode::rolling`].",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "names"
+      ],
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -215,6 +267,80 @@
       "required": [
         "mint"
       ],
+      "type": "object"
+    },
+    "Lifetime": {
+      "additionalProperties": false,
+      "description": "The lifetime of one written type (PL-80): the whole entity, chosen attributes, or both.",
+      "properties": {
+        "attributes": {
+          "description": "When chosen attributes end: the `expiresAt` member of each named attribute.",
+          "items": {
+            "$ref": "#/definitions/AttributeLifetime"
+          },
+          "type": "array"
+        },
+        "entity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LifetimeMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the whole entity ends: its `expiresAt`."
+        },
+        "type": {
+          "description": "The entity type, a class of the target space's model that an output writes.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "LifetimeMode": {
+      "additionalProperties": false,
+      "description": "One of three modes (PL-80): `from` a field (with `plus` and `notAfter`), `rolling`, or `at`.",
+      "properties": {
+        "at": {
+          "description": "One fixed RFC 3339 instant with an offset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "description": "A date-time slot of the type, or `observedAt`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "notAfter": {
+          "description": "Caps a `from` end at the write time plus this duration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "plus": {
+          "description": "Added to the `from` time, an ISO 8601 duration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rolling": {
+          "description": "The write time plus this duration, renewed by each write.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "Mint": {
@@ -631,6 +757,13 @@
             }
           ],
           "description": "Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64)."
+        },
+        "lifetime": {
+          "description": "When entities of a written type, or chosen attributes of them, end (PL-80…PL-83): the rendered stream writes their `expiresAt` after the author's steps.",
+          "items": {
+            "$ref": "#/definitions/Lifetime"
+          },
+          "type": "array"
         },
         "output": {
           "anyOf": [

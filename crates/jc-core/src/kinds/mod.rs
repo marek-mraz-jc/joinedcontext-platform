@@ -28,6 +28,7 @@ pub mod org_settings;
 pub mod organization;
 pub mod pipeline;
 pub mod pipeline_identity;
+pub mod pipeline_lifetime;
 pub mod policy;
 pub mod role;
 pub mod service_account;
@@ -102,6 +103,7 @@ pub use pipeline::{
     PipelineClass, PipelineOutput, PipelineQuotas, PipelineSource, PipelineSpec, ProcessorStep,
     ReplaceConflict, SourceQuery, Step, SubscriptionTrigger, TemplatePart, TemporalWindow, Trigger,
 };
+pub use pipeline_lifetime::{AttributeLifetime, End, Lifetime, LifetimeMode};
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PlatformAction, PolicyEffect,
     PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
