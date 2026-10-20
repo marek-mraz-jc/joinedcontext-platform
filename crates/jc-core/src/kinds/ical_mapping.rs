@@ -528,19 +528,27 @@ fn is_plain(value: &str, max: usize) -> bool {
 }
 
 fn field_shape_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
-    let mut gaps = Vec::new();
-    let mut gap = |text: String| gaps.push(format!("`ical` {field}: {text}"));
-    match field {
-        IcalField::Uid => {
-            gap("UID is fixed to the entity id and cannot be mapped".to_owned());
-            return gaps;
-        }
+    let texts = match field {
+        IcalField::Uid => vec!["UID is fixed to the entity id and cannot be mapped".to_owned()],
         IcalField::Dtstamp => {
-            gap("DTSTAMP is fixed to the entity's modifiedAt and cannot be mapped".to_owned());
-            return gaps;
+            vec!["DTSTAMP is fixed to the entity's modifiedAt and cannot be mapped".to_owned()]
         }
-        _ => {}
-    }
+        _ => [
+            source_gaps(field, remap),
+            value_gaps(field, remap),
+            status_gaps(field, remap),
+        ]
+        .concat(),
+    };
+    texts
+        .into_iter()
+        .map(|text| format!("`ical` {field}: {text}"))
+        .collect()
+}
+
+/// One source, attribute paths only, and only the remaps the field takes.
+fn source_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
+    let mut gaps = Vec::new();
     let sources = [
         remap.attribute.is_some(),
         !remap.first_of.is_empty(),
@@ -548,7 +556,7 @@ fn field_shape_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
         remap.constant.is_some(),
     ];
     if sources.iter().filter(|s| **s).count() != 1 {
-        gap("needs exactly one of attribute, firstOf, join or constant".to_owned());
+        gaps.push("needs exactly one of attribute, firstOf, join or constant".to_owned());
     }
     let used = [
         ("firstOf", !remap.first_of.is_empty()),
@@ -562,21 +570,18 @@ fn field_shape_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
         ("truncate", remap.truncate.is_some()),
     ];
     for (key, _) in used.iter().filter(|(key, on)| *on && !field.allows(key)) {
-        gap(format!(
+        let keys = field.remaps();
+        gaps.push(format!(
             "does not take `{key}`; it takes {}",
-            match field.remaps().as_slice() {
-                [] => "none".to_owned(),
-                keys => keys.join(", "),
+            if keys.is_empty() {
+                "none".to_owned()
+            } else {
+                keys.join(", ")
             }
         ));
     }
     if remap.separator.is_some() && remap.join.is_empty() {
-        gap("`separator` belongs to `join`".to_owned());
-    }
-    if let Some(separator) = &remap.separator {
-        if !is_plain(separator, 10) {
-            gap("`separator` must be 1 to 10 characters, no control characters".to_owned());
-        }
+        gaps.push("`separator` belongs to `join`".to_owned());
     }
     for path in remap
         .attribute
@@ -585,65 +590,81 @@ fn field_shape_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
         .chain(&remap.join)
         .filter(|p| !is_path(p))
     {
-        gap(format!(
+        gaps.push(format!(
             "`{path}` is not an attribute path (names joined by dots, at most three)"
         ));
     }
+    gaps
+}
+
+/// The values the remaps carry: short plain text, a language code, a zone name, a sane length.
+fn value_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if remap.separator.as_deref().is_some_and(|s| !is_plain(s, 10)) {
+        gaps.push("`separator` must be 1 to 10 characters, no control characters".to_owned());
+    }
     if field == IcalField::Class {
         if remap.constant.as_deref() != Some("PUBLIC") {
-            gap("CLASS takes only `constant: PUBLIC`".to_owned());
+            gaps.push("CLASS takes only `constant: PUBLIC`".to_owned());
         }
-    } else if let Some(constant) = &remap.constant {
-        if !is_plain(constant, 100) {
-            gap("`constant` must be 1 to 100 characters, no control characters".to_owned());
-        }
+    } else if remap.constant.as_deref().is_some_and(|c| !is_plain(c, 100)) {
+        gaps.push("`constant` must be 1 to 100 characters, no control characters".to_owned());
     }
-    if let Some(language) = &remap.language {
-        let code = language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase());
-        if !code && language != "first" {
-            gap(format!(
-                "`language: {language}` is neither a two-letter code nor `first`"
-            ));
-        }
+    if let Some(language) = remap.language.as_deref().filter(|l| !is_language(l)) {
+        gaps.push(format!(
+            "`language: {language}` is neither a two-letter code nor `first`"
+        ));
     }
-    if let Some(zone) = &remap.timezone {
-        let shaped = zone == "UTC"
-            || (zone.contains('/')
-                && is_plain(zone, 64)
-                && zone
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "/_+-".contains(c)));
-        if !shaped {
-            gap(format!("`timezone: {zone}` is not an IANA zone name"));
-        }
+    if let Some(zone) = remap.timezone.as_deref().filter(|z| !is_zone(z)) {
+        gaps.push(format!("`timezone: {zone}` is not an IANA zone name"));
     }
-    if remap.truncate == Some(0) || remap.truncate.is_some_and(|n| n > 10_000) {
-        gap("`truncate` must be 1 to 10000".to_owned());
+    if remap.truncate.is_some_and(|n| n == 0 || n > 10_000) {
+        gaps.push("`truncate` must be 1 to 10000".to_owned());
     }
-    for (from, to) in &remap.map {
-        if !is_plain(from, 200) || !is_plain(to, 100) {
-            gap("`map` keys and values must be short plain text".to_owned());
-            break;
-        }
-    }
-    if field == IcalField::Status {
-        let bad: Vec<_> = remap
-            .map
-            .values()
-            .chain(&remap.default)
-            .filter(|v| !STATUS_VALUES.contains(&v.as_str()))
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        if !bad.is_empty() {
-            gap(format!(
-                "STATUS takes TENTATIVE, CONFIRMED or CANCELLED, not {}",
-                bad.join(", ")
-            ));
-        }
+    if remap
+        .map
+        .iter()
+        .any(|(from, to)| !is_plain(from, 200) || !is_plain(to, 100))
+    {
+        gaps.push("`map` keys and values must be short plain text".to_owned());
     }
     gaps
+}
+
+/// STATUS maps only to the values RFC 5545 gives a VEVENT.
+fn status_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
+    if field != IcalField::Status {
+        return Vec::new();
+    }
+    let bad: BTreeSet<&str> = remap
+        .map
+        .values()
+        .chain(&remap.default)
+        .map(String::as_str)
+        .filter(|v| !STATUS_VALUES.contains(v))
+        .collect();
+    if bad.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "STATUS takes TENTATIVE, CONFIRMED or CANCELLED, not {}",
+        bad.into_iter().collect::<Vec<_>>().join(", ")
+    )]
+}
+
+/// A two-letter language code or `first`.
+fn is_language(language: &str) -> bool {
+    language == "first" || (language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase()))
+}
+
+/// `UTC` or an IANA name such as `Europe/Bratislava`, by its shape.
+fn is_zone(zone: &str) -> bool {
+    zone == "UTC"
+        || (zone.contains('/')
+            && is_plain(zone, 64)
+            && zone
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "/_+-".contains(c)))
 }
 
 /// What the model says of one attribute.
@@ -911,6 +932,17 @@ mod tests {
             let gaps = case.ical.model_gaps(Some(&model)).expect("model parses");
             assert_eq!(gaps, case.gaps, "case {name}");
         }
+    }
+
+    #[test]
+    fn field_names_are_the_wire_names() {
+        for field in IcalField::ALL {
+            let wire = serde_json::to_value(field).expect("serializes");
+            assert_eq!(wire.as_str(), Some(field.as_str()), "{field:?}");
+            assert!(field.section().starts_with('§'));
+        }
+        assert!(is_language("sk") && is_language("first") && !is_language("SK"));
+        assert!(is_zone("Europe/Bratislava") && is_zone("UTC") && !is_zone("CET; x"));
     }
 
     #[test]
