@@ -111,11 +111,9 @@ fn entities_of(entities: &Value) -> Vec<&Value> {
 }
 
 impl Table {
-    /// Adds the rows of `entities` (as [`table`] reads them), widening every row when they name
-    /// a column the table has not seen. A download appends each page as it arrives and drops
-    /// it, so it keeps the leaves of its pages and not their parsed entities, which are about
-    /// fifteen times their JSON: a whole download held at once put the gateway past its 1 Gi
-    /// limit (T-4782).
+    /// Adds the rows of `entities` (as [`table`] reads them), widening every row for a new column.
+    /// A download appends each page and drops it: its parsed entities, about fifteen times their
+    /// JSON, held whole put the gateway past its 1 Gi limit (T-4782).
     pub fn append(&mut self, entities: &Value) {
         let width = self.columns.len();
         // Each column's position by name, so placing a cell is a lookup rather than a scan of
