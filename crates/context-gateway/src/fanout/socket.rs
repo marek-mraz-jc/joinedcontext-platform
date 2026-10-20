@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::extract::ws::{self, WebSocket};
 use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Method};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
@@ -442,6 +443,8 @@ pub enum Ended {
     NoPong,
     /// The broker refused the hub's upstream subscription.
     Refused,
+    /// The client broke RFC 6455; closed with this code (7.4.1).
+    Broken(u16, &'static str),
 }
 
 /// One client connection: welcome, then its messages answered and its queue written, until it
@@ -492,9 +495,7 @@ pub async fn session(
                     Some(Ok(ws::Message::Pong(_))) => last_pong = Instant::now(),
                     Some(Ok(ws::Message::Ping(_))) => {}
                     Some(Ok(ws::Message::Close(_))) | None => ended = Some(Ended::Closed),
-                    Some(Err(error)) => {
-                        ended = Some(if too_big(&error) { Ended::TooBig } else { Ended::Closed });
-                    }
+                    Some(Err(error)) => ended = Some(read_error(&error)),
                 }
             }
             () = queue.ready() => {
@@ -545,7 +546,15 @@ pub async fn session(
         }
     }
     let ended = ended.unwrap_or(Ended::Closed);
-    let close = match &ended {
+    finish(&mut to_client, &ended).await;
+    hub.close(conn, &name, &token, sent);
+    ended
+}
+
+/// The close frame that ends a session. After the client's own close, the answering close frame
+/// tungstenite queued (RFC 6455 5.5.1) reaches the client only when the sink is flushed.
+async fn finish(to_client: &mut SplitSink<WebSocket, ws::Message>, ended: &Ended) {
+    let close = match ended {
         Ended::Closing(reason) => {
             let closing = json!({"metadata": {"x-op": "x-closing", "x-reason": reason}});
             let _ = to_client.send(ws::Message::text(closing.to_string())).await;
@@ -558,6 +567,7 @@ pub async fn session(
             INTERNAL,
             "the context broker refuses this Endpoint's fan-out",
         )),
+        Ended::Broken(code, reason) => Some((*code, *reason)),
         Ended::Closed => None,
     };
     if let Some((code, reason)) = close {
@@ -566,21 +576,27 @@ pub async fn session(
             reason: reason.into(),
         };
         let _ = to_client.send(ws::Message::Close(Some(frame))).await;
+    } else {
+        let _ = to_client.flush().await;
     }
-    hub.close(conn, &name, &token, sent);
-    ended
 }
 
 fn gap(from: u64, to: u64) -> String {
     json!({"metadata": {"x-op": "x-gap", "x-from": from, "x-to": to}}).to_string()
 }
 
-/// Whether a read failed because the client broke the message or frame bound.
-fn too_big(error: &axum::Error) -> bool {
-    use tokio_tungstenite::tungstenite;
-    std::error::Error::source(error)
-        .and_then(|source| source.downcast_ref::<tungstenite::Error>())
-        .is_some_and(|error| matches!(error, tungstenite::Error::Capacity(_)))
+/// How a failed read ends the session: a broken bound or frame closes with its code, any other
+/// error, a dropped connection included, means the client is gone.
+fn read_error(error: &axum::Error) -> Ended {
+    use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+    match std::error::Error::source(error).and_then(|s| s.downcast_ref::<Error>()) {
+        Some(Error::Capacity(_)) => Ended::TooBig,
+        Some(Error::Protocol(p)) if !matches!(p, ProtocolError::ResetWithoutClosingHandshake) => {
+            Ended::Broken(1002, "protocol error")
+        }
+        Some(Error::Utf8(_)) => Ended::Broken(1007, "text is not UTF-8"),
+        _ => Ended::Closed,
+    }
 }
 
 /// The messages that answer one client message, in order.
@@ -854,5 +870,70 @@ mod tests {
             echoed[0].contains("\"x-id\":\"s1\"") && echoed[0].contains("\"x-status\":201"),
             "{echoed:?}"
         );
+    }
+
+    /// A session behind a real upgrade, for the RFC 6455 tests.
+    async fn served() -> String {
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(|up: ws::WebSocketUpgrade| async move {
+                up.on_upgrade(|client| async move {
+                    let hub = Arc::new(Hub::new("s", 10));
+                    let endpoint = crate::fanout::hub::tests_support::endpoint();
+                    let (conn, queue) = hub.open(endpoint, "anonymous".into());
+                    let lifetime = Duration::from_secs(60);
+                    session(client, hub, conn, queue, "anonymous".into(), lifetime).await;
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("ws://{addr}/ws")
+    }
+
+    /// The code of the close frame the gateway answers `message` with, skipping its own messages.
+    async fn closes_with(url: &str, message: Message) -> Option<u16> {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect");
+        ws.send(message).await.expect("send");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(Message::Close(frame)))) => return frame.map(|f| f.code.into()),
+                Ok(Some(Ok(_))) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    /// RFC 6455 5.5.1 and 7.4.1: a client's close is answered with a close frame, and a frame
+    /// that breaks the protocol closes with 1002, text that is not UTF-8 with 1007.
+    #[tokio::test]
+    async fn a_close_is_answered_and_a_broken_frame_closes_with_its_code() {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+        use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        let url = served().await;
+        let bye = CloseFrame {
+            code: NORMAL.into(),
+            reason: "bye".into(),
+        };
+        assert_eq!(
+            closes_with(&url, Message::Close(Some(bye))).await,
+            Some(NORMAL)
+        );
+        let mut rsv = Frame::message(b"{}".to_vec(), OpCode::Data(Data::Text), true);
+        rsv.header_mut().rsv1 = true;
+        assert_eq!(closes_with(&url, Message::Frame(rsv)).await, Some(1002));
+        let reserved = Frame::message(Vec::new(), OpCode::Data(Data::Reserved(3)), true);
+        assert_eq!(
+            closes_with(&url, Message::Frame(reserved)).await,
+            Some(1002)
+        );
+        let latin = Frame::message(vec![0xce, 0xba, 0xff], OpCode::Data(Data::Text), true);
+        assert_eq!(closes_with(&url, Message::Frame(latin)).await, Some(1007));
     }
 }
