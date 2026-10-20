@@ -13,8 +13,8 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    dataset_page, dataset_page_projects, endpoint_page, hybrid_search, project_scope,
-    search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, endpoint_page, held_page_projects, hybrid_search,
+    project_scope, search_projects, sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -564,6 +564,16 @@ Read it at https://gw.example/api/endpoint/od-air",
             .await
             .expect("page");
         assert_eq!(page.as_deref(), found, "{slugs:?} {kind}");
+    }
+    // T-4793: a dataset page an entity names is cited only when the sources hold it.
+    for (url, held) in [
+        ("https://hel-ckan.example/#0", true),
+        ("https://elsewhere.example/#0", false),
+    ] {
+        let found = held_page_projects(&pool, url, &projects, true)
+            .await
+            .expect("held");
+        assert_eq!(found, held, "{url}");
     }
     tx.rollback().await.expect("rollback");
 
