@@ -432,3 +432,33 @@ async fn a_batch_the_policy_refuses_names_no_rule_of_its_members() {
     );
     assert!(answer.broker_saw.is_empty(), "the broker is not asked");
 }
+
+/// DM-131: the system members of DM-130 are no slots. An entity carrying every one of them, and
+/// an attribute carrying every attribute member, reaches the broker; an `expiresAt` that is not
+/// an RFC 3339 instant is refused at either level.
+#[tokio::test]
+async fn system_members_pass_and_a_malformed_instant_is_refused() {
+    let model = model();
+    let at = json!("2026-10-21T06:00:00Z");
+    let mut entity = reading();
+    for member in jc_core::system_members::INSTANT_MEMBERS {
+        if jc_core::system_members::is_entity_system_member(member) {
+            entity[member] = at.clone();
+        }
+        entity["pm10"][member] = at.clone();
+    }
+    entity["scope"] = json!("/geo/SK/BB");
+    entity["pm10"]["datasetId"] = json!("urn:ngsi-ld:Dataset:raw");
+    entity["pm10"]["instanceId"] = json!("urn:ngsi-ld:Instance:1");
+    let answer = send(Some(&model), Method::POST, "/entities", entity).await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.body);
+
+    let mut bad = reading();
+    bad["expiresAt"] = json!("tomorrow");
+    let answer = send(Some(&model), Method::POST, "/entities", bad).await;
+    assert_eq!(refused(&answer), ("sh:datatype".into(), "expiresAt".into()));
+    let mut bad = reading();
+    bad["pm10"]["expiresAt"] = json!("2026-13-01T00:00:00Z");
+    let answer = send(Some(&model), Method::POST, "/entities", bad).await;
+    assert_eq!(refused(&answer), ("sh:datatype".into(), "pm10".into()));
+}

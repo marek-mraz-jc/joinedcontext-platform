@@ -3,6 +3,7 @@
 use crate::envelope::{Kind, ObjectMeta, Ref, Scope, SecretRef, TypedRef};
 use crate::error::{Error, Result};
 use crate::names;
+use crate::system_members::is_entity_system_member;
 use crate::urn::Urn;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -887,26 +888,6 @@ pub struct Projection {
     pub hidden_attributes: Vec<String>,
 }
 
-/// The members an Endpoint cannot hide: the identity without which the answer is not an NGSI-LD
-/// entity, and the timestamps the broker sets rather than an author (EP-71).
-///
-/// The gateway serves all ten whatever the projection says — `pdp::projection`'s `STRUCTURAL` and
-/// `SYSTEM` — so a manifest naming one here used to be accepted and then hide nothing (T-2334).
-/// The same name in a write payload is refused, which is the second reason the two lists may not
-/// be the same list.
-const ALWAYS_SERVED: &[&str] = &[
-    "id",
-    "type",
-    "@context",
-    "@id",
-    "@type",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-];
-
 impl Projection {
     /// Validates that every hidden attribute is a usable NGSI-LD attribute name.
     ///
@@ -922,7 +903,9 @@ impl Projection {
                     reason: "an attribute name must not be empty",
                 });
             }
-            if ALWAYS_SERVED.contains(&attribute.as_str()) {
+            // The system members of DM-130 are served whatever a projection says (EP-71), so a
+            // manifest naming one would be accepted and then hide nothing (T-2334).
+            if is_entity_system_member(attribute) {
                 return Err(Error::Name {
                     field: "projection.hiddenAttributes",
                     value: attribute.clone(),

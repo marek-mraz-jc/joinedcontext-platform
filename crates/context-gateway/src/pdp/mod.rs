@@ -14,6 +14,7 @@ use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use evaluator::{Request, Subject, Verdict};
 use jc_core::kinds::Operation;
+use jc_core::system_members::is_entity_system_member;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -169,24 +170,13 @@ fn project_constraints(
     Verdict::Rewrite(Box::new(constraints))
 }
 
-/// The members every entity carries whatever the grants say, so filtering on one is not a
-/// reference to anything a grant could withhold (CIM 009 4.5.1).
-const ALWAYS_SERVED: &[&str] = &[
-    "id",
-    "type",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-    "deletedAt",
-    "expiresAt",
-    "observedAt",
-];
-
-/// The referenced names a grant could withhold: every one but the members each entity carries.
+/// The referenced names a grant could withhold: every one but the system members each entity and
+/// attribute carries (DM-130), so filtering on one references nothing a grant could withhold
+/// (CIM 009 4.5.1).
 pub fn selecting(referenced: &BTreeSet<String>) -> BTreeSet<String> {
     referenced
         .iter()
-        .filter(|name| !ALWAYS_SERVED.contains(&name.as_str()))
+        .filter(|name| !is_entity_system_member(name) && name.as_str() != "observedAt")
         .cloned()
         .collect()
 }
