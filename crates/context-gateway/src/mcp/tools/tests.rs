@@ -63,8 +63,9 @@ fn an_anonymous_read_without_a_window_is_refused() {
     }
 }
 
-/// T-4261, decided: `lastN` above 100 is refused, not clamped, so the caller learns why its
-/// answer is short; an absent one becomes 100.
+/// T-4261, decided: `lastN` above the broker's maximum is refused, not clamped, so the caller
+/// learns why its answer is short; an absent one becomes the broker's default. T-4804: 100 and
+/// 1,000 for every caller (owner), the body cap and the per-caller rate stay the bound.
 #[test]
 fn an_anonymous_last_n_is_100_when_absent_and_more_is_refused() {
     assert_eq!(
@@ -91,10 +92,14 @@ fn an_anonymous_last_n_is_100_when_absent_and_more_is_refused() {
         bounded("retrieve_temporal", own).expect("ok")["lastN"],
         json!(100)
     );
-    for n in [json!(1000), json!(101), json!(0), json!("5")] {
+    assert_eq!(
+        bounded("query_temporal", json!({ "lastN": 1000 })).expect("ok")["lastN"],
+        json!(1000)
+    );
+    for n in [json!(1001), json!(0), json!("5")] {
         let refused = bounded("query_temporal", json!({ "lastN": n })).expect_err("refused");
         assert!(
-            refused.contains("`lastN` without a token is 1 to 100"),
+            refused.contains("`lastN` without a token is 1 to 1000"),
             "{refused}"
         );
     }
@@ -626,6 +631,20 @@ fn a_published_schema_has_the_broker_s_types() {
         subscribe["properties"]["subscription"]["required"],
         serde_json::json!(["type", "notification"])
     );
+    // T-4804: `limit` and `lastN` publish the broker's default and maximum
+    for (tool, arg) in [
+        ("query_entities", "limit"),
+        ("query_temporal", "lastN"),
+        ("retrieve_temporal", "lastN"),
+        ("batch_query_temporal", "limit"),
+    ] {
+        let arg = &schema(tool)["properties"][arg];
+        assert_eq!(
+            (&arg["default"], &arg["maximum"]),
+            (&json!(100), &json!(1000)),
+            "{tool}"
+        );
+    }
     for tool in TOOLS {
         assert!(
             jsonschema::draft7::new(&tool.input_schema()).is_ok(),

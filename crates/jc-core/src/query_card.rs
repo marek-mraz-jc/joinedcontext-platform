@@ -44,8 +44,9 @@ pub fn card(
         card.push_str("\nq: attr==value; AND, | OR, == != > >= < <= ~= (regex), ranges a..b; a text value in quotes; a Relationship by its target id (refParentArea==\"urn:ngsi-ld:...\").");
     }
     if offers("query_temporal") {
-        // the broker's default ceilings (ANTARES_TEMPORAL_INSTANCE_LIMIT, ANTARES_MAX_LIMIT; T-4800)
-        card.push_str("\nHistory: at most 1,000 values per Attribute; past a day hourly averages unless lastN; a cut answer has more.next.");
+        // the broker's defaults and ceilings (ANTARES_TEMPORAL_DEFAULT_INSTANCES,
+        // ANTARES_TEMPORAL_INSTANCE_LIMIT, ANTARES_DEFAULT_LIMIT, ANTARES_MAX_LIMIT; T-4800, T-4804)
+        card.push_str("\nHistory: lastN and limit 100 by default, 1,000 at most; over a day hourly averages; more.next continues.");
     }
     if offers("query_entities") {
         card.push_str("\nGeo: georel near;maxDistance==<metres> or within on location. Units: compare in the unit shown (pm10 is ug/m3; a distance asked in km is sent in m).");

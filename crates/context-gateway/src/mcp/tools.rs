@@ -137,17 +137,15 @@ pub(crate) fn anonymous_refusal(id: Value, name: &str) -> Value {
 
 /// The widest history window an anonymous temporal read may ask for (T-4261).
 const ANONYMOUS_WINDOW_DAYS: i64 = 31;
-/// The `lastN` an anonymous temporal read gets when it names none, and the most it may name.
-const ANONYMOUS_LAST_N: u64 = 100;
-/// The page cap every `limit` argument already publishes.
-const PAGE_CAP: u64 = 1000;
 /// The shortest aggregation period an anonymous read may ask for, in seconds (`PT1H`).
 const ANONYMOUS_AGGR_SECONDS: f64 = 3600.0;
 
 /// Bounds what one anonymous temporal read makes the broker read (T-4261, Architecture/07 §2):
-/// a window of at most 31 days, `type` or `id`, `lastN` at most 100 and 100 when absent,
-/// `limit` within the page cap, and aggregation periods of an hour or more. Any other tool
-/// passes untouched; the error names the bound it broke.
+/// a window of at most 31 days, `type` or `id`, `lastN` within the broker's maximum and its
+/// default when absent, `limit` within the broker's page maximum (T-4804: the owner's 1,000
+/// for every caller; the body cap and the per-caller rate stay the bound), and aggregation
+/// periods of an hour or more. Any other tool passes untouched; the error names the bound it
+/// broke.
 pub(crate) fn anonymous_bounds(
     name: &str,
     arguments: &mut Map<String, Value>,
@@ -194,29 +192,11 @@ pub(crate) fn anonymous_bounds(
     }
     // A window over a day that asks neither raw values (`format`) nor its own aggregation
     // answers the broker's hourly or daily averages (T-4800), periods the PT1H floor below
-    // allows; every other read keeps the newest 100 instances.
+    // allows; every other read keeps the broker's default of newest instances.
     let averaged = window > chrono::Duration::days(1)
         && !arguments.contains_key("format")
         && !arguments.contains_key("aggrMethods");
-    match arguments.get("lastN") {
-        None if averaged => {}
-        None => {
-            arguments.insert("lastN".to_owned(), Value::from(ANONYMOUS_LAST_N));
-        }
-        Some(n)
-            if n.as_u64()
-                .is_some_and(|n| (1..=ANONYMOUS_LAST_N).contains(&n)) => {}
-        Some(_) => {
-            return Err(format!(
-                "`lastN` without a token is 1 to {ANONYMOUS_LAST_N}"
-            ))
-        }
-    }
-    if let Some(limit) = arguments.get("limit") {
-        if !limit.as_u64().is_some_and(|n| (1..=PAGE_CAP).contains(&n)) {
-            return Err(format!("`limit` is 1 to {PAGE_CAP}"));
-        }
-    }
+    crate::mcp::limits::anonymous_page(arguments, averaged)?;
     if arguments.contains_key("aggrMethods") {
         let period = arguments
             .get("aggrPeriodDuration")
@@ -335,6 +315,10 @@ enum Kind {
     Object(&'static [Arg]),
     ListOf(&'static [Arg], usize),
     Endpoint,
+    /// A page `limit`: the broker's default and maximum ([`crate::mcp::limits`]).
+    Limit,
+    /// `lastN`: the broker's default and maximum instances per Attribute.
+    LastN,
 }
 
 /// The broker's bounds on a list (Antares `schema.rs`).
@@ -394,6 +378,8 @@ fn schema_of(kind: Kind) -> Value {
             json!({"type": "array", "maxItems": max, "items": input_schema(args)})
         }
         Kind::Endpoint => json!({"type": "string", "maxLength": 2048}),
+        Kind::Limit => crate::mcp::limits::current().schema(false),
+        Kind::LastN => crate::mcp::limits::current().schema(true),
     }
 }
 
@@ -417,10 +403,10 @@ fn grammar(name: &str) -> Option<&'static str> {
         "timerel" => "before, after or between timeAt (and endTimeAt)",
         "timeAt" | "endTimeAt" => "An ISO 8601 instant, e.g. 2026-10-12T00:00:00Z",
         "timeproperty" => "The instant history is ordered by: observedAt (default), modifiedAt, createdAt, or deletedAt for removals",
-        "lastN" => "Keep the newest N instances of each attribute",
+        "lastN" => "Keep the newest N instances of each attribute; the broker's default when absent, at most its maximum",
         "aggrMethods" => "Comma-separated: avg, min, max, sum, totalCount, distinctCount, stddev, sumsq",
         "aggrPeriodDuration" => "ISO 8601 duration of each aggregation period, e.g. PT1H or P1D",
-        "limit" => "Entities per page, 1 to 1000",
+        "limit" => "Entities per page; the broker's default when absent, at most its maximum",
         "count" => "true answers the total number of matches",
         _ => return None,
     })
@@ -503,7 +489,7 @@ const QUERY: &[Arg] = &[
     opt("sysAttrs", Kind::Flag),
     opt("orderBy", Kind::Text(1024)),
     opt("count", Kind::Flag),
-    opt("limit", Kind::Int(1, 1000)),
+    opt("limit", Kind::Limit),
     opt("cursor", Kind::Text(CURSOR_LEN)),
 ];
 /// The broker's `summarize` (Antares T-4680): one type and the filters of `query_entities`; it
@@ -533,7 +519,7 @@ const BATCH_QUERY: &[Arg] = &[
     opt("local", Kind::Flag),
     opt("lang", Kind::Text(64)),
     opt("count", Kind::Flag),
-    opt("limit", Kind::Int(1, 1000)),
+    opt("limit", Kind::Limit),
     opt("cursor", Kind::Text(CURSOR_LEN)),
 ];
 const TEMPORAL_ONE: &[Arg] = &[
@@ -543,7 +529,7 @@ const TEMPORAL_ONE: &[Arg] = &[
     req("timeAt", Kind::Text(64)),
     opt("endTimeAt", Kind::Text(64)),
     opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
-    opt("lastN", Kind::Int(1, 100)),
+    opt("lastN", Kind::LastN),
     opt("aggrMethods", Kind::Text(256)),
     opt("aggrPeriodDuration", Kind::Text(64)),
     opt("format", Kind::Word(TEMPORAL_FORMATS)),
@@ -563,13 +549,13 @@ const TEMPORAL_QUERY: &[Arg] = &[
     req("timeAt", Kind::Text(64)),
     opt("endTimeAt", Kind::Text(64)),
     opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
-    opt("lastN", Kind::Int(1, 100)),
+    opt("lastN", Kind::LastN),
     opt("aggrMethods", Kind::Text(256)),
     opt("aggrPeriodDuration", Kind::Text(64)),
     opt("format", Kind::Word(TEMPORAL_FORMATS)),
     opt("sysAttrs", Kind::Flag),
     opt("count", Kind::Flag),
-    opt("limit", Kind::Int(1, 1000)),
+    opt("limit", Kind::Limit),
     opt("cursor", Kind::Text(CURSOR_LEN)),
 ];
 /// The POST form: its conditions go into the Query document, which has no representation.
@@ -587,17 +573,17 @@ const BATCH_TEMPORAL_QUERY: &[Arg] = &[
     req("timeAt", Kind::Text(64)),
     opt("endTimeAt", Kind::Text(64)),
     opt("timeproperty", Kind::Word(TIMEPROPERTIES)),
-    opt("lastN", Kind::Int(1, 100)),
+    opt("lastN", Kind::LastN),
     opt("aggrMethods", Kind::Text(256)),
     opt("aggrPeriodDuration", Kind::Text(64)),
     opt("count", Kind::Flag),
-    opt("limit", Kind::Int(1, 1000)),
+    opt("limit", Kind::Limit),
     opt("cursor", Kind::Text(CURSOR_LEN)),
 ];
 const ID_ONLY: &[Arg] = &[req("id", Kind::Text(512))];
 const PAGE_ONLY: &[Arg] = &[
     opt("count", Kind::Flag),
-    opt("limit", Kind::Int(1, 1000)),
+    opt("limit", Kind::Limit),
     opt("cursor", Kind::Text(CURSOR_LEN)),
 ];
 const NONE: &[Arg] = &[];
@@ -1134,6 +1120,7 @@ pub(crate) fn reads_anything(gateway: &Gateway, endpoint: &Endpoint, subject: &S
 /// the caller's list grants it, with the one required `endpoint` argument: a string, never an
 /// enum of the list, so `tools/list` is the same size for 10 Endpoints and for 10,000 (T-4491).
 pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Vec<Value> {
+    let limits = crate::mcp::limits::current();
     TOOLS
         .iter()
         .filter(|tool| {
@@ -1166,10 +1153,15 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                     }
                 }
             }
+            // The broker's default and maximum page, as it publishes them (T-4804).
+            let description = match crate::mcp::limits::note(tool.name, limits) {
+                Some(note) => format!("{} {note}", tool.description),
+                None => tool.description.to_owned(),
+            };
             json!({
                 "name": tool.name,
                 // How `endpoint` is named is said once, in the hub's instructions (T-4506).
-                "description": tool.description,
+                "description": description,
                 "inputSchema": schema,
                 "outputSchema": output_schema(tool),
                 "annotations": {

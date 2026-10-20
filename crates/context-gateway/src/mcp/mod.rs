@@ -13,6 +13,7 @@ pub mod documents;
 pub mod endpoint;
 pub mod hub;
 pub mod jsonrpc;
+pub mod limits;
 pub mod personal;
 pub mod search;
 pub mod server;

@@ -1997,13 +1997,16 @@ pub(super) async fn dataset_of(
 
 /// The rows of `kind` as the Endpoint `slug` serves them to anyone: a table's download, and the
 /// link of a citation whose type no dataset page publishes (T-4747). `None` without a gateway
-/// address.
+/// address. It asks the broker's maximum page (1,000): with no `limit` the broker answers its
+/// default of 100 (T-4804), short of what a download promises.
 pub(super) fn type_listing(ask: &Ask<'_>, slug: &str, kind: &str) -> Option<String> {
     let mut url = ask
         .endpoint_base?
         .join(&format!("api/endpoint/{slug}/ngsi-ld/v1/entities"))
         .ok()?;
-    url.query_pairs_mut().append_pair("type", kind);
+    url.query_pairs_mut()
+        .append_pair("type", kind)
+        .append_pair("limit", "1000");
     Some(url.to_string())
 }
 
