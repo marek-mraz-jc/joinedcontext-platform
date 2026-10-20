@@ -986,3 +986,100 @@ async fn job_records_and_counters_answer_on_the_admin_port_alone() {
         404
     );
 }
+
+/// T-4777: hostile Apps, each stopped or refused within a second of its own, the host answering
+/// the next request: unbounded recursion overflows the guest stack, a spin under a small fuel budget
+/// runs out of fuel even before its wall time, and a host file by path is no file at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hostile_app_is_trapped_or_refused_within_a_second_and_the_host_stays_up() {
+    let world = World::new(
+        "hostile",
+        Limits {
+            wall_time: Duration::from_secs(1),
+            fuel: 50_000_000,
+            ..Limits::default()
+        },
+        None,
+    );
+    let app = world.place("hostile", guest());
+    assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
+    for (path, expect) in [("/api/recurse", "wasm trap"), ("/api/loop", "out of fuel")] {
+        let started = Instant::now();
+        let stopped = world.get(&app, path, None).await;
+        let took = started.elapsed();
+        match stopped {
+            Err(Failure::Failed(why)) => assert!(why.contains(expect), "{path}: {why}"),
+            other => panic!("{path} answered {other:?}, not a trap"),
+        }
+        assert!(took < Duration::from_secs(1), "{path} took {took:?}");
+        assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
+    }
+    let (status, answer) = world.get(&app, "/api/passwd", None).await.unwrap();
+    assert_eq!(status, 200);
+    assert!(answer.starts_with("refused"), "{answer}");
+}
+
+/// T-4777: an App that answers and then runs on still holds its place among the requests its App
+/// may run at once, until its instance ends, so answering early is no way past the cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_that_answers_and_runs_on_holds_its_place_until_its_instance_ends() {
+    let world = World::new(
+        "answer-then-spin",
+        Limits {
+            wall_time: Duration::from_secs(1),
+            per_app_concurrency: 1,
+            ..Limits::default()
+        },
+        None,
+    );
+    let app = world.place("lingers", guest());
+    assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
+    assert_eq!(
+        world
+            .get(&app, "/api/answer-then-spin", None)
+            .await
+            .unwrap(),
+        (200, "answered".into())
+    );
+    assert_eq!(
+        world.get(&app, "/api/hello", None).await.unwrap_err(),
+        Failure::Busy,
+        "the first instance still runs"
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(world.get(&app, "/api/hello", None).await.unwrap().0, 200);
+}
+
+/// T-4777: the body of an App's call to the gateway is held to the request cap, so a component
+/// streaming without end cannot fill the shard's memory; a body within the cap goes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_outgoing_body_past_the_request_cap_is_refused_and_never_sent() {
+    let gateway = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&gateway)
+        .await;
+    let world = World::new(
+        "upload",
+        Limits {
+            request_bytes: 2 << 20,
+            ..Limits::default()
+        },
+        Some(&gateway.uri()),
+    );
+    let app = world.place("uploader", guest());
+    let (_, answer) = world.get(&app, "/api/upload?1", Some("tok")).await.unwrap();
+    assert_eq!(answer, "status 200");
+    let (_, answer) = world
+        .get(&app, "/api/upload?64", Some("tok"))
+        .await
+        .unwrap();
+    assert!(answer.starts_with("refused"), "{answer}");
+    let seen = gateway.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        seen.len(),
+        1,
+        "only the body within the cap reached the gateway"
+    );
+    assert_eq!(seen[0].body.len(), 1 << 20);
+}
