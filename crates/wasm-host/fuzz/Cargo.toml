@@ -1,0 +1,36 @@
+# cargo-fuzz targets of jc-wasm-host (T-4777): nightly, run by ci-full only, never part of the
+# workspace or an image. `component` loads arbitrary bytes as an App and serves it one request under
+# the production engine; `host_inputs` hands the checks behind every host function arbitrary input.
+[package]
+name = "wasm-host-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wasm-host = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+http = "1"
+bytes = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[[bin]]
+name = "component"
+path = "fuzz_targets/component.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "host_inputs"
+path = "fuzz_targets/host_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

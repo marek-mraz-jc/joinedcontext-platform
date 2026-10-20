@@ -1,8 +1,10 @@
 //! A test App: `/api/hello`, `/api/state` (a counter that a fresh instance starts at one),
 //! `/api/loop` (never ends), `/api/alloc` (asks for 128 MiB), `/api/fetch?<url>` (an outgoing
 //! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`), `/api/reach`
-//! (what the component gets of the environment, the files and the sockets); and the jobs of
-//! `wit/jobs.wit`.
+//! (what the component gets of the environment, the files and the sockets); the hostile ones of
+//! T-4777: `/api/recurse` (unbounded recursion), `/api/passwd` (a host file by path),
+//! `/api/answer-then-spin` (answers, then never ends), `/api/upload?<MiB>` (an outgoing POST of
+//! that many MiB to the gateway); and the jobs of `wit/jobs.wit`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -78,6 +80,47 @@ fn reach(port: u16) -> String {
     format!("env={env} dirs={dirs} lookup={lookup} tcp={tcp} udp={udp}")
 }
 
+/// Recursion with no end: each frame keeps a buffer so the optimiser cannot fold it away.
+fn recurse(depth: u64) -> u64 {
+    if std::hint::black_box(depth) == u64::MAX {
+        return 0;
+    }
+    let frame = std::hint::black_box([depth; 64]);
+    recurse(depth + 1).wrapping_add(frame[(depth % 64) as usize])
+}
+
+/// A POST of `mib` MiB to the App's own Endpoint, written in 4 KiB chunks as a stream allows.
+fn upload(mib: usize) -> String {
+    use wasip2::http::types::Method;
+    let request = OutgoingRequest::new(Fields::new());
+    let _ = request.set_method(&Method::Post);
+    let _ = request.set_scheme(Some(&Scheme::Http));
+    let _ = request.set_authority(Some("gateway"));
+    let _ = request.set_path_with_query(Some("/ngsi-ld/v1/entities"));
+    let body = request.body().expect("body");
+    let future = match outgoing_handler::handle(request, None) {
+        Err(code) => return format!("refused: {code:?}"),
+        Ok(future) => future,
+    };
+    let stream = body.write().expect("stream");
+    let chunk = [b'x'; 4096];
+    let mut sent = 0usize;
+    while sent < mib << 20 {
+        if stream.blocking_write_and_flush(&chunk).is_err() {
+            break;
+        }
+        sent += chunk.len();
+    }
+    drop(stream);
+    let _ = OutgoingBody::finish(body, None);
+    future.subscribe().block();
+    match future.get() {
+        Some(Ok(Ok(response))) => format!("status {}", response.status()),
+        Some(Ok(Err(code))) => format!("refused: {code:?}"),
+        other => format!("no answer: {other:?}"),
+    }
+}
+
 fn fetch(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some(("https", rest)) => (Scheme::Https, rest),
@@ -120,6 +163,19 @@ impl wasip2::exports::http::incoming_handler::Guest for App {
                 answer(out, 200, &std::hint::black_box(big).len().to_string());
             }
             "/api/fetch" => answer(out, 200, &fetch(query)),
+            "/api/upload" => answer(out, 200, &upload(query.parse().unwrap_or(1))),
+            "/api/recurse" => answer(out, 200, &recurse(0).to_string()),
+            "/api/passwd" => match std::fs::read_to_string("/etc/passwd") {
+                Ok(text) => answer(out, 200, &format!("read {} bytes", text.len())),
+                Err(err) => answer(out, 200, &format!("refused: {err}")),
+            },
+            "/api/answer-then-spin" => {
+                answer(out, 200, "answered");
+                let mut n: u64 = 0;
+                loop {
+                    n = std::hint::black_box(n.wrapping_add(1));
+                }
+            }
             "/api/reach" => answer(out, 200, &reach(query.parse().unwrap_or(80))),
             "/api/sql" => match jc::app::sql::query("select 1", &[]) {
                 Ok(rows) => answer(out, 200, &format!("{} rows", rows.values.len())),

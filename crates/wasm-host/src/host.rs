@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{
-    Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, Store, StoreLimits,
-    StoreLimitsBuilder, Trap, UpdateDeadline,
+    Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig, ResourceLimiter, Store,
+    StoreLimits, StoreLimitsBuilder, Trap, UpdateDeadline,
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::bindings::http::types::Scheme;
@@ -34,13 +34,87 @@ pub struct State {
     wasi: WasiCtx,
     http: WasiHttpCtx,
     table: ResourceTable,
-    limits: StoreLimits,
+    limits: Budget,
     hooks: GatewayOnly,
     /// The App this instance runs for: the storage interfaces answer as it and no other.
     pub app: Placed,
     pub storage: Arc<dyn Storage>,
     /// The caller and the platform services, asked of the Portal as the request's person.
     pub services: crate::services::Services,
+}
+
+/// One request's memory, counted across every linear memory of its instance: the per-memory limit
+/// alone lets a component of many core modules hold many times `memory_bytes` (T-4777). A growth
+/// past the budget traps, as one past the per-memory limit does.
+struct Budget {
+    each: StoreLimits,
+    memory_bytes: usize,
+    used: usize,
+}
+
+impl Budget {
+    fn new(memory_bytes: usize) -> Self {
+        Self {
+            each: StoreLimitsBuilder::new()
+                .memory_size(memory_bytes)
+                .instances(64)
+                .trap_on_grow_failure(true)
+                .build(),
+            memory_bytes,
+            used: 0,
+        }
+    }
+}
+
+impl ResourceLimiter for Budget {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let total = self.used.saturating_sub(current).saturating_add(desired);
+        if total > self.memory_bytes {
+            return Err(wasmtime::format_err!(
+                "the application's memories would pass {} bytes",
+                self.memory_bytes
+            ));
+        }
+        let allowed = self.each.memory_growing(current, desired, maximum)?;
+        if allowed {
+            self.used = total;
+        }
+        Ok(allowed)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.each.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.each.table_growing(current, desired, maximum)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.each.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.each.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.each.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.each.memories()
+    }
 }
 
 impl WasiView for State {
@@ -75,6 +149,8 @@ struct GatewayOnly {
     endpoint: Option<(String, String)>,
     token: Option<String>,
     client: reqwest::Client,
+    /// The body an App may send the gateway, the cap of the request it was handed (T-4777).
+    request_bytes: usize,
     response_bytes: usize,
 }
 
@@ -152,12 +228,15 @@ impl WasiHttpHooks for GatewayOnly {
         let client = self.client.clone();
         let token = self.token.clone();
         let cap = self.response_bytes;
+        let sent_cap = self.request_bytes;
         Box::new(async move {
             let (parts, body) = request.into_parts();
-            let body = body
+            // Read to the request cap, never further: a component streaming without end would
+            // otherwise fill the shard's memory (T-4777).
+            let body = http_body_util::Limited::new(body, sent_cap)
                 .collect()
                 .await
-                .map_err(|_| wasmtime_wasi_http::Error::HttpRequestBodySize(None))?
+                .map_err(|_| wasmtime_wasi_http::Error::HttpRequestBodySize(Some(sent_cap as u64)))?
                 .to_bytes();
             let mut headers = parts.headers;
             headers.remove(http::header::AUTHORIZATION);
@@ -498,11 +577,7 @@ impl Host {
                 wasi,
                 http: WasiHttpCtx::new(),
                 table: ResourceTable::new(),
-                limits: StoreLimitsBuilder::new()
-                    .memory_size(self.limits.memory_bytes)
-                    .instances(64)
-                    .trap_on_grow_failure(true)
-                    .build(),
+                limits: Budget::new(self.limits.memory_bytes),
                 hooks: GatewayOnly {
                     endpoint: match (&self.gateway, &app.endpoint) {
                         (Some(gateway), Some(slug)) => Some((gateway.clone(), slug.clone())),
@@ -510,6 +585,7 @@ impl Host {
                     },
                     token,
                     client: self.client.clone(),
+                    request_bytes: self.limits.request_bytes,
                     response_bytes: self.limits.response_bytes,
                 },
                 app: app.clone(),
@@ -627,7 +703,7 @@ impl Host {
     pub async fn serve_admitted(
         &self,
         app: &Placed,
-        _admission: Admission,
+        admission: Admission,
         request: http::Request<Bytes>,
         token: Option<String>,
     ) -> Result<http::Response<HyperOutgoingBody>, Failure> {
@@ -690,7 +766,10 @@ impl Host {
             .http()
             .new_response_outparam(sender)
             .map_err(|err| Failure::Failed(err.to_string()))?;
+        // The admission lives as long as the instance, not the answer: an App that answers and runs
+        // on keeps its place until its wall time ends it (T-4777).
         let task = tokio::spawn(async move {
+            let _admission = admission;
             let proxy = pre.instantiate_async(&mut store).await?;
             proxy
                 .wasi_http_incoming_handler()
@@ -756,6 +835,19 @@ pub fn capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-4777: two memories of one instance share one budget; each alone stays under its limit.
+    #[test]
+    fn every_memory_of_an_instance_counts_against_one_budget() {
+        let mut budget = Budget::new(100);
+        assert!(budget.memory_growing(0, 60, None).unwrap());
+        let second = budget.memory_growing(0, 60, None).unwrap_err();
+        assert!(second.to_string().contains("100 bytes"), "{second}");
+        assert!(budget.memory_growing(60, 90, None).unwrap());
+        assert!(budget.memory_growing(0, 10, None).unwrap());
+        assert!(budget.memory_growing(0, 1, None).is_err());
+        assert!(Budget::new(100).memory_growing(0, 101, None).is_err());
+    }
 
     fn target(uri: &str) -> Option<String> {
         endpoint_target("http://gw:8080", "ep1", &uri.parse().expect("uri"))
