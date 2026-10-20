@@ -111,61 +111,85 @@ pub fn step(spec: &PipelineSpec) -> Result<Option<String>> {
             literal(&entry.entity_type)
         ));
         if let Some(mode) = &entry.entity {
-            let end = mode.end(&format!("{path}.entity"))?;
-            text.push_str(&format!("    let end = {}\n", end_expression(&end)?));
-            text.push_str(&format!(
-                "    if $end != null {{\n      root.expiresAt = $end{FORMAT}\n    }}\n"
-            ));
-            if matches!(end, End::From { .. }) {
-                text.push_str(&format!(
-                    "    if $end == null {{\n      root.{MARKER} = true\n    }}\n"
-                ));
-            }
+            text.push_str(&entity_block(&mode.end(&format!("{path}.entity"))?)?);
         }
-        let mut attributes: Vec<(String, End)> = Vec::new();
-        for (at, attribute) in entry.attributes.iter().enumerate() {
-            let end = attribute.mode().end(&format!("{path}.attributes[{at}]"))?;
-            for name in &attribute.names {
-                if !is_slot_name(name) {
-                    return Err(Error::Invalid {
-                        field: format!("{path}.attributes[{at}].names"),
-                        reason: format!("`{}` is not a slot name (PL-81)", name.escape_debug()),
-                    });
-                }
-                attributes.push((name.clone(), end.clone()));
-            }
-        }
-        attributes.sort_by(|a, b| a.0.cmp(&b.0));
-        for (name, end) in attributes {
-            text.push_str(&format!(
-                "    if this.exists({}) {{\n      let end = {}\n",
-                literal(&name),
-                end_expression(&end)?
-            ));
-            text.push_str(&format!(
-                "      if $end != null {{\n        let at = $end{FORMAT}\n        root.{name} = \
-                 this.{name}.(a -> if a.type() == \"array\" {{ a.map_each(i -> if i.type() == \
-                 \"object\" {{ i.assign({{\"expiresAt\": $at}}) }} else {{ i }}) }} else if a.type() \
-                 == \"object\" {{ a.assign({{\"expiresAt\": $at}}) }} else {{ a }})\n      }}\n"
-            ));
-            if matches!(end, End::From { .. }) {
-                text.push_str(&format!(
-                    "      if $end == null {{\n        root.{MARKER} = true\n      }}\n"
-                ));
-            }
-            text.push_str("    }\n");
+        for (name, end) in attribute_targets(&path, entry)? {
+            text.push_str(&attribute_block(&name, &end)?);
         }
         text.push_str("  }\n");
     }
+    text.push_str(&tail());
+    Ok(Some(text))
+}
+
+/// Sets the entity's `expiresAt`, or marks the record when its `from` gives no time.
+fn entity_block(end: &End) -> Result<String> {
+    let mut text = format!(
+        "    let end = {}\n    if $end != null {{\n      root.expiresAt = $end{FORMAT}\n    }}\n",
+        end_expression(end)?
+    );
+    if matches!(end, End::From { .. }) {
+        text.push_str(&format!(
+            "    if $end == null {{\n      root.{MARKER} = true\n    }}\n"
+        ));
+    }
+    Ok(text)
+}
+
+/// Each named attribute with its end, sorted by name; a name off the slot pattern is refused.
+fn attribute_targets(path: &str, entry: &Lifetime) -> Result<Vec<(String, End)>> {
+    let mut attributes: Vec<(String, End)> = Vec::new();
+    for (at, attribute) in entry.attributes.iter().enumerate() {
+        let end = attribute.mode().end(&format!("{path}.attributes[{at}]"))?;
+        if let Some(name) = attribute.names.iter().find(|name| !is_slot_name(name)) {
+            return Err(Error::Invalid {
+                field: format!("{path}.attributes[{at}].names"),
+                reason: format!("`{}` is not a slot name (PL-81)", name.escape_debug()),
+            });
+        }
+        attributes.extend(
+            attribute
+                .names
+                .iter()
+                .map(|name| (name.clone(), end.clone())),
+        );
+    }
+    attributes.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(attributes)
+}
+
+/// Sets the `expiresAt` member of every instance of `name`, when the record carries it.
+fn attribute_block(name: &str, end: &End) -> Result<String> {
+    let mut text = format!(
+        "    if this.exists({}) {{\n      let end = {}\n",
+        literal(name),
+        end_expression(end)?
+    );
     text.push_str(&format!(
+        "      if $end != null {{\n        let at = $end{FORMAT}\n        root.{name} = \
+         this.{name}.(a -> if a.type() == \"array\" {{ a.map_each(i -> if i.type() == \
+         \"object\" {{ i.assign({{\"expiresAt\": $at}}) }} else {{ i }}) }} else if a.type() \
+         == \"object\" {{ a.assign({{\"expiresAt\": $at}}) }} else {{ a }})\n      }}\n"
+    ));
+    if matches!(end, End::From { .. }) {
+        text.push_str(&format!(
+            "      if $end == null {{\n        root.{MARKER} = true\n      }}\n"
+        ));
+    }
+    text.push_str("    }\n");
+    Ok(text)
+}
+
+/// Applies the map to one entity or each of an array, sets the problem and drops the marker.
+fn tail() -> String {
+    format!(
         "}}\n\
          let jc_out = if this.type() == \"array\" {{ this.map_each(e -> if e.type() == \"object\" {{ e.apply(\"jc_lifetime\") }} else {{ e }}) }} else if this.type() == \"object\" {{ this.apply(\"jc_lifetime\") }} else {{ this }}\n\
          let jc_failed = if $jc_out.type() == \"array\" {{ $jc_out.any(e -> e.type() == \"object\" && e.{MARKER}.or(false) == true) }} else {{ $jc_out.type() == \"object\" && $jc_out.{MARKER}.or(false) == true }}\n\
          if $jc_failed {{\n  meta {PROBLEM_META} = {}\n}}\n\
          root = if $jc_out.type() == \"array\" {{ $jc_out.map_each(e -> if e.type() == \"object\" {{ e.without({MARKER:?}) }} else {{ e }}) }} else if $jc_out.type() == \"object\" {{ $jc_out.without({MARKER:?}) }} else {{ $jc_out }}\n",
         literal(PROBLEM_FROM)
-    ));
-    Ok(Some(text))
+    )
 }
 
 /// The end as unix seconds, or `null` when a `from` field gives no date-time.
