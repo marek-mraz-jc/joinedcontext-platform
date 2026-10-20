@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use jc_core::error::ProblemDetails;
 use jc_core::kinds::{QualityOutcome, QualityRule};
 use jc_core::quality::{mark, on_write, rejection, QUARANTINED_AT, QUARANTINE_RULES};
+use jc_core::system_members::{is_entity_system_member, INSTANT_MEMBERS};
 use jc_manifest::model_schema::{ModelSchema, Problem};
 use serde_json::{json, Map, Value};
 
@@ -199,18 +200,6 @@ const MEMBERS: [(&str, &str); 4] = [
     ("vocab", "VocabProperty"),
 ];
 
-/// An entity's own members, which are no attribute.
-const OWN: [&str; 8] = [
-    "id",
-    "@id",
-    "type",
-    "@type",
-    "@context",
-    "scope",
-    "createdAt",
-    "modifiedAt",
-];
-
 /// The refusal of a write that breaks a slot constraint of the space's model (DM-86).
 pub fn model_refusal(model: &str, problem: &Problem) -> ProblemDetails {
     let mut refused =
@@ -278,10 +267,12 @@ fn checked(
     // The first instance of each attribute is checked with the entity, the others alone.
     let mut first = Map::new();
     let mut others: Vec<(&str, Value)> = Vec::new();
-    for (name, value) in object
-        .iter()
-        .filter(|(name, _)| !OWN.contains(&name.as_str()))
-    {
+    // A system member is no attribute (DM-131); an instant among them is still held to its form.
+    for (name, value) in object.iter().filter(|(name, _)| own_form_checked(name)) {
+        if is_entity_system_member(name) {
+            first.insert(name.clone(), value.clone());
+            continue;
+        }
         let mut instances = match value {
             Value::Array(many) if !many.is_empty() && many.iter().all(is_instance) => {
                 many.iter().map(prepared).collect()
@@ -334,8 +325,14 @@ fn broken(
         .check(&normalized)
         .into_iter()
         .filter(|p| SLOT_CONSTRAINTS.contains(&p.rule.as_str()))
-        .filter(|p| !OWN.contains(&p.path.as_str()) && kept(&p.path))
+        .filter(|p| own_form_checked(&p.path) && kept(&p.path))
         .collect()
+}
+
+/// Whether a member of an entity is checked: an attribute, or a system member holding an instant
+/// (DM-131). The other system members are no attribute and never refused as one.
+fn own_form_checked(name: &str) -> bool {
+    !is_entity_system_member(name) || INSTANT_MEMBERS.contains(&name)
 }
 
 /// Whether an array member is an instance of a normalized attribute (one per `datasetId`)

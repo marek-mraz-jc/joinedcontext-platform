@@ -32,6 +32,7 @@ pub mod query_card;
 pub mod reach;
 pub mod registry;
 pub mod secret;
+pub mod system_members;
 pub mod units;
 pub mod urn;
 
