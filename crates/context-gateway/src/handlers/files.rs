@@ -45,7 +45,8 @@ pub(crate) async fn file_csv(
     };
     let params = query::parse(request.uri().query().unwrap_or_default());
     let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
-    let (entities, restricted) = match paged_entities(
+    // The table is built page by page as the broker answers (T-4782).
+    let (mut table, restricted) = match paged_entities(
         &gateway,
         &endpoint,
         &subject,
@@ -58,14 +59,6 @@ pub(crate) async fn file_csv(
         Ok(answer) => answer,
         Err(problem) => return *problem,
     };
-
-    let mut table = match tabular::table(&entities, &limits) {
-        Ok(table) => table,
-        Err(_) => return too_large(),
-    };
-    // The table owns its cells now; the broker's answer would only double what is held
-    // while the file is written (T-4107).
-    drop(entities);
     if query::first(&params, "humanHeaders") == Some("true") {
         tabular::humanize(&mut table);
     }

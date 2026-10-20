@@ -10,6 +10,12 @@ use context_gateway::store;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// jemalloc, not glibc's malloc (T-4782): after a 100 req/s load glibc kept 928 Mi of the 1 Gi
+/// limit, the freed blocks of the broker answers spread over its heap. The image's
+/// `_RJEM_MALLOC_CONF` starts jemalloc's background thread, which gives them back.
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 /// The one outbound client: the broker hop (R46).
 fn broker_of(config: &Config) -> Result<Broker, String> {
     let Some(path) = config.egress_ca_bundle.as_ref() else {
