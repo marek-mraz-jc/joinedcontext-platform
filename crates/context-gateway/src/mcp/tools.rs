@@ -406,7 +406,7 @@ fn grammar(name: &str) -> Option<&'static str> {
         "lastN" => "Keep the newest N instances of each attribute; the broker's default when absent, at most its maximum",
         "aggrMethods" => "Comma-separated: avg, min, max, sum, totalCount, distinctCount, stddev, sumsq",
         "aggrPeriodDuration" => "ISO 8601 duration of each aggregation period, e.g. PT1H or P1D",
-        "limit" => "Entities per page; the broker's default when absent, at most its maximum",
+        "limit" => "Entities per page",
         "count" => "true answers the total number of matches",
         _ => return None,
     })

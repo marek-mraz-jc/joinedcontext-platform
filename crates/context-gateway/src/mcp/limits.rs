@@ -156,7 +156,7 @@ pub async fn follow(broker: Broker) {
 pub fn note(tool: &str, limits: Limits) -> Option<String> {
     let entities = || {
         format!(
-            "Default {} Entities per call, maximum {} (limit); more pages with nextCursor.",
+            "Default {} Entities per call, maximum {} (limit).",
             thousands(limits.default_limit),
             thousands(limits.max_limit)
         )
@@ -217,9 +217,7 @@ mod tests {
         let l = Limits::default();
         assert_eq!(
             note("query_entities", l).as_deref(),
-            Some(
-                "Default 100 Entities per call, maximum 1,000 (limit); more pages with nextCursor."
-            )
+            Some("Default 100 Entities per call, maximum 1,000 (limit).")
         );
         assert_eq!(
             note("retrieve_temporal", l).as_deref(),

@@ -171,6 +171,8 @@ async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     // directories also require (T-4732), adds 198: 14,438. get_endpoint's `detail` and `type`
     // (T-4748), which keep its default answer short instead of every attribute of every type,
     // add 104: 14,542, so the ceiling is 14,600, and it only comes down.
+    // query_entities' limit default and maximum (T-4804), in its schema and one note sentence
+    // that no longer repeats the cursor's nextCursor, add 57: 14,599 (T-4812).
     assert!(sizes[0] < 14_600, "{sizes:?}");
 }
 
