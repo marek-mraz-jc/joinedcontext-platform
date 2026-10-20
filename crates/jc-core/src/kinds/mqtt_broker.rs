@@ -233,33 +233,7 @@ impl MqttBrokerSpec {
             for filter in &role.publish {
                 check_filter("roles[].publish", filter)?;
             }
-            if !role.subscribe.is_empty() && self.mode != Some(MqttMode::Relay) {
-                let reason = match self.mode {
-                    None => format!(
-                        "role `{}` lets devices subscribe, which only a relay broker allows: set \
-                         spec.mode: relay (ADR-N-048 §2.10)",
-                        role.name
-                    ),
-                    Some(mode) => format!(
-                        "role `{}` lets devices subscribe, and in {} mode devices get no \
-                         subscribe right; use spec.mode: relay",
-                        role.name,
-                        mode.word()
-                    ),
-                };
-                return Err(invalid("roles[].subscribe", reason));
-            }
-            for filter in &role.subscribe {
-                check_filter("roles[].subscribe", filter)?;
-                if !under_client_id(filter) {
-                    return Err(invalid(
-                        "roles[].subscribe",
-                        format!(
-                            "`{filter}` reaches beyond the client's own topics: a device subscribes only under {CLIENT_ID}, with no wildcard before it"
-                        ),
-                    ));
-                }
-            }
+            self.check_subscribe(role)?;
         }
         let limits = [
             (
@@ -287,31 +261,7 @@ impl MqttBrokerSpec {
             }
         }
         if let Some(capture) = &self.capture {
-            if self.mode != Some(MqttMode::Capture) {
-                return Err(invalid(
-                    "capture",
-                    "is read only by a broker with spec.mode: capture".into(),
-                ));
-            }
-            if capture.messages_per_topic == 0 || capture.messages_per_topic > MAX_CAPTURE_MESSAGES
-            {
-                return Err(invalid(
-                    "capture.messagesPerTopic",
-                    format!(
-                        "{} is outside 1…{MAX_CAPTURE_MESSAGES}",
-                        capture.messages_per_topic
-                    ),
-                ));
-            }
-            if !capture
-                .window_seconds()
-                .is_some_and(|seconds| (1..=MAX_CAPTURE_SECONDS).contains(&seconds))
-            {
-                return Err(invalid(
-                    "capture.window",
-                    format!("`{}` is not a duration from PT1S to PT24H", capture.window),
-                ));
-            }
+            self.check_capture(capture)?;
         }
         if let Some(port) = self.port {
             if !DEDICATED_PORTS.contains(&port) {
@@ -324,6 +274,67 @@ impl MqttBrokerSpec {
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// A device subscribes only on a relay broker, and only under its own `${clientid}`.
+    fn check_subscribe(&self, role: &MqttRole) -> Result<()> {
+        if !role.subscribe.is_empty() && self.mode != Some(MqttMode::Relay) {
+            let reason = match self.mode {
+                None => format!(
+                    "role `{}` lets devices subscribe, which only a relay broker allows: set \
+                     spec.mode: relay (ADR-N-048 §2.10)",
+                    role.name
+                ),
+                Some(mode) => format!(
+                    "role `{}` lets devices subscribe, and in {} mode devices get no \
+                     subscribe right; use spec.mode: relay",
+                    role.name,
+                    mode.word()
+                ),
+            };
+            return Err(invalid("roles[].subscribe", reason));
+        }
+        for filter in &role.subscribe {
+            check_filter("roles[].subscribe", filter)?;
+            if !under_client_id(filter) {
+                return Err(invalid(
+                    "roles[].subscribe",
+                    format!(
+                        "`{filter}` reaches beyond the client's own topics: a device subscribes only under {CLIENT_ID}, with no wildcard before it"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `spec.capture` of a capture broker, within its bounds.
+    fn check_capture(&self, capture: &MqttCapture) -> Result<()> {
+        if self.mode != Some(MqttMode::Capture) {
+            return Err(invalid(
+                "capture",
+                "is read only by a broker with spec.mode: capture".into(),
+            ));
+        }
+        if capture.messages_per_topic == 0 || capture.messages_per_topic > MAX_CAPTURE_MESSAGES {
+            return Err(invalid(
+                "capture.messagesPerTopic",
+                format!(
+                    "{} is outside 1…{MAX_CAPTURE_MESSAGES}",
+                    capture.messages_per_topic
+                ),
+            ));
+        }
+        if !capture
+            .window_seconds()
+            .is_some_and(|seconds| (1..=MAX_CAPTURE_SECONDS).contains(&seconds))
+        {
+            return Err(invalid(
+                "capture.window",
+                format!("`{}` is not a duration from PT1S to PT24H", capture.window),
+            ));
         }
         Ok(())
     }
