@@ -192,7 +192,14 @@ pub(crate) fn anonymous_bounds(
             "`{name}` without a token reads at most {ANONYMOUS_WINDOW_DAYS} days between timeAt and endTimeAt"
         ));
     }
+    // A window over a day that asks neither raw values (`format`) nor its own aggregation
+    // answers the broker's hourly or daily averages (T-4800), periods the PT1H floor below
+    // allows; every other read keeps the newest 100 instances.
+    let averaged = window > chrono::Duration::days(1)
+        && !arguments.contains_key("format")
+        && !arguments.contains_key("aggrMethods");
     match arguments.get("lastN") {
+        None if averaged => {}
         None => {
             arguments.insert("lastN".to_owned(), Value::from(ANONYMOUS_LAST_N));
         }
@@ -878,7 +885,7 @@ pub(crate) const TOOLS: &[Tool] = &[
     broker(
         "query_temporal",
         &[Operation::QueryTemporal],
-        "Query the history of Entities (TS 104 175 11.3.3) between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances.",
+        "Query the history of Entities (TS 104 175 11.3.3) between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
         TEMPORAL_QUERY,
         "entities",
     ),
@@ -899,7 +906,7 @@ pub(crate) const TOOLS: &[Tool] = &[
     broker(
         "retrieve_temporal",
         &[Operation::RetrieveTemporal],
-        "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances.",
+        "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
         TEMPORAL_ONE,
         "entity",
     ),
