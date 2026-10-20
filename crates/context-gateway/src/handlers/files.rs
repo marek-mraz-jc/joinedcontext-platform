@@ -37,6 +37,12 @@ pub(crate) async fn file_csv(
         Err(problem) => return *problem,
     };
 
+    // Admitted first, so a refused caller learns nothing from a 503 (T-4782).
+    let Some(_slot) = gateway.in_flight.download() else {
+        return crate::middleware::in_flight::busy(
+            "the gateway builds as many downloads as it may at once",
+        );
+    };
     let params = query::parse(request.uri().query().unwrap_or_default());
     let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
     let (entities, restricted) = match paged_entities(
