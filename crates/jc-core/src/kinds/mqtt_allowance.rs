@@ -186,12 +186,16 @@ impl MqttAllowance {
     }
 
     /// Why `spec` may not join a project whose other brokers use `used`, or `None` when it fits
-    /// what is left. The sentence names the limit, its value, the usage and who can raise it.
+    /// what is left. `previous` is the broker's committed spec on an edit: an edit is never
+    /// refused for the count, nor for a sum it does not raise, so a project over a lowered
+    /// allowance can still fix a broker (PF-100). The sentence names the limit, its value, the
+    /// usage and who can raise it (PF-101).
     pub fn refusal(
         &self,
         project: &str,
         used: &MqttUsage,
         spec: &MqttBrokerSpec,
+        previous: Option<&MqttBrokerSpec>,
     ) -> Option<String> {
         let raise = raise(project);
         if !self.enabled {
@@ -201,7 +205,7 @@ impl MqttAllowance {
             ));
         }
         let brokers = self.limit("brokers");
-        if used.brokers + 1 > brokers {
+        if previous.is_none() && used.brokers + 1 > brokers {
             return Some(format!(
                 "the project may run {brokers} MQTT brokers ({} in use); {raise} (PF-118)",
                 used.brokers
@@ -213,17 +217,19 @@ impl MqttAllowance {
                 "spec.limits.maxConnections",
                 used.connections,
                 u64::from(spec.limits.max_connections),
+                previous.map(|p| u64::from(p.limits.max_connections)),
             ),
             (
                 "messagesPerSecond",
                 "maxConnections × messagesPerSecond",
                 used.messages_per_second,
                 rate(spec),
+                previous.map(rate),
             ),
         ];
-        for (field, what, in_use, asked) in sums {
+        for (field, what, in_use, asked, before) in sums {
             let limit = self.limit(field);
-            if in_use + asked > u64::from(limit) {
+            if before.is_none_or(|before| asked > before) && in_use + asked > u64::from(limit) {
                 return Some(format!(
                     "{what} of this broker is {asked}, and the project may hold {limit} MQTT \
                      {field} in all ({in_use} in use, {} left); {raise} (PF-118)",
@@ -313,7 +319,9 @@ mod tests {
     }
 
     fn refused(allowance: &MqttAllowance, used: &MqttUsage, spec: &MqttBrokerSpec) -> String {
-        allowance.refusal("helsinki", used, spec).expect("refused")
+        allowance
+            .refusal("helsinki", used, spec, None)
+            .expect("refused")
     }
 
     #[test]
@@ -337,7 +345,7 @@ mod tests {
         assert_eq!(allowance.limit("maxMessageBytes"), 65536);
         assert_eq!(allowance.modes(), vec![MqttMode::Ingest]);
         assert_eq!(
-            allowance.refusal("helsinki", &MqttUsage::default(), &broker(100, 10)),
+            allowance.refusal("helsinki", &MqttUsage::default(), &broker(100, 10), None),
             None
         );
     }
@@ -352,7 +360,10 @@ mod tests {
         };
         let mut used = MqttUsage::default();
         used.add(&broker(10, 1));
-        assert_eq!(allowance.refusal("helsinki", &used, &broker(10, 1)), None);
+        assert_eq!(
+            allowance.refusal("helsinki", &used, &broker(10, 1), None),
+            None
+        );
         used.add(&broker(10, 1));
         let message = refused(&allowance, &used, &broker(10, 1));
         assert!(
@@ -383,6 +394,26 @@ mod tests {
         let rate = refused(&allowance, &used, &broker(500, 30));
         assert!(rate.contains("messagesPerSecond"), "{rate}");
         assert!(rate.contains("10000 in use, 10000 left"), "{rate}");
+        // An edit that raises nothing passes in a project over a lowered allowance; one that
+        // raises a sum past it does not, and an edit is never refused for the count.
+        let held = broker(1000, 10);
+        let mut over = used;
+        over.add(&held);
+        assert_eq!(
+            allowance.refusal("helsinki", &over, &broker(900, 10), Some(&held)),
+            None
+        );
+        assert!(allowance
+            .refusal("helsinki", &over, &broker(1001, 10), Some(&held))
+            .is_some_and(|m| m.contains("connections")));
+        let full = MqttAllowance {
+            brokers: Some(1),
+            ..allowance
+        };
+        assert_eq!(
+            full.refusal("helsinki", &used, &broker(10, 1), Some(&held)),
+            None
+        );
     }
 
     #[test]
@@ -410,7 +441,7 @@ mod tests {
             ..assigned
         };
         assert_eq!(
-            both.refusal("helsinki", &MqttUsage::default(), &ported),
+            both.refusal("helsinki", &MqttUsage::default(), &ported, None),
             None
         );
         assert!(refused(&both, &MqttUsage::default(), &broker(10, 1)).contains("platform address"));
