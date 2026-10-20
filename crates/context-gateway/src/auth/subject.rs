@@ -249,6 +249,7 @@ pub(crate) fn subject_of(
             return Ok(Subject {
                 user: None,
                 service_account: Some(account.name.clone()),
+                service_account_project: Some(account.project.clone()),
                 roles: roles_on(
                     endpoint.audience,
                     account.roles_in(&account.project, &endpoint.space),
@@ -294,6 +295,7 @@ pub(crate) fn subject_of(
     Ok(Subject {
         user: Some(user),
         service_account: None,
+        service_account_project: None,
         roles: roles_on(endpoint.audience, claims.roles().iter().cloned()),
         groups,
         did: None,
