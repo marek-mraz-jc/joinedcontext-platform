@@ -21,8 +21,9 @@ use tower::ServiceExt;
 const SLUG: &str = "k7r2m4xq9vbn3tdw6hcy5pajfe";
 const SPACE: &str = "ovzdusie";
 const DOMAIN: &str = "banskabystrica.sk";
-const SLOW_AFTER: Duration = Duration::from_millis(100);
-const DEADLINE: Duration = Duration::from_millis(600);
+// The deployed timings: the gateway takes no other (a test-only knob is dead code, T-4903).
+const SLOW_AFTER: Duration = context_gateway::middleware::in_flight::SLOW_AFTER;
+const DEADLINE: Duration = context_gateway::middleware::in_flight::READ_DEADLINE;
 
 /// Counts the broker calls in progress; one comes off when its handler is dropped, answered or not.
 struct Live(Arc<AtomicUsize>);
@@ -115,7 +116,6 @@ fn gateway(url: &str, total: usize, per_caller: usize) -> Router {
     router(Arc::new(
         Gateway::new(Broker::new(url.to_owned()), Box::new(PolicyPdp), DOMAIN)
             .limit_in_flight(total, per_caller, 1)
-            .time_reads(SLOW_AFTER, DEADLINE)
             .serve([endpoint()]),
     ))
 }
@@ -176,7 +176,7 @@ async fn slow_reads_weigh_more_and_leave_room_for_another_callers_quick_read() {
     let slow: Vec<_> = (0..3)
         .map(|_| tokio::spawn(app.clone().oneshot(read("Slow", "192.0.2.1"))))
         .collect();
-    tokio::time::sleep(SLOW_AFTER * 2).await;
+    tokio::time::sleep(SLOW_AFTER + Duration::from_millis(500)).await;
 
     // Two slow reads weigh 8: the caller's own quick read no longer fits its share.
     let (retry, _) = problem(

@@ -116,12 +116,6 @@ impl InFlight {
         }
     }
 
-    /// A read counts as slow after `slow_after` and is ended at `deadline`.
-    pub(crate) fn time_reads(&mut self, slow_after: Duration, deadline: Duration) {
-        self.slow_after = slow_after;
-        self.deadline = deadline.max(slow_after);
-    }
-
     /// A slot for one `file.csv` download, or `None` while every slot is taken.
     pub(crate) fn download(&self) -> Option<OwnedSemaphorePermit> {
         Arc::clone(&self.downloads).try_acquire_owned().ok()
@@ -300,9 +294,11 @@ mod tests {
     }
 
     fn timed(total: usize, per_caller: usize) -> InFlight {
-        let mut gate = InFlight::new(total, per_caller, 1);
-        gate.time_reads(Duration::from_millis(20), Duration::from_millis(80));
-        gate
+        InFlight {
+            slow_after: Duration::from_millis(20),
+            deadline: Duration::from_millis(80),
+            ..InFlight::new(total, per_caller, 1)
+        }
     }
 
     #[test]

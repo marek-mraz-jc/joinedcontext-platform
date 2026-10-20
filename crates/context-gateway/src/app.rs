@@ -223,18 +223,6 @@ impl Gateway {
         self
     }
 
-    /// A plain read counts as slow after `slow_after` and is ended at `deadline` (T-4903; the
-    /// defaults are [`in_flight::SLOW_AFTER`] and [`in_flight::READ_DEADLINE`]). After
-    /// [`Self::limit_in_flight`], which starts from the defaults.
-    pub fn time_reads(
-        mut self,
-        slow_after: std::time::Duration,
-        deadline: std::time::Duration,
-    ) -> Self {
-        self.in_flight.time_reads(slow_after, deadline);
-        self
-    }
-
     /// Holds at most `mib` MiB of write bodies at once (T-4077).
     pub fn budget_writes(mut self, mib: usize) -> Self {
         let kib = u32::try_from(mib.saturating_mul(1024))
