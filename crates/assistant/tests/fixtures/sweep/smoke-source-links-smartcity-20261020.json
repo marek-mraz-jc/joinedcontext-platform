@@ -1,0 +1,2281 @@
+{
+ "owners": {
+  "25duckdheaxinjjsl3ehqnue2cu2opgu": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo"
+  ],
+  "3iasem46w7d7pxxypwdfdzheyaodv3qn": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-pocasie"
+  ],
+  "3kryfkyvvhbybpeibizyqipzjrvb2kbp": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-sk"
+  ],
+  "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia"
+  ],
+  "3uyv6absozuxhrxvgfdsxybid3xmr7vg": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-do"
+  ],
+  "43cfrkftlkcsjfbf3kfhabvuukywv7ft": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-so"
+  ],
+  "4m5qe2n5rchxoj5lcrufykp6qn4ordx6": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz-zdravie"
+  ],
+  "4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-parkoviste-pr"
+  ],
+  "4vo4ysgzhr7hgprui63cybmiha55flbm": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp-priemysel"
+  ],
+  "4ysiqy53qik5qyvawwaj7wgylpt4uoxa": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bb-zasadnutia-organov-samospravy",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bb-objednavky-bb",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bb-dotacie",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bb-dtm-bb-register-statickej-dopravy"
+  ],
+  "5kcqu4qq5b4ejd3dvfu27svfpm7kd67u": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/zilina-zeleznicne-stanice"
+  ],
+  "5xmxkf2b5lxznfcy2akxevmbagdx6arc": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr"
+  ],
+  "6b4yqhzqieutqcoeew5rnxrx5udqeert": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-vysoke-skoly-v-banskobystrickom-kraji-b0be47",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-stredne-skoly-v-banskobystrickom-kraji-581554",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-lekarni-v-bbk-c564de",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-uradne-hodiny-c912ed",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-clenovia-samospravy-efc2f3",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zakladne-skoly-v-banskobystrickom-kraji-13a8b6",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-podjazdy-v-banskobystrickom-kraji-public-view-e6fb8f",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-priepusty-v-banskobystrickom-kraji-public-view-a9ed8e",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-zdravotnickych-zariadeni-v-bbk-701db2",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zeleznicne-priecestia-v-banskobystrickom-kraji-public-view-89feb8",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-cykloscitace-miesta-6e967d",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kulturne-institucie-bbsk-a-ich-pobocky-2f9362",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-materske-skoly-v-banskobystrickom-kraji-3f7d07",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kontaktne-miesta-2128a0",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-nehodovost-v-bbk-0ea72d",
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-ekologicky-stav-vodnych-utvarov-48bbbd"
+  ],
+  "6icyuts7sj2fvg53hcgrq4s7nw5qs2jo": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz"
+  ],
+  "6wrymzu5x2uwjo2xqei66ppw53mafvbu": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-weather"
+  ],
+  "a3q6ndocu5mge5dnitjrti3qomn3vy4l": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-do-preprava"
+  ],
+  "ajaezssvx3bwqgejgepmq4ig3frgan4e": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport"
+  ],
+  "bkc4g3zfirh6zae3owdike7am2upayjs": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly"
+  ],
+  "c223begxsfspzmdaq5ij4aayw6vyucjl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-kataster"
+  ],
+  "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-hranice"
+  ],
+  "dhiw4735mzyvwkrmszljpxcvvgv32q33": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-alerts"
+  ],
+  "e6sryswazw3lcgip7tngpeoampsoai6z": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-trideny-odpad"
+  ],
+  "eicsvjehoiwoykalzmpqqp6hakoj426t": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-zd"
+  ],
+  "enulf35isjc5bnobvepmamp75sm3ii24": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr"
+  ],
+  "fe7jcjxr3io6qswlcemuetb4wjp6wqrz": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ku"
+  ],
+  "fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-om"
+  ],
+  "g3jcsy27jw4zqctgo67khc7irh2z7pgs": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-mestske-casti"
+  ],
+  "gwxmhyqit2dvveu4kkhi3w7nqjunjo3p": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt"
+  ],
+  "gx2knuus75alkjgc24kjz7llte6q5jkk": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-events"
+  ],
+  "h3yeindeacruy57l6c25pxcykq3zjubw": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp"
+  ],
+  "jquhkkvh3ukkok6zm7j3vyahd4zohwj3": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ts"
+  ],
+  "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia"
+  ],
+  "l4bwpgiadi4f3pztzujbczanuliwbton": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ob"
+  ],
+  "l7q5rbcjcqwn6xyo5q5gocjphsfdfib2": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp"
+  ],
+  "lk4xgzahvxywq2cwdblfxpsqarby2wmk": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps"
+  ],
+  "lmobgyt3nmvjty46tug2hrpswqy7w3qv": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu"
+  ],
+  "mluyob4nz52lok3ssk7pgn5vwt": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/public-air"
+  ],
+  "mmio3jkuh5e2naw2f4kwss7adgtqo2n7": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm-ceny"
+  ],
+  "muwmdpwigo7paq3gpy7hrwe7ou35lmaa": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-ovzdusi"
+  ],
+  "nkojudgn32ub5upzjuu74xm52svhtwpy": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-organizacie"
+  ],
+  "nr6udfzsnvaejtnochjpkssfxidm55tn": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-st"
+  ],
+  "om2xospuff5uotaib5vqnkiuv3lne4w2": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-rozpocet"
+  ],
+  "omto6qk5sfn5ft7zl5pdiaxunj2ljnae": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty"
+  ],
+  "ookuklgyy6dtlpgrhnaxexb5fgjj4pqy": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr-mzdy"
+  ],
+  "os4quyrmvhijr3x7x4fno2jicej4ifv5": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/zilina-uniza"
+  ],
+  "p3ibd2fuzpslybehopzpqsaysbgummui": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-og"
+  ],
+  "p5d4v5vgbbvyfdhkgsroy3qbzmspzxks": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-as"
+  ],
+  "paa3ylcfieyt2nbmgceqyy3ggzxds7zz": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-od"
+  ],
+  "plgaltgaom2rbfbpsnc7xn7ifoamabun": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-nabijanie"
+  ],
+  "ptj22i44igzp4z3qxsvnunoh2gfg2yjb": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-om-pohyb"
+  ],
+  "q5zciruevofcmaeyvu7mu4k4vzzevnpb": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm"
+  ],
+  "qczxsxskvcj6rst2t4h6ervanln7oppy": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr-navstevnici"
+  ],
+  "qfhhh5no5wz4lk3rfjisdtx3chiyfig3": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kpi"
+  ],
+  "qq5gbaotcygufhkofnzc3qomj6qxolf3": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ik"
+  ],
+  "r5mfjjjicyioozmhbhduy6e2tjcd3boq": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-np"
+  ],
+  "rhnhewwotdngtrsb7gnzpj63ysnkutwl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/zilina-ovzdusie"
+  ],
+  "ricvfpfxtaxeyzf5c3b3es7ymc6unh3o": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/zilina-kpi"
+  ],
+  "rj2fmnzih5dzigixvsnbmz6ecf7zhcbn": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo-kapitoly"
+  ],
+  "rjktf6sxt7mdqgdc3cvyf56ezh6if6kh": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-public-area-permits"
+  ],
+  "rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ra"
+  ],
+  "rrilrawsqy54mdbpjnfljwcamepekkoh": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp"
+  ],
+  "s3luopgog5nkxcpykwxdvhw22iis5n7e": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-districts"
+  ],
+  "scsd2eehkx42n53z2zyd6vshfh7s7irf": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-bikes"
+  ],
+  "ssyq2yewnyqs4rypdmghumswi3haak3t": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-st-povolenia"
+  ],
+  "stydygk2di4litxfhy5zo3m3ejqgbk7p": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt-pracovnici"
+  ],
+  "t2vph7knk35vyjoxzqwhjldnls6nhcmj": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-news"
+  ],
+  "tq7eq5ksj73yxjs4evznjsyzm733ahkt": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps-vydavky"
+  ],
+  "tzlxpcxtrf3gmjmmlbfpyasncrfscuvs": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp-jadrova"
+  ],
+  "uollbyawh4uo2o73wvlot4u7dmkacu6q": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-en"
+  ],
+  "vbcinyfdvxajvzifutmvdjyz37wehhju": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp-emisie"
+  ],
+  "vx42gnf6fksxmc53pb2hsbbp3glxtlul": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-vh"
+  ],
+  "w3stbpbmvssqvu4upe4kgvvgdjl5ohvx": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-zdravie"
+  ],
+  "w5vgo2mi6phigetdq3pvvcjgznw73hji": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-beach-water"
+  ],
+  "wtvuppkop6y3qv7bnvzqwifv4uts4e2k": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/ovzdusie-sk"
+  ],
+  "x6d6jph5t3tib5vr53kmiz2l5n3u3tnu": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-parking"
+  ],
+  "xe336h6hvltlyatay2dxc4cyncl77mzk": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu-odvetvia"
+  ],
+  "xfstyj3wts2bjaho4fkzhbl3v5l7xgfy": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-pl"
+  ],
+  "xutej6p46cqde27cjvjbysv6yhtamfnd": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/susr-sv"
+  ],
+  "y5un365itcxfgdme2muhk7dweef43ydl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-mista"
+  ],
+  "yl5ifsuftssvaghx2ke4atgvuxx4zonl": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/zilina-pamiatky"
+  ],
+  "yw7epl4ai3dujdj4itt4uwvhwcz6tib2": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/praha-sdilena-kola"
+  ],
+  "zq6avaaqv3d7ma2avz7rvkwtxelaxkc4": [
+   "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-places"
+  ]
+ },
+ "pages": [
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/c223begxsfspzmdaq5ij4aayw6vyucjl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/c223begxsfspzmdaq5ij4aayw6vyucjl/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/c223begxsfspzmdaq5ij4aayw6vyucjl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-kataster"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/plgaltgaom2rbfbpsnc7xn7ifoamabun/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/plgaltgaom2rbfbpsnc7xn7ifoamabun/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/plgaltgaom2rbfbpsnc7xn7ifoamabun/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-nabijanie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/3iasem46w7d7pxxypwdfdzheyaodv3qn/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3iasem46w7d7pxxypwdfdzheyaodv3qn/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3iasem46w7d7pxxypwdfdzheyaodv3qn/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-pocasie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/bkc4g3zfirh6zae3owdike7am2upayjs/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/bkc4g3zfirh6zae3owdike7am2upayjs/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/bkc4g3zfirh6zae3owdike7am2upayjs/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/w3stbpbmvssqvu4upe4kgvvgdjl5ohvx/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/w3stbpbmvssqvu4upe4kgvvgdjl5ohvx/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/w3stbpbmvssqvu4upe4kgvvgdjl5ohvx/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-zdravie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4ysiqy53qik5qyvawwaj7wgylpt4uoxa/odata/v4/Grant",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bb-dotacie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4ysiqy53qik5qyvawwaj7wgylpt4uoxa/odata/v4/OffStreetParking",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bb-dtm-bb-register-statickej-dopravy"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4ysiqy53qik5qyvawwaj7wgylpt4uoxa/odata/v4/PurchaseOrder",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bb-objednavky-bb"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4ysiqy53qik5qyvawwaj7wgylpt4uoxa/odata/v4/CouncilMeeting",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bb-zasadnutia-organov-samospravy"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/Person",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-clenovia-samospravy-efc2f3"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-cykloscitace-miesta-6e967d%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/PointOfInterest?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-cykloscitace-miesta-6e967d%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-cykloscitace-miesta-6e967d"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=WaterBodyStatus&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-ekologicky-stav-vodnych-utvarov-48bbbd%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/WaterBodyStatus?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-ekologicky-stav-vodnych-utvarov-48bbbd%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-ekologicky-stav-vodnych-utvarov-48bbbd"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/cx5p4ldnpyf2vzn6sjt4vjiykd3734t6/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/cx5p4ldnpyf2vzn6sjt4vjiykd3734t6/ngsi-ld/v1/entities?type=AdministrativeArea&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/cx5p4ldnpyf2vzn6sjt4vjiykd3734t6/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-hranice"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-kontaktne-miesta-2128a0%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/PointOfInterest?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-kontaktne-miesta-2128a0%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kontaktne-miesta-2128a0"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/qfhhh5no5wz4lk3rfjisdtx3chiyfig3/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/qfhhh5no5wz4lk3rfjisdtx3chiyfig3/ngsi-ld/v1/entities?type=KeyPerformanceIndicator&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/qfhhh5no5wz4lk3rfjisdtx3chiyfig3/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kpi"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-kulturne-institucie-bbsk-a-ich-pobocky-2f9362%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/PointOfInterest?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-kulturne-institucie-bbsk-a-ich-pobocky-2f9362%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kulturne-institucie-bbsk-a-ich-pobocky-2f9362"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=Organization&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-materske-skoly-v-banskobystrickom-kraji-3f7d07%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/Organization?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-materske-skoly-v-banskobystrickom-kraji-3f7d07%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-materske-skoly-v-banskobystrickom-kraji-3f7d07"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/omto6qk5sfn5ft7zl5pdiaxunj2ljnae/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/omto6qk5sfn5ft7zl5pdiaxunj2ljnae/ngsi-ld/v1/entities?type=AdministrativeArea&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/omto6qk5sfn5ft7zl5pdiaxunj2ljnae/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=RoadAccident&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-nehodovost-v-bbk-0ea72d%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/RoadAccident?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-nehodovost-v-bbk-0ea72d%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-nehodovost-v-bbk-0ea72d"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/nkojudgn32ub5upzjuu74xm52svhtwpy/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/nkojudgn32ub5upzjuu74xm52svhtwpy/ngsi-ld/v1/entities?type=AdministrativeArea&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/nkojudgn32ub5upzjuu74xm52svhtwpy/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-organizacie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=RoadStructure&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-podjazdy-v-banskobystrickom-kraji-public-view-e6fb8f%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/RoadStructure?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-podjazdy-v-banskobystrickom-kraji-public-view-e6fb8f%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-podjazdy-v-banskobystrickom-kraji-public-view-e6fb8f"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=RoadStructure&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-priepusty-v-banskobystrickom-kraji-public-view-a9ed8e%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/RoadStructure?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-priepusty-v-banskobystrickom-kraji-public-view-a9ed8e%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-priepusty-v-banskobystrickom-kraji-public-view-a9ed8e"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=Organization&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-stredne-skoly-v-banskobystrickom-kraji-581554%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/Organization?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-stredne-skoly-v-banskobystrickom-kraji-581554%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-stredne-skoly-v-banskobystrickom-kraji-581554"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/OfficeHours",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-uradne-hodiny-c912ed"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=Organization&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-vysoke-skoly-v-banskobystrickom-kraji-b0be47%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/Organization?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-vysoke-skoly-v-banskobystrickom-kraji-b0be47%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-vysoke-skoly-v-banskobystrickom-kraji-b0be47"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=Organization&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zakladne-skoly-v-banskobystrickom-kraji-13a8b6%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/Organization?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zakladne-skoly-v-banskobystrickom-kraji-13a8b6%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zakladne-skoly-v-banskobystrickom-kraji-13a8b6"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl/ngsi-ld/v1/entities?type=AdministrativeArea&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=RoadStructure&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zeleznicne-priecestia-v-banskobystrickom-kraji-public-view-89feb8%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/RoadStructure?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zeleznicne-priecestia-v-banskobystrickom-kraji-public-view-89feb8%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zeleznicne-priecestia-v-banskobystrickom-kraji-public-view-89feb8"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zoznam-lekarni-v-bbk-c564de%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/PointOfInterest?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zoznam-lekarni-v-bbk-c564de%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-lekarni-v-bbk-c564de"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zoznam-zdravotnickych-zariadeni-v-bbk-701db2%22\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6b4yqhzqieutqcoeew5rnxrx5udqeert/odata/v4/PointOfInterest?%24filter=isPartOf%20eq%20%27https%3A%2F%2Fopendata.smartcity.joinedcontext.com%2Fdataset%2Fbbsk-zoznam-zdravotnickych-zariadeni-v-bbk-701db2%27",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-zdravotnickych-zariadeni-v-bbk-701db2"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/dhiw4735mzyvwkrmszljpxcvvgv32q33/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/dhiw4735mzyvwkrmszljpxcvvgv32q33/ngsi-ld/v1/entities?type=Alert&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/dhiw4735mzyvwkrmszljpxcvvgv32q33/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-alerts"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/w5vgo2mi6phigetdq3pvvcjgznw73hji/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/w5vgo2mi6phigetdq3pvvcjgznw73hji/ngsi-ld/v1/entities?type=WaterQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/w5vgo2mi6phigetdq3pvvcjgznw73hji/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-beach-water"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/scsd2eehkx42n53z2zyd6vshfh7s7irf/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/scsd2eehkx42n53z2zyd6vshfh7s7irf/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/scsd2eehkx42n53z2zyd6vshfh7s7irf/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-bikes"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/s3luopgog5nkxcpykwxdvhw22iis5n7e/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/s3luopgog5nkxcpykwxdvhw22iis5n7e/ngsi-ld/v1/entities?type=AdministrativeArea&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/s3luopgog5nkxcpykwxdvhw22iis5n7e/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-districts"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/gx2knuus75alkjgc24kjz7llte6q5jkk/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/gx2knuus75alkjgc24kjz7llte6q5jkk/ngsi-ld/v1/entities?type=Event&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/gx2knuus75alkjgc24kjz7llte6q5jkk/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-events"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/t2vph7knk35vyjoxzqwhjldnls6nhcmj/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/t2vph7knk35vyjoxzqwhjldnls6nhcmj/ngsi-ld/v1/entities?type=Article&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/t2vph7knk35vyjoxzqwhjldnls6nhcmj/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-news"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/x6d6jph5t3tib5vr53kmiz2l5n3u3tnu/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/x6d6jph5t3tib5vr53kmiz2l5n3u3tnu/ngsi-ld/v1/entities?type=OnStreetParking&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/x6d6jph5t3tib5vr53kmiz2l5n3u3tnu/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-parking"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/zq6avaaqv3d7ma2avz7rvkwtxelaxkc4/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/zq6avaaqv3d7ma2avz7rvkwtxelaxkc4/ngsi-ld/v1/entities?type=PointOfInterest&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/zq6avaaqv3d7ma2avz7rvkwtxelaxkc4/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-places"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/rjktf6sxt7mdqgdc3cvyf56ezh6if6kh/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rjktf6sxt7mdqgdc3cvyf56ezh6if6kh/ngsi-ld/v1/entities?type=CityWork&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rjktf6sxt7mdqgdc3cvyf56ezh6if6kh/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-public-area-permits"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/ajaezssvx3bwqgejgepmq4ig3frgan4e/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ajaezssvx3bwqgejgepmq4ig3frgan4e/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6wrymzu5x2uwjo2xqei66ppw53mafvbu/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6wrymzu5x2uwjo2xqei66ppw53mafvbu/ngsi-ld/v1/entities?type=WeatherObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6wrymzu5x2uwjo2xqei66ppw53mafvbu/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-weather"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/wtvuppkop6y3qv7bnvzqwifv4uts4e2k/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/wtvuppkop6y3qv7bnvzqwifv4uts4e2k/ngsi-ld/v1/entities?type=AirQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/wtvuppkop6y3qv7bnvzqwifv4uts4e2k/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/ovzdusie-sk"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/g3jcsy27jw4zqctgo67khc7irh2z7pgs/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/g3jcsy27jw4zqctgo67khc7irh2z7pgs/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/g3jcsy27jw4zqctgo67khc7irh2z7pgs/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mestske-casti"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/y5un365itcxfgdme2muhk7dweef43ydl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/y5un365itcxfgdme2muhk7dweef43ydl/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/y5un365itcxfgdme2muhk7dweef43ydl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mista"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/muwmdpwigo7paq3gpy7hrwe7ou35lmaa/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/muwmdpwigo7paq3gpy7hrwe7ou35lmaa/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/muwmdpwigo7paq3gpy7hrwe7ou35lmaa/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-ovzdusi"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-parkoviste-pr"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/om2xospuff5uotaib5vqnkiuv3lne4w2/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/om2xospuff5uotaib5vqnkiuv3lne4w2/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/om2xospuff5uotaib5vqnkiuv3lne4w2/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-rozpocet"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/yw7epl4ai3dujdj4itt4uwvhwcz6tib2/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/yw7epl4ai3dujdj4itt4uwvhwcz6tib2/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/yw7epl4ai3dujdj4itt4uwvhwcz6tib2/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-sdilena-kola"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/e6sryswazw3lcgip7tngpeoampsoai6z/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/e6sryswazw3lcgip7tngpeoampsoai6z/ngsi-ld/v1/entities?type=BikeHireDockingStation&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/e6sryswazw3lcgip7tngpeoampsoai6z/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/praha-trideny-odpad"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/mluyob4nz52lok3ssk7pgn5vwt/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/mluyob4nz52lok3ssk7pgn5vwt/ngsi-ld/v1/entities?type=AirQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/mluyob4nz52lok3ssk7pgn5vwt/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/public-air"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/p5d4v5vgbbvyfdhkgsroy3qbzmspzxks/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/p5d4v5vgbbvyfdhkgsroy3qbzmspzxks/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-as"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/5xmxkf2b5lxznfcy2akxevmbagdx6arc/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/5xmxkf2b5lxznfcy2akxevmbagdx6arc/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/qczxsxskvcj6rst2t4h6ervanln7oppy/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/qczxsxskvcj6rst2t4h6ervanln7oppy/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr-navstevnici"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/3uyv6absozuxhrxvgfdsxybid3xmr7vg/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3uyv6absozuxhrxvgfdsxybid3xmr7vg/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-do"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/a3q6ndocu5mge5dnitjrti3qomn3vy4l/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/a3q6ndocu5mge5dnitjrti3qomn3vy4l/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-do-preprava"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/uollbyawh4uo2o73wvlot4u7dmkacu6q/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/uollbyawh4uo2o73wvlot4u7dmkacu6q/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-en"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/qq5gbaotcygufhkofnzc3qomj6qxolf3/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/qq5gbaotcygufhkofnzc3qomj6qxolf3/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ik"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/rrilrawsqy54mdbpjnfljwcamepekkoh/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rrilrawsqy54mdbpjnfljwcamepekkoh/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4vo4ysgzhr7hgprui63cybmiha55flbm/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/4vo4ysgzhr7hgprui63cybmiha55flbm/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp-priemysel"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/fe7jcjxr3io6qswlcemuetb4wjp6wqrz/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/fe7jcjxr3io6qswlcemuetb4wjp6wqrz/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ku"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/6icyuts7sj2fvg53hcgrq4s7nw5qs2jo/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/6icyuts7sj2fvg53hcgrq4s7nw5qs2jo/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/4m5qe2n5rchxoj5lcrufykp6qn4ordx6/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/4m5qe2n5rchxoj5lcrufykp6qn4ordx6/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz-zdravie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/r5mfjjjicyioozmhbhduy6e2tjcd3boq/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/r5mfjjjicyioozmhbhduy6e2tjcd3boq/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-np"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/lmobgyt3nmvjty46tug2hrpswqy7w3qv/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/lmobgyt3nmvjty46tug2hrpswqy7w3qv/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/xe336h6hvltlyatay2dxc4cyncl77mzk/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/xe336h6hvltlyatay2dxc4cyncl77mzk/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu-odvetvia"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/l4bwpgiadi4f3pztzujbczanuliwbton/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/l4bwpgiadi4f3pztzujbczanuliwbton/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ob"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/paa3ylcfieyt2nbmgceqyy3ggzxds7zz/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/paa3ylcfieyt2nbmgceqyy3ggzxds7zz/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-od"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/p3ibd2fuzpslybehopzpqsaysbgummui/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/p3ibd2fuzpslybehopzpqsaysbgummui/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-og"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-om"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/ptj22i44igzp4z3qxsvnunoh2gfg2yjb/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ptj22i44igzp4z3qxsvnunoh2gfg2yjb/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-om-pohyb"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/xfstyj3wts2bjaho4fkzhbl3v5l7xgfy/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/xfstyj3wts2bjaho4fkzhbl3v5l7xgfy/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pl"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/q5zciruevofcmaeyvu7mu4k4vzzevnpb/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/q5zciruevofcmaeyvu7mu4k4vzzevnpb/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/mmio3jkuh5e2naw2f4kwss7adgtqo2n7/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/mmio3jkuh5e2naw2f4kwss7adgtqo2n7/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm-ceny"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/enulf35isjc5bnobvepmamp75sm3ii24/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/enulf35isjc5bnobvepmamp75sm3ii24/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/ookuklgyy6dtlpgrhnaxexb5fgjj4pqy/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ookuklgyy6dtlpgrhnaxexb5fgjj4pqy/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr-mzdy"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/lk4xgzahvxywq2cwdblfxpsqarby2wmk/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/lk4xgzahvxywq2cwdblfxpsqarby2wmk/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/tq7eq5ksj73yxjs4evznjsyzm733ahkt/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/tq7eq5ksj73yxjs4evznjsyzm733ahkt/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps-vydavky"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ra"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/3kryfkyvvhbybpeibizyqipzjrvb2kbp/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/3kryfkyvvhbybpeibizyqipzjrvb2kbp/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sk"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/43cfrkftlkcsjfbf3kfhabvuukywv7ft/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/43cfrkftlkcsjfbf3kfhabvuukywv7ft/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-so"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/l7q5rbcjcqwn6xyo5q5gocjphsfdfib2/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/l7q5rbcjcqwn6xyo5q5gocjphsfdfib2/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/tzlxpcxtrf3gmjmmlbfpyasncrfscuvs/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/tzlxpcxtrf3gmjmmlbfpyasncrfscuvs/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp-jadrova"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/nr6udfzsnvaejtnochjpkssfxidm55tn/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/nr6udfzsnvaejtnochjpkssfxidm55tn/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-st"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/ssyq2yewnyqs4rypdmghumswi3haak3t/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ssyq2yewnyqs4rypdmghumswi3haak3t/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-st-povolenia"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/xutej6p46cqde27cjvjbysv6yhtamfnd/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/xutej6p46cqde27cjvjbysv6yhtamfnd/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sv"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/jquhkkvh3ukkok6zm7j3vyahd4zohwj3/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/jquhkkvh3ukkok6zm7j3vyahd4zohwj3/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ts"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/vx42gnf6fksxmc53pb2hsbbp3glxtlul/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/vx42gnf6fksxmc53pb2hsbbp3glxtlul/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vh"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/gwxmhyqit2dvveu4kkhi3w7nqjunjo3p/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/gwxmhyqit2dvveu4kkhi3w7nqjunjo3p/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/stydygk2di4litxfhy5zo3m3ejqgbk7p/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/stydygk2di4litxfhy5zo3m3ejqgbk7p/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt-pracovnici"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/eicsvjehoiwoykalzmpqqp6hakoj426t/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/eicsvjehoiwoykalzmpqqp6hakoj426t/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zd"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/25duckdheaxinjjsl3ehqnue2cu2opgu/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/25duckdheaxinjjsl3ehqnue2cu2opgu/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/rj2fmnzih5dzigixvsnbmz6ecf7zhcbn/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rj2fmnzih5dzigixvsnbmz6ecf7zhcbn/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo-kapitoly"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/h3yeindeacruy57l6c25pxcykq3zjubw/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/h3yeindeacruy57l6c25pxcykq3zjubw/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/vbcinyfdvxajvzifutmvdjyz37wehhju/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/vbcinyfdvxajvzifutmvdjyz37wehhju/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp-emisie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/ricvfpfxtaxeyzf5c3b3es7ymc6unh3o/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ricvfpfxtaxeyzf5c3b3es7ymc6unh3o/ngsi-ld/v1/entities?type=KeyPerformanceIndicator&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/ricvfpfxtaxeyzf5c3b3es7ymc6unh3o/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-kpi"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/rhnhewwotdngtrsb7gnzpj63ysnkutwl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rhnhewwotdngtrsb7gnzpj63ysnkutwl/ngsi-ld/v1/entities?type=AirQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/rhnhewwotdngtrsb7gnzpj63ysnkutwl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-ovzdusie"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/yl5ifsuftssvaghx2ke4atgvuxx4zonl/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/yl5ifsuftssvaghx2ke4atgvuxx4zonl/ngsi-ld/v1/entities?type=AirQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/yl5ifsuftssvaghx2ke4atgvuxx4zonl/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-pamiatky"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/os4quyrmvhijr3x7x4fno2jicej4ifv5/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/os4quyrmvhijr3x7x4fno2jicej4ifv5/ngsi-ld/v1/entities?type=Article&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/os4quyrmvhijr3x7x4fno2jicej4ifv5/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-uniza"
+  },
+  {
+   "text": "https://api.smartcity.joinedcontext.com/api/endpoint/5kcqu4qq5b4ejd3dvfu27svfpm7kd67u/ngsi-ld/v1/\nhttps://api.smartcity.joinedcontext.com/api/endpoint/5kcqu4qq5b4ejd3dvfu27svfpm7kd67u/ngsi-ld/v1/entities?type=AirQualityObserved&limit=10\nhttps://api.smartcity.joinedcontext.com/api/endpoint/5kcqu4qq5b4ejd3dvfu27svfpm7kd67u/odata/v4/",
+   "url": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-zeleznicne-stanice"
+  }
+ ],
+ "rows": [
+  {
+   "endpoint": "25duckdheaxinjjsl3ehqnue2cu2opgu",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo",
+   "siblings": [
+    "25duckdheaxinjjsl3ehqnue2cu2opgu"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "2lwz27hvqjvxaow2hr73lxmxx743irui",
+   "expected": "-",
+   "siblings": [
+    "2lwz27hvqjvxaow2hr73lxmxx743irui"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "32ea6ze7db7g6u7qnlgezpwp75",
+   "expected": "-",
+   "siblings": [
+    "32ea6ze7db7g6u7qnlgezpwp75",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "3bayn5lqwhce7opxqu3e7ruibkhqmfew",
+   "expected": "-",
+   "siblings": [
+    "3bayn5lqwhce7opxqu3e7ruibkhqmfew"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "3iasem46w7d7pxxypwdfdzheyaodv3qn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-pocasie",
+   "siblings": [
+    "3iasem46w7d7pxxypwdfdzheyaodv3qn",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "WeatherObserved"
+  },
+  {
+   "endpoint": "3kryfkyvvhbybpeibizyqipzjrvb2kbp",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sk",
+   "siblings": [
+    "3kryfkyvvhbybpeibizyqipzjrvb2kbp"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia",
+   "siblings": [
+    "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "rv5cn2kxq7bmt3wza6hjd4ype2",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "3uyv6absozuxhrxvgfdsxybid3xmr7vg",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-do",
+   "siblings": [
+    "3uyv6absozuxhrxvgfdsxybid3xmr7vg"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "43cfrkftlkcsjfbf3kfhabvuukywv7ft",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-so",
+   "siblings": [
+    "43cfrkftlkcsjfbf3kfhabvuukywv7ft"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "4m5qe2n5rchxoj5lcrufykp6qn4ordx6",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz-zdravie",
+   "siblings": [
+    "4m5qe2n5rchxoj5lcrufykp6qn4ordx6"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-parkoviste-pr",
+   "siblings": [
+    "4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "OffStreetParking"
+  },
+  {
+   "endpoint": "4vo4ysgzhr7hgprui63cybmiha55flbm",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp-priemysel",
+   "siblings": [
+    "4vo4ysgzhr7hgprui63cybmiha55flbm"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "-",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "Address"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "-",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "Article"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "-",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "Contract"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bb-zasadnutia-organov-samospravy",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "CouncilMeeting"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "-",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "Garden"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bb-dotacie",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "Grant"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "-",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bb-dtm-bb-register-statickej-dopravy",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "OffStreetParking"
+  },
+  {
+   "endpoint": "4ysiqy53qik5qyvawwaj7wgylpt4uoxa",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bb-objednavky-bb",
+   "siblings": [
+    "4ysiqy53qik5qyvawwaj7wgylpt4uoxa"
+   ],
+   "type": "PurchaseOrder"
+  },
+  {
+   "endpoint": "5kcqu4qq5b4ejd3dvfu27svfpm7kd67u",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-zeleznicne-stanice",
+   "siblings": [
+    "5kcqu4qq5b4ejd3dvfu27svfpm7kd67u",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "GtfsStop"
+  },
+  {
+   "endpoint": "5xmxkf2b5lxznfcy2akxevmbagdx6arc",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr",
+   "siblings": [
+    "5xmxkf2b5lxznfcy2akxevmbagdx6arc"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Bridge"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "CommitteeSeat"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Contract"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "CouncilMeeting"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "CouncilVote"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "CycleRoute"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Grant"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Invoice"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-uradne-hodiny-c912ed",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "OfficeHours"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-materske-skoly-v-banskobystrickom-kraji-3f7d07,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-stredne-skoly-v-banskobystrickom-kraji-581554,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-vysoke-skoly-v-banskobystrickom-kraji-b0be47,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zakladne-skoly-v-banskobystrickom-kraji-13a8b6",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Organization"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-clenovia-samospravy-efc2f3",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Person"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Petition"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-cykloscitace-miesta-6e967d,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kontaktne-miesta-2128a0,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kulturne-institucie-bbsk-a-ich-pobocky-2f9362,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-lekarni-v-bbk-c564de,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-zdravotnickych-zariadeni-v-bbk-701db2",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "PublicInvestment"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "PublicOrganization"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "PublicProcurement"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "PurchaseOrder"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "RiverBasin"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-nehodovost-v-bbk-0ea72d",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "RoadAccident"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-podjazdy-v-banskobystrickom-kraji-public-view-e6fb8f,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-priepusty-v-banskobystrickom-kraji-public-view-a9ed8e,https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zeleznicne-priecestia-v-banskobystrickom-kraji-public-view-89feb8",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "RoadStructure"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "-",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "Rule"
+  },
+  {
+   "endpoint": "6b4yqhzqieutqcoeew5rnxrx5udqeert",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-ekologicky-stav-vodnych-utvarov-48bbbd",
+   "siblings": [
+    "6b4yqhzqieutqcoeew5rnxrx5udqeert"
+   ],
+   "type": "WaterBodyStatus"
+  },
+  {
+   "endpoint": "6icyuts7sj2fvg53hcgrq4s7nw5qs2jo",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kz",
+   "siblings": [
+    "6icyuts7sj2fvg53hcgrq4s7nw5qs2jo"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "6wrymzu5x2uwjo2xqei66ppw53mafvbu",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-weather",
+   "siblings": [
+    "6wrymzu5x2uwjo2xqei66ppw53mafvbu"
+   ],
+   "type": "WeatherObserved"
+  },
+  {
+   "endpoint": "a3q6ndocu5mge5dnitjrti3qomn3vy4l",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-do-preprava",
+   "siblings": [
+    "a3q6ndocu5mge5dnitjrti3qomn3vy4l"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport",
+   "siblings": [
+    "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+    "dhiw4735mzyvwkrmszljpxcvvgv32q33"
+   ],
+   "type": "Alert"
+  },
+  {
+   "endpoint": "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport",
+   "siblings": [
+    "ajaezssvx3bwqgejgepmq4ig3frgan4e"
+   ],
+   "type": "GtfsStop"
+  },
+  {
+   "endpoint": "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport",
+   "siblings": [
+    "ajaezssvx3bwqgejgepmq4ig3frgan4e"
+   ],
+   "type": "OffStreetParking"
+  },
+  {
+   "endpoint": "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-transport",
+   "siblings": [
+    "ajaezssvx3bwqgejgepmq4ig3frgan4e"
+   ],
+   "type": "PublicTransportRoute"
+  },
+  {
+   "endpoint": "bkc4g3zfirh6zae3owdike7am2upayjs",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly",
+   "siblings": [
+    "bkc4g3zfirh6zae3owdike7am2upayjs",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Organization"
+  },
+  {
+   "endpoint": "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-hranice",
+   "siblings": [
+    "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "dhiw4735mzyvwkrmszljpxcvvgv32q33",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-alerts",
+   "siblings": [
+    "ajaezssvx3bwqgejgepmq4ig3frgan4e",
+    "dhiw4735mzyvwkrmszljpxcvvgv32q33"
+   ],
+   "type": "Alert"
+  },
+  {
+   "endpoint": "e6sryswazw3lcgip7tngpeoampsoai6z",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-trideny-odpad",
+   "siblings": [
+    "e6sryswazw3lcgip7tngpeoampsoai6z",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "WasteContainerIsle"
+  },
+  {
+   "endpoint": "eicsvjehoiwoykalzmpqqp6hakoj426t",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zd",
+   "siblings": [
+    "eicsvjehoiwoykalzmpqqp6hakoj426t"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "enulf35isjc5bnobvepmamp75sm3ii24",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr",
+   "siblings": [
+    "enulf35isjc5bnobvepmamp75sm3ii24"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "fe7jcjxr3io6qswlcemuetb4wjp6wqrz",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ku",
+   "siblings": [
+    "fe7jcjxr3io6qswlcemuetb4wjp6wqrz"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-om",
+   "siblings": [
+    "fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "fq4xw2ztnbe7rcav3ms6kd5ypu",
+   "expected": "-",
+   "siblings": [
+    "32ea6ze7db7g6u7qnlgezpwp75",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "fq4xw2ztnbe7rcav3ms6kd5ypu",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia",
+   "siblings": [
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Event"
+  },
+  {
+   "endpoint": "fq4xw2ztnbe7rcav3ms6kd5ypu",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly",
+   "siblings": [
+    "bkc4g3zfirh6zae3owdike7am2upayjs",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Organization"
+  },
+  {
+   "endpoint": "g3jcsy27jw4zqctgo67khc7irh2z7pgs",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mestske-casti",
+   "siblings": [
+    "g3jcsy27jw4zqctgo67khc7irh2z7pgs",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "gwxmhyqit2dvveu4kkhi3w7nqjunjo3p",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt",
+   "siblings": [
+    "gwxmhyqit2dvveu4kkhi3w7nqjunjo3p"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "gx2knuus75alkjgc24kjz7llte6q5jkk",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-events",
+   "siblings": [
+    "gx2knuus75alkjgc24kjz7llte6q5jkk"
+   ],
+   "type": "Event"
+  },
+  {
+   "endpoint": "h3yeindeacruy57l6c25pxcykq3zjubw",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp",
+   "siblings": [
+    "h3yeindeacruy57l6c25pxcykq3zjubw"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "jquhkkvh3ukkok6zm7j3vyahd4zohwj3",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ts",
+   "siblings": [
+    "jquhkkvh3ukkok6zm7j3vyahd4zohwj3"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mestske-casti",
+   "siblings": [
+    "g3jcsy27jw4zqctgo67khc7irh2z7pgs",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-ovzdusi",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "muwmdpwigo7paq3gpy7hrwe7ou35lmaa"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-sdilena-kola",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "yw7epl4ai3dujdj4itt4uwvhwcz6tib2"
+   ],
+   "type": "BikeHireDockingStation"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-rozpocet",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "om2xospuff5uotaib5vqnkiuv3lne4w2"
+   ],
+   "type": "BudgetLine"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-parkoviste-pr",
+   "siblings": [
+    "4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "OffStreetParking"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mista",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "y5un365itcxfgdme2muhk7dweef43ydl"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "-",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "WasteContainer"
+  },
+  {
+   "endpoint": "jw7tffshzip7igmzcszgffkkkuetnc6v",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-trideny-odpad",
+   "siblings": [
+    "e6sryswazw3lcgip7tngpeoampsoai6z",
+    "jw7tffshzip7igmzcszgffkkkuetnc6v"
+   ],
+   "type": "WasteContainerIsle"
+  },
+  {
+   "endpoint": "kz3c7bq2mxa6wdr4tnyh5pje7f",
+   "expected": "-",
+   "siblings": [
+    "32ea6ze7db7g6u7qnlgezpwp75",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "kz3c7bq2mxa6wdr4tnyh5pje7f",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia",
+   "siblings": [
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Event"
+  },
+  {
+   "endpoint": "kz3c7bq2mxa6wdr4tnyh5pje7f",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly",
+   "siblings": [
+    "bkc4g3zfirh6zae3owdike7am2upayjs",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Organization"
+  },
+  {
+   "endpoint": "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia",
+   "siblings": [
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Event"
+  },
+  {
+   "endpoint": "l4bwpgiadi4f3pztzujbczanuliwbton",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ob",
+   "siblings": [
+    "l4bwpgiadi4f3pztzujbczanuliwbton"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "l7q5rbcjcqwn6xyo5q5gocjphsfdfib2",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp",
+   "siblings": [
+    "l7q5rbcjcqwn6xyo5q5gocjphsfdfib2"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "lk4xgzahvxywq2cwdblfxpsqarby2wmk",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps",
+   "siblings": [
+    "lk4xgzahvxywq2cwdblfxpsqarby2wmk"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "lmobgyt3nmvjty46tug2hrpswqy7w3qv",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu",
+   "siblings": [
+    "lmobgyt3nmvjty46tug2hrpswqy7w3qv"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "lws6dd7o56veegwxsjtvak3goeta4mfn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-hranice",
+   "siblings": [
+    "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "lws6dd7o56veegwxsjtvak3goeta4mfn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty",
+   "siblings": [
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "omto6qk5sfn5ft7zl5pdiaxunj2ljnae",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "Bridge"
+  },
+  {
+   "endpoint": "lws6dd7o56veegwxsjtvak3goeta4mfn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia",
+   "siblings": [
+    "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "rv5cn2kxq7bmt3wza6hjd4ype2",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "lws6dd7o56veegwxsjtvak3goeta4mfn",
+   "expected": "-",
+   "siblings": [
+    "lws6dd7o56veegwxsjtvak3goeta4mfn"
+   ],
+   "type": "PublicOrganization"
+  },
+  {
+   "endpoint": "mluyob4nz52lok3ssk7pgn5vwt",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/public-air",
+   "siblings": [
+    "mluyob4nz52lok3ssk7pgn5vwt"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "mmio3jkuh5e2naw2f4kwss7adgtqo2n7",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm-ceny",
+   "siblings": [
+    "mmio3jkuh5e2naw2f4kwss7adgtqo2n7"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "muwmdpwigo7paq3gpy7hrwe7ou35lmaa",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-ovzdusi",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "muwmdpwigo7paq3gpy7hrwe7ou35lmaa"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "nr6udfzsnvaejtnochjpkssfxidm55tn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-st",
+   "siblings": [
+    "nr6udfzsnvaejtnochjpkssfxidm55tn"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "om2xospuff5uotaib5vqnkiuv3lne4w2",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-rozpocet",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "om2xospuff5uotaib5vqnkiuv3lne4w2"
+   ],
+   "type": "BudgetLine"
+  },
+  {
+   "endpoint": "omto6qk5sfn5ft7zl5pdiaxunj2ljnae",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty",
+   "siblings": [
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "omto6qk5sfn5ft7zl5pdiaxunj2ljnae",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "Bridge"
+  },
+  {
+   "endpoint": "ookuklgyy6dtlpgrhnaxexb5fgjj4pqy",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pr-mzdy",
+   "siblings": [
+    "ookuklgyy6dtlpgrhnaxexb5fgjj4pqy"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "os4quyrmvhijr3x7x4fno2jicej4ifv5",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-uniza",
+   "siblings": [
+    "os4quyrmvhijr3x7x4fno2jicej4ifv5"
+   ],
+   "type": "Article"
+  },
+  {
+   "endpoint": "p3ibd2fuzpslybehopzpqsaysbgummui",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-og",
+   "siblings": [
+    "p3ibd2fuzpslybehopzpqsaysbgummui"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "p5d4v5vgbbvyfdhkgsroy3qbzmspzxks",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-as",
+   "siblings": [
+    "p5d4v5vgbbvyfdhkgsroy3qbzmspzxks"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "paa3ylcfieyt2nbmgceqyy3ggzxds7zz",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-od",
+   "siblings": [
+    "paa3ylcfieyt2nbmgceqyy3ggzxds7zz"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "ptj22i44igzp4z3qxsvnunoh2gfg2yjb",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-om-pohyb",
+   "siblings": [
+    "ptj22i44igzp4z3qxsvnunoh2gfg2yjb"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "q5zciruevofcmaeyvu7mu4k4vzzevnpb",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pm",
+   "siblings": [
+    "q5zciruevofcmaeyvu7mu4k4vzzevnpb"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "qczxsxskvcj6rst2t4h6ervanln7oppy",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-cr-navstevnici",
+   "siblings": [
+    "qczxsxskvcj6rst2t4h6ervanln7oppy"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "qfhhh5no5wz4lk3rfjisdtx3chiyfig3",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-kpi",
+   "siblings": [
+    "qfhhh5no5wz4lk3rfjisdtx3chiyfig3"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "qq5gbaotcygufhkofnzc3qomj6qxolf3",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ik",
+   "siblings": [
+    "qq5gbaotcygufhkofnzc3qomj6qxolf3"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "r5mfjjjicyioozmhbhduy6e2tjcd3boq",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-np",
+   "siblings": [
+    "r5mfjjjicyioozmhbhduy6e2tjcd3boq"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "rhnhewwotdngtrsb7gnzpj63ysnkutwl",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-ovzdusie",
+   "siblings": [
+    "rhnhewwotdngtrsb7gnzpj63ysnkutwl",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "ricvfpfxtaxeyzf5c3b3es7ymc6unh3o",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-kpi",
+   "siblings": [
+    "ricvfpfxtaxeyzf5c3b3es7ymc6unh3o"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "rj2fmnzih5dzigixvsnbmz6ecf7zhcbn",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zo-kapitoly",
+   "siblings": [
+    "rj2fmnzih5dzigixvsnbmz6ecf7zhcbn"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "rjktf6sxt7mdqgdc3cvyf56ezh6if6kh",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-public-area-permits",
+   "siblings": [
+    "rjktf6sxt7mdqgdc3cvyf56ezh6if6kh"
+   ],
+   "type": "CityWork"
+  },
+  {
+   "endpoint": "rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ra",
+   "siblings": [
+    "rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "-",
+   "siblings": [
+    "32ea6ze7db7g6u7qnlgezpwp75",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "-",
+   "siblings": [
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "CadastralParcel"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "-",
+   "siblings": [
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "EVChargingStation"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-podujatia",
+   "siblings": [
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Event"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-skoly",
+   "siblings": [
+    "bkc4g3zfirh6zae3owdike7am2upayjs",
+    "fq4xw2ztnbe7rcav3ms6kd5ypu",
+    "kz3c7bq2mxa6wdr4tnyh5pje7f",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "Organization"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "-",
+   "siblings": [
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "rpfqszwlbp5bonvg7kckhdsne5qedjor",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/banskabystrica-pocasie",
+   "siblings": [
+    "3iasem46w7d7pxxypwdfdzheyaodv3qn",
+    "rpfqszwlbp5bonvg7kckhdsne5qedjor"
+   ],
+   "type": "WeatherObserved"
+  },
+  {
+   "endpoint": "rrilrawsqy54mdbpjnfljwcamepekkoh",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-kp",
+   "siblings": [
+    "rrilrawsqy54mdbpjnfljwcamepekkoh"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "rv5cn2kxq7bmt3wza6hjd4ype2",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia",
+   "siblings": [
+    "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "rv5cn2kxq7bmt3wza6hjd4ype2",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "rv5cn2kxq7bmt3wza6hjd4ype2",
+   "expected": "-",
+   "siblings": [
+    "rv5cn2kxq7bmt3wza6hjd4ype2"
+   ],
+   "type": "PublicOrganization"
+  },
+  {
+   "endpoint": "s3luopgog5nkxcpykwxdvhw22iis5n7e",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-districts",
+   "siblings": [
+    "s3luopgog5nkxcpykwxdvhw22iis5n7e"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "scsd2eehkx42n53z2zyd6vshfh7s7irf",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-bikes",
+   "siblings": [
+    "scsd2eehkx42n53z2zyd6vshfh7s7irf"
+   ],
+   "type": "BikeHireDockingStation"
+  },
+  {
+   "endpoint": "ssyq2yewnyqs4rypdmghumswi3haak3t",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-st-povolenia",
+   "siblings": [
+    "ssyq2yewnyqs4rypdmghumswi3haak3t"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "stydygk2di4litxfhy5zo3m3ejqgbk7p",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vt-pracovnici",
+   "siblings": [
+    "stydygk2di4litxfhy5zo3m3ejqgbk7p"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "t2vph7knk35vyjoxzqwhjldnls6nhcmj",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-news",
+   "siblings": [
+    "t2vph7knk35vyjoxzqwhjldnls6nhcmj"
+   ],
+   "type": "Article"
+  },
+  {
+   "endpoint": "tq7eq5ksj73yxjs4evznjsyzm733ahkt",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-ps-vydavky",
+   "siblings": [
+    "tq7eq5ksj73yxjs4evznjsyzm733ahkt"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "tw3jx6pcam2qzk7nre5bdv4yfh",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-hranice",
+   "siblings": [
+    "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "AdministrativeArea"
+  },
+  {
+   "endpoint": "tw3jx6pcam2qzk7nre5bdv4yfh",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-mosty",
+   "siblings": [
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "omto6qk5sfn5ft7zl5pdiaxunj2ljnae",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "Bridge"
+  },
+  {
+   "endpoint": "tw3jx6pcam2qzk7nre5bdv4yfh",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zariadenia",
+   "siblings": [
+    "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl",
+    "lws6dd7o56veegwxsjtvak3goeta4mfn",
+    "rv5cn2kxq7bmt3wza6hjd4ype2",
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "tw3jx6pcam2qzk7nre5bdv4yfh",
+   "expected": "-",
+   "siblings": [
+    "tw3jx6pcam2qzk7nre5bdv4yfh"
+   ],
+   "type": "PublicOrganization"
+  },
+  {
+   "endpoint": "tzlxpcxtrf3gmjmmlbfpyasncrfscuvs",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sp-jadrova",
+   "siblings": [
+    "tzlxpcxtrf3gmjmmlbfpyasncrfscuvs"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "uollbyawh4uo2o73wvlot4u7dmkacu6q",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-en",
+   "siblings": [
+    "uollbyawh4uo2o73wvlot4u7dmkacu6q"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "vbcinyfdvxajvzifutmvdjyz37wehhju",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-zp-emisie",
+   "siblings": [
+    "vbcinyfdvxajvzifutmvdjyz37wehhju"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "vx42gnf6fksxmc53pb2hsbbp3glxtlul",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-vh",
+   "siblings": [
+    "vx42gnf6fksxmc53pb2hsbbp3glxtlul"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "w5vgo2mi6phigetdq3pvvcjgznw73hji",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-beach-water",
+   "siblings": [
+    "w5vgo2mi6phigetdq3pvvcjgznw73hji"
+   ],
+   "type": "WaterQualityObserved"
+  },
+  {
+   "endpoint": "wtvuppkop6y3qv7bnvzqwifv4uts4e2k",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/ovzdusie-sk",
+   "siblings": [
+    "wtvuppkop6y3qv7bnvzqwifv4uts4e2k"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "x6d6jph5t3tib5vr53kmiz2l5n3u3tnu",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-parking",
+   "siblings": [
+    "x6d6jph5t3tib5vr53kmiz2l5n3u3tnu"
+   ],
+   "type": "OnStreetParking"
+  },
+  {
+   "endpoint": "xe336h6hvltlyatay2dxc4cyncl77mzk",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-nu-odvetvia",
+   "siblings": [
+    "xe336h6hvltlyatay2dxc4cyncl77mzk"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "xfstyj3wts2bjaho4fkzhbl3v5l7xgfy",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-pl",
+   "siblings": [
+    "xfstyj3wts2bjaho4fkzhbl3v5l7xgfy"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "xutej6p46cqde27cjvjbysv6yhtamfnd",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/susr-sv",
+   "siblings": [
+    "xutej6p46cqde27cjvjbysv6yhtamfnd"
+   ],
+   "type": "KeyPerformanceIndicator"
+  },
+  {
+   "endpoint": "y5un365itcxfgdme2muhk7dweef43ydl",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-mista",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "y5un365itcxfgdme2muhk7dweef43ydl"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "yl5ifsuftssvaghx2ke4atgvuxx4zonl",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-pamiatky",
+   "siblings": [
+    "yl5ifsuftssvaghx2ke4atgvuxx4zonl",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "yw7epl4ai3dujdj4itt4uwvhwcz6tib2",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/praha-sdilena-kola",
+   "siblings": [
+    "jw7tffshzip7igmzcszgffkkkuetnc6v",
+    "yw7epl4ai3dujdj4itt4uwvhwcz6tib2"
+   ],
+   "type": "BikeHireDockingStation"
+  },
+  {
+   "endpoint": "zhu42lbyivllciy7pluenlhxmqn5hi7c",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-ovzdusie",
+   "siblings": [
+    "rhnhewwotdngtrsb7gnzpj63ysnkutwl",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "AirQualityObserved"
+  },
+  {
+   "endpoint": "zhu42lbyivllciy7pluenlhxmqn5hi7c",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-zeleznicne-stanice",
+   "siblings": [
+    "5kcqu4qq5b4ejd3dvfu27svfpm7kd67u",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "GtfsStop"
+  },
+  {
+   "endpoint": "zhu42lbyivllciy7pluenlhxmqn5hi7c",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/zilina-pamiatky",
+   "siblings": [
+    "yl5ifsuftssvaghx2ke4atgvuxx4zonl",
+    "zhu42lbyivllciy7pluenlhxmqn5hi7c"
+   ],
+   "type": "PointOfInterest"
+  },
+  {
+   "endpoint": "zq6avaaqv3d7ma2avz7rvkwtxelaxkc4",
+   "expected": "https://opendata.smartcity.joinedcontext.com/dataset/helsinki-places",
+   "siblings": [
+    "zq6avaaqv3d7ma2avz7rvkwtxelaxkc4"
+   ],
+   "type": "PointOfInterest"
+  }
+ ],
+ "served": {
+  "25duckdheaxinjjsl3ehqnue2cu2opgu": [
+   "KeyPerformanceIndicator"
+  ],
+  "2lwz27hvqjvxaow2hr73lxmxx743irui": [
+   "KeyPerformanceIndicator"
+  ],
+  "32ea6ze7db7g6u7qnlgezpwp75": [
+   "AirQualityObserved"
+  ],
+  "3bayn5lqwhce7opxqu3e7ruibkhqmfew": [
+   "KeyPerformanceIndicator"
+  ],
+  "3iasem46w7d7pxxypwdfdzheyaodv3qn": [
+   "WeatherObserved"
+  ],
+  "3kryfkyvvhbybpeibizyqipzjrvb2kbp": [
+   "KeyPerformanceIndicator"
+  ],
+  "3tjpnb5x6uhbj7rdi34fjbpfmuxcu6cl": [
+   "PointOfInterest"
+  ],
+  "3uyv6absozuxhrxvgfdsxybid3xmr7vg": [
+   "KeyPerformanceIndicator"
+  ],
+  "43cfrkftlkcsjfbf3kfhabvuukywv7ft": [
+   "KeyPerformanceIndicator"
+  ],
+  "4m5qe2n5rchxoj5lcrufykp6qn4ordx6": [
+   "KeyPerformanceIndicator"
+  ],
+  "4qt5psgy3oxnd5eiuh4ku4thx7ozqgbl": [
+   "OffStreetParking"
+  ],
+  "4vo4ysgzhr7hgprui63cybmiha55flbm": [
+   "KeyPerformanceIndicator"
+  ],
+  "4ysiqy53qik5qyvawwaj7wgylpt4uoxa": [
+   "Address",
+   "Article",
+   "Contract",
+   "CouncilMeeting",
+   "Garden",
+   "Grant",
+   "KeyPerformanceIndicator",
+   "OffStreetParking",
+   "PurchaseOrder"
+  ],
+  "5kcqu4qq5b4ejd3dvfu27svfpm7kd67u": [
+   "GtfsStop"
+  ],
+  "5xmxkf2b5lxznfcy2akxevmbagdx6arc": [
+   "KeyPerformanceIndicator"
+  ],
+  "6b4yqhzqieutqcoeew5rnxrx5udqeert": [
+   "AdministrativeArea",
+   "Bridge",
+   "CommitteeSeat",
+   "Contract",
+   "CouncilMeeting",
+   "CouncilVote",
+   "CycleRoute",
+   "Grant",
+   "Invoice",
+   "KeyPerformanceIndicator",
+   "OfficeHours",
+   "Organization",
+   "Person",
+   "Petition",
+   "PointOfInterest",
+   "PublicInvestment",
+   "PublicOrganization",
+   "PublicProcurement",
+   "PurchaseOrder",
+   "RiverBasin",
+   "RoadAccident",
+   "RoadStructure",
+   "Rule",
+   "WaterBodyStatus"
+  ],
+  "6icyuts7sj2fvg53hcgrq4s7nw5qs2jo": [
+   "KeyPerformanceIndicator"
+  ],
+  "6wrymzu5x2uwjo2xqei66ppw53mafvbu": [
+   "WeatherObserved"
+  ],
+  "a3q6ndocu5mge5dnitjrti3qomn3vy4l": [
+   "KeyPerformanceIndicator"
+  ],
+  "ajaezssvx3bwqgejgepmq4ig3frgan4e": [
+   "Alert",
+   "GtfsStop",
+   "OffStreetParking",
+   "PublicTransportRoute"
+  ],
+  "bkc4g3zfirh6zae3owdike7am2upayjs": [
+   "Organization"
+  ],
+  "c223begxsfspzmdaq5ij4aayw6vyucjl": [],
+  "cx5p4ldnpyf2vzn6sjt4vjiykd3734t6": [
+   "AdministrativeArea"
+  ],
+  "dhiw4735mzyvwkrmszljpxcvvgv32q33": [
+   "Alert"
+  ],
+  "e6sryswazw3lcgip7tngpeoampsoai6z": [
+   "WasteContainerIsle"
+  ],
+  "eicsvjehoiwoykalzmpqqp6hakoj426t": [
+   "KeyPerformanceIndicator"
+  ],
+  "enulf35isjc5bnobvepmamp75sm3ii24": [
+   "KeyPerformanceIndicator"
+  ],
+  "fe7jcjxr3io6qswlcemuetb4wjp6wqrz": [
+   "KeyPerformanceIndicator"
+  ],
+  "fkgbhpcfvzfkpiegsg5xprfsr2tmnn4h": [
+   "KeyPerformanceIndicator"
+  ],
+  "fq4xw2ztnbe7rcav3ms6kd5ypu": [
+   "AirQualityObserved",
+   "Event",
+   "Organization"
+  ],
+  "g3jcsy27jw4zqctgo67khc7irh2z7pgs": [
+   "AdministrativeArea"
+  ],
+  "gwxmhyqit2dvveu4kkhi3w7nqjunjo3p": [
+   "KeyPerformanceIndicator"
+  ],
+  "gx2knuus75alkjgc24kjz7llte6q5jkk": [
+   "Event"
+  ],
+  "h3yeindeacruy57l6c25pxcykq3zjubw": [
+   "KeyPerformanceIndicator"
+  ],
+  "jquhkkvh3ukkok6zm7j3vyahd4zohwj3": [
+   "KeyPerformanceIndicator"
+  ],
+  "jw7tffshzip7igmzcszgffkkkuetnc6v": [
+   "AdministrativeArea",
+   "AirQualityObserved",
+   "BikeHireDockingStation",
+   "BudgetLine",
+   "OffStreetParking",
+   "PointOfInterest",
+   "WasteContainer",
+   "WasteContainerIsle"
+  ],
+  "kz3c7bq2mxa6wdr4tnyh5pje7f": [
+   "AirQualityObserved",
+   "Event",
+   "Organization"
+  ],
+  "l3nomvl5q7kikgdhhy4xiq5ofwjp4mfk": [
+   "Event"
+  ],
+  "l4bwpgiadi4f3pztzujbczanuliwbton": [
+   "KeyPerformanceIndicator"
+  ],
+  "l7q5rbcjcqwn6xyo5q5gocjphsfdfib2": [
+   "KeyPerformanceIndicator"
+  ],
+  "lk4xgzahvxywq2cwdblfxpsqarby2wmk": [
+   "KeyPerformanceIndicator"
+  ],
+  "lmobgyt3nmvjty46tug2hrpswqy7w3qv": [
+   "KeyPerformanceIndicator"
+  ],
+  "lws6dd7o56veegwxsjtvak3goeta4mfn": [
+   "AdministrativeArea",
+   "Bridge",
+   "PointOfInterest",
+   "PublicOrganization"
+  ],
+  "mluyob4nz52lok3ssk7pgn5vwt": [
+   "AirQualityObserved"
+  ],
+  "mmio3jkuh5e2naw2f4kwss7adgtqo2n7": [
+   "KeyPerformanceIndicator"
+  ],
+  "muwmdpwigo7paq3gpy7hrwe7ou35lmaa": [
+   "AirQualityObserved"
+  ],
+  "nkojudgn32ub5upzjuu74xm52svhtwpy": [],
+  "nr6udfzsnvaejtnochjpkssfxidm55tn": [
+   "KeyPerformanceIndicator"
+  ],
+  "om2xospuff5uotaib5vqnkiuv3lne4w2": [
+   "BudgetLine"
+  ],
+  "omto6qk5sfn5ft7zl5pdiaxunj2ljnae": [
+   "Bridge"
+  ],
+  "ookuklgyy6dtlpgrhnaxexb5fgjj4pqy": [
+   "KeyPerformanceIndicator"
+  ],
+  "os4quyrmvhijr3x7x4fno2jicej4ifv5": [
+   "Article"
+  ],
+  "p3ibd2fuzpslybehopzpqsaysbgummui": [
+   "KeyPerformanceIndicator"
+  ],
+  "p5d4v5vgbbvyfdhkgsroy3qbzmspzxks": [
+   "KeyPerformanceIndicator"
+  ],
+  "paa3ylcfieyt2nbmgceqyy3ggzxds7zz": [
+   "KeyPerformanceIndicator"
+  ],
+  "plgaltgaom2rbfbpsnc7xn7ifoamabun": [],
+  "ptj22i44igzp4z3qxsvnunoh2gfg2yjb": [
+   "KeyPerformanceIndicator"
+  ],
+  "q5zciruevofcmaeyvu7mu4k4vzzevnpb": [
+   "KeyPerformanceIndicator"
+  ],
+  "qczxsxskvcj6rst2t4h6ervanln7oppy": [
+   "KeyPerformanceIndicator"
+  ],
+  "qfhhh5no5wz4lk3rfjisdtx3chiyfig3": [
+   "KeyPerformanceIndicator"
+  ],
+  "qq5gbaotcygufhkofnzc3qomj6qxolf3": [
+   "KeyPerformanceIndicator"
+  ],
+  "r5mfjjjicyioozmhbhduy6e2tjcd3boq": [
+   "KeyPerformanceIndicator"
+  ],
+  "rhnhewwotdngtrsb7gnzpj63ysnkutwl": [
+   "AirQualityObserved"
+  ],
+  "ricvfpfxtaxeyzf5c3b3es7ymc6unh3o": [
+   "KeyPerformanceIndicator"
+  ],
+  "rj2fmnzih5dzigixvsnbmz6ecf7zhcbn": [
+   "KeyPerformanceIndicator"
+  ],
+  "rjktf6sxt7mdqgdc3cvyf56ezh6if6kh": [
+   "CityWork"
+  ],
+  "rn6vjgnvy7dr5nd2ijhs4oih2lsak2qq": [
+   "KeyPerformanceIndicator"
+  ],
+  "rpfqszwlbp5bonvg7kckhdsne5qedjor": [
+   "AirQualityObserved",
+   "CadastralParcel",
+   "EVChargingStation",
+   "Event",
+   "Organization",
+   "PointOfInterest",
+   "WeatherObserved"
+  ],
+  "rrilrawsqy54mdbpjnfljwcamepekkoh": [
+   "KeyPerformanceIndicator"
+  ],
+  "rv5cn2kxq7bmt3wza6hjd4ype2": [
+   "PointOfInterest",
+   "PublicOrganization"
+  ],
+  "s3luopgog5nkxcpykwxdvhw22iis5n7e": [
+   "AdministrativeArea"
+  ],
+  "scsd2eehkx42n53z2zyd6vshfh7s7irf": [
+   "BikeHireDockingStation"
+  ],
+  "ssyq2yewnyqs4rypdmghumswi3haak3t": [
+   "KeyPerformanceIndicator"
+  ],
+  "stydygk2di4litxfhy5zo3m3ejqgbk7p": [
+   "KeyPerformanceIndicator"
+  ],
+  "t2vph7knk35vyjoxzqwhjldnls6nhcmj": [
+   "Article"
+  ],
+  "tq7eq5ksj73yxjs4evznjsyzm733ahkt": [
+   "KeyPerformanceIndicator"
+  ],
+  "tw3jx6pcam2qzk7nre5bdv4yfh": [
+   "AdministrativeArea",
+   "Bridge",
+   "PointOfInterest",
+   "PublicOrganization"
+  ],
+  "tzlxpcxtrf3gmjmmlbfpyasncrfscuvs": [
+   "KeyPerformanceIndicator"
+  ],
+  "uollbyawh4uo2o73wvlot4u7dmkacu6q": [
+   "KeyPerformanceIndicator"
+  ],
+  "vbcinyfdvxajvzifutmvdjyz37wehhju": [
+   "KeyPerformanceIndicator"
+  ],
+  "vx42gnf6fksxmc53pb2hsbbp3glxtlul": [
+   "KeyPerformanceIndicator"
+  ],
+  "w3stbpbmvssqvu4upe4kgvvgdjl5ohvx": [],
+  "w5vgo2mi6phigetdq3pvvcjgznw73hji": [
+   "WaterQualityObserved"
+  ],
+  "wtvuppkop6y3qv7bnvzqwifv4uts4e2k": [
+   "AirQualityObserved"
+  ],
+  "x6d6jph5t3tib5vr53kmiz2l5n3u3tnu": [
+   "OnStreetParking"
+  ],
+  "xe336h6hvltlyatay2dxc4cyncl77mzk": [
+   "KeyPerformanceIndicator"
+  ],
+  "xfstyj3wts2bjaho4fkzhbl3v5l7xgfy": [
+   "KeyPerformanceIndicator"
+  ],
+  "xutej6p46cqde27cjvjbysv6yhtamfnd": [
+   "KeyPerformanceIndicator"
+  ],
+  "y5un365itcxfgdme2muhk7dweef43ydl": [
+   "PointOfInterest"
+  ],
+  "yl5ifsuftssvaghx2ke4atgvuxx4zonl": [
+   "PointOfInterest"
+  ],
+  "yw7epl4ai3dujdj4itt4uwvhwcz6tib2": [
+   "BikeHireDockingStation"
+  ],
+  "zhu42lbyivllciy7pluenlhxmqn5hi7c": [
+   "AirQualityObserved",
+   "GtfsStop",
+   "PointOfInterest"
+  ],
+  "zq6avaaqv3d7ma2avz7rvkwtxelaxkc4": [
+   "PointOfInterest"
+  ]
+ }
+}

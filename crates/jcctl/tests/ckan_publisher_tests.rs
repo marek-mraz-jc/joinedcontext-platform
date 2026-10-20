@@ -5,7 +5,7 @@ use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     missing_linkml, package, publish, withdraw, CkanApi, InMemoryCkan, Outcome, PublishError,
-    Settings, EXAMPLE_TYPE, GENERATOR,
+    Settings, EXAMPLE_TYPE, GENERATOR, SERVED_TYPES,
 };
 use serde_json::{json, Value};
 
@@ -1370,6 +1370,43 @@ fn usage_texts_name_the_guides_type_and_never_a_placeholder() {
             "{blank:?}"
         );
     }
+}
+
+/// T-4802: the OData text names the entity set of every type the Endpoint serves, so a dataset
+/// whose Endpoint serves several types is found by each of them; a name that is no plain type
+/// never reaches the text, and the private member never reaches CKAN.
+#[test]
+fn the_odata_text_names_each_served_types_entity_set() {
+    let mut typed = record();
+    typed[EXAMPLE_TYPE] = json!("Bridge");
+    typed[SERVED_TYPES] = json!(["Bridge", "PointOfInterest", "a b'c", ""]);
+    let dataset = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &typed,
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let odata = description(&dataset, "/odata/v4/");
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/odata/v4";
+    assert!(
+        odata.contains(&format!(
+            "Its entity sets: {base}/Bridge, {base}/PointOfInterest."
+        )),
+        "{odata}"
+    );
+    assert!(!odata.contains("a b'c"), "{odata}");
+    assert!(!dataset.to_string().contains(SERVED_TYPES));
+    let plain = package(
+        &default_endpoint("public", ""),
+        &instance(),
+        &record(),
+        &documented(),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    assert!(!description(&plain, "/odata/v4/").contains("entity sets:"));
 }
 
 /// EP-108: a surface switched off loses exactly its resource in the same run.

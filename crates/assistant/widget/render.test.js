@@ -2,7 +2,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
+const { notice, closeTargets, connector, sourceCount, badges, chosen, asksLanguage, ordered, markdown, streamable, sources, label, unlisted, safeUrl, events, language, table, chart, greeting, title, linkHost, followups, restore, remember, stamp, cards, stage, steps, tel, mailto, suggestions, trouble, retryable, said, retry, vizOrigin, vizSpec, mapFirst, lasting, recalled, privacyLines, dataset, view } = require("./render.js");
 
 const upTo = (max) => (n) => n >= 1 && n <= max;
 
@@ -102,6 +102,21 @@ test("the owner's sources: one per address, titled, and live data never by its t
   // T-4184: an uploaded file is its file name, never a link.
   assert.equal(label({ url: "upload:subory/Návod.md#page=1", title: null }), "Návod.md");
   assert.doesNotMatch(JSON.stringify(list), /query_entities/);
+});
+
+test("rows of a type no dataset publishes say so and link nothing (T-4802)", () => {
+  const { list } = sources([
+    { n: 1, tool: "query_entities", endpoint: "lws6dd7o56veegwxsjtvak3goeta4mfn", title: "PointOfInterest",
+      url: "https://api.example.org/api/endpoint/lws6dd7o56veegwxsjtvak3goeta4mfn/ngsi-ld/v1/entities?type=PointOfInterest" },
+    { n: 2, tool: "query_entities", endpoint: "lws6dd7o56veegwxsjtvak3goeta4mfn",
+      url: "https://opendata.example.org/dataset/bbsk-mosty" },
+    { n: 3, tool: "describe_schema", endpoint: "other" },
+    { n: 4, url: "https://www.bbsk.sk/" },
+  ]);
+  assert.deepEqual(list.map(unlisted), [true, false, false, false]);
+  assert.equal(label(list[0]), "PointOfInterest");
+  assert.equal(safeUrl(list[0].url), null, "an address for programs is no link");
+  assert.equal(unlisted(null), false);
 });
 
 test("nothing to show for no answer and no citations", () => {
@@ -642,7 +657,35 @@ test("with the done event's stage times the steps are named stages with their du
   assert.equal(steps(searches, "en", null).lines.length, 2);
   const widget = require("node:fs").readFileSync(require("node:path").join(__dirname, "widget.js"), "utf8");
   assert.match(widget, /name === "done" && data && data\.stagesMs/);
-  assert.match(widget, /JCRender\.steps\(item\.stages, lang, item\.timed\)/);
+  assert.match(widget, /JCRender\.steps\(item\.stages, lang, item\.timed, item\.reads\)/);
+});
+
+test("a reply's reads are its steps, each naming the source, the query and the count it returned (T-4801)", () => {
+  // The owner's bridge answer: four tool steps, of which the counts are the tool results' totals.
+  const page = "https://data.example/dataset/mosty";
+  const reads = [
+    { source: "Registre kraja", type: "Bridge", count: 1651, url: page },
+    { source: "Registre kraja", type: "Bridge", q: "yearBuilt<1900", count: 32, url: page },
+    { source: "Registre kraja", type: "Bridge", q: "heritageStatus==\"kultúrna pamiatka\"", count: 4 },
+    { source: "Registre kraja", type: "Bridge" }
+  ];
+  const timed = { route: 900, search: 300, judge: 200, answer: 2400 };
+  const took = steps([{ stage: "reading", topic: "Bridge" }], "sk", timed, reads);
+  assert.equal(took.summary, "Postup (4)");
+  assert.equal(took.lines.length, 4);
+  took.lines.forEach((line) => assert.ok(line.trim().length > 0 && line.includes("Registre kraja / Bridge"), line));
+  assert.equal(took.lines[0], "Hľadal som v: Registre kraja / Bridge · dotaz: všetky záznamy → 1\u00a0651");
+  assert.equal(took.lines[1], "Hľadal som v: Registre kraja / Bridge · dotaz: yearBuilt<1900 → 32");
+  assert.match(took.lines[2], /heritageStatus=="kultúrna pamiatka" → 4$/);
+  assert.equal(took.lines[3], "Hľadal som v: Registre kraja / Bridge", "a read without a count names only where it read");
+  assert.deepEqual(took.links, [page, page, null, null]);
+  assert.equal(steps([], "en", null, [reads[1]]).lines[0], "Searched: Registre kraja / Bridge · query: yearBuilt<1900 → 32");
+  assert.equal(steps([], "cs", null, [reads[0]]).lines[0], "Hledal jsem v: Registre kraja / Bridge · dotaz: všechny záznamy → 1\u00a0651");
+  // A step is checked: no script address, no negative or text count, and one naming nothing is dropped.
+  const odd = steps([], "en", null, [{ source: "X", count: -1, url: "javascript:alert(1)" }, { count: 5 }, null, "x"]);
+  assert.deepEqual(odd, { summary: "Steps (1)", lines: ["Searched: X"], links: [null] });
+  // No reads: the stage times stand, as before.
+  assert.equal(steps([], "en", timed, []).lines[0], "Choosing the sources 0.9 s");
 });
 
 test("a message's time is the visitor's HH:MM with the UTC minute beside it, kept across a page change (T-4339)", () => {

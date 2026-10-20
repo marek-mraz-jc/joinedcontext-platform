@@ -239,6 +239,15 @@ pub fn package(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|kind| !kind.is_empty()),
+            entity_types: record
+                .get(SERVED_TYPES)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|kind| is_type_name(kind))
+                .take(MAX_ENTITY_SETS)
+                .collect(),
             url: &url,
             licence: licence.as_deref(),
             public: spec.audience == Audience::Public,
@@ -267,11 +276,22 @@ fn public_base(record: &Value, slug: &str) -> Option<String> {
 /// usage texts name instead of a placeholder. It is no DCAT term and is never published.
 pub const EXAMPLE_TYPE: &str = "jc:exampleType";
 
+/// The member of a record that carries the entity types the Endpoint's own type list names
+/// (T-4802): the OData text gives each its entity set's address, so a reader, and the
+/// assistant matching rows of a type to their dataset, finds every type, not the example's
+/// alone. Like [`EXAMPLE_TYPE`] it is never published.
+pub const SERVED_TYPES: &str = "jc:servedTypes";
+
+/// The most entity sets an OData text names.
+const MAX_ENTITY_SETS: usize = 20;
+
 /// What a usage text says about the dataset it sits in (EP-108, API/02 §10).
 struct Usage<'a> {
     dataset: &'a str,
     /// A type the Endpoint serves, `None` when the gateway's guide named none.
     entity_type: Option<&'a str>,
+    /// Every type the Endpoint's type list names, plain names only.
+    entity_types: Vec<&'a str>,
     url: &'a str,
     licence: Option<&'a str>,
     public: bool,
@@ -397,7 +417,8 @@ impl Usage<'_> {
                 "OData v4, read-only: each entity type is an entity set, with $filter, $select, \
                  $orderby and $top. In Excel: Data, Get Data, From Other Sources, From OData \
                  Feed, then the URL {address}. In Power BI: Get data, OData feed, the same URL. \
-                 With curl:\n\n    curl{auth} '{address}'\n\n{live} {access}"
+                 With curl:\n\n    curl{auth} '{address}'\n\n{sets}{live} {access}",
+                sets = entity_sets(address, &self.entity_types)
             ),
             Representation::Sta => format!(
                 "OGC SensorThings API 1.1, read-only: Things, Datastreams and Observations.\
@@ -1063,6 +1084,24 @@ fn catalog_extras(record: &Value, language: Option<&str>) -> Vec<Value> {
         text(record.pointer("/prov:wasGeneratedBy/rdfs:label")),
     );
     out
+}
+
+/// A plain entity type name: what a URL path segment carries as itself.
+fn is_type_name(kind: &str) -> bool {
+    (1..=100).contains(&kind.len())
+        && kind.starts_with(|c: char| c.is_ascii_alphabetic())
+        && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The sentence naming each type's entity set under the OData `address` (T-4802); empty for
+/// none.
+fn entity_sets(address: &str, kinds: &[&str]) -> String {
+    if kinds.is_empty() {
+        return String::new();
+    }
+    let base = address.trim_end_matches('/');
+    let sets: Vec<String> = kinds.iter().map(|kind| format!("{base}/{kind}")).collect();
+    format!("Its entity sets: {}.\n\n", sets.join(", "))
 }
 
 /// A `dcat:mediaType` as CKAN's `mimetype`: the record names the IANA IRI (EP-78).

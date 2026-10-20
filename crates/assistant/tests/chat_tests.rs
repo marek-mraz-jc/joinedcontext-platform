@@ -557,6 +557,20 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
     let mut d = deployment(Channel::Public, 50_000, 10);
     d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
     let w = world("chatnotfound", d).await;
+    // T-4801: the Endpoint lists the attributes a follow-up may name; mounted first, so this
+    // tools/list answers before recorded_air's.
+    Mock::given(method("POST"))
+        .and(path(format!("/api/endpoint/{SLUG}/mcp")))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {
+                "type": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "attrs": {"type": "array", "items": {"enum": ["name", "no2", "observedAt"]}}}}}
+        ]}})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
     recorded_air(&w.gateway, SLUG).await;
     let routed = |followups: Value| {
         completion(
@@ -566,7 +580,8 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
     };
     script_routed(&w.proxy, vec![
         routed(json!(["Aký bol prirodzený prírastok v kraji?", "Koľko detí sa narodilo?"])),
-        routed(json!(["Aký bol prirodzený prírastok v kraji?", "Kde je NO2 najvyššie?"])),
+        routed(json!(["Aký bol prirodzený prírastok v kraji?", {"text": "Kde je NO2 najvyššie?", "attrs": ["no2"]},
+            {"text": "Aký je stav staníc?", "attrs": ["condition"]}, "Ktorá stanica je najčistejšia?"])),
     ], vec![
         completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
         completion(json!({"role": "assistant", "content": "{\"answers\": true}"}), 100),
@@ -723,6 +738,7 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
             "stage",
             "tool",
             "tool",
+            "step",
             "stage",
             "data",
             "answer",
@@ -746,8 +762,12 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
         // T-4654: a visitor's stream names no Endpoint.
         json!({"name": "query_entities", "status": "done"})
     );
+    // T-4801: the read is a step the visitor checks, by its type and never by the Endpoint's slug.
+    assert_eq!(events[5].0, "step", "{events:?}");
+    assert_eq!(events[5].1["type"], "AirQualityObserved");
+    assert!(!events[5].1.to_string().contains(SLUG), "{events:?}");
     assert_eq!(
-        events[6].1,
+        events[7].1,
         json!({
             "type": "AirQualityObserved",
             "columns": ["name", "no2", "observedAt"],
@@ -763,11 +783,11 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     // No page of the sources publishes the type: the rows cite their own listing, named by the
     // type, never another dataset's page (T-4747).
     assert_eq!(
-        events[8].1,
+        events[9].1,
         json!([{"n": 1, "tool": "query_entities", "endpoint": "ovzdusie", "title": "AirQualityObserved",
                 "url": format!("https://data.hronov.example/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved&limit=1000")}])
     );
-    let done = &events[9].1;
+    let done = &events[10].1;
     // T-4654: a visitor's `done` carries no tokens or calls; the two calls are counted below.
     assert_eq!(
         (&done["tokens"], &done["modelCalls"], &done["cached"]),
@@ -890,14 +910,22 @@ async fn a_data_question_is_answered_from_the_endpoints_live_values() {
     let names: Vec<&str> = again.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
         names,
-        ["conversation", "data", "answer", "citations", "done"]
+        // The read's step too, so the replayed answer can still be checked (T-4801).
+        [
+            "conversation",
+            "step",
+            "data",
+            "answer",
+            "citations",
+            "done"
+        ]
     );
     let first: Vec<&Value> = events
         .iter()
-        .filter(|(n, _)| n == "data" || n == "answer" || n == "citations")
+        .filter(|(n, _)| ["step", "data", "answer", "citations"].contains(&n.as_str()))
         .map(|(_, d)| d)
         .collect();
-    let replayed: Vec<&Value> = again[1..4].iter().map(|(_, d)| d).collect();
+    let replayed: Vec<&Value> = again[1..5].iter().map(|(_, d)| d).collect();
     assert_eq!(replayed, first);
     assert_eq!(model_calls(&w.proxy).await.len(), calls_before);
     assert_eq!(
