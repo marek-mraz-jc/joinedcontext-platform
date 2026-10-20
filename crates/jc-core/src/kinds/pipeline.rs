@@ -878,6 +878,25 @@ impl PipelineSpec {
             .map(|out| out.target_endpoint)
     }
 
+    /// Every Bloblang text and processor string of the author's steps, the routes' included:
+    /// what the lifetime's scan for `expiresAt` assignments reads (PL-83).
+    fn author_texts(&self) -> Vec<String> {
+        let mut texts = Vec::new();
+        let mut steps = self.steps();
+        steps.extend(self.routes.iter().flat_map(|route| route.steps.clone()));
+        for step in &steps {
+            match step {
+                Step::Compute(compute) => texts.extend(compute.bloblang.clone()),
+                Step::Processor(processor) => {
+                    for config in processor.processor.values() {
+                        config_strings(config, &mut texts);
+                    }
+                }
+            }
+        }
+        texts
+    }
+
     /// The runner variables this pipeline declares for its own steps: the `envVar` of each of
     /// its `secretRefs` (PL-15, T-3163).
     pub fn own_variables(&self) -> Vec<&str> {
@@ -1007,7 +1026,18 @@ impl PipelineSpec {
                 });
             }
         }
-        super::pipeline_lifetime::validate(self)?;
+        if !self.lifetime.is_empty() {
+            let outputs = self.outputs();
+            let context = super::pipeline_lifetime::Context {
+                written: outputs
+                    .iter()
+                    .map(|out| out.entity_type.as_deref())
+                    .collect(),
+                expiry_types: self.expiry.as_ref().map_or(&[], |e| e.types.as_slice()),
+                author_texts: &self.author_texts(),
+            };
+            super::pipeline_lifetime::validate(&self.lifetime, &context)?;
+        }
 
         Ok(())
     }
@@ -1206,7 +1236,7 @@ fn nested_refused(value: &serde_json::Value) -> Option<&'static str> {
 /// A processor carries Bloblang in two places: a `mapping` or `mutation` body, and the
 /// `${! … }` interpolation any field may hold. Both are strings, so both are scanned with the
 /// same eye as an inline mapping.
-pub(super) fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
+fn config_strings(value: &serde_json::Value, found: &mut Vec<String>) {
     match value {
         serde_json::Value::String(text) => found.push(text.clone()),
         serde_json::Value::Array(items) => {

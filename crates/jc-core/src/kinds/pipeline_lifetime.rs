@@ -6,7 +6,6 @@
 //! The checks here need neither the space's model nor a clock; the ones that do (a name that is
 //! not a slot of the type, an `at` already past) are `jc_manifest::lifetime::check`.
 
-use super::pipeline::{PipelineSpec, Step};
 use crate::error::{Error, Result};
 use crate::names;
 use chrono::{DateTime, FixedOffset};
@@ -238,28 +237,30 @@ pub fn is_slot_name(name: &str) -> bool {
     SLOT_RE.is_match(name) && !ENTITY_SYSTEM_MEMBERS.contains(&name)
 }
 
+/// What [`validate`] reads of the rest of the Pipeline, so this module needs none of its types.
+pub(super) struct Context<'a> {
+    /// The types the outputs write; `None` when an output names none.
+    pub written: Option<BTreeSet<&'a str>>,
+    /// `spec.expiry.types`.
+    pub expiry_types: &'a [String],
+    /// Every Bloblang text of the author's steps and routes' steps.
+    pub author_texts: &'a [String],
+}
+
 /// The admission checks of PL-81 and PL-83 that need no model and no clock.
-pub(super) fn validate(spec: &PipelineSpec) -> Result<()> {
-    if spec.lifetime.is_empty() {
-        return Ok(());
-    }
+pub(super) fn validate(lifetime: &[Lifetime], context: &Context<'_>) -> Result<()> {
     let refused = |field: String, reason: String| Error::Invalid { field, reason };
-    if spec.lifetime.len() > LIFETIME_MAX_TYPES {
+    if lifetime.len() > LIFETIME_MAX_TYPES {
         return Err(refused(
             "spec.lifetime".to_owned(),
             format!("name one to {LIFETIME_MAX_TYPES} types (PL-80)"),
         ));
     }
-    let outputs = spec.outputs();
-    let written: Option<BTreeSet<&str>> = outputs
-        .iter()
-        .map(|out| out.entity_type.as_deref())
-        .collect();
-    let writes = scan_author_writes(spec);
-    for (index, entry) in spec.lifetime.iter().enumerate() {
+    let writes = scan_author_writes(context.author_texts);
+    for (index, entry) in lifetime.iter().enumerate() {
         let path = format!("spec.lifetime[{index}]");
         names::validate_entity_type(&entry.entity_type)?;
-        if spec.lifetime[..index]
+        if lifetime[..index]
             .iter()
             .any(|other| other.entity_type == entry.entity_type)
         {
@@ -273,7 +274,7 @@ pub(super) fn validate(spec: &PipelineSpec) -> Result<()> {
         }
         // Every output names its type: the lifetime's type must be one of them. An output that
         // names none may write any type, which the model check judges.
-        if let Some(written) = &written {
+        if let Some(written) = &context.written {
             if !written.contains(entry.entity_type.as_str()) {
                 return Err(refused(
                     format!("{path}.type"),
@@ -295,11 +296,7 @@ pub(super) fn validate(spec: &PipelineSpec) -> Result<()> {
         }
         if let Some(mode) = &entry.entity {
             mode.end(&format!("{path}.entity"))?;
-            if spec
-                .expiry
-                .as_ref()
-                .is_some_and(|expiry| expiry.types.contains(&entry.entity_type))
-            {
+            if context.expiry_types.contains(&entry.entity_type) {
                 return Err(refused(
                     format!("{path}.entity"),
                     format!(
@@ -409,22 +406,9 @@ static ATTRIBUTE_EXPIRES_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
 static KEY_EXPIRES_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#""expiresAt"\s*:"#).expect("valid regex"));
 
-fn scan_author_writes(spec: &PipelineSpec) -> AuthorWrites {
-    let mut texts = Vec::new();
-    let mut steps = spec.steps();
-    steps.extend(spec.routes.iter().flat_map(|route| route.steps.clone()));
-    for step in &steps {
-        match step {
-            Step::Compute(compute) => texts.extend(compute.bloblang.clone()),
-            Step::Processor(processor) => {
-                for config in processor.processor.values() {
-                    super::pipeline::config_strings(config, &mut texts);
-                }
-            }
-        }
-    }
+fn scan_author_writes(texts: &[String]) -> AuthorWrites {
     let mut writes = AuthorWrites::default();
-    for text in &texts {
+    for text in texts {
         writes.attributes.extend(
             ATTRIBUTE_EXPIRES_RE
                 .captures_iter(text)
