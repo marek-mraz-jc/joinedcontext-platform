@@ -26,14 +26,41 @@ pub const PER_SPACE: usize = 1000;
 /// `JC_GATEWAY_WS_PER_SPACE`: the space cap, raised for a measurement (the `ws-fanout` rig).
 pub fn per_space() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        std::env::var("JC_GATEWAY_WS_PER_SPACE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(PER_SPACE)
-    })
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_PER_SPACE", PER_SPACE))
 }
+/// Hubs the gateway holds when `JC_GATEWAY_WS_HUBS` names no other number (API/07 §3): each is one
+/// broker WebSocket and up to `JC_GATEWAY_WS_ENTITIES` entities, so this bounds both.
+pub const HUBS: usize = 64;
+/// Hubs one space may hold when `JC_GATEWAY_WS_HUBS_PER_SPACE` names no other number: under the
+/// broker's 50 connections per tenant, so the broker never refuses a hub the gateway admitted.
+pub const HUBS_PER_SPACE: usize = 32;
+
+/// A positive whole number from `name`, else `default`.
+fn env_cap(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// `JC_GATEWAY_WS_HUBS`: the hubs, and so the broker connections, of this replica.
+pub fn hubs_cap() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_HUBS", HUBS))
+}
+
+/// `JC_GATEWAY_WS_HUBS_PER_SPACE`: the hubs one space may hold in this replica.
+pub fn hubs_per_space() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_HUBS_PER_SPACE", HUBS_PER_SPACE))
+}
+
+/// Frames a client may send at once, then [`MESSAGES_PER_SEC`] a second; past that the
+/// connection closes with `1008` (API/07 §3).
+const MESSAGE_BURST: f64 = 100.0;
+const MESSAGES_PER_SEC: f64 = 20.0;
+
 /// How long a hub keeps its upstream after its last client left (ADR-N-049 §2.1).
 const LINGER: Duration = Duration::from_secs(60);
 /// The upstream's reconnect delay grows to this.
@@ -53,18 +80,13 @@ const FROM_BROKER: usize = 1024 * 1024;
 const NORMAL: u16 = 1000;
 const UNSUPPORTED: u16 = 1003;
 const TOO_BIG: u16 = 1009;
+const POLICY: u16 = 1008;
 const INTERNAL: u16 = 1011;
 
 /// `JC_GATEWAY_WS_ENTITIES`, the entity table's bound per Endpoint (ADR-N-049 §2.2).
 fn bound() -> usize {
     static BOUND: OnceLock<usize> = OnceLock::new();
-    *BOUND.get_or_init(|| {
-        std::env::var("JC_GATEWAY_WS_ENTITIES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(hub::DEFAULT_ENTITIES)
-    })
+    *BOUND.get_or_init(|| env_cap("JC_GATEWAY_WS_ENTITIES", hub::DEFAULT_ENTITIES))
 }
 
 /// Every hub, keyed by `hub_key`: one per Endpoint and caller identity (T-4755).
@@ -78,6 +100,8 @@ pub enum Refused {
     SpaceFull,
     /// The caller's identity is no header value.
     NoIdentity,
+    /// The gateway holds [`hubs_cap`] hubs, or the space [`hubs_per_space`], each with a client.
+    HubsFull,
 }
 
 impl Hubs {
@@ -105,8 +129,10 @@ impl Hubs {
         let hub = match hubs.get(&key) {
             Some((_, hub)) => Arc::clone(hub),
             None => {
+                make_room(&mut hubs, &endpoint.space, hubs_cap(), hubs_per_space())?;
                 let hub = Arc::new(Hub::new(&endpoint.slug, bound()));
                 hubs.insert(key, (endpoint.space.clone(), Arc::clone(&hub)));
+                metrics::gauge!("jc_gateway_ws_hubs").set(hubs.len() as f64);
                 tokio::spawn(upstream(Arc::clone(gateway), Arc::clone(&hub), headers));
                 hub
             }
@@ -115,13 +141,68 @@ impl Hubs {
         Ok(hub::Joined::new(hub, conn, queue))
     }
 
-    /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did.
+    /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did, or
+    /// when [`make_room`] dropped it already.
     fn leave_if_idle(&self, hub: &Arc<Hub>) -> bool {
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
+        let held = hubs.values().any(|(_, held)| Arc::ptr_eq(held, hub));
+        if held && !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
             return false;
         }
         hubs.retain(|_, (_, held)| !Arc::ptr_eq(held, hub));
+        metrics::gauge!("jc_gateway_ws_hubs").set(hubs.len() as f64);
+        true
+    }
+}
+
+/// Makes room for one more hub in `space`: at a cap, drops the hub idle longest (no connection, in
+/// its linger), whose upstream then stops at its next tick; refused when every hub has a client.
+fn make_room(
+    hubs: &mut HashMap<String, (String, Arc<Hub>)>,
+    space: &str,
+    total: usize,
+    per_space: usize,
+) -> Result<(), Refused> {
+    for (cap, in_space) in [(per_space, true), (total, false)] {
+        let counted = |held: &str| !in_space || held == space;
+        if hubs.values().filter(|(held, _)| counted(held)).count() < cap {
+            continue;
+        }
+        let idlest = hubs
+            .iter()
+            .filter(|(_, (held, _))| counted(held))
+            .filter_map(|(key, (_, hub))| Some((hub.idle_for()?, key.clone())))
+            .max();
+        let (_, key) = idlest.ok_or(Refused::HubsFull)?;
+        hubs.remove(&key);
+    }
+    Ok(())
+}
+
+/// A token bucket over the frames one client sends (API/07 §3). It runs before a message is
+/// parsed, so a flood of `x-subscribe`, `x-update` or Pings costs a comparison a frame.
+struct Rate {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Rate {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: MESSAGE_BURST,
+            at: now,
+        }
+    }
+
+    /// Whether one more frame at `now` stays within the bound.
+    fn take(&mut self, now: Instant) -> bool {
+        let earned = now.duration_since(self.at).as_secs_f64() * MESSAGES_PER_SEC;
+        self.tokens = (self.tokens + earned).min(MESSAGE_BURST);
+        self.at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
         true
     }
 }
@@ -444,6 +525,20 @@ pub enum Ended {
     Refused,
 }
 
+impl Ended {
+    /// The `reason` label of `jc_gateway_ws_closed_total`.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::TooBig => "too-big",
+            Self::Binary => "binary",
+            Self::Closing(reason) => reason,
+            Self::NoPong => "no-pong",
+            Self::Refused => "refused",
+        }
+    }
+}
+
 /// One client connection: welcome, then its messages answered and its queue written, until it
 /// ends; its subscriptions leave the index then and its place is held for a resume.
 pub async fn session(
@@ -475,6 +570,7 @@ pub async fn session(
     let mut last_pong = Instant::now();
     let mut last_message = Instant::now();
     let mut first = true;
+    let mut rate = Rate::new(Instant::now());
     let expired = tokio::time::sleep(lifetime);
     tokio::pin!(expired);
     while ended.is_none() {
@@ -482,6 +578,10 @@ pub async fn session(
         tokio::select! {
             read = from_client.next() => {
                 last_message = Instant::now();
+                if matches!(read, Some(Ok(_))) && !rate.take(last_message) {
+                    tracing::warn!(slug = %hub.slug, %principal, "WebSocket client past its message rate");
+                    ended = Some(Ended::Closing("rate"));
+                } else {
                 match read {
                     Some(Ok(ws::Message::Text(text))) => {
                         let replies = answer(&hub, conn, &principal, text.as_str(), first, &mut seq, &mut sent);
@@ -495,6 +595,7 @@ pub async fn session(
                     Some(Err(error)) => {
                         ended = Some(if too_big(&error) { Ended::TooBig } else { Ended::Closed });
                     }
+                }
                 }
             }
             () = queue.ready() => {
@@ -549,7 +650,7 @@ pub async fn session(
         Ended::Closing(reason) => {
             let closing = json!({"metadata": {"x-op": "x-closing", "x-reason": reason}});
             let _ = to_client.send(ws::Message::text(closing.to_string())).await;
-            Some((NORMAL, *reason))
+            Some((if *reason == "rate" { POLICY } else { NORMAL }, *reason))
         }
         Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
         Ended::Binary => Some((UNSUPPORTED, "text frames only")),
@@ -761,6 +862,46 @@ mod tests {
         assert!(subscription["body"]["notification"]
             .get("endpoint")
             .is_none());
+    }
+
+    /// API/07 §3: at either hub cap the hub idle longest goes; one hub past the cap with every hub
+    /// holding a client is refused, and the other space's hubs stay.
+    #[test]
+    fn hubs_are_capped_per_space_and_in_all_and_idle_ones_make_room() {
+        let endpoint = crate::fanout::hub::tests_support::endpoint();
+        let busy = |slug: &str| {
+            let hub = Arc::new(Hub::new(slug, 10));
+            hub.open(Arc::clone(&endpoint), "anonymous".into());
+            hub
+        };
+        let mut hubs: HashMap<String, (String, Arc<Hub>)> = HashMap::new();
+        hubs.insert("a1".into(), ("a".into(), busy("a1")));
+        hubs.insert("b1".into(), ("b".into(), busy("b1")));
+        hubs.insert("a2".into(), ("a".into(), busy("a2")));
+        assert_eq!(make_room(&mut hubs, "a", 10, 2), Err(Refused::HubsFull));
+        assert_eq!(make_room(&mut hubs, "b", 3, 2), Err(Refused::HubsFull));
+        assert_eq!(make_room(&mut hubs, "b", 4, 2), Ok(()));
+
+        hubs.insert("a3".into(), ("a".into(), Arc::new(Hub::new("a3", 10))));
+        assert_eq!(make_room(&mut hubs, "a", 10, 3), Ok(()), "a3 lingers");
+        assert!(!hubs.contains_key("a3"), "{:?}", hubs.keys());
+        assert_eq!(hubs.len(), 3);
+    }
+
+    /// API/07 §3: the burst passes, the next frame is refused, a twentieth of a second earns one
+    /// back, and idle time saves no more than the burst.
+    #[test]
+    fn the_message_rate_holds_a_burst_then_the_pace() {
+        let start = Instant::now();
+        let mut rate = Rate::new(start);
+        assert!((0..100).all(|_| rate.take(start)));
+        assert!(!rate.take(start), "one past the burst");
+        let later = start + Duration::from_millis(50);
+        assert!(rate.take(later));
+        assert!(!rate.take(later));
+        let idle = later + Duration::from_secs(60);
+        assert!((0..100).all(|_| rate.take(idle)));
+        assert!(!rate.take(idle));
     }
 
     #[test]
