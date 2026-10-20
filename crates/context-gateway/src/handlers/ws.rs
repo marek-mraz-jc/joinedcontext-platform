@@ -165,11 +165,22 @@ pub(crate) async fn endpoint_ws(
     let joined = match joined {
         Ok(joined) => joined,
         Err(crate::fanout::socket::Refused::SpaceFull) => {
+            metrics::counter!("jc_gateway_ws_refused_total", "reason" => "space-full").increment(1);
             return ProblemDetails::new(503, "space-full", "Service Unavailable")
                 .with_detail(format!(
                     "a space holds at most {} WebSocket connections at once",
                     crate::fanout::socket::per_space()
                 ))
+                .into_response();
+        }
+        Err(crate::fanout::socket::Refused::HubsFull) => {
+            tracing::warn!(space = %endpoint.space, "WebSocket refused: every fan-out hub has a client");
+            metrics::counter!("jc_gateway_ws_refused_total", "reason" => "fan-out-full")
+                .increment(1);
+            return ProblemDetails::new(503, "fan-out-full", "Service Unavailable")
+                .with_detail(
+                    "the gateway serves as many Endpoint fan-outs as it may; try again later",
+                )
                 .into_response();
         }
         Err(crate::fanout::socket::Refused::NoIdentity) => {
@@ -187,6 +198,8 @@ pub(crate) async fn endpoint_ws(
             let ended =
                 crate::fanout::socket::session(client, hub, conn, queue, principal, lifetime).await;
             tracing::info!(slug = %endpoint.slug, closed = ?ended, "WebSocket closed");
+            metrics::counter!("jc_gateway_ws_closed_total", "reason" => ended.reason())
+                .increment(1);
             drop(held);
         })
 }
