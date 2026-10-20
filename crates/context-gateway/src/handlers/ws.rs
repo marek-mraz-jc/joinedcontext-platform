@@ -38,8 +38,8 @@ pub const PER_CALLER: usize = 10;
 /// The client's bounds (API/07 §3): a message over them closes the connection with 1009.
 const MAX_MESSAGE: usize = 64 * 1024;
 const MAX_FRAME: usize = 16 * 1024;
-/// A token caller's socket ends when its access token would (Keycloak's default 300 s), since
-/// nothing re-checks the token on an open socket (API/07 §3).
+/// The longest a token caller's socket lives; it ends sooner when its access token expires,
+/// since nothing re-checks the token on an open socket (API/07 §3, T-4874).
 pub const TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
 /// An anonymous socket's lifetime (API/07 §3).
 const ANONYMOUS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
@@ -131,7 +131,7 @@ pub(crate) async fn endpoint_ws(
     let lifetime = if principal == "anonymous" {
         ANONYMOUS_LIFETIME
     } else {
-        gateway.ws_token_lifetime
+        token_lifetime(&gateway, &endpoint, request.headers())
     };
     let caller = match principal {
         anonymous if anonymous == "anonymous" => caller_key(request.headers()),
@@ -189,6 +189,34 @@ pub(crate) async fn endpoint_ws(
             tracing::info!(slug = %endpoint.slug, closed = ?ended, "WebSocket closed");
             drop(held);
         })
+}
+
+/// How long a token caller's socket may live (T-4874): until its token's `exp`, never past
+/// the gateway's cap, so reconnecting needs a fresh token. A token the realm does not verify
+/// here (a data space caller's) keeps the cap.
+fn token_lifetime(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    headers: &HeaderMap,
+) -> std::time::Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let presented = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let left = jc_core::auth::token::bearer(presented)
+        .ok()
+        .zip(gateway.verifier.as_deref())
+        .and_then(|(raw, verifier)| verifier.verify(raw, &gateway.audiences_for(endpoint)).ok())
+        .map(|claims| {
+            std::time::Duration::from_secs(
+                u64::try_from(claims.exp).unwrap_or(0).saturating_sub(now),
+            )
+        });
+    left.map_or(gateway.ws_token_lifetime, |left| {
+        left.min(gateway.ws_token_lifetime)
+    })
 }
 
 /// Whether the request asks for a WebSocket at all (RFC 6455 §4.1: `Upgrade: websocket`).
