@@ -1,0 +1,300 @@
+{
+ "_source": "prod bbsk-registre Endpoint lws6dd7o56veegwxsjtvak3goeta4mfn, query_entities type Bridge orderBy yearBuilt limit 12, read 2026-10-20 (T-4803)",
+ "entities": [
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M1641",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "Pracovný názov: R1_060A, B. Bystrica"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M1641"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "motorway"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1000
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M252",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "Pracovný názov: Nadjazd zo žel. st. v B. Bytrici"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M252"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "local"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1700
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 0.1,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M5417",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "Pracovný názov: Most na MK nad R1 B. Bystrica"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M5417"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "local"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1700
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 0.1,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M5472",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "Pracovný názov: Most na MK nac cestou I/66 B. Bystrica"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M5472"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "local"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1700
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 0.1,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M6925",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2588-2 Most cez suché koryto Turianskeho potoka za obcou Pôtor ( 508 028 - 002)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M6925"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1800
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 6.56,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M837",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2530-004 Most cez Hodrušský potok v km 6,288 Hodruša Hámre (065018-004)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M837"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1800
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 3.7,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M191",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2530-005 Most cez Hodrušský potok v km 7,755 Hodruša Hámre (065018-005)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M191"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1810
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 3.9,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M2812",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2530-008 Most cez Hodrušský potok v km 12,276 Hodruša Hámre (065018-008)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M2812"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1830
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 3.98,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M7058",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "527-002 Most cez kanál za obcou Ipeľské Predmostie (000527-002)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M7058"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "secondClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1865
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 3.3,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M1678",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2530-007 Most cez Hodrušský potok v km 12,068 Hodruša Hámre (065018-007)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M1678"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1870
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 3.7,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M312",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "72_024 Most cez potok v areáli Tisovec - Bánovo"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M312"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "firstClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1870
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 2.7,
+    "unitCode": "MTR"
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:Bridge:bbsk.sk:bbsk-registre:M3789",
+   "type": "Bridge",
+   "name": {
+    "type": "Property",
+    "value": "2530-002 Most cez Hodrušský potok v km 5,016 Hodruša Hámre (065018-002)"
+   },
+   "bridgeCode": {
+    "type": "Property",
+    "value": "M3789"
+   },
+   "roadClass": {
+    "type": "Property",
+    "value": "thirdClass"
+   },
+   "yearBuilt": {
+    "type": "Property",
+    "value": 1870
+   },
+   "bridgedLength": {
+    "type": "Property",
+    "value": 2.45,
+    "unitCode": "MTR"
+   }
+  }
+ ]
+}
