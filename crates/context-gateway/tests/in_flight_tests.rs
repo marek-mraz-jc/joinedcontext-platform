@@ -319,3 +319,91 @@ async fn a_download_past_its_slots_is_refused_and_a_read_still_served() {
         StatusCode::OK
     );
 }
+
+/// The resident memory of this process now, in KiB (Linux `VmRSS`).
+fn resident_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .expect("/proc/self/status")
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+        .expect("VmRSS")
+}
+
+/// Waves of full-page reads from 64 callers through the gateway's default caps, every answer read
+/// whole; returns how many KiB more this process holds once they are answered and it went idle.
+async fn a_load_of_full_pages() -> u64 {
+    let broker = slow_broker().await;
+    broker.release.add_permits(Semaphore::MAX_PERMITS);
+    let app = gateway(&broker, 128, 32);
+    let before = resident_kib();
+    for wave in 0..8 {
+        let answers: Vec<_> = (0..400)
+            .map(|n| {
+                let caller = format!("192.0.2.{}", (n + wave) % 64);
+                tokio::spawn(app.clone().oneshot(read(&caller)))
+            })
+            .collect();
+        for answer in answers {
+            let answer = answer.await.expect("joined").expect("answered");
+            if answer.status() == StatusCode::OK {
+                axum::body::to_bytes(answer.into_body(), 64 << 20)
+                    .await
+                    .expect("the page");
+            } else {
+                assert_busy(answer).await;
+            }
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    resident_kib().saturating_sub(before)
+}
+
+/// Set in the child processes of the test below, which run the load and print what it left.
+const LOAD_CHILD: &str = "JC_GATEWAY_TEST_LOAD_CHILD";
+
+/// T-4782 (reopened): after prod's 100 req/s run the gateway idled at 929 Mi of its 1 Gi. glibc
+/// raises its mmap threshold to the largest block freed, so every later page body comes from the
+/// heap and stays there. The deployment fixes the threshold at 128 KiB
+/// (`MALLOC_MMAP_THRESHOLD_` in the gateway's base values, beside `MALLOC_ARENA_MAX`): the same
+/// load then leaves almost nothing behind. Without it the growth stays, which makes this test red
+/// when the setting goes. The load runs in a child process of its own (this test, `LOAD_CHILD`
+/// set), so neither the setting nor its memory reaches the other tests of this binary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_memory_of_a_load_comes_back_with_the_deployed_malloc_setting() {
+    const NAME: &str = "the_memory_of_a_load_comes_back_with_the_deployed_malloc_setting";
+    if std::env::var_os(LOAD_CHILD).is_some() {
+        eprintln!("idle growth KiB {}", a_load_of_full_pages().await);
+        return;
+    }
+    let idle_growth_mib = |mmap_threshold: Option<&str>| {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("this test"));
+        child
+            .args(["--exact", NAME, "--nocapture"])
+            .env(LOAD_CHILD, "1")
+            .env("MALLOC_ARENA_MAX", "2")
+            .env_remove("MALLOC_MMAP_THRESHOLD_");
+        if let Some(threshold) = mmap_threshold {
+            child.env("MALLOC_MMAP_THRESHOLD_", threshold);
+        }
+        let output = child.output().expect("the load ran");
+        let printed = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{printed}");
+        printed
+            .lines()
+            .find_map(|line| line.strip_prefix("idle growth KiB "))
+            .and_then(|kib| kib.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no measurement in {printed}"))
+            / 1024
+    };
+    let deployed = idle_growth_mib(Some("131072"));
+    let dynamic = idle_growth_mib(None);
+    eprintln!("idle growth after the load: {deployed} MiB with the deployed threshold, {dynamic} MiB with glibc's dynamic one");
+    // Measured (debug build, 3,200 reads of 1 MiB pages, MALLOC_ARENA_MAX=2): 9 MiB with the
+    // deployed threshold, 98-103 MiB without; release build 9 and 102 MiB.
+    assert!(deployed < 32, "the load left {deployed} MiB behind");
+    assert!(
+        dynamic > deployed + 32,
+        "glibc's dynamic threshold kept only {dynamic} MiB: the setting may no longer be needed"
+    );
+}
