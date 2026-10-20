@@ -1078,9 +1078,9 @@ async fn datasets(ask: &Ask<'_>, queries: &[String]) -> Vec<Hit> {
 
 /// The live data a deployment reads, for a catalogue question (T-4810): one passage per public
 /// Endpoint it is lent, as `(slug, passage)`, holding its title, its publisher and the types
-/// [`live`] listed for it. A connector read with a person's token is never listed, nor one that
+/// `live` listed for it. A connector read with a person's token is never listed, nor one that
 /// neither a title nor a type describes. Each cites the Endpoint's address until
-/// [`holdings_linked`] puts its dataset page in. "k akým datasetom máš prístup?" on bbsk-demo
+/// `holdings_linked` puts its dataset page in. "k akým datasetom máš prístup?" on bbsk-demo
 /// listed 8 CKAN pages of the 11 Endpoints it reads.
 pub fn holdings(connectors: &[Connected], live: &[Shown], base: &url::Url) -> Vec<(String, Hit)> {
     connectors
