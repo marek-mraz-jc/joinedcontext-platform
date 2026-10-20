@@ -747,75 +747,68 @@ fn disabled_representations_are_checked() {
     );
 }
 
-/// EP-125 (T-4573): what `ical` needs of the space's model, read from its LinkML source.
+/// EP-125: only `ical` checks a mapping against the model; the generic ones serve any type.
 #[test]
-fn ical_needs_event_with_start_date_and_name_required_and_nothing_else_needs_a_model() {
+fn only_ical_needs_the_model() {
     use Representation as R;
-    for generic in R::ALL.into_iter().filter(|r| *r != R::Ical) {
-        assert_eq!(generic.requirement(), None, "{generic}");
-        assert_eq!(generic.model_gap("classes: {}").unwrap(), None, "{generic}");
+    for r in R::ALL {
+        assert_eq!(r.needs_model(), r == R::Ical, "{r}");
     }
-    let need = R::Ical.requirement().expect("ical declares its model");
-    assert_eq!(need.entity_type, "Event");
-    let mandatory: Vec<_> = need
-        .fields
-        .iter()
-        .filter(|f| f.3)
-        .map(|f| (f.0, f.2))
-        .collect();
-    assert_eq!(
-        mandatory,
-        [
-            ("UID", "id"),
-            ("DTSTAMP", "modifiedAt"),
-            ("DTSTART", "startDate"),
-            ("SUMMARY", "name")
-        ]
-    );
-
-    // Required as class attributes counts the same as required slots.
-    let attributes = "classes:\n  Event:\n    attributes:\n      name: { required: true }\n      startDate: { required: true }\n";
-    assert_eq!(R::Ical.model_gap(attributes).unwrap(), None);
-    // A slot required globally but not listed by the class is not the class's.
-    let unlisted = "slots:\n  startDate: { required: true }\n  name: { required: true }\nclasses:\n  Event:\n    slots: [name]\n";
-    assert_eq!(
-        R::Ical.model_gap(unlisted).unwrap().as_deref(),
-        Some("the type Event with the required attribute(s) startDate")
-    );
-    assert_eq!(
-        R::Ical.model_gap("classes: {}").unwrap().as_deref(),
-        Some("the type Event")
-    );
-    assert!(
-        R::Ical.model_gap("classes: [").is_err(),
-        "an unreadable model is an error, not a pass"
-    );
 }
 
-/// Every representation's requirement as the Markdown tables `schemas/surface-requirements.md`
+/// The iCalendar fields, remaps and presets as the Markdown `schemas/surface-requirements.md`
 /// commits and API/02 §8b quotes (EP-125).
 fn markdown() -> String {
+    use jc_core::kinds::{FieldSource, IcalField, Preset};
     let mut out = String::from(
-        "# Domain-standard representations and the data model they need\n\n\
-         Generated from `Representation::requirement()` (jc-core); a test fails when this \
-         file and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test \
-         endpoint_tests` rewrites it. An Endpoint may list a representation below only when \
-         its space's data model has the type with every mandatory source attribute as a \
-         required slot; `id`, `type` and `modifiedAt` belong to every entity (EP-125).\n",
+        "# Domain-standard representations and their mappings\n\n\
+         Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this file \
+         and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test endpoint_tests` \
+         rewrites it. An Endpoint that serves a representation below maps its fields from \
+         NGSI-LD attributes in `spec.representations.<name>`; `jcctl validate` and the Portal \
+         check the mapping against the space's data model (EP-125, API/02 §8b).\n\n\
+         ## `ical` (RFC 5545)\n\n\
+         | Field | Section | Required | Source accepts | Remaps |\n|---|---|---|---|---|\n",
     );
-    for representation in Representation::ALL {
-        let Some(need) = representation.requirement() else {
-            continue;
+    for field in IcalField::ALL {
+        let required = match field {
+            IcalField::Uid => "yes, fixed: entity `id`",
+            IcalField::Dtstamp => "yes, fixed: entity `modifiedAt`",
+            f if f.required() => "yes",
+            _ => "no",
         };
+        let remaps = field.remaps();
         out.push_str(&format!(
-            "\n## `{representation}` ({})\n\nType: `{}` ({})\n\n| Field | Section | Source attribute | Mandatory |\n|---|---|---|---|\n",
-            need.standard, need.entity_type, need.type_iri
+            "| `{field}` | {} | {required} | {} | {} |\n",
+            field.section(),
+            field.accepts().words(),
+            if remaps.is_empty() {
+                "none".to_owned()
+            } else {
+                remaps
+                    .iter()
+                    .map(|r| format!("`{r}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         ));
-        for (field, section, attribute, mandatory) in need.fields {
-            out.push_str(&format!(
-                "| `{field}` | {section} | `{attribute}` | {} |\n",
-                if *mandatory { "yes" } else { "no" }
-            ));
+    }
+    for preset in Preset::ALL {
+        out.push_str(&format!(
+            "\n### Preset `{}`\n\n| Field | Source |\n|---|---|\n",
+            preset.as_str()
+        ));
+        for (field, source) in preset.mapping() {
+            let source = match source {
+                FieldSource::Attribute(name) => format!("`{name}`"),
+                FieldSource::Remap(remap) => format!(
+                    "`{}`, mapped ({} values), default `{}`",
+                    remap.attribute.unwrap_or_default(),
+                    remap.map.len(),
+                    remap.default.unwrap_or_default()
+                ),
+            };
+            out.push_str(&format!("| `{field}` | {source} |\n"));
         }
     }
     out
@@ -837,5 +830,5 @@ fn the_committed_surface_requirements_are_the_generated_ones() {
     let committed = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{}: {e} — run with UPDATE_SCHEMAS=1", path.display()));
     assert_eq!(committed, generated, "{} is stale", path.display());
-    assert!(committed.contains("| `DTSTART` | §3.6.1, §3.8.2.4 | `startDate` | yes |"));
+    assert!(committed.contains("| `DTSTART` | §3.6.1, §3.8.2.4 | yes | date or datetime |"));
 }

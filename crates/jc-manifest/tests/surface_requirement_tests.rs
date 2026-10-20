@@ -148,7 +148,7 @@ fn a_model_without_event_is_refused_and_the_type_named() {
     let dir = repo_with("no-event", Some(&model), ICAL);
     assert_eq!(
         surface_findings(&dir),
-        ["Endpoint city/calendar: `ical` needs the type Event in the data model of space events (EP-125)"]
+        ["Endpoint city/calendar, space events: `ical` maps the type Event, which the data model does not have (EP-125)"]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -162,7 +162,7 @@ fn an_event_whose_start_date_is_not_required_is_refused_and_only_that_attribute_
     let dir = repo_with("optional-start", Some(&model), ICAL);
     assert_eq!(
         surface_findings(&dir),
-        ["Endpoint city/calendar: `ical` needs the type Event with the required attribute(s) startDate in the data model of space events (EP-125)"]
+        ["Endpoint city/calendar, space events: `ical` maps DTSTART to `startDate`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)"]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -189,7 +189,11 @@ fn a_space_without_a_model_has_no_event() {
     let dir = repo_with("no-model", None, ICAL);
     let found = surface_findings(&dir);
     assert_eq!(found.len(), 1, "{found:?}");
-    assert!(found[0].contains("needs the type Event"), "{}", found[0]);
+    assert!(
+        found[0].contains("maps the type Event, which the data model does not have"),
+        "{}",
+        found[0]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -251,6 +255,44 @@ fn a_display_is_checked_against_the_projection_not_the_whole_model() {
         found[0].contains("endDate is no slot of Event"),
         "{}",
         found[0]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The mapping API/02 §8b prints, run through `jcctl validate` against the shared fixture model
+/// (T-4900): accepted as printed, and refused with one finding per gap once broken.
+const DOCS_MAPPING: &str = "  enabledRepresentations: [ngsi-ld, ical]
+  representations:
+    ical:
+      type: Event
+      preset: sdm-event
+      mapping:
+        LOCATION: { join: [address.streetAddress, address.addressLocality], separator: \", \" }
+        SUMMARY: { attribute: name, language: sk, truncate: 200 }
+        DTEND: { attribute: endDate, date: date, endInclusive: true }
+";
+
+#[test]
+fn the_documented_mapping_validates_and_each_gap_is_one_finding() {
+    let model = include_str!("../../../testdata/ical-mapping/model.linkml.yaml");
+    let dir = repo_with("docs-mapping", Some(model), DOCS_MAPPING);
+    assert_eq!(surface_findings(&dir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let broken = DOCS_MAPPING
+        .replace("preset: sdm-event", "preset: schema-org")
+        .replace(
+            "attribute: name, language",
+            "attribute: description, language",
+        )
+        .replace("attribute: endDate,", "attribute: url,");
+    let dir = repo_with("docs-mapping-broken", Some(model), &broken);
+    assert_eq!(
+        surface_findings(&dir),
+        [
+            "Endpoint city/calendar, space events: `ical` maps DTEND to `url`, range uri; DTEND takes date or datetime (EP-125)",
+            "Endpoint city/calendar, space events: `ical` maps SUMMARY to `description`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)",
+        ]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

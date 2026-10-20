@@ -564,6 +564,32 @@
         }
       ]
     },
+    "DateMode": {
+      "description": "How a date field reads its value.",
+      "oneOf": [
+        {
+          "description": "As the value is: a date stays a date, a date-time a date-time.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A whole day (`VALUE=DATE`).",
+          "enum": [
+            "date"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A date-time.",
+          "enum": [
+            "datetime"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Display": {
       "additionalProperties": false,
       "description": "An override of the model's display order for one type: an Endpoint's `spec.display` entry or a visualization's `fields` (EP-135). Either list empty leaves that part to the model.",
@@ -773,6 +799,17 @@
           ],
           "description": "Optional rate limiting configuration (EP-20)."
         },
+        "representations": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Representations"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The mappings of the domain-standard representations, `ical` first (EP-125, API/02 §8b)."
+        },
         "roles": {
           "description": "Roles a caller this Endpoint admits holds when a subject matches them, on requests through it alone (AP-96, AP-97).",
           "items": {
@@ -806,6 +843,117 @@
         "slug"
       ],
       "type": "object"
+    },
+    "FieldRemap": {
+      "additionalProperties": false,
+      "description": "The object form of a [`FieldSource`] (API/02 §8b): exactly one of `attribute`, `firstOf`, `join` and `constant`, and the remaps the field allows.",
+      "properties": {
+        "attribute": {
+          "description": "An attribute, or a dotted path into its value (`address.addressLocality`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "constant": {
+          "description": "A fixed value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "date": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DateMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a date field reads its value."
+        },
+        "default": {
+          "description": "The calendar value of a source value `map` does not name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endInclusive": {
+          "description": "The source names the last day, so DTEND is the day after.",
+          "type": "boolean"
+        },
+        "firstOf": {
+          "description": "The first of these attributes that has a value.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "join": {
+          "description": "The values of these attributes that have one, joined by `separator`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "language": {
+          "description": "Which text of a LanguageProperty: a two-letter code or `first` (the default).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "map": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Source value to calendar value.",
+          "type": "object"
+        },
+        "separator": {
+          "description": "The `join` separator; default `\", \"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timezone": {
+          "description": "The IANA zone of a floating time; default `Europe/Bratislava`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncate": {
+          "description": "At most this many characters.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FieldSource": {
+      "anyOf": [
+        {
+          "description": "`DTSTART: startDate`.",
+          "type": "string"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FieldRemap"
+            }
+          ],
+          "description": "`SUMMARY: {attribute: name, language: sk}`."
+        }
+      ],
+      "description": "A field's source: an attribute name, or an object with one source and its remaps."
     },
     "FileLimits": {
       "additionalProperties": false,
@@ -906,6 +1054,36 @@
           "type": "string"
         }
       ]
+    },
+    "IcalMapping": {
+      "additionalProperties": false,
+      "description": "`spec.representations.ical`.",
+      "properties": {
+        "mapping": {
+          "additionalProperties": {
+            "$ref": "#/definitions/FieldSource"
+          },
+          "description": "Fields that replace the preset's, or the whole mapping when no preset is named.",
+          "type": "object"
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Preset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The preset the mapping starts from; with no `mapping` either, `sdm-event`."
+        },
+        "type": {
+          "default": "Event",
+          "description": "The NGSI-LD type the feed maps.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "Licence": {
       "description": "A licence of the EU licence table whose duties are known (EP-79).",
@@ -1088,6 +1266,25 @@
         }
       ]
     },
+    "Preset": {
+      "description": "A named starting mapping.",
+      "oneOf": [
+        {
+          "description": "Smart Data Models `Event` (dataModel.Event), the default.",
+          "enum": [
+            "sdm-event"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "schema.org `Event`.",
+          "enum": [
+            "schema-org"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Projection": {
       "additionalProperties": false,
       "description": "What this Endpoint never serves, whatever the Policy set allows (EP-61).\n\nA publication decision, not an authorization one: the gateway intersects this list with the caller's policy projection, so an Endpoint can subtract from a grant and never add to it. The same space can therefore be published twice with different amounts of detail without writing a second Policy, and because the subtraction happens where every representation reads its entities, a hidden attribute is missing from the CSV, the GeoJSON, the MCP tool result and the schema surface alike (EP-06, EP-07, EP-47).",
@@ -1239,13 +1436,31 @@
           "type": "string"
         },
         {
-          "description": "iCalendar (RFC 5545) feed of the view's Events (`/ical/v1/`); served only where listed, and only on a space whose model has Event with `startDate` and `name` required (EP-125).",
+          "description": "iCalendar (RFC 5545) feed of the view's entities (`/ical/v1/`); served only where listed, through the mapping `spec.representations.ical` checked against the space's model (EP-125).",
           "enum": [
             "ical"
           ],
           "type": "string"
         }
       ]
+    },
+    "Representations": {
+      "additionalProperties": false,
+      "description": "`spec.representations`: the mappings of the domain-standard representations (EP-125).",
+      "properties": {
+        "ical": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IcalMapping"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The iCalendar feed's mapping; absent means the `sdm-event` preset over `Event`."
+        }
+      },
+      "type": "object"
     },
     "Source": {
       "additionalProperties": false,

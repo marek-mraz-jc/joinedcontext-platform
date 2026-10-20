@@ -1315,7 +1315,7 @@
           "type": "string"
         },
         {
-          "description": "iCalendar (RFC 5545) feed of the view's Events (`/ical/v1/`); served only where listed, and only on a space whose model has Event with `startDate` and `name` required (EP-125).",
+          "description": "iCalendar (RFC 5545) feed of the view's entities (`/ical/v1/`); served only where listed, through the mapping `spec.representations.ical` checked against the space's model (EP-125).",
           "enum": [
             "ical"
           ],

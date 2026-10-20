@@ -1653,8 +1653,8 @@ fn stale_projections(repo_dir: &Path, repo: &Repository) -> Vec<(Location, Strin
     stale
 }
 
-/// An Endpoint that lists a domain-standard representation needs, in its space's data model,
-/// the type that standard maps with every mandatory source attribute marked required (EP-125).
+/// An Endpoint that serves a domain-standard representation needs a mapping that fits its
+/// space's data model: one finding per gap (EP-125, API/02 §8b).
 fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Location, String)> {
     let mut refused = Vec::new();
     for (id, resource) in repo.iter() {
@@ -1666,38 +1666,35 @@ fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Loca
         else {
             continue;
         };
-        let space = spec.context_space_ref.name();
-        let wanted: Vec<_> = spec
+        if !spec
             .served_representations()
-            .into_iter()
-            .filter(|r| r.requirement().is_some())
-            .collect();
-        if wanted.is_empty() {
+            .iter()
+            .any(|r| r.needs_model())
+        {
             continue;
         }
+        let space = spec.context_space_ref.name();
         let linkml = space_linkml(repo_dir, repo, id.namespace.as_deref(), space);
-        for representation in wanted {
-            let gap = match &linkml {
-                // A space without a model has no type at all.
-                None => Ok(representation
-                    .requirement()
-                    .map(|need| format!("the type {}", need.entity_type))),
-                Some(Err(err)) => Err(err.clone()),
-                Some(Ok(text)) => representation.model_gap(text),
-            };
-            let message = match gap {
-                Ok(None) => continue,
-                Ok(Some(gap)) => format!(
-                    "Endpoint {}/{}: `{representation}` needs {gap} in the data model of space {space} (EP-125)",
-                    id.namespace.as_deref().unwrap_or_default(),
-                    id.name
-                ),
-                Err(err) => format!(
-                    "Endpoint {}/{}: `{representation}` cannot be checked against the data model of space {space}: {err} (EP-125)",
-                    id.namespace.as_deref().unwrap_or_default(),
-                    id.name
-                ),
-            };
+        let gaps = match &linkml {
+            None => spec.representation_gaps(None),
+            Some(Err(err)) => Err(err.clone()),
+            Some(Ok(text)) => spec.representation_gaps(Some(text)),
+        };
+        let at = format!(
+            "Endpoint {}/{}, space {space}",
+            id.namespace.as_deref().unwrap_or_default(),
+            id.name
+        );
+        let messages = match gaps {
+            Ok(gaps) => gaps
+                .into_iter()
+                .map(|gap| format!("{at}: {gap} (EP-125)"))
+                .collect(),
+            Err(err) => vec![format!(
+                "{at}: the representations cannot be checked against the data model: {err} (EP-125)"
+            )],
+        };
+        for message in messages {
             refused.push((
                 (resource.path.clone(), resource.document, resource.line),
                 message,

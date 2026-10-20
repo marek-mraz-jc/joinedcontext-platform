@@ -169,46 +169,10 @@ pub enum Representation {
     /// Notifications over one WebSocket (`/ws`, EP-106).
     #[serde(rename = "websocket")]
     WebSocket,
-    /// iCalendar (RFC 5545) feed of the view's Events (`/ical/v1/`); served only where listed,
-    /// and only on a space whose model has Event with `startDate` and `name` required (EP-125).
+    /// iCalendar (RFC 5545) feed of the view's entities (`/ical/v1/`); served only where listed,
+    /// through the mapping `spec.representations.ical` checked against the space's model (EP-125).
     Ical,
 }
-
-/// What a domain-standard representation needs of the space's data model (EP-125): the
-/// NGSI-LD type it maps and, per field its standard makes mandatory, the attribute the field
-/// comes from. Static code, never read from a manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SurfaceRequirement {
-    /// The Smart Data Models type, by the NGSI-LD type name the view filters on.
-    pub entity_type: &'static str,
-    /// Its IRI, for the documentation.
-    pub type_iri: &'static str,
-    /// The standard and the section that makes the fields below mandatory.
-    pub standard: &'static str,
-    /// `(field, standard section, source attribute, mandatory)`.
-    pub fields: &'static [(&'static str, &'static str, &'static str, bool)],
-}
-
-/// Attributes every entity has, so a model never has to declare them.
-const SYSTEM_ATTRIBUTES: [&str; 3] = ["id", "type", "modifiedAt"];
-
-const ICAL: SurfaceRequirement = SurfaceRequirement {
-    entity_type: "Event",
-    type_iri: "https://smartdatamodels.org/dataModel.Event/Event",
-    standard: "RFC 5545",
-    fields: &[
-        ("UID", "§3.6.1, §3.8.4.7", "id", true),
-        ("DTSTAMP", "§3.6.1, §3.8.7.2", "modifiedAt", true),
-        ("DTSTART", "§3.6.1, §3.8.2.4", "startDate", true),
-        // A calendar entry without a title is of no use, so SUMMARY is mandatory here.
-        ("SUMMARY", "§3.8.1.12", "name", true),
-        ("DTEND", "§3.8.2.2", "endDate", false),
-        ("DESCRIPTION", "§3.8.1.5", "description", false),
-        ("LOCATION", "§3.8.1.7", "address", false),
-        ("GEO", "§3.8.1.6", "location", false),
-        ("URL", "§3.8.4.6", "url", false),
-    ],
-};
 
 impl Representation {
     /// Returns the wire name string for this representation.
@@ -225,49 +189,14 @@ impl Representation {
         }
     }
 
-    /// What this representation needs of the space's data model; `None` for the generic ones,
-    /// which serve any type (EP-125).
-    pub const fn requirement(&self) -> Option<&'static SurfaceRequirement> {
-        match self {
-            Self::Ical => Some(&ICAL),
-            _ => None,
-        }
+    /// Whether the Endpoint's space model must fit the representation's mapping (EP-125).
+    pub const fn needs_model(&self) -> bool {
+        matches!(self, Self::Ical)
     }
 
     /// Served only where `enabledRepresentations` lists it, never by the default (EP-104).
     pub const fn opt_in(&self) -> bool {
         matches!(self, Self::Sta | Self::Ical)
-    }
-
-    /// Why a space whose model is `linkml` cannot serve this representation, or `None` when it
-    /// can (EP-125): the type missing, or the mandatory source attributes the type does not mark
-    /// `required: true`.
-    pub fn model_gap(&self, linkml: &str) -> std::result::Result<Option<String>, String> {
-        let Some(need) = self.requirement() else {
-            return Ok(None);
-        };
-        let Some(required) =
-            super::model_projection::linkml_required_slots(linkml, need.entity_type)?
-        else {
-            return Ok(Some(format!("the type {}", need.entity_type)));
-        };
-        let missing: Vec<&str> = need
-            .fields
-            .iter()
-            .filter(|(_, _, attribute, mandatory)| {
-                *mandatory
-                    && !SYSTEM_ATTRIBUTES.contains(attribute)
-                    && !required.contains(*attribute)
-            })
-            .map(|(_, _, attribute, _)| *attribute)
-            .collect();
-        Ok((!missing.is_empty()).then(|| {
-            format!(
-                "the type {} with the required attribute(s) {}",
-                need.entity_type,
-                missing.join(", ")
-            )
-        }))
     }
 
     /// Every representation, in the order a record lists them.
@@ -544,6 +473,9 @@ pub struct EndpointSpec {
     /// key attributes, reordering and narrowing the model's display order (EP-135, DM-98).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub display: BTreeMap<String, crate::display_order::Display>,
+    /// The mappings of the domain-standard representations, `ical` first (EP-125, API/02 §8b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representations: Option<super::ical_mapping::Representations>,
 }
 
 /// One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).
@@ -614,6 +546,29 @@ impl EndpointSpec {
         served
     }
 
+    /// The iCalendar mapping in force when the Endpoint serves `ical` (EP-125).
+    pub fn ical_mapping(&self) -> Option<super::ical_mapping::IcalMapping> {
+        self.served_representations()
+            .contains(&Representation::Ical)
+            .then(|| {
+                self.representations
+                    .as_ref()
+                    .and_then(|r| r.ical.clone())
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Every gap between the mappings of the representations this Endpoint serves and its
+    /// space's LinkML model (`None`: the space has none), one sentence each (EP-125, API/02
+    /// §8b). `Err` when the model does not parse.
+    pub fn representation_gaps(
+        &self,
+        linkml: Option<&str>,
+    ) -> std::result::Result<Vec<String>, String> {
+        self.ical_mapping()
+            .map_or(Ok(Vec::new()), |mapping| mapping.model_gaps(linkml))
+    }
+
     /// Validates endpoint audience, representations, limits, and policy reference.
     pub fn validate(&self) -> Result<()> {
         let space_name = self.context_space_ref.name();
@@ -666,6 +621,27 @@ impl EndpointSpec {
                 },
                 other => other,
             })?;
+        }
+
+        if let Some(ical) = self.representations.as_ref().and_then(|r| r.ical.as_ref()) {
+            if !self
+                .served_representations()
+                .contains(&Representation::Ical)
+            {
+                return Err(Error::Invalid {
+                    field: "spec.representations.ical".to_owned(),
+                    reason: "the Endpoint does not serve `ical`: list it in \
+                             spec.enabledRepresentations or drop the mapping"
+                        .to_owned(),
+                });
+            }
+            let gaps = ical.shape_gaps();
+            if !gaps.is_empty() {
+                return Err(Error::Invalid {
+                    field: "spec.representations.ical".to_owned(),
+                    reason: gaps.join("; "),
+                });
+            }
         }
 
         if let Some(projection) = &self.projection_ref {
