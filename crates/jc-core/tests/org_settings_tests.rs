@@ -275,6 +275,16 @@ fn the_mqtt_allowance_is_catalogued_off_by_default_and_held_to_its_bound() {
         built_in.contains("spec.limits.mqtt.connections"),
         "{built_in}"
     );
+    let own = jc_core::kinds::MqttAllowance {
+        enabled: true,
+        brokers: Some(21),
+        ..Default::default()
+    };
+    let error = OrganizationBounds::default()
+        .check_mqtt(&own, "spec.quotas.mqtt")
+        .expect_err("a project's own allowance stays inside the bound")
+        .to_string();
+    assert!(error.contains("spec.quotas.mqtt.brokers"), "{error}");
     let misplaced = org("  projects:\n    quota: {mqtt: {enabled: true}}\n")
         .expect_err("a project's allowance is its own");
     assert!(misplaced.contains("spec.limits.mqtt"), "{misplaced}");

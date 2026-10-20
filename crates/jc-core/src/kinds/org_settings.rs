@@ -541,7 +541,7 @@ pub const CATALOG: &[Entry] = &[
     entry(
         "spec.limits.mqtt.brokers",
         Section::Mqtt,
-        Some(1),
+        Some(crate::kinds::mqtt_allowance::DEFAULT_BROKERS),
         0,
         Some(20),
         BoundKind::Number,
@@ -549,7 +549,7 @@ pub const CATALOG: &[Entry] = &[
     entry(
         "spec.limits.mqtt.connections",
         Section::Mqtt,
-        Some(1000),
+        Some(crate::kinds::mqtt_allowance::DEFAULT_CONNECTIONS),
         0,
         Some(20_000),
         BoundKind::Number,
@@ -557,8 +557,7 @@ pub const CATALOG: &[Entry] = &[
     entry(
         "spec.limits.mqtt.messagesPerSecond",
         Section::Mqtt,
-        // One broker at its own defaults, 1000 connections × 10 a second, fits.
-        Some(10_000),
+        Some(crate::kinds::mqtt_allowance::DEFAULT_MESSAGES_PER_SECOND),
         0,
         Some(100_000),
         BoundKind::Number,
@@ -566,7 +565,7 @@ pub const CATALOG: &[Entry] = &[
     entry(
         "spec.limits.mqtt.maxMessageBytes",
         Section::Mqtt,
-        Some(65536),
+        Some(crate::kinds::mqtt_allowance::DEFAULT_MAX_MESSAGE_BYTES),
         1,
         Some(crate::kinds::mqtt_broker::MAX_MESSAGE_BYTES),
         BoundKind::Number,
@@ -668,6 +667,29 @@ impl OrganizationBounds {
                 })
                 .collect(),
         )
+    }
+
+    /// Refuses a number of an MQTT allowance outside its `spec.limits.mqtt` entry's range: a
+    /// project's own allowance may exceed the organization's, never the bound (ADR-N-048 §2.9).
+    pub fn check_mqtt(&self, allowance: &crate::kinds::MqttAllowance, field: &str) -> Result<()> {
+        for (name, value) in allowance.numbers() {
+            let (Some(value), Some(entry)) = (value, entry_at(&format!("spec.limits.mqtt.{name}")))
+            else {
+                continue;
+            };
+            let (min, max) = self.range(entry);
+            if value < min || max.is_some_and(|max| value > max) {
+                let bound = match max {
+                    Some(max) => format!("{min} … {max}"),
+                    None => format!("at least {min}"),
+                };
+                return Err(Error::Invalid {
+                    field: format!("{field}.{name}"),
+                    reason: format!("{value} is outside the bound, {bound} (PF-97)"),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The range an organization may set `entry` in: the operator's bound where it sets one, else

@@ -11,7 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::kinds::mqtt_broker::{MqttBrokerSpec, MqttMode, DEDICATED_PORTS};
-use crate::kinds::org_settings::{entry_at, OrganizationBounds};
+
+/// The default `brokers` once MQTT is on.
+pub const DEFAULT_BROKERS: u32 = 1;
+/// The default `connections`.
+pub const DEFAULT_CONNECTIONS: u32 = 1000;
+/// The default `messagesPerSecond`: one broker at its own defaults, 1000 connections × 10 a
+/// second, fits.
+pub const DEFAULT_MESSAGES_PER_SECOND: u32 = 10_000;
+/// The default `maxMessageBytes`, the broker's own default.
+pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = 64 * 1024;
 
 /// How a broker is addressed from outside (ADR-N-048 §2.11).
 #[derive(
@@ -112,10 +121,15 @@ impl MqttAllowance {
         if !self.enabled {
             return 0;
         }
+        let default = match field {
+            "brokers" => DEFAULT_BROKERS,
+            "connections" => DEFAULT_CONNECTIONS,
+            "messagesPerSecond" => DEFAULT_MESSAGES_PER_SECOND,
+            "maxMessageBytes" => DEFAULT_MAX_MESSAGE_BYTES,
+            _ => 0,
+        };
         let set = self.numbers().into_iter().find(|(name, _)| *name == field);
-        set.and_then(|(_, value)| value)
-            .or_else(|| entry_at(&format!("spec.limits.mqtt.{field}")).and_then(|e| e.default))
-            .unwrap_or(0)
+        set.and_then(|(_, value)| value).unwrap_or(default)
     }
 
     /// The modes in force.
@@ -157,29 +171,6 @@ impl MqttAllowance {
             }
             if !seen.insert(port) {
                 return Err(invalid(format!("ports: {port} is listed twice")));
-            }
-        }
-        Ok(())
-    }
-
-    /// Refuses a number outside the operator's bound for its `spec.limits.mqtt` entry, else the
-    /// built-in one: a project's own allowance may exceed the organization's, never the bound.
-    pub fn check_bounds(&self, bounds: &OrganizationBounds, field: &str) -> Result<()> {
-        for (name, value) in self.numbers() {
-            let (Some(value), Some(entry)) = (value, entry_at(&format!("spec.limits.mqtt.{name}")))
-            else {
-                continue;
-            };
-            let (min, max) = bounds.range(entry);
-            if value < min || max.is_some_and(|max| value > max) {
-                let bound = match max {
-                    Some(max) => format!("{min} … {max}"),
-                    None => format!("at least {min}"),
-                };
-                return Err(Error::Invalid {
-                    field: format!("{field}.{name}"),
-                    reason: format!("{value} is outside the bound, {bound} (PF-97)"),
-                });
             }
         }
         Ok(())
@@ -465,15 +456,6 @@ mod tests {
             ..on()
         };
         assert!(no_mode.validate("spec.quotas.mqtt").is_err());
-        let past = MqttAllowance {
-            brokers: Some(21),
-            ..on()
-        };
-        let error = past
-            .check_bounds(&OrganizationBounds::default(), "spec.quotas.mqtt")
-            .expect_err("past the built-in bound")
-            .to_string();
-        assert!(error.contains("spec.quotas.mqtt.brokers"), "{error}");
         let read: MqttAllowance = serde_json::from_value(serde_json::json!({
             "enabled": true, "brokers": 2, "modes": ["ingest", "capture"],
             "addresses": ["platform", "dedicatedPort"], "ports": [18831]
