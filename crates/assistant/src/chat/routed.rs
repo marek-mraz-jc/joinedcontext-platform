@@ -419,8 +419,18 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
     }
     // The wording overrides a page route only: a question the router reads data for keeps its
     // reads, so its values are still answered (owner capability gate, T-4729).
-    let data = (route == "data" || route == "both") && !reads.is_empty();
     let catalogue = route == "catalogue" || (route == "rag" && asks_for_datasets(question));
+    // A measured quantity a shown type holds is read, whatever page route the router named
+    // (T-4810): bbsk-demo sent "Aká je kvalita ovzdušia v BB?" to the pages and answered "no data".
+    if reads.is_empty() && !catalogue {
+        reads = measured_reads(question, live);
+    }
+    let route = if route == "rag" && !reads.is_empty() {
+        "data"
+    } else {
+        route
+    };
+    let data = (route == "data" || route == "both") && !reads.is_empty();
     // The attributes a follow-up may name (T-4801): those of the Endpoints this answer reads,
     // else of every Endpoint shown, as no read narrows them.
     let known: HashSet<&str> = live
@@ -495,13 +505,69 @@ fn asks_for_datasets(question: &str) -> bool {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    ASKS_FOR_DATASETS.iter().any(|phrase| {
-        asked.match_indices(phrase).any(|(at, _)| {
-            asked[..at]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !c.is_alphanumeric())
-        })
+    ASKS_FOR_DATASETS
+        .iter()
+        .any(|phrase| at_word_start(&asked, phrase))
+}
+
+/// The words that ask for a measured quantity, folded, each with the type that measures it
+/// (T-4810), in the languages the assistant answers: each matches at a word's start, so "teplot"
+/// holds teplota and teploty.
+const MEASURED: &[(&str, &str)] = &[
+    ("ovzdus", "AirQualityObserved"),
+    ("vzduch", "AirQualityObserved"),
+    ("znecist", "AirQualityObserved"),
+    ("smog", "AirQualityObserved"),
+    ("pm10", "AirQualityObserved"),
+    ("pm2", "AirQualityObserved"),
+    ("prasnost", "AirQualityObserved"),
+    ("air quality", "AirQualityObserved"),
+    ("air pollution", "AirQualityObserved"),
+    ("pocasi", "WeatherObserved"),
+    ("teplot", "WeatherObserved"),
+    ("weather", "WeatherObserved"),
+    ("temperature", "WeatherObserved"),
+    ("hladin", "WaterObserved"),
+    ("prietok", "WaterObserved"),
+    ("water level", "WaterObserved"),
+    ("river level", "WaterObserved"),
+];
+
+// ponytail: a word list for the three observed types; a type's own LinkML keywords when a fourth
+// measured type needs it.
+/// The reads a question naming a measured quantity asks for: per [`MEASURED`] type it names, the
+/// first Endpoint of `live` that lists the type, at most [`MAX_READS`]; none when no shown
+/// Endpoint holds it, so the pages still answer.
+fn measured_reads(question: &str, live: &[Shown]) -> Vec<Read> {
+    let asked =
+        jc_core::ngsi_catalog::fold(&question.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut reads: Vec<Read> = Vec::new();
+    for (_, kind) in MEASURED
+        .iter()
+        .filter(|(word, _)| at_word_start(&asked, word))
+    {
+        if reads.len() == MAX_READS || reads.iter().any(|r| r.kind == *kind) {
+            continue;
+        }
+        if let Some(shown) = live.iter().find(|s| s.types.iter().any(|t| t == kind)) {
+            reads.push(Read {
+                endpoint: shown.endpoint.clone(),
+                kind: (*kind).to_owned(),
+                q: None,
+                order: None,
+            });
+        }
+    }
+    reads
+}
+
+/// `phrase` occurs in `text` where a word starts.
+fn at_word_start(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric())
     })
 }
 
@@ -1010,8 +1076,103 @@ async fn datasets(ask: &Ask<'_>, queries: &[String]) -> Vec<Hit> {
     dataset_pages(&found)
 }
 
-/// What the answer call of a catalogue question is told besides its rules (T-4729).
-const CATALOGUE_RULE: &str = "\n\nThis question asks which datasets there are on a topic. The passages are the catalogue's dataset pages, one per dataset. List every one of them that is about the topic, grouped by publisher (the page's Publisher line): each as its title and a few words on what it holds, citing it [n]. Open with how many there are, like \"13 datasetov o doprave\". Leave out the pages that are not about the topic and list none twice; this list may be longer than 150 words.";
+/// The live data a deployment reads, for a catalogue question (T-4810): one passage per public
+/// Endpoint it is lent, as `(slug, passage)`, holding its title, its publisher and the types
+/// [`live`] listed for it. A connector read with a person's token is never listed, nor one that
+/// neither a title nor a type describes. Each cites the Endpoint's address until
+/// [`holdings_linked`] puts its dataset page in. "k akým datasetom máš prístup?" on bbsk-demo
+/// listed 8 CKAN pages of the 11 Endpoints it reads.
+pub fn holdings(connectors: &[Connected], live: &[Shown], base: &url::Url) -> Vec<(String, Hit)> {
+    connectors
+        .iter()
+        .filter(|c| c.surface.token.is_none())
+        .filter_map(|c| {
+            let types = live
+                .iter()
+                .find(|s| s.endpoint == c.endpoint)
+                .map(|s| s.types.join(", "))
+                .unwrap_or_default();
+            let title = c.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+            if title.is_none() && types.is_empty() {
+                return None;
+            }
+            let mut text = format!(
+                "Live data the assistant reads: {}",
+                title.unwrap_or("(untitled)")
+            );
+            if let Some(label) = c.label.as_deref().filter(|l| !l.trim().is_empty()) {
+                let _ = write!(text, "\nPublisher: {}", label.trim());
+            }
+            if !types.is_empty() {
+                let _ = write!(text, "\nHolds: {types}");
+            }
+            let url = base
+                .join(&format!("api/endpoint/{}/", c.surface.slug))
+                .ok()?
+                .to_string();
+            Some((
+                c.surface.slug.clone(),
+                Hit {
+                    chunk: 0,
+                    url,
+                    text,
+                    score: 0.0,
+                    site: String::new(),
+                    dates: Default::default(),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// [`holdings`] cited at each Endpoint's dataset page where the sources hold one, so the answer
+/// links the page and not the Endpoint's address (T-4799); a lookup that fails keeps the address.
+async fn holdings_linked(ask: &Ask<'_>, held: Vec<(String, Hit)>) -> Vec<(String, Hit)> {
+    let pages = futures_util::future::join_all(held.iter().map(|(slug, _)| {
+        crate::endpoint_page_projects(ask.pool, slug, ask.sources, ask.public_only)
+    }))
+    .await;
+    held.into_iter()
+        .zip(pages)
+        .map(|((slug, mut hit), page)| {
+            match page {
+                Ok(Some(page)) => hit.url = page,
+                Ok(None) => {}
+                Err(why) => {
+                    tracing::warn!(deployment = %ask.deployment, %why, "an Endpoint's page could not be looked up")
+                }
+            }
+            (slug, hit)
+        })
+        .collect()
+}
+
+/// The passages of a catalogue question (T-4810): the deployment's live data, linked, beside the
+/// catalogue's dataset pages its queries find, as [`with_holdings`] joins them.
+async fn catalogue_passages(ask: &Ask<'_>, queries: &[String], live: &[Shown]) -> Vec<Hit> {
+    let held = ask
+        .endpoint_base
+        .map(|base| holdings(ask.connectors, live, base))
+        .unwrap_or_default();
+    let (held, pages) = tokio::join!(holdings_linked(ask, held), datasets(ask, queries));
+    with_holdings(held, pages)
+}
+
+/// The passages of a catalogue question: the live data first, then the dataset pages that are
+/// none of it (by the Endpoint a page names or by its link), so nothing is listed twice.
+pub fn with_holdings(held: Vec<(String, Hit)>, pages: Vec<Hit>) -> Vec<Hit> {
+    let slugs: HashSet<String> = held.iter().map(|(slug, _)| slug.clone()).collect();
+    let urls: HashSet<String> = held.iter().map(|(_, hit)| hit.url.clone()).collect();
+    let mut out: Vec<Hit> = held.into_iter().map(|(_, hit)| hit).collect();
+    out.extend(pages.into_iter().filter(|page| {
+        !urls.contains(&page.url)
+            && super::agent::endpoint_slug(&page.url).is_none_or(|slug| !slugs.contains(&slug))
+    }));
+    out
+}
+
+/// What the answer call of a catalogue question is told besides its rules (T-4729, T-4810).
+const CATALOGUE_RULE: &str = "\n\nThis question asks which data or datasets there are, on a topic or in all. The passages starting \"Live data the assistant reads\" are the data sources you read live, one per source; the others are the catalogue's dataset pages, one per dataset. For a topic, list every passage about the topic; for all data you have or can reach, list every live data source. Group them by publisher (the passage's Publisher line), each as its title and a few words on what it holds in plain words, citing it [n]. Open with how many there are, like \"13 datasetov o doprave\". Leave out the passages that are not about the topic and list none twice; this list may be longer than 150 words.";
 
 /// The best [`ANSWER_PASSAGES`] passages, at most [`WEB_PASSAGES`] of them from `websites`.
 pub fn best(found: &[Hit], websites: &[String]) -> Vec<Hit> {
@@ -2997,7 +3158,7 @@ async fn answer_routed(
     };
     let (best, rounds, searches) = if routing.catalogue {
         send(events, stage("searching", Some(routing.queries.join(", ")))).await;
-        let pages = datasets(ask, &routing.queries).await;
+        let pages = catalogue_passages(ask, &routing.queries, &live).await;
         (pages, 1, routing.queries.len())
     } else {
         let (mut found, pending) =
@@ -6305,5 +6466,194 @@ classes:
         let words = enums[1].as_ref().expect("roadClass is an enum");
         assert_eq!(words["thirdClass"]["sk"], "cesta III. triedy");
         assert_eq!(words["thirdClass"]["en"], "third-class road");
+    }
+
+    /// T-4810: a question naming a measured quantity reads the type that measures it when a
+    /// shown Endpoint holds it, whatever page route the router named; without such an Endpoint,
+    /// or for a question about which data there is, the route stays the router's.
+    #[test]
+    fn a_measured_quantity_goes_to_the_data_route_when_a_shown_type_holds_it() {
+        let live = vec![
+            shown("bb/akty", &["Contract"], &[]),
+            shown("bb/ovzdusie", &["AirQualityObserved", "Event"], &[]),
+            shown("bb/pocasie", &["WeatherObserved"], &[]),
+            shown("bb/rieky", &["WaterObserved"], &[]),
+        ];
+        let rag = r#"{"route": "rag", "queries": ["kvalita ovzdušia"]}"#;
+        for (question, endpoint, kind) in [
+            (
+                "Aká je kvalita ovzdušia v BB?",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            (
+                "Aka je kvalita ovzdusia v BB??",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            (
+                "Aký je teraz vzduch v Banskej Bystrici?",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            (
+                "Koľko je PM10 na Štefánikovom nábreží?",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            ("Je dnes smog?", "bb/ovzdusie", "AirQualityObserved"),
+            (
+                "What is the air quality in Banská Bystrica?",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            (
+                "Is there air pollution today?",
+                "bb/ovzdusie",
+                "AirQualityObserved",
+            ),
+            ("Aké je počasie v BB?", "bb/pocasie", "WeatherObserved"),
+            ("Aká je teplota vonku?", "bb/pocasie", "WeatherObserved"),
+            ("What's the weather like?", "bb/pocasie", "WeatherObserved"),
+            (
+                "What is the temperature now?",
+                "bb/pocasie",
+                "WeatherObserved",
+            ),
+            ("Aká je hladina Hrona?", "bb/rieky", "WaterObserved"),
+            (
+                "What is the water level of the Hron?",
+                "bb/rieky",
+                "WaterObserved",
+            ),
+        ] {
+            let r = routing(rag, question, &live);
+            assert!(r.data && !r.rag && !r.catalogue, "{question}: {r:?}");
+            assert_eq!(
+                r.reads,
+                [Read {
+                    endpoint: endpoint.into(),
+                    kind: kind.into(),
+                    q: None,
+                    order: None,
+                }],
+                "{question}"
+            );
+        }
+        let none = [shown("bb/akty", &["Contract"], &[])];
+        for question in [
+            "Aká je kvalita ovzdušia v BB?",
+            "What is the air quality in Banská Bystrica?",
+            "Aké je počasie v BB?",
+            "Aká je hladina Hrona?",
+        ] {
+            let r = routing(rag, question, &none);
+            assert!(r.rag && !r.data && r.reads.is_empty(), "{question}");
+        }
+        // Words inside other words, and questions on which data there is, keep their route.
+        for question in ["Kde je ulica Nadteplotná?", "Kedy je otvorená knižnica?"] {
+            assert!(!routing(rag, question, &live).data, "{question}");
+        }
+        let about = routing(rag, "Aké dáta máte o kvalite ovzdušia?", &live);
+        assert!(about.catalogue && !about.data);
+        // The router's own read is kept as it named it.
+        let named = r#"{"route": "data", "data": [{"endpoint": "bb/ovzdusie", "type": "Event"}]}"#;
+        assert_eq!(
+            routing(named, "Aká je kvalita ovzdušia?", &live).reads[0].kind,
+            "Event"
+        );
+    }
+
+    fn lent_connector(slug: &str, title: Option<&str>, token: bool) -> Connected {
+        Connected {
+            endpoint: slug.into(),
+            title: title.map(str::to_owned),
+            surface: super::super::mcp::Surface {
+                gateway: "https://gw.example".into(),
+                slug: slug.into(),
+                timeout: Duration::from_secs(10),
+                token: token.then(|| super::super::mcp::PersonToken("t".into())),
+            },
+            tools: Vec::new(),
+            label: Some(
+                if slug.starts_with("bbsk") {
+                    "BBSK"
+                } else {
+                    "Mesto Banská Bystrica"
+                }
+                .into(),
+            ),
+            siblings: Vec::new(),
+        }
+    }
+
+    /// T-4810: "k akým datasetom máš prístup?" is answered from every public Endpoint the
+    /// deployment reads, one passage each with its title, publisher and types, before the
+    /// catalogue's pages; a page about one of them is not listed twice, and an Endpoint read with
+    /// a person's token is never listed.
+    #[test]
+    fn a_catalogue_answer_lists_every_public_endpoint_the_deployment_reads() {
+        let base = url::Url::parse("https://api.example/").expect("a url");
+        let mut connectors: Vec<Connected> = (0..11)
+            .map(|i| {
+                let slug = if i < 5 {
+                    format!("bbsk{i}")
+                } else {
+                    format!("bb{i}")
+                };
+                lent_connector(&slug, Some(&format!("Source {i}")), false)
+            })
+            .collect();
+        connectors.push(lent_connector("private1", Some("Mine"), true));
+        connectors.push(lent_connector("blank1", None, false));
+        let live = vec![
+            shown("bbsk0", &["Bridge", "OfficeHours"], &[]),
+            shown("bb5", &["AirQualityObserved"], &[]),
+            shown("private1", &["Secret"], &[]),
+        ];
+        let held = holdings(&connectors, &live, &base);
+        assert_eq!(held.len(), 11, "{held:?}");
+        assert_eq!(held[0].0, "bbsk0");
+        assert_eq!(held[0].1.url, "https://api.example/api/endpoint/bbsk0/");
+        assert_eq!(
+            held[0].1.text,
+            "Live data the assistant reads: Source 0\nPublisher: BBSK\nHolds: Bridge, OfficeHours"
+        );
+        assert!(held[5].1.text.ends_with("Holds: AirQualityObserved"));
+        assert!(held
+            .iter()
+            .all(|(slug, h)| slug != "private1" && !h.text.contains("Mine")));
+        // An untitled Endpoint is listed by its types.
+        let typed = holdings(
+            &[lent_connector("blank1", None, false)],
+            &[shown("blank1", &["Event"], &[])],
+            &base,
+        );
+        assert_eq!(typed.len(), 1);
+
+        let page = |url: &str| Hit {
+            chunk: 7,
+            url: url.into(),
+            text: String::new(),
+            score: 1.0,
+            site: String::new(),
+            dates: Default::default(),
+        };
+        let mut linked = held.clone();
+        linked[1].1.url = "https://data.example/dataset/mosty".into();
+        let out = with_holdings(
+            linked,
+            vec![
+                page("https://data.example/dataset/mosty"),
+                page("https://api.example/api/endpoint/bb6/"),
+                page("https://data.example/dataset/cyklotrasy"),
+            ],
+        );
+        assert_eq!(
+            out.len(),
+            12,
+            "the two pages of listed Endpoints are not listed twice"
+        );
+        assert_eq!(out[11].url, "https://data.example/dataset/cyklotrasy");
     }
 }

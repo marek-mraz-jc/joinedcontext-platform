@@ -53,11 +53,15 @@ impl std::fmt::Debug for PersonToken {
     }
 }
 
-/// The most Endpoints a named server lends one question, the fan-out bound of a named server
-/// (EP-121): a server that reaches more lends the first of its `list_endpoints` page.
-// ponytail: the first ten in the server's order; a catalogue search by the question (T-4501)
+/// The most Endpoints a named server lends one question: a server that reaches more lends the
+/// first of its `list_endpoints` page. Ten cut bbsk/kraj-a-mesto's eleventh Endpoint, the
+/// region's registers, out of the answers (T-4810).
+// ponytail: the first twenty in the server's order; a catalogue search by the question (T-4501)
 // when a server's reach is larger than that.
-pub const MAX_SERVER_ENDPOINTS: usize = 10;
+pub const MAX_SERVER_ENDPOINTS: usize = 20;
+
+/// The longest Endpoint title a server's listing lends the router and the answer.
+const MAX_TITLE_CHARS: usize = 120;
 
 /// One JSON-RPC message to the gateway at `url`, as `token` or as anyone; the `result`.
 async fn post(
@@ -99,11 +103,13 @@ async fn post(
         .ok_or_else(|| "the Endpoint's answer has no result".to_owned())
 }
 
-/// One Endpoint a named server lends: its slug and whether it is public.
+/// One Endpoint a named server lends: its slug, whether it is public, and its title, which the
+/// router and a catalogue answer name it by (T-4810).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lent {
     pub slug: String,
     pub public: bool,
+    pub title: Option<String>,
 }
 
 /// A named MCP server on the gateway, `{project}/{name}` (EP-92).
@@ -150,9 +156,15 @@ fn lent(result: &Value) -> Vec<Lent> {
                 && slug
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+            let title = row
+                .get("title")
+                .and_then(Value::as_str)
+                .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|t| !t.is_empty() && t.chars().count() <= MAX_TITLE_CHARS);
             valid.then(|| Lent {
                 slug: slug.to_owned(),
                 public: row.get("access").and_then(Value::as_str) == Some("public"),
+                title,
             })
         })
         .take(MAX_SERVER_ENDPOINTS)
@@ -282,9 +294,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_server_lends_its_listed_slugs_at_most_ten() {
-        let rows: Vec<_> = (0..12)
-            .map(|i| json!({"slug": format!("s{i:02}"), "access": if i == 0 { "public" } else { "internal" }}))
+    fn a_server_lends_its_listed_slugs_at_most_twenty_with_their_titles() {
+        let rows: Vec<_> = (0..22)
+            .map(|i| json!({"slug": format!("s{i:02}"), "access": if i == 0 { "public" } else { "internal" },
+                "title": if i == 0 { "Air quality  map\nof Banská Bystrica" } else { "" }}))
             .chain([json!({"slug": "../x"}), json!({"title": "no slug"})])
             .collect();
         let got = lent(&json!({"structuredContent": {"endpoints": rows}}));
@@ -293,10 +306,15 @@ mod tests {
             got[0],
             Lent {
                 slug: "s00".into(),
-                public: true
+                public: true,
+                title: Some("Air quality map of Banská Bystrica".into()),
             }
         );
         assert!(!got[1].public);
+        assert_eq!(got[1].title, None, "an empty title is none");
+        // T-4810: bbsk/kraj-a-mesto lends eleven Endpoints; the eleventh is the registers.
+        let eleven = lent(&json!({"structuredContent": {"endpoints": &rows[..11]}}));
+        assert_eq!(eleven.len(), 11);
         let odd =
             lent(&json!({"structuredContent": {"endpoints": [{"slug": "../x"}, {"slug": "A1"}]}}));
         assert!(odd.is_empty());
