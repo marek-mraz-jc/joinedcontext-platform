@@ -22,6 +22,7 @@ pub mod group;
 pub mod mapping;
 pub mod mcp_server;
 pub mod model_projection;
+pub mod mqtt_allowance;
 pub mod mqtt_broker;
 pub mod org_settings;
 pub mod organization;
@@ -90,7 +91,8 @@ pub use mapping::{
 };
 pub use mcp_server::McpServerSpec;
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
-pub use mqtt_broker::{MqttBrokerSpec, MqttLimits, MqttRole};
+pub use mqtt_allowance::{MqttAddress, MqttAllowance, MqttUsage};
+pub use mqtt_broker::{MqttBrokerSpec, MqttCapture, MqttLimits, MqttMode, MqttRole};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
     Contact, ContactRole, DcatProfile, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,

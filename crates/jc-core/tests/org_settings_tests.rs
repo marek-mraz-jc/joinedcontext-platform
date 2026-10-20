@@ -224,7 +224,7 @@ fn every_catalog_entry_is_readable_from_a_manifest_and_its_default_is_in_range()
         }
     }
     let full = org(
-        "  projects:\n    nameCooldownDays: 7\n    quota: { contextSpaces: 1, residentPipelines: 1, publicEndpoints: 1, ingestEventsPerSecond: 1, apps: 1, agentRunsPerDay: 1, entitiesPerSpace: 1, requestsPerMinute: 1 }\n  policies:\n    signIn:\n      password: { minLength: 13, history: 1 }\n  limits:\n    edge:\n      requestsPerMinute: { web: 1, api: 1, dataRead: 1, dataWrite: 1, publicEndpoint: 1 }\n      maxRequestBodyMegabytes: 1\n    gateway: { maxRequestBodyMegabytes: 1 }\n    signIn: { sessionIdleMinutes: 60, sessionMaxHours: 1 }\n    people: { invitationHours: 1 }\n    agents: { spendPerDay: 1, spendPerMonth: 1 }\n    pipelines: { rejectedKept: 1, sampleMegabytes: 1 }\n    data: { uploadMegabytes: 1 }\n    apps: { emailsPerDay: 1, aiTokensPerDay: 1, filesMiB: 1 }\n",
+        "  projects:\n    nameCooldownDays: 7\n    quota: { contextSpaces: 1, residentPipelines: 1, publicEndpoints: 1, ingestEventsPerSecond: 1, apps: 1, agentRunsPerDay: 1, entitiesPerSpace: 1, requestsPerMinute: 1 }\n  policies:\n    signIn:\n      password: { minLength: 13, history: 1 }\n  limits:\n    edge:\n      requestsPerMinute: { web: 1, api: 1, dataRead: 1, dataWrite: 1, publicEndpoint: 1 }\n      maxRequestBodyMegabytes: 1\n    gateway: { maxRequestBodyMegabytes: 1 }\n    signIn: { sessionIdleMinutes: 60, sessionMaxHours: 1 }\n    people: { invitationHours: 1 }\n    agents: { spendPerDay: 1, spendPerMonth: 1 }\n    pipelines: { rejectedKept: 1, sampleMegabytes: 1 }\n    data: { uploadMegabytes: 1 }\n    apps: { emailsPerDay: 1, aiTokensPerDay: 1, filesMiB: 1 }\n    mqtt: { enabled: true, brokers: 1, connections: 1, messagesPerSecond: 1, maxMessageBytes: 1 }\n",
     )
     .expect("every entry set");
     for entry in CATALOG {
@@ -239,4 +239,43 @@ fn every_catalog_entry_is_readable_from_a_manifest_and_its_default_is_in_range()
     let again: jc_core::kinds::OrganizationSpec =
         serde_norway::from_str(&yaml).expect("round trip");
     assert_eq!(again, full.spec);
+}
+
+#[test]
+fn the_mqtt_allowance_is_catalogued_off_by_default_and_held_to_its_bound() {
+    let bare = org("").expect("a bare organization");
+    assert!(
+        !bare.spec.limits.mqtt.enabled,
+        "MQTT is off until an org admin turns it on"
+    );
+    assert_eq!(
+        bare.spec.effective(entry("spec.limits.mqtt.brokers")),
+        (Some(1), Origin::Default)
+    );
+    let on = org("  limits:\n    mqtt: {enabled: true, brokers: 3, modes: [ingest, capture]}\n")
+        .expect("an allowance");
+    assert_eq!(
+        on.spec.effective(entry("spec.limits.mqtt.brokers")),
+        (Some(3), Origin::Organization)
+    );
+    let past = org("  limits:\n    mqtt: {enabled: true, brokers: 3}\n").expect("parses");
+    let error = past
+        .spec
+        .check_limits(&bounds(&[("spec.limits.mqtt.brokers", None, Some(2))]))
+        .expect_err("past the operator's bound")
+        .to_string();
+    assert!(error.contains("spec.limits.mqtt.brokers"), "{error}");
+    let built_in = org("  limits:\n    mqtt: {enabled: true, connections: 20001}\n")
+        .expect("parses")
+        .spec
+        .check_limits(&OrganizationBounds::default())
+        .expect_err("past the built-in bound")
+        .to_string();
+    assert!(
+        built_in.contains("spec.limits.mqtt.connections"),
+        "{built_in}"
+    );
+    let misplaced = org("  projects:\n    quota: {mqtt: {enabled: true}}\n")
+        .expect_err("a project's allowance is its own");
+    assert!(misplaced.contains("spec.limits.mqtt"), "{misplaced}");
 }

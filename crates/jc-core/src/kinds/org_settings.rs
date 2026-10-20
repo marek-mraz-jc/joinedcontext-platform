@@ -130,6 +130,9 @@ pub struct OrganizationLimits {
     /// The per-App quotas of the platform services (AP-165).
     #[serde(default, skip_serializing_if = "is_default")]
     pub apps: crate::kinds::AppServiceLimits,
+    /// The MQTT allowance every project gets, off by default (PF-117, ADR-N-048 §2.9).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub mqtt: crate::kinds::MqttAllowance,
 }
 
 /// `spec.limits.edge`.
@@ -248,6 +251,8 @@ pub enum Section {
     Agents,
     /// Pipelines and data.
     PipelinesAndData,
+    /// MQTT edge brokers (PF-117).
+    Mqtt,
 }
 
 /// Which way an entry's bound points.
@@ -533,6 +538,38 @@ pub const CATALOG: &[Entry] = &[
         None,
         BoundKind::Number,
     ),
+    entry(
+        "spec.limits.mqtt.brokers",
+        Section::Mqtt,
+        Some(1),
+        0,
+        Some(20),
+        BoundKind::Number,
+    ),
+    entry(
+        "spec.limits.mqtt.connections",
+        Section::Mqtt,
+        Some(1000),
+        0,
+        Some(20_000),
+        BoundKind::Number,
+    ),
+    entry(
+        "spec.limits.mqtt.messagesPerSecond",
+        Section::Mqtt,
+        Some(1000),
+        0,
+        Some(100_000),
+        BoundKind::Number,
+    ),
+    entry(
+        "spec.limits.mqtt.maxMessageBytes",
+        Section::Mqtt,
+        Some(65536),
+        1,
+        Some(crate::kinds::mqtt_broker::MAX_MESSAGE_BYTES),
+        BoundKind::Number,
+    ),
 ];
 
 /// The entries that may not exceed the edge's body, since the edge refuses anything larger first.
@@ -681,6 +718,10 @@ impl OrganizationSpec {
             "spec.limits.apps.emailsPerDay" => limits.apps.emails_per_day,
             "spec.limits.apps.aiTokensPerDay" => limits.apps.ai_tokens_per_day,
             "spec.limits.apps.filesMiB" => limits.apps.files_mib,
+            "spec.limits.mqtt.brokers" => limits.mqtt.brokers,
+            "spec.limits.mqtt.connections" => limits.mqtt.connections,
+            "spec.limits.mqtt.messagesPerSecond" => limits.mqtt.messages_per_second,
+            "spec.limits.mqtt.maxMessageBytes" => limits.mqtt.max_message_bytes,
             _ => None,
         }
     }
@@ -745,6 +786,15 @@ impl OrganizationSpec {
                 ));
             }
         }
+        self.limits.mqtt.validate("spec.limits.mqtt")?;
+        if quota_mqtt(self).is_some() {
+            return Err(invalid(
+                "spec.projects.quota.mqtt",
+                "the MQTT allowance of every project is spec.limits.mqtt; a project's own is its \
+                 spec.quotas.mqtt (ADR-N-048 §2.9)"
+                    .to_owned(),
+            ));
+        }
         if let Some(models) = &self.policies.agents.models {
             if models.is_empty() || models.iter().any(|model| model.trim().is_empty()) {
                 return Err(invalid(
@@ -757,4 +807,8 @@ impl OrganizationSpec {
         }
         Ok(())
     }
+}
+
+fn quota_mqtt(spec: &OrganizationSpec) -> Option<&crate::kinds::MqttAllowance> {
+    spec.projects.quota.as_ref()?.mqtt.as_ref()
 }

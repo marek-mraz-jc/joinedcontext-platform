@@ -58,6 +58,78 @@ pub struct MqttBrokerSpec {
     /// A dedicated port from 18830–18849 instead of TLS by SNI on 8883.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// What the broker does with a message; absent is `ingest` (ADR-N-048 §2.10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<MqttMode>,
+    /// How much a `capture` broker keeps; read only in that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<MqttCapture>,
+}
+
+/// What a broker does with a message (ADR-N-048 §2.10).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MqttMode {
+    /// Devices publish and nothing else; the project's pipelines are the only subscribers.
+    Ingest,
+    /// `ingest`, and the Portal keeps the newest messages for the project's stewards.
+    Capture,
+    /// Devices may also subscribe, each under its own `${clientid}`.
+    Relay,
+}
+
+impl MqttMode {
+    /// The word a manifest writes.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Ingest => "ingest",
+            Self::Capture => "capture",
+            Self::Relay => "relay",
+        }
+    }
+}
+
+/// The most messages per topic a capture keeps (ADR-N-048 §2.10).
+pub const MAX_CAPTURE_MESSAGES: u32 = 1000;
+/// The longest a captured message is kept, in seconds.
+pub const MAX_CAPTURE_SECONDS: u64 = 24 * 3600;
+
+/// `spec.capture` of a `capture` broker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MqttCapture {
+    /// Messages kept per topic, newest first.
+    #[serde(default = "default_capture_messages")]
+    pub messages_per_topic: u32,
+    /// How long a message is kept from its arrival, an ISO 8601 duration `PT…`.
+    #[serde(default = "default_capture_window")]
+    pub window: String,
+}
+
+fn default_capture_messages() -> u32 {
+    20
+}
+
+fn default_capture_window() -> String {
+    "PT1H".into()
+}
+
+impl Default for MqttCapture {
+    fn default() -> Self {
+        Self {
+            messages_per_topic: default_capture_messages(),
+            window: default_capture_window(),
+        }
+    }
+}
+
+impl MqttCapture {
+    /// The window in seconds, `None` when it does not parse.
+    pub fn window_seconds(&self) -> Option<u64> {
+        crate::kinds::agent_profile::parse_iso_duration(&self.window)
+    }
 }
 
 /// A role: the ServiceAccounts that hold it and the topic filters it grants.
@@ -161,6 +233,22 @@ impl MqttBrokerSpec {
             for filter in &role.publish {
                 check_filter("roles[].publish", filter)?;
             }
+            if !role.subscribe.is_empty() && self.mode != Some(MqttMode::Relay) {
+                let reason = match self.mode {
+                    None => format!(
+                        "role `{}` lets devices subscribe, which only a relay broker allows: set \
+                         spec.mode: relay (ADR-N-048 §2.10)",
+                        role.name
+                    ),
+                    Some(mode) => format!(
+                        "role `{}` lets devices subscribe, and in {} mode devices get no \
+                         subscribe right; use spec.mode: relay",
+                        role.name,
+                        mode.word()
+                    ),
+                };
+                return Err(invalid("roles[].subscribe", reason));
+            }
             for filter in &role.subscribe {
                 check_filter("roles[].subscribe", filter)?;
                 if !under_client_id(filter) {
@@ -198,6 +286,33 @@ impl MqttBrokerSpec {
                 ));
             }
         }
+        if let Some(capture) = &self.capture {
+            if self.mode != Some(MqttMode::Capture) {
+                return Err(invalid(
+                    "capture",
+                    "is read only by a broker with spec.mode: capture".into(),
+                ));
+            }
+            if capture.messages_per_topic == 0 || capture.messages_per_topic > MAX_CAPTURE_MESSAGES
+            {
+                return Err(invalid(
+                    "capture.messagesPerTopic",
+                    format!(
+                        "{} is outside 1…{MAX_CAPTURE_MESSAGES}",
+                        capture.messages_per_topic
+                    ),
+                ));
+            }
+            if !capture
+                .window_seconds()
+                .is_some_and(|seconds| (1..=MAX_CAPTURE_SECONDS).contains(&seconds))
+            {
+                return Err(invalid(
+                    "capture.window",
+                    format!("`{}` is not a duration from PT1S to PT24H", capture.window),
+                ));
+            }
+        }
         if let Some(port) = self.port {
             if !DEDICATED_PORTS.contains(&port) {
                 return Err(invalid(
@@ -211,6 +326,11 @@ impl MqttBrokerSpec {
             }
         }
         Ok(())
+    }
+
+    /// The mode in force: `ingest` when the manifest names none.
+    pub fn effective_mode(&self) -> MqttMode {
+        self.mode.unwrap_or(MqttMode::Ingest)
     }
 
     /// The roles a ServiceAccount holds, in declaration order.
@@ -292,6 +412,8 @@ mod tests {
             roles,
             limits: MqttLimits::default(),
             port: None,
+            mode: Some(MqttMode::Relay),
+            capture: None,
         }
     }
 
@@ -428,5 +550,62 @@ mod tests {
             broker.port = Some(port);
             assert!(refusal(&broker).contains("reserved range"), "{port}");
         }
+    }
+
+    #[test]
+    fn devices_subscribe_only_on_a_relay_broker() {
+        let mut broker = spec(vec![role("camera", &["a"], &["commands/${clientid}/+"])]);
+        broker.mode = None;
+        assert!(refusal(&broker).contains("set spec.mode: relay"));
+        broker.mode = Some(MqttMode::Ingest);
+        assert!(refusal(&broker).contains("in ingest mode devices get no subscribe right"));
+        broker.mode = Some(MqttMode::Capture);
+        assert!(refusal(&broker).contains("in capture mode"));
+        let mut ingest = spec(vec![role("camera", &["a"], &[])]);
+        ingest.mode = None;
+        assert_eq!(ingest.validate().map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(ingest.effective_mode(), MqttMode::Ingest);
+    }
+
+    #[test]
+    fn a_capture_is_bounded_and_belongs_to_the_capture_mode() {
+        let mut broker = spec(vec![role("camera", &["a"], &[])]);
+        broker.mode = Some(MqttMode::Ingest);
+        broker.capture = Some(MqttCapture::default());
+        assert!(refusal(&broker).contains("spec.mode: capture"));
+        broker.mode = Some(MqttMode::Capture);
+        assert_eq!(broker.validate().map_err(|e| e.to_string()), Ok(()));
+        for (capture, field) in [
+            (
+                MqttCapture {
+                    messages_per_topic: MAX_CAPTURE_MESSAGES + 1,
+                    ..MqttCapture::default()
+                },
+                "messagesPerTopic",
+            ),
+            (
+                MqttCapture {
+                    window: "PT25H".into(),
+                    ..MqttCapture::default()
+                },
+                "window",
+            ),
+            (
+                MqttCapture {
+                    window: "P1D".into(),
+                    ..MqttCapture::default()
+                },
+                "window",
+            ),
+        ] {
+            broker.capture = Some(capture);
+            assert!(refusal(&broker).contains(field), "{field}");
+        }
+        let read: MqttBrokerSpec = serde_json::from_value(serde_json::json!({
+            "mode": "capture", "capture": {},
+            "roles": [{"name": "camera", "serviceAccounts": ["cam-north"], "publish": ["a"]}]
+        }))
+        .expect("reads");
+        assert_eq!(read.capture.and_then(|c| c.window_seconds()), Some(3600));
     }
 }
