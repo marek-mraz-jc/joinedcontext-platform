@@ -131,8 +131,68 @@ pub enum Event {
     Visualization(Value),
     /// Up to three questions to offer after the answer (T-4174).
     Followups(Vec<String>),
+    /// A read the answer made, for the steps a person checks it by (T-4801).
+    Step(Step),
     /// The last event: what the question cost and how long it took, in milliseconds (T-4139).
     Done(Spent, u64),
+}
+
+/// One read of live data as the `step` event shows it (T-4801): where it read, the type and the
+/// `q` it asked, and how many entities matched, so a person can check each figure of the answer
+/// against the dataset it links. The source is the Endpoint's title, never its slug.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Step {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub entity_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// The longest `q` a step shows, in characters.
+const STEP_Q_CHARS: usize = 200;
+
+impl Step {
+    /// The step of a call on `connector` with `arguments` that answered `text`: the count is the
+    /// answer's `total`, absent without one; `url` is the page the read cites.
+    pub fn of(connector: &Connected, arguments: &Value, text: &str, url: Option<String>) -> Self {
+        // Only the source's own total: the entities of a page are not how many match.
+        let count = super::routed::total_of(text);
+        Self::new(
+            connector,
+            super::data::type_of(arguments),
+            arguments.get("q").and_then(Value::as_str),
+            count,
+            url,
+        )
+    }
+
+    /// The step of a read of `kind` with `q` on `connector` that counted `count`.
+    pub fn new(
+        connector: &Connected,
+        kind: Option<String>,
+        q: Option<&str>,
+        count: Option<u64>,
+        url: Option<String>,
+    ) -> Self {
+        Step {
+            source: connector
+                .title
+                .clone()
+                .or_else(|| connector.label.clone())
+                .filter(|t| !t.trim().is_empty()),
+            entity_type: kind,
+            q: q.map(|q| cut(q.trim(), STEP_Q_CHARS))
+                .filter(|q| !q.is_empty()),
+            count,
+            url,
+        }
+    }
 }
 
 /// An enum's values, each as its words per language (T-4682).
@@ -906,6 +966,11 @@ async fn run_tool(
                     }
                     None => (None, None),
                 };
+                send(
+                    events,
+                    Event::Step(Step::of(connector, &arguments, &text, url.clone())),
+                )
+                .await;
                 let n = citations.len() + 1;
                 citations.push(Citation {
                     n,
@@ -1347,5 +1412,61 @@ mod tests {
             "\n\nThe Endpoints the data tools read; give one as `endpoint`:\n- ovzdusie (Ovzdušie)\n- bbsk/registre"
         );
         assert_eq!(endpoint_lines(&[]), "");
+    }
+
+    /// T-4801: each read is a step a person checks: the Endpoint's title, the type, the `q` and
+    /// the count the source returned (the owner's 1,651 bridges and 32 built before 1900).
+    #[test]
+    fn a_read_is_a_step_with_its_source_query_and_count() {
+        let connector = |title: Option<&str>, label: Option<&str>| Connected {
+            endpoint: "omto6qk5sfn5ft7zl5pdiaxunj2ljnae".into(),
+            title: title.map(str::to_owned),
+            surface: Surface {
+                gateway: "http://gateway".into(),
+                slug: "registre".into(),
+                timeout: std::time::Duration::from_secs(1),
+                token: None,
+            },
+            tools: Vec::new(),
+            label: label.map(str::to_owned),
+            siblings: Vec::new(),
+        };
+        let registre = connector(Some("Registre kraja"), Some("BBSK"));
+        let page = Some("https://data.example/dataset/mosty".to_owned());
+        let all = Step::of(
+            &registre,
+            &json!({"type": ["Bridge"], "count": true}),
+            r#"{"entities": [], "total": 1651}"#,
+            page.clone(),
+        );
+        assert_eq!(
+            json!(all),
+            json!({"source": "Registre kraja", "type": "Bridge", "count": 1651,
+                "url": "https://data.example/dataset/mosty"})
+        );
+        let old = Step::of(
+            &registre,
+            &json!({"type": "Bridge", "q": " yearBuilt<1900 ", "count": true}),
+            r#"{"entities": [{"id": "urn:ngsi-ld:Bridge:1"}], "total": 32}"#,
+            None,
+        );
+        assert_eq!(
+            (old.q.as_deref(), old.count),
+            (Some("yearBuilt<1900"), Some(32))
+        );
+        // Without a total no count, since a page is not how many match; the publisher when the
+        // Endpoint has no title, and never the slug.
+        let listed = Step::of(
+            &connector(None, Some("BBSK")),
+            &json!({"type": ["Bridge"], "q": ""}),
+            r#"[{"id": "a"}, {"id": "b"}]"#,
+            None,
+        );
+        assert_eq!(
+            (listed.source.as_deref(), listed.q, listed.count),
+            (Some("BBSK"), None, None)
+        );
+        let bare = Step::of(&connector(None, None), &json!({}), "not json", None);
+        assert_eq!(json!(bare), json!({}));
     }
 }

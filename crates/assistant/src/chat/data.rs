@@ -575,6 +575,16 @@ async fn recorded(
                     tables.push((citations.len() + 1, table));
                 }
             }
+            send(
+                events,
+                Event::Step(super::agent::Step::of(
+                    c.connector,
+                    &c.arguments,
+                    &text,
+                    dataset.clone(),
+                )),
+            )
+            .await;
             // What a step did, never what it read (T-4294's per-step record).
             tracing::info!(deployment = %ask.deployment, tool = %tool, endpoint = %endpoint, status = "done", rows, ms, "data step");
             let n = citations.len() + 1;

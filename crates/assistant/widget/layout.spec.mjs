@@ -63,6 +63,23 @@ function sse(res, data) {
   res.end();
 }
 
+// T-4801: the owner's bridge answer as the server streams it, a `step` per read with its count.
+const BRIDGE_PAGE = "https://data.example.sk/dataset/register-mostov";
+function bridges(res) {
+  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  send("conversation", { id: "c1", at: "2026-10-20T06:21:05Z" });
+  send("stage", { stage: "reading", topic: "Bridge" });
+  send("step", { source: "Registre kraja", type: "Bridge", count: 1651, url: BRIDGE_PAGE });
+  send("stage", { stage: "reading", topic: "Bridge" });
+  send("step", { source: "Registre kraja", type: "Bridge", q: "yearBuilt<1900", count: 32, url: BRIDGE_PAGE });
+  send("answer", { text: "V registri mostov kraja je 1 651 mostov [1], z nich 32 bolo postavených pred rokom 1900 [2]." });
+  send("citations", [1, 2].map((n) => ({ n, url: BRIDGE_PAGE, tool: "query_entities", title: "Register mostov" })));
+  send("followups", { questions: ["Koľko mostov je pamiatkovo chránených?"] });
+  send("done", { totalMs: 4200, stagesMs: { route: 900, answer: 2400 } });
+  res.end();
+}
+
 // The visitor tokens the stand-in has issued (T-4653).
 let TOKENS = 0;
 
@@ -184,7 +201,8 @@ test.beforeAll(async () => {
       req.on("data", (chunk) => { body += chunk; });
       // The question asked now, not the history the request carries beside it.
       const asked = () => { try { return String(JSON.parse(body).message || ""); } catch { return body; } };
-      return req.on("end", () => sse(res, asked().includes("mape") ? "map" : asked().includes("ovzdušia")));
+      return req.on("end", () => (asked().includes("mostov") ? bridges(res)
+        : sse(res, asked().includes("mape") ? "map" : asked().includes("ovzdušia"))));
     }
     res.writeHead(404).end();
   });
@@ -423,6 +441,28 @@ test("a data table at 400 px shows the name and the first value", async ({ page 
   expect(value.x + value.width, "the first value lies in view without scrolling").toBeLessThanOrEqual(scroll.x + scroll.width + 0.5);
   expect(await table.locator("td.jc-num").count(), "values align as numbers").toBeGreaterThan(0);
 });
+
+// T-4801: "Postup" names each read a person can check: where, the query and the count, with the
+// dataset's page; at a desktop and a phone (screenshots into $JC_SHOTS when it is set).
+for (const [width, height] of [[1366, 768], [390, 844]]) {
+  test(`the steps of a data answer name each read and its count at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto(`${base}/d/bb?lang=sk`);
+    await page.locator("#jc-question").fill("Koľko mostov je v registri mostov kraja a koľko je postavených pred rokom 1900?");
+    await page.locator(".jc-form .jc-submit").click();
+    const steps = page.locator(".jc-bot .jc-steps");
+    await expect(steps.locator("summary")).toHaveText("Postup (2)");
+    await steps.locator("summary").click();
+    const items = steps.locator("li");
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toContainText("Hľadal som v: Registre kraja / Bridge · dotaz: všetky záznamy → 1\u00a0651");
+    await expect(items.nth(1)).toContainText("dotaz: yearBuilt<1900 → 32");
+    await expect(items.nth(1).getByRole("link", { name: "Otvoriť dataset" })).toHaveAttribute("href", BRIDGE_PAGE);
+    const sideways = await page.locator(".jc-log").evaluate((log) => log.scrollWidth > log.clientWidth + 1);
+    expect(sideways, "no horizontal scroll").toBe(false);
+    if (process.env.JC_SHOTS) await page.screenshot({ path: `${process.env.JC_SHOTS}/steps-${width}.png` });
+  });
+}
 
 // T-4657: a data card whose rows all have places opens on its map, framed from the viz origin
 // alone; the spec goes in by message, labels in the visitor's language, and the table is one tab away.

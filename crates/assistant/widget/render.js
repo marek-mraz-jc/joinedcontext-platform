@@ -712,12 +712,48 @@ var JCRender = (function () {
   }
 
 
+  // The words of a read's step (T-4801).
+  var READ_WORDS = {
+    sk: { read: "Hľadal som v", query: "dotaz", all: "všetky záznamy" },
+    en: { read: "Searched", query: "query", all: "all records" },
+    cs: { read: "Hledal jsem v", query: "dotaz", all: "všechny záznamy" }
+  };
+
   /**
-   * The steps an answer took, for the collapsed list under it (T-4294): with the `done` event's
-   * `stagesMs`, each stage that ran by its name and how long it took (T-4729); without them, the
-   * line of each stage that did work, in order; null for fewer than two, which need no list.
+   * A `step` event (T-4801) as the steps list reads it: the source's title, the type, the `q`,
+   * the count the source returned and the dataset page, each checked; null when it names neither
+   * a source nor a type.
    */
-  function steps(stages, lang, timed) {
+  function read(data) {
+    if (!data || typeof data !== "object") return null;
+    var count = typeof data.count === "number" && isFinite(data.count) && data.count >= 0 ? Math.floor(data.count) : null;
+    var out = { source: text(data.source, 80), type: text(data.type, 80), q: text(data.q, 200), count: count, url: safeUrl(data.url) };
+    return out.source || out.type ? out : null;
+  }
+
+  /** A read's line: `Hľadal som v: Registre kraja / Bridge · dotaz: yearBuilt<1900 → 32`. */
+  function readLine(r, lang) {
+    var words = READ_WORDS[lang] || READ_WORDS.en;
+    var line = words.read + ": " + [r.source, r.type].filter(Boolean).join(" / ");
+    if (r.count === null) return line;
+    var n = new Intl.NumberFormat(YES_NO[lang] ? lang : "en").format(r.count);
+    return line + " · " + words.query + ": " + (r.q || words.all) + " → " + n;
+  }
+
+  /**
+   * The steps an answer took, for the collapsed list under it (T-4294): with the `step` events
+   * of its reads, each read by its source, query and count, with the dataset page in `links`
+   * (T-4801); else with the `done` event's `stagesMs`, each stage that ran by its name and how
+   * long it took (T-4729); without them, the line of each stage that did work, in order; null for
+   * fewer than two stages, which need no list.
+   */
+  function steps(stages, lang, timed, reads) {
+    var checked = (Array.isArray(reads) ? reads : []).map(read).filter(Boolean);
+    if (checked.length > 0) {
+      return { summary: (STAGES[lang] || STAGES.en).steps + " (" + checked.length + ")",
+        lines: checked.map(function (r) { return readLine(r, lang); }),
+        links: checked.map(function (r) { return r.url; }) };
+    }
     var seconds = new Intl.NumberFormat(YES_NO[lang] ? lang : "en", { maximumFractionDigits: 1 });
     var words = TIMED_WORDS[lang] || TIMED_WORDS.en;
     var named = TIMED.filter(function (name) {

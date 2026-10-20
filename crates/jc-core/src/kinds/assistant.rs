@@ -61,6 +61,98 @@ pub const MAX_SUGGESTIONS: usize = 6;
 pub const MAX_SUGGESTION_LEN: usize = 120;
 /// The longest disclaimer.
 pub const MAX_DISCLAIMER_LEN: usize = 400;
+
+/// What a suggested question may not ask about (T-4801, owner 2026-10-20: "all question that are
+/// provided needs to be positive and not aiming for something bad"): failures, damage, danger,
+/// accidents, crime, complaints, blame or a place ranked as bad, as word stems in Slovak, Czech
+/// and English, written without diacritics (a question is compared folded).
+const NEGATIVE_STEMS: &[&str] = &[
+    // sk, cs
+    "havarij",
+    "nebezpec",
+    "najhors",
+    "nejhors",
+    "nehod",
+    "stazn",
+    "stiznost",
+    "vytlk",
+    "vytluk",
+    "poruch",
+    "poskod",
+    "poskoz",
+    "skod",
+    "kriminal",
+    "kradez",
+    "zlocin",
+    "uraz",
+    "obet",
+    "trestn",
+    "zruten",
+    "zricen",
+    "rekonstruk",
+    "vandal",
+    "zlom stave",
+    "zly stav",
+    "spatn",
+    "vinnik",
+    "vinik",
+    "smrt",
+    "umrt",
+    "chatrn",
+    // en
+    "accident",
+    "danger",
+    "damage",
+    "crime",
+    "criminal",
+    "complain",
+    "worst",
+    "failure",
+    "failing",
+    "broken",
+    "collapse",
+    "pothole",
+    "blame",
+    "injur",
+    "death",
+    "deadly",
+    "unsafe",
+    "hazard",
+    "disrepair",
+    "poor condition",
+    "bad condition",
+    "theft",
+    "vandal",
+    "reconstruct",
+    "repair",
+];
+
+/// Whether a suggested question asks for something bad ([`NEGATIVE_STEMS`]); a starter or a
+/// follow-up that does is never shown.
+pub fn negative_question(question: &str) -> bool {
+    let folded: String = question
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'ä' => 'a',
+            'č' => 'c',
+            'ď' => 'd',
+            'é' | 'ě' => 'e',
+            'í' => 'i',
+            'ĺ' | 'ľ' => 'l',
+            'ň' => 'n',
+            'ó' | 'ô' => 'o',
+            'ŕ' | 'ř' => 'r',
+            'š' => 's',
+            'ť' => 't',
+            'ú' | 'ů' => 'u',
+            'ý' => 'y',
+            'ž' => 'z',
+            other => other,
+        })
+        .collect();
+    NEGATIVE_STEMS.iter().any(|stem| folded.contains(stem))
+}
 /// The most other projects a deployment's connectors may reach.
 pub const MAX_SCOPE_PROJECTS: usize = 10;
 
@@ -1580,6 +1672,13 @@ impl AssistantDeploymentSpec {
                         "a suggested question is 1 to 120 characters",
                     ));
                 }
+                if negative_question(question) {
+                    return Err(name(
+                        "suggestions",
+                        language.clone(),
+                        "a suggested question asks what exists, where, how many or how to use it, never about failures, damage, danger, accidents, crime, complaints or blame",
+                    ));
+                }
             }
         }
         for (language, text) in &self.disclaimer {
@@ -2388,6 +2487,27 @@ mod deployment_spec_tests {
             refused(with(|s| s["suggestions"] = json!({"de": ["Wie?"]})).text_fields()),
             "suggestions"
         );
+        // T-4801: a starter never asks for something bad, in any case or without diacritics.
+        for bad in [
+            "Ktoré mosty sú v havarijnom stave?",
+            "KDE SU NAJHORSIE CESTY?",
+            "Kolik bylo dopravních nehod?",
+            "Where are the potholes?",
+        ] {
+            assert_eq!(
+                refused(with(|s| s["suggestions"] = json!({"sk": [bad]})).text_fields()),
+                "suggestions",
+                "{bad}"
+            );
+        }
+        for good in [
+            "Koľko mostov je pamiatkovo chránených?",
+            "Aké sú úradné hodiny Úradu BBSK a kde sídli?",
+            "Aká je kvalita ovzdušia v Banskej Bystrici?",
+            "Which schools are in Zvolen?",
+        ] {
+            assert!(!negative_question(good), "{good}");
+        }
         assert_eq!(
             refused(with(|s| s["disclaimer"] = json!({"sk": " "})).text_fields()),
             "disclaimer"

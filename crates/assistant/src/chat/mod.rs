@@ -1136,6 +1136,7 @@ fn sse(event: &Event, anonymous: bool) -> SseEvent {
         Event::Answer(text) => ("answer", json!({"text": text})),
         Event::Citations(citations) => ("citations", json!(citations)),
         Event::Followups(questions) => ("followups", json!({"questions": questions})),
+        Event::Step(step) => ("step", json!(step)),
         Event::Error {
             status,
             title,
