@@ -194,7 +194,6 @@ body { font: 15px/1.5 var(--font, system-ui, -apple-system, "Segoe UI", Roboto, 
 .jc-chart-text { fill: var(--muted); font-size: 10px; }
 .jc-data-links { display: flex; gap: 12px; flex-wrap: wrap; margin: 6px 0 0; font-size: 13px; }
 .jc-data-links a { color: var(--link); }
-.jc-address code { overflow-wrap: anywhere; user-select: all; }
 .jc-steps { margin-top: 6px; font-size: 13px; color: var(--muted); }
 .jc-steps summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; gap: 6px; }
 .jc-steps summary::before { content: "▸"; }
