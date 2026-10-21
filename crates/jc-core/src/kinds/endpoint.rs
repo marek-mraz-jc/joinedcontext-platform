@@ -162,7 +162,8 @@ pub enum Representation {
     /// OGC API - Features Part 1 collections and items (`/ogc/features/`).
     #[serde(rename = "ogc-features")]
     OgcFeatures,
-    /// SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).
+    /// SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104),
+    /// and only on a space whose model has a numeric attribute with a unit (EP-125).
     Sta,
     /// OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).
     Odata,
@@ -179,7 +180,8 @@ pub enum Representation {
 /// comes from. Static code, never read from a manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceRequirement {
-    /// The Smart Data Models type, by the NGSI-LD type name the view filters on.
+    /// The Smart Data Models type, by the NGSI-LD type name the view filters on; [`ANY_TYPE`]
+    /// when the standard maps every type that has a measurement.
     pub entity_type: &'static str,
     /// Its IRI, for the documentation.
     pub type_iri: &'static str,
@@ -191,6 +193,29 @@ pub struct SurfaceRequirement {
 
 /// Attributes every entity has, so a model never has to declare them.
 const SYSTEM_ATTRIBUTES: [&str; 3] = ["id", "type", "modifiedAt"];
+
+/// The [`SurfaceRequirement::entity_type`] of a standard that maps no fixed type: it serves any
+/// class of the model with a slot whose `range` is numeric and that declares its `unit`.
+pub const ANY_TYPE: &str = "*";
+
+/// The source column of a measurement in the SensorThings fields.
+pub const MEASUREMENT: &str = "a numeric slot with its unit";
+
+// Every entity is a Thing, every numeric Property a Datastream (antares-sta mapping rules 1-6).
+const STA: SurfaceRequirement = SurfaceRequirement {
+    entity_type: ANY_TYPE,
+    type_iri: "https://docs.ogc.org/is/18-088/18-088.html",
+    standard: "OGC SensorThings API v1.1",
+    fields: &[
+        ("Thing", "§9.2.1", "id", true),
+        ("Datastream", "§9.2.5", MEASUREMENT, true),
+        ("Datastream.unitOfMeasurement", "§9.2.5", MEASUREMENT, true),
+        ("Observation.result", "§9.2.7", MEASUREMENT, true),
+        ("Observation.phenomenonTime", "§9.2.7", "observedAt", true),
+        ("ObservedProperty", "§9.2.4", "type", true),
+        ("Location", "§9.2.2", "location", false),
+    ],
+};
 
 const ICAL: SurfaceRequirement = SurfaceRequirement {
     entity_type: "Event",
@@ -230,6 +255,7 @@ impl Representation {
     pub const fn requirement(&self) -> Option<&'static SurfaceRequirement> {
         match self {
             Self::Ical => Some(&ICAL),
+            Self::Sta => Some(&STA),
             _ => None,
         }
     }
@@ -241,11 +267,18 @@ impl Representation {
 
     /// Why a space whose model is `linkml` cannot serve this representation, or `None` when it
     /// can (EP-125): the type missing, or the mandatory source attributes the type does not mark
-    /// `required: true`.
+    /// `required: true`; for `sta`, no slot that is a measurement.
     pub fn model_gap(&self, linkml: &str) -> std::result::Result<Option<String>, String> {
         let Some(need) = self.requirement() else {
             return Ok(None);
         };
+        if need.entity_type == ANY_TYPE {
+            let measured = super::model_projection::linkml_measurements(linkml)?;
+            return Ok(measured
+                .is_empty()
+                .then(|| self.missing_model_gap())
+                .flatten());
+        }
         let Some(required) =
             super::model_projection::linkml_required_slots(linkml, need.entity_type)?
         else {
@@ -268,6 +301,15 @@ impl Representation {
                 missing.join(", ")
             )
         }))
+    }
+
+    /// What a space without a usable data model lacks for this representation, `None` for the
+    /// generic ones (EP-125).
+    pub fn missing_model_gap(&self) -> Option<String> {
+        self.requirement().map(|need| match need.entity_type {
+            ANY_TYPE => "a type with a numeric attribute that declares its unit".to_owned(),
+            named => format!("the type {named}"),
+        })
     }
 
     /// Every representation, in the order a record lists them.
