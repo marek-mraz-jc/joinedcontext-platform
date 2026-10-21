@@ -962,6 +962,21 @@ spec:
 "#,
     )
     .unwrap();
+    // The Endpoint the pipeline reads and writes through, so its write has a door (PL-111).
+    std::fs::create_dir_all(project.join("spaces/mhd/endpoints")).unwrap();
+    std::fs::write(
+        project.join("spaces/mhd/endpoints/stops.yaml"),
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata: { name: stops, namespace: doprava }
+spec:
+  contextSpaceRef: mhd
+  slug: zt4qm7ge2xdv6ksb3ncf5arw2y
+  audience: organization
+  enabledRepresentations: ["ngsi-ld"]
+"#,
+    )
+    .unwrap();
 
     let repo = Repository::load_for(&dir, Some("dev")).expect("loads");
     let written: Vec<&str> = repo
