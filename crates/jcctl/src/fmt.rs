@@ -137,7 +137,10 @@ mod tests {
             std::fs::read_to_string(&messy).ok().as_deref(),
             Some("apiVersion: v1\nkind: K\n")
         );
-        assert!(run(std::slice::from_ref(&dir), true).expect("again").changed.is_empty());
+        assert!(run(std::slice::from_ref(&dir), true)
+            .expect("again")
+            .changed
+            .is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
