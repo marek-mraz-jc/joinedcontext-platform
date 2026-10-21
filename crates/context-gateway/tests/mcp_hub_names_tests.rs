@@ -173,6 +173,7 @@ async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     // add 104: 14,542, so the ceiling is 14,600, and it only comes down.
     // query_entities' limit default and maximum (T-4804), in its schema and one note sentence
     // that no longer repeats the cursor's nextCursor, add 57: 14,599 (T-4812).
+    // describe_access does not repeat `liveUpdates` (T-5045): initialize says it (T-5148).
     assert!(sizes[0] < 14_600, "{sizes:?}");
 }
 
