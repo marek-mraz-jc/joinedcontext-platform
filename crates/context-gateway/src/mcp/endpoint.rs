@@ -225,7 +225,8 @@ pub(crate) async fn mcp_answer(
         .and_then(|value| value.to_str().ok()?.parse::<usize>().ok())
         .is_some_and(|length| length <= MAX_BODY);
     let units = calls && fits;
-    if key.is_none() && !decorated && !units || !answer.status().is_success() || !json {
+    let live = method == "initialize" && endpoint.serves(Representation::WebSocket);
+    if key.is_none() && !decorated && !units && !live || !answer.status().is_success() || !json {
         return answer;
     }
     let (parts, body) = answer.into_parts();
@@ -243,6 +244,14 @@ pub(crate) async fn mcp_answer(
     }
     if units {
         mcp::units::readable(&mut listed);
+    }
+    if live {
+        let address = crate::handlers::ws::ws_address(&format!(
+            "{}{}/ws",
+            gateway.base_url(),
+            endpoint.base_path
+        ));
+        live_instructions(&mut listed, &address);
     }
     if let Some(key) = key {
         let kept = match key {
@@ -285,6 +294,18 @@ fn member_names(gateway: &Gateway, endpoint: &Endpoint) -> Vec<String> {
         .into_iter()
         .map(|member| member.name)
         .collect()
+}
+
+/// Names the Endpoint's WebSocket in the server's instructions, so an agent learns that live
+/// updates exist before it lists a tool (T-5045); `describe_access` carries the details.
+fn live_instructions(answer: &mut Value, address: &str) {
+    if let Some(Value::String(instructions)) = answer.pointer_mut("/result/instructions") {
+        instructions.push_str(&format!(
+            " Live updates: open {address} as a WebSocket with the subprotocol ngsi-ld-ws and \
+             send x-subscribe; describe_access lists the message shape and the limits under \
+             `liveUpdates`."
+        ));
+    }
 }
 
 /// The messages whose answer says what a federating space federates (EP-71, AG-30).
@@ -599,6 +620,28 @@ pub(crate) fn unauthorized(gateway: &Gateway, slug: &str) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-5045: `initialize` names the WebSocket where a model reads first; an answer without
+    /// instructions is left as it came.
+    #[test]
+    fn initialize_names_the_live_updates_websocket() {
+        let mut answer = serde_json::json!({ "result": { "instructions": "NGSI-LD." } });
+        live_instructions(&mut answer, "wss://data.example.fi/api/endpoint/s/ws");
+        let said = answer["result"]["instructions"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            said.starts_with("NGSI-LD. Live updates: open wss://data.example.fi/api/endpoint/s/ws")
+        );
+        assert!(
+            said.contains("ngsi-ld-ws") && said.contains("liveUpdates"),
+            "{said}"
+        );
+
+        let mut bare = serde_json::json!({ "result": { "tools": [] } });
+        live_instructions(&mut bare, "wss://x/ws");
+        assert_eq!(bare, serde_json::json!({ "result": { "tools": [] } }));
+    }
 
     /// T-3819: what the broker answers is not trusted to be the shape MCP says; an answer that
     /// is no object, or whose parts are not, is left as it came and never panics the request.

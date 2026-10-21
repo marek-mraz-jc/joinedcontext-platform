@@ -268,14 +268,29 @@ async fn access_document(
         "grant-ast" => AccessFormat::GrantAst,
         _ => AccessFormat::AuthZen,
     };
-    view_access::document(gateway, endpoint, subject, format)
+    let mut document = view_access::document(gateway, endpoint, subject, format)
         .await
         .map_err(|answer| {
             format!(
                 "the access document could not be read (HTTP {}); try again in a moment",
                 answer.status().as_u16()
             )
-        })
+        })?;
+    // How to get changes as they happen goes beside the grants an agent reads (T-5045); the
+    // ODRL and grant-ast documents stay the standard documents they are.
+    if format == AccessFormat::AuthZen {
+        with_live_updates(&mut document, gateway, endpoint);
+    }
+    Ok(document)
+}
+
+/// Adds `liveUpdates` to an access document when the Endpoint serves a WebSocket (T-5045).
+fn with_live_updates(document: &mut Value, gateway: &Gateway, endpoint: &Endpoint) {
+    let live =
+        crate::handlers::ws::live_updates(endpoint, gateway.base_url(), gateway.ws_token_lifetime);
+    if let (Some(members), Some(live)) = (document.as_object_mut(), live) {
+        members.insert("liveUpdates".to_owned(), live);
+    }
 }
 
 /// One resource, in the envelope `resources/read` answers with.

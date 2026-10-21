@@ -616,3 +616,44 @@ async fn an_endpoint_without_a_view_is_answered_by_nobody() {
     }
     assert!(hops.lock().expect("the hop log").is_empty());
 }
+
+/// T-5045: an agent reading `describe_access` on an Endpoint that serves the WebSocket learns
+/// its public address, subprotocol and subscribe message; on one that does not, nothing.
+#[tokio::test]
+async fn describe_access_names_the_websocket_only_where_it_is_served() {
+    let ask = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/endpoint/{SLUG}/mcp"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": { "name": "describe_access", "arguments": {} } })
+                .to_string(),
+            ))
+            .expect("a request")
+    };
+    let live = |representations: Vec<Representation>| async move {
+        let (upstream, _) = json_broker(StatusCode::OK, view_document()).await;
+        let served = Endpoint {
+            representations,
+            ..endpoint()
+        };
+        let (status, _, body) = call(app(upstream, served), ask()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: Value = serde_json::from_str(&body).expect("JSON");
+        answer["result"]["structuredContent"]["access"]["liveUpdates"].clone()
+    };
+
+    let socket = live(vec![Representation::Mcp, Representation::WebSocket]).await;
+    assert_eq!(
+        socket["address"],
+        format!("wss://dev.joinedcontext.com/api/endpoint/{SLUG}/ws")
+    );
+    assert_eq!(socket["protocol"], "ngsi-ld-ws");
+    assert_eq!(socket["subscribe"]["metadata"]["x-op"], "x-subscribe");
+    assert_eq!(socket["limits"]["lifetime"]["anonymousSeconds"], 86_400);
+
+    let none = live(vec![Representation::Mcp]).await;
+    assert!(none.is_null(), "{none}");
+}

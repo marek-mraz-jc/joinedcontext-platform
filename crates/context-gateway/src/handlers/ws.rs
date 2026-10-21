@@ -250,17 +250,9 @@ fn asks_to_upgrade(headers: &HeaderMap) -> bool {
 fn guide(endpoint: &Endpoint, base: &str, headers: &HeaderMap) -> Response<Body> {
     let address = ws_address(&format!("{base}{}/ws", endpoint.base_path));
     let help = format!("{base}/docs/API/07-websocket");
-    let example = json!({
-        "metadata": { "x-op": "x-subscribe", "x-id": "s1" },
-        "body": { "type": "Subscription", "entities": [{ "type": example_type(endpoint) }] },
-    });
+    let example = subscribe_example(endpoint);
     let public = endpoint.audience == Audience::Public;
-    let token = if public {
-        "none: this Endpoint is public"
-    } else {
-        "an access token for the Endpoint's audience, in the Authorization header or as the \
-         bearer.<token> subprotocol entry"
-    };
+    let token = token_text(public);
     let credential = if public {
         ""
     } else {
@@ -317,6 +309,68 @@ fn guide(endpoint: &Endpoint, base: &str, headers: &HeaderMap) -> Response<Body>
 }
 
 pub(crate) use jc_dcat::ws_address;
+
+/// One `x-subscribe` message for a type of this Endpoint (API/07 §2).
+fn subscribe_example(endpoint: &Endpoint) -> serde_json::Value {
+    json!({
+        "metadata": { "x-op": "x-subscribe", "x-id": "s1" },
+        "body": { "type": "Subscription", "entities": [{ "type": example_type(endpoint) }] },
+    })
+}
+
+/// What a caller needs to present, said without naming any token.
+fn token_text(public: bool) -> &'static str {
+    if public {
+        "none: this Endpoint is public"
+    } else {
+        "an access token for the Endpoint's audience, in the Authorization header or as the \
+         bearer.<token> subprotocol entry"
+    }
+}
+
+/// How an agent gets this Endpoint's changes as they happen (T-5045, API/07): the public
+/// WebSocket address, the subprotocol, one `x-subscribe` message, the limits the upgrade above
+/// enforces and the HTTP subscription alternative. `None` for an Endpoint that serves no
+/// WebSocket, so nobody is pointed at an address that answers 404.
+pub(crate) fn live_updates(
+    endpoint: &Endpoint,
+    base: &str,
+    token_lifetime: std::time::Duration,
+) -> Option<serde_json::Value> {
+    if !endpoint.serves(Representation::WebSocket) {
+        return None;
+    }
+    let public = endpoint.audience == Audience::Public;
+    let mut lifetime = serde_json::Map::new();
+    lifetime.insert("tokenSeconds".to_owned(), json!(token_lifetime.as_secs()));
+    if public {
+        lifetime.insert(
+            "anonymousSeconds".to_owned(),
+            json!(ANONYMOUS_LIFETIME.as_secs()),
+        );
+    }
+    Some(json!({
+        "address": ws_address(&format!("{base}{}/ws", endpoint.base_path)),
+        "protocol": PROTOCOL,
+        "token": token_text(public),
+        "subscribe": subscribe_example(endpoint),
+        "welcome": "the first message is x-welcome; keep its x-connection and x-resume-token \
+                    and send x-resume after a reconnect",
+        "limits": {
+            "connectionsPerCaller": PER_CALLER,
+            "connectionsPerSpace": crate::fanout::socket::per_space(),
+            "maxMessageBytes": MAX_MESSAGE,
+            "maxFrameBytes": MAX_FRAME,
+            "lifetime": lifetime,
+        },
+        "httpSubscription": format!(
+            "or have changes POSTed to your own HTTPS URL: create_subscription, or POST \
+             {base}{}/ngsi-ld/v1/subscriptions, where describe_access lists createSubscription",
+            endpoint.base_path
+        ),
+        "guide": format!("{base}/docs/API/07-websocket"),
+    }))
+}
 
 /// The first entity type the Endpoint's policies name, else the first class of its models: a
 /// type the example can subscribe to.
@@ -471,6 +525,43 @@ mod tests {
         assert!(origin_allowed(&with("HTTPS://DATA.EXAMPLE.FI"), public));
         assert!(!origin_allowed(&with("https://evil.example"), public));
         assert!(!origin_allowed(&with("https://data.example.fi"), ""));
+    }
+
+    /// T-5045: an agent learns the public address, the subprotocol, one `x-subscribe` message
+    /// and the limits the upgrade enforces; an Endpoint without the WebSocket names none.
+    #[test]
+    fn live_updates_name_the_socket_only_where_it_is_served() {
+        let endpoint = crate::fanout::hub::tests_support::endpoint();
+        let base = "https://data.example.fi";
+        let live = live_updates(&endpoint, base, TOKEN_LIFETIME).unwrap_or_default();
+        assert_eq!(live["address"], "wss://data.example.fi/api/endpoint/s/ws");
+        assert_eq!(live["protocol"], PROTOCOL);
+        assert_eq!(live["subscribe"]["metadata"]["x-op"], "x-subscribe");
+        assert_eq!(live["subscribe"]["body"]["type"], "Subscription");
+        assert_eq!(live["limits"]["connectionsPerCaller"], PER_CALLER);
+        assert_eq!(live["limits"]["maxMessageBytes"], MAX_MESSAGE);
+        assert_eq!(live["limits"]["lifetime"]["anonymousSeconds"], 86_400);
+        assert_eq!(live["limits"]["lifetime"]["tokenSeconds"], 300);
+        assert_eq!(live["token"], "none: this Endpoint is public");
+        let http = live["httpSubscription"].as_str().unwrap_or_default();
+        assert!(http.contains("https://data.example.fi/api/endpoint/s/ngsi-ld/v1/subscriptions"));
+        // Only the public base: no token, no in-cluster host.
+        let text = live.to_string();
+        assert!(
+            !text.contains("Bearer ") && !text.contains("svc.cluster"),
+            "{text}"
+        );
+
+        let mut private = (*endpoint).clone();
+        private.audience = jc_core::kinds::Audience::Organization;
+        let live = live_updates(&private, base, TOKEN_LIFETIME).unwrap_or_default();
+        assert!(live["limits"]["lifetime"]["anonymousSeconds"].is_null());
+        assert!(live["token"]
+            .as_str()
+            .is_some_and(|t| t.contains("access token")));
+
+        private.representations = vec![Representation::NgsiLd];
+        assert_eq!(live_updates(&private, base, TOKEN_LIFETIME), None);
     }
 
     #[test]
