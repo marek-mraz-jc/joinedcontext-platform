@@ -12,11 +12,11 @@ name = "jc-wasm-host"
 path = "src/main.rs"
 
 [dependencies]
-wasmtime = { version = "=49.0.3", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "pooling-allocator", "parallel-compilation", "std"] }
-wasmtime-wasi = "=49.0.3"
+wasmtime = { version = "=49.0.4", default-features = false, features = ["runtime", "cranelift", "component-model", "async", "pooling-allocator", "parallel-compilation", "std"] }
+wasmtime-wasi = "=49.0.4"
 # No `default-send-request`: the host sends an App's calls itself, to the gateway alone, with the
 # workspace's reqwest (and without webpki-roots' CDLA licence).
-wasmtime-wasi-http = { version = "=49.0.3", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "=49.0.4", default-features = false, features = ["p2"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
