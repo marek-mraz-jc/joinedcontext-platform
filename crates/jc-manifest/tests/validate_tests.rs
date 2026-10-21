@@ -1962,3 +1962,182 @@ fn an_assistant_resolving_more_than_fifty_endpoints_is_refused() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Policy of the space `ovzdusie` granting `operations` to `assignee` (ADR-N-057 decision 5).
+fn space_policy(dir: &Path, name: &str, assignee: &str, operations: &str) {
+    write(
+        dir,
+        &format!("projects/ovzdusie/spaces/ovzdusie/policies/{name}.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: {{ kind: ContextSpace, name: ovzdusie }}\n  assigner: did:web:banskabystrica.sk\n  assignee: {assignee}\n  operations: {operations}\n"),
+    );
+}
+
+/// The public Endpoint `public-air`, narrowed to the Policy `public-read` by its `policyRef`.
+fn narrow_public_air(dir: &Path) {
+    write(
+        dir,
+        ENDPOINT_PATH,
+        &format!(
+            "{ENDPOINT}  policyRef: urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie-ovzdusie:public-read\n"
+        ),
+    );
+    space_policy(
+        dir,
+        "public-read",
+        "{ kind: role, id: public }",
+        "[retrieveOps, createSubscription, deleteSubscription]",
+    );
+}
+
+/// PL-111, T-5035: the bbsk podujatia defect. A write Policy whose space's only Endpoint names another
+/// Policy by `policyRef` is bound nowhere; a read Policy that lets its reader subscribe is no write.
+#[test]
+fn a_write_policy_no_endpoint_binds_is_refused() {
+    let dir = valid_repo("adr57-unbound-write");
+    narrow_public_air(&dir);
+    space_policy(
+        &dir,
+        "sensors-write",
+        "{ kind: serviceAccount, id: sensors }",
+        "[upsertBatch]",
+    );
+
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(
+        found[0].contains("Policy sensors-write")
+            && found[0].contains("public-air binds only its policyRef"),
+        "{}",
+        found[0]
+    );
+    let finding = report
+        .findings
+        .iter()
+        .find(|f| f.message.contains("ADR-N-057"))
+        .expect("finding");
+    assert_eq!(
+        finding.path,
+        PathBuf::from("projects/ovzdusie/spaces/ovzdusie/policies/sensors-write.yaml")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_write_policy_an_endpoint_binds_passes() {
+    let dir = valid_repo("adr57-bound-write");
+    // `public-air` names no policyRef, so it evaluates every Policy of its space.
+    space_policy(
+        &dir,
+        "sensors-write",
+        "{ kind: serviceAccount, id: sensors }",
+        "[updateOps]",
+    );
+    // A prohibition takes away and needs no Endpoint of its own.
+    write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/policies/no-deletes.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: no-deletes\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: { kind: ContextSpace, name: ovzdusie }\n  effect: prohibition\n  assigner: did:web:banskabystrica.sk\n  assignee: { kind: role, id: public }\n  operations: [deleteEntity]\n",
+    );
+
+    let report = validate::run(&dir);
+    assert_eq!(citing(&report, "ADR-N-057"), Vec::<&str>::new());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_write_policy_named_by_the_policy_ref_passes() {
+    let dir = valid_repo("adr57-named-write");
+    // The space pins no urnSegment, so its Policies render under `{project}-{space}` (PF-84).
+    let narrowed = |space: &str| {
+        format!(
+            "{ENDPOINT}  policyRef: urn:ngsi-ld:Policy:banskabystrica.sk:{space}:sensors-write\n"
+        )
+    };
+    write(&dir, ENDPOINT_PATH, &narrowed("ovzdusie-ovzdusie"));
+    space_policy(
+        &dir,
+        "sensors-write",
+        "{ kind: serviceAccount, id: sensors }",
+        "[redirectionOps]",
+    );
+
+    let report = validate::run(&dir);
+    assert_eq!(citing(&report, "ADR-N-057"), Vec::<&str>::new());
+
+    // The same name under the space's local name is another Policy, which the gateway never binds.
+    write(&dir, ENDPOINT_PATH, &narrowed("ovzdusie"));
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(
+        found[0]
+            .contains("write urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie-ovzdusie:sensors-write"),
+        "{}",
+        found[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PL-111, T-5035: a Pipeline writes as `pl-{pipeline}` under a Policy derived for it (PL-20), which an
+/// Endpoint with a `policyRef` never binds, so every upsert of the pipeline answered 404.
+#[test]
+fn a_pipeline_whose_target_does_not_bind_its_write_is_refused() {
+    let dir = valid_repo("adr57-pipeline-target");
+    narrow_public_air(&dir);
+    writer(
+        &dir,
+        "stations",
+        "public-air",
+        "AirQualityObserved",
+        "upsert",
+        None,
+    );
+    writer(
+        &dir,
+        "lost",
+        "no-such-endpoint",
+        "AirQualityObserved",
+        "upsert",
+        None,
+    );
+
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert_eq!(found.len(), 2, "{:?}", report.findings);
+    assert!(
+        found.iter().any(
+            |f| f.contains("Pipeline stations output 1 writes as pl-stations")
+                && f.contains("public-air binds only its policyRef")
+        ),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|f| f.contains("Pipeline lost output 1")
+            && f.contains("project ovzdusie declares no Endpoint no-such-endpoint")),
+        "{found:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pipeline_aimed_at_an_endpoint_without_policy_ref_passes() {
+    let dir = valid_repo("adr57-pipeline-ok");
+    writer(
+        &dir,
+        "stations",
+        "public-air",
+        "AirQualityObserved",
+        "upsert",
+        None,
+    );
+
+    let report = validate::run(&dir);
+    assert_eq!(citing(&report, "ADR-N-057"), Vec::<&str>::new());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

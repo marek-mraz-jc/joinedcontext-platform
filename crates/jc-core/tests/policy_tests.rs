@@ -1,4 +1,7 @@
-use jc_core::kinds::policy::{Operation, OperationRef, ScopeDefinitionSpec, Validity};
+use jc_core::kinds::policy::{
+    Operation, OperationGroup, OperationRef, Principal, PrincipalKind, ScopeDefinitionSpec,
+    Validity,
+};
 use jc_core::kinds::{Policy, ScopeDefinition};
 use regex::Regex;
 
@@ -372,4 +375,60 @@ fn a_policy_grants_platform_actions_beside_or_without_operations() {
     let plain = spec("operations: [queryEntity]\n").expect("parses");
     let rendered = serde_json::to_value(&plain).expect("renders");
     assert!(rendered.get("actions").is_none(), "{rendered}");
+}
+
+/// CIM 009 Table 4.20-2: `redirectionOps` writes and `federationOps` does not, the same answer
+/// [`OperationGroup::includes_write`] gives (T-5035).
+#[test]
+fn has_write_reads_the_groups_as_the_table_does() {
+    let mut p = Policy::from_yaml(GOLDEN_POLICY)
+        .expect("valid golden YAML")
+        .spec;
+    p.operations = vec![OperationRef::Group(OperationGroup::RedirectionOps)];
+    assert!(p.has_write());
+    p.operations = vec![OperationRef::Group(OperationGroup::FederationOps)];
+    assert!(!p.has_write());
+}
+
+/// AP-96: the roles an Endpoint hands out are its caller role and one level of named roles.
+#[test]
+fn is_endpoint_grant_takes_the_endpoints_own_roles_alone() {
+    let mut p = Policy::from_yaml(GOLDEN_POLICY)
+        .expect("valid golden YAML")
+        .spec;
+    let grant = |p: &mut jc_core::kinds::PolicySpec, kind, id: &str| {
+        p.assignee = Principal::new(kind, id);
+        p.is_endpoint_grant("helsinki", "app-alerts")
+    };
+    assert!(grant(
+        &mut p,
+        PrincipalKind::Role,
+        "endpoint:helsinki/app-alerts"
+    ));
+    assert!(grant(
+        &mut p,
+        PrincipalKind::Role,
+        "endpoint:helsinki/app-alerts/editor"
+    ));
+    assert!(!grant(
+        &mut p,
+        PrincipalKind::Role,
+        "endpoint:helsinki/app-alerts/"
+    ));
+    assert!(!grant(
+        &mut p,
+        PrincipalKind::Role,
+        "endpoint:helsinki/app-alerts/a/b"
+    ));
+    assert!(!grant(
+        &mut p,
+        PrincipalKind::Role,
+        "endpoint:helsinki/app-alerts-2"
+    ));
+    assert!(!grant(&mut p, PrincipalKind::Role, "public"));
+    assert!(!grant(
+        &mut p,
+        PrincipalKind::Group,
+        "endpoint:helsinki/app-alerts"
+    ));
 }

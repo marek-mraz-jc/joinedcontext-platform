@@ -788,14 +788,28 @@ impl PolicySpec {
         Ok(())
     }
 
-    /// Returns `true` if any granted operation or group modifies context state.
+    /// Returns `true` if any granted operation or group modifies context state: a group by
+    /// [`OperationGroup::includes_write`], so `redirectionOps` writes and `federationOps` does not.
     pub fn has_write(&self) -> bool {
-        self.operations.iter().any(|op| match op {
-            OperationRef::Single(s) => s.is_write(),
-            OperationRef::Group(g) => {
-                matches!(g, OperationGroup::UpdateOps | OperationGroup::FederationOps)
-            }
-        })
+        self.operations.iter().any(OperationRef::is_write)
+    }
+
+    /// Whether this Policy is assigned to a role the Endpoint `endpoint` of `project` hands out,
+    /// `endpoint:{project}/{endpoint}` or `endpoint:{project}/{endpoint}/{role}` (AP-96): the
+    /// only permissions an App's generated Endpoint evaluates besides the space's prohibitions.
+    pub fn is_endpoint_grant(&self, project: &str, endpoint: &str) -> bool {
+        let own = crate::kinds::endpoint_role(project, endpoint, None);
+        self.assignee.kind == PrincipalKind::Role
+            && self
+                .assignee
+                .id
+                .strip_prefix(own.as_str())
+                .is_some_and(|rest| {
+                    rest.is_empty()
+                        || rest
+                            .strip_prefix('/')
+                            .is_some_and(|role| !role.is_empty() && !role.contains('/'))
+                })
     }
 }
 

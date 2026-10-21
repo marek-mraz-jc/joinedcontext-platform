@@ -18,8 +18,8 @@ use crate::view_mapping::ViewMapping;
 use jc_core::kinds::mcp_server::{knowledge_source_id, Select};
 use jc_core::kinds::{
     AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
-    EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, PrincipalKind,
-    ProjectSpec, Representation,
+    EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, ProjectSpec,
+    Representation,
 };
 use jc_core::reach::{resolve_connectors, EndpointFacts};
 use jc_core::Urn;
@@ -639,9 +639,11 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             }
             None => named.to_vec(),
         };
+        // An App's generated Endpoint evaluates its own grants and the space's prohibitions
+        // alone (AP-139), so it serves what the App declares.
         if app_client.is_some() {
             bound.retain(|(_, policy)| {
-                policy.effect.is_prohibition() || is_own_grant(policy, &project, &id.name)
+                policy.effect.is_prohibition() || policy.is_endpoint_grant(&project, &id.name)
             });
         }
         let (policy_names, bound): (Vec<String>, Vec<PolicySpec>) = bound.into_iter().unzip();
@@ -981,27 +983,6 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
     policies
 }
 
-/// Whether `policy` is assigned to one of the roles the Endpoint `endpoint` hands out:
-/// `endpoint:{project}/{endpoint}` or `endpoint:{project}/{endpoint}/{role}` (AP-96).
-///
-/// An App's generated Endpoint evaluates these permissions and the space's prohibitions alone
-/// (AP-139): a grant written for a person, a group, the role `public` or another endpoint stays
-/// on the surfaces written for it, so the App's endpoint serves what the App declares.
-fn is_own_grant(policy: &PolicySpec, project: &str, endpoint: &str) -> bool {
-    let own = jc_core::kinds::endpoint_role(project, endpoint, None);
-    policy.assignee.kind == PrincipalKind::Role
-        && policy
-            .assignee
-            .id
-            .strip_prefix(own.as_str())
-            .is_some_and(|rest| {
-                rest.is_empty()
-                    || rest
-                        .strip_prefix('/')
-                        .is_some_and(|role| !role.is_empty() && !role.contains('/'))
-            })
-}
-
 /// The one Policy an endpoint with `spec.policyRef` evaluates (EP-14, GW8).
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
@@ -1248,7 +1229,7 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_own_grant, language_map, normalize};
+    use super::{language_map, normalize};
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1265,7 +1246,7 @@ mod tests {
             .expect("a policy spec")
         };
         let own =
-            |kind: &str, id: &str| is_own_grant(&assigned(kind, id), "helsinki", "app-events");
+            |kind: &str, id: &str| assigned(kind, id).is_endpoint_grant("helsinki", "app-events");
         assert!(own("role", "endpoint:helsinki/app-events"));
         assert!(own("role", "endpoint:helsinki/app-events/editor"));
         assert!(!own("role", "endpoint:helsinki/app-events-2"));
