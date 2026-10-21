@@ -1,12 +1,12 @@
-# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 988d01a, portal c80ef247, antares e67f07f2
+# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 2b3bee0, portal 593a0859 + T-4965, antares 53ab566e + T-4965
 antares | links-unmatched | 0
 antares | memory-body-copy | 18
 antares | memory-per-request-build | 0
 antares | memory-unbounded-global | 11
 antares | memory-uncapped-read | 1
-antares | modularity-file-cycle | 59
+antares | modularity-file-cycle | 56
 antares | modularity-server-as-library | 0
-antares | security-fetch-from-route | 4
+antares | security-fetch-from-route | 3
 antares | security-log-secret-field | 0
 antares | security-mcp-write-unguarded | 0
 platform | links-unmatched | 0
@@ -22,10 +22,10 @@ platform | security-mcp-write-unguarded | 0
 portal | links-unmatched | 0
 portal | memory-body-copy | 19
 portal | memory-per-request-build | 11
-portal | memory-unbounded-global | 11
-portal | memory-uncapped-read | 52
+portal | memory-unbounded-global | 14
+portal | memory-uncapped-read | 42
 portal | modularity-file-cycle | 61
 portal | modularity-server-as-library | 0
-portal | security-fetch-from-route | 91
+portal | security-fetch-from-route | 94
 portal | security-log-secret-field | 0
 portal | security-mcp-write-unguarded | 4
