@@ -930,7 +930,8 @@ pub(crate) const TOOLS: &[Tool] = &[
         description:
             "The caller's effective grants here: operations, attributes, residual constraints. \
              `format` picks the language: `permissions` (AuthZEN, the default), `odrl` (ODRL 2.2) \
-             or `grant-ast` (UCAST); the grants are the same in all three (EP-60).",
+             or `grant-ast` (UCAST); the grants are the same in all three (EP-60). `permissions` \
+             adds `liveUpdates`, the WebSocket for changes as they happen, where one is served.",
         shape: Shape::Own(|| {
             json!({
                 "type": "object",
