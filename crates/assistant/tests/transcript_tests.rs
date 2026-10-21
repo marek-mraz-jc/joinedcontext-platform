@@ -192,6 +192,11 @@ async fn a_turn_reads_back_redacted_with_its_steps_and_the_cost_is_their_sum() {
         .expect("the data conversation is listed");
     assert_eq!(listed["costUsd"].as_f64(), Some(step_sum));
     assert_eq!(listed["uncosted"], 1);
+    assert_eq!(
+        listed["lastError"],
+        Value::Null,
+        "an answered conversation names no failure"
+    );
     let (other, _) = transcript::list(&pool, "elsewhere", &Filter::default())
         .await
         .expect("another project's list reads");
@@ -246,6 +251,7 @@ async fn a_timed_out_turn_keeps_its_steps_and_the_error() {
     .await
     .expect("the filtered list reads");
     assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0]["lastError"], "The assistant took too long.");
 
     db::drop_database(admin, pool, &name).await;
 }
