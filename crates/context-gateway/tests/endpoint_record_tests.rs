@@ -595,6 +595,16 @@ async fn the_websocket_distribution_explains_itself_and_links_its_guide() {
         record["@context"]["foaf:page"]["@type"], "@id",
         "the page is an IRI"
     );
+    // DCAT-AP 3.0.0 gives foaf:page the range foaf:Document; dev's live record failed it (T-4586).
+    let page = &ws["foaf:page"];
+    assert!(
+        record["@included"]
+            .as_array()
+            .expect("typed nodes")
+            .iter()
+            .any(|node| node["@id"] == *page && node["@type"] == "foaf:Document"),
+        "the guide is typed foaf:Document"
+    );
 
     let html = read("text/html").await;
     assert!(html.contains("ngsi-ld-ws"), "{html}");

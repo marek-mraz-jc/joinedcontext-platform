@@ -659,6 +659,7 @@ fn typed_values(distributions: &[Value], included: &mut Vec<Value>) {
             ("dcat:mediaType", "dct:MediaType"),
             ("dct:format", "dct:MediaTypeOrExtent"),
             ("dct:conformsTo", "dct:Standard"),
+            ("foaf:page", "foaf:Document"),
         ] {
             if let Some(value) = distribution.get(key).and_then(Value::as_str) {
                 if seen.insert((value.to_owned(), class)) {
