@@ -457,32 +457,7 @@ impl KpiStep {
                 ),
             });
         }
-        let mut seen = BTreeSet::new();
-        for input in inputs {
-            if let Some(attr) = input.attrs.iter().find(|a| !ATTR_RE.is_match(a)) {
-                return Err(Error::Invalid {
-                    field: "spec.sources.query.attrs".to_owned(),
-                    reason: format!(
-                        "`{attr}` of source `{}` is not an attribute name: letters, digits and _ (PL-103)",
-                        input.name
-                    ),
-                });
-            }
-            if input.name.is_empty() {
-                return Err(Error::Invalid {
-                    field: "spec.sources.name".to_owned(),
-                    reason: "each source of a kpi step has a name the formula reads it by"
-                        .to_owned(),
-                });
-            }
-            names::validate_dns1123_label(&input.name)?;
-            if !seen.insert(input.name.as_str()) {
-                return Err(Error::Invalid {
-                    field: "spec.sources.name".to_owned(),
-                    reason: format!("two sources are named `{}`", input.name),
-                });
-            }
-        }
+        source_names(inputs)?;
         if let Some(window) = &self.window {
             if !WINDOW_RE.is_match(window) {
                 return Err(field(
@@ -500,6 +475,14 @@ impl KpiStep {
                 ),
             ));
         }
+        self.validate_join(inputs)?;
+        let expr = parse(&self.formula)?;
+        formula_terms(&expr, inputs)?;
+        self.check_unit(expr, inputs)
+    }
+
+    /// The join's keys name one read attribute (or id) of each source and nothing else.
+    fn validate_join(&self, inputs: &[Input]) -> Result<()> {
         match self.join.by {
             JoinBy::Time if !self.join.keys.is_empty() => {
                 return Err(field("join.keys", "a join by time takes no keys"));
@@ -537,30 +520,11 @@ impl KpiStep {
                 }
             }
         }
-        let expr = parse(&self.formula)?;
-        let mut used = Vec::new();
-        terms(&expr, &mut used);
-        for (name, attr, agg) in &used {
-            let Some(input) = inputs.iter().find(|i| i.name == *name) else {
-                return Err(invalid(format!(
-                    "`{name}` is not a source: the sources are {}",
-                    inputs
-                        .iter()
-                        .map(|i| i.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            };
-            if let Some(attr) = attr {
-                if !input.attrs.iter().any(|a| a == attr) {
-                    return Err(invalid(format!(
-                        "{}({name}.{attr}): `{attr}` is not among the attributes `{name}` reads ({})",
-                        agg.word(),
-                        input.attrs.join(", ")
-                    )));
-                }
-            }
-        }
+        Ok(())
+    }
+
+    /// The formula's unit matches the declared unitCode.
+    fn check_unit(&self, expr: Expr, inputs: &[Input]) -> Result<Expr> {
         match unit_of(&expr, inputs)? {
             Some(unit) if unit.is_empty() && !DIMENSIONLESS.contains(&self.unit_code.as_str()) => {
                 Err(field(
@@ -588,6 +552,64 @@ impl KpiStep {
             _ => Ok(expr),
         }
     }
+}
+
+/// Each source has a unique DNS-1123 name and reads only attribute names.
+fn source_names(inputs: &[Input]) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    for input in inputs {
+        if let Some(attr) = input.attrs.iter().find(|a| !ATTR_RE.is_match(a)) {
+            return Err(Error::Invalid {
+                field: "spec.sources.query.attrs".to_owned(),
+                reason: format!(
+                    "`{attr}` of source `{}` is not an attribute name: letters, digits and _ (PL-103)",
+                    input.name
+                ),
+            });
+        }
+        if input.name.is_empty() {
+            return Err(Error::Invalid {
+                field: "spec.sources.name".to_owned(),
+                reason: "each source of a kpi step has a name the formula reads it by".to_owned(),
+            });
+        }
+        names::validate_dns1123_label(&input.name)?;
+        if !seen.insert(input.name.as_str()) {
+            return Err(Error::Invalid {
+                field: "spec.sources.name".to_owned(),
+                reason: format!("two sources are named `{}`", input.name),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Each term of the formula reads a source and an attribute it reads.
+fn formula_terms(expr: &Expr, inputs: &[Input]) -> Result<()> {
+    let mut used = Vec::new();
+    terms(expr, &mut used);
+    for (name, attr, agg) in &used {
+        let Some(input) = inputs.iter().find(|i| i.name == *name) else {
+            return Err(invalid(format!(
+                "`{name}` is not a source: the sources are {}",
+                inputs
+                    .iter()
+                    .map(|i| i.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        if let Some(attr) = attr {
+            if !input.attrs.iter().any(|a| a == attr) {
+                return Err(invalid(format!(
+                    "{}({name}.{attr}): `{attr}` is not among the attributes `{name}` reads ({})",
+                    agg.word(),
+                    input.attrs.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The slug of a key in an indicator's `{localId}`: what the compiled mapping writes too.
