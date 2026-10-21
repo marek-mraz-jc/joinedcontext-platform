@@ -1,7 +1,8 @@
 //! T-4782: the gateway works on a bounded number of requests at once, in total and per caller. A
 //! broker that answers slowly fills the slots and not the gateway's memory: a request past them is
 //! answered 503 with `Retry-After` at once and never reaches the broker, and the slots come back
-//! when the admitted requests are answered.
+//! when the admitted requests are answered. T-5124: anonymous requests share half of the slots, so
+//! an anonymous flood is answered 429 and a signed-in caller still gets in.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -9,6 +10,7 @@ use axum::http::StatusCode;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
+use context_gateway::middleware::in_flight::anonymous_share;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
@@ -192,6 +194,17 @@ async fn assert_busy(answer: axum::response::Response) {
     );
 }
 
+/// The 429 of a full anonymous share (T-5124).
+async fn assert_too_many(answer: axum::response::Response) {
+    assert_eq!(answer.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(answer.headers()["retry-after"], "1");
+    let body = axum::body::to_bytes(answer.into_body(), 1 << 16)
+        .await
+        .expect("the body");
+    let problem: serde_json::Value = serde_json::from_slice(&body).expect("a problem");
+    assert_eq!(problem["status"], 429, "{problem}");
+}
+
 /// The peak resident memory of this process, in KiB (Linux `VmHWM`).
 fn peak_kib() -> u64 {
     std::fs::read_to_string("/proc/self/status")
@@ -202,13 +215,14 @@ fn peak_kib() -> u64 {
         .expect("VmHWM")
 }
 
-/// The load test: 128 callers of 4 reads each against a broker that holds every read. The gateway
-/// forwards 16 and answers the other 496 503 at once, so its memory stays under a fixed bound
+/// The load test: 128 anonymous callers of 4 reads each against a broker that holds every read. The
+/// gateway forwards the anonymous half of its 16 slots and answers the other 504 429 at once, so its memory stays under a fixed bound
 /// however many come in; without the cap all 512 reach the broker and their pages arrive together.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_slow_broker_fills_the_slots_and_not_the_memory() {
     const CAP: usize = 16;
     const SENT: usize = 512;
+    let admitted = anonymous_share(CAP);
     let broker = slow_broker(ENTITIES).await;
     let app = gateway(&broker, CAP, 4);
     let before = peak_kib();
@@ -218,9 +232,9 @@ async fn a_slow_broker_fills_the_slots_and_not_the_memory() {
         .map(|n| tokio::spawn(app.clone().oneshot(read(&format!("192.0.2.{}", n % 128)))))
         .collect();
     // Every request past the cap is answered while the broker still holds the admitted ones.
-    holding(&broker, CAP).await;
+    holding(&broker, admitted).await;
     let deadline = Instant::now() + Duration::from_secs(30);
-    while answers.iter().filter(|answer| answer.is_finished()).count() < SENT - CAP {
+    while answers.iter().filter(|answer| answer.is_finished()).count() < SENT - admitted {
         assert!(
             Instant::now() < deadline,
             "the requests past the cap were not answered"
@@ -239,27 +253,64 @@ async fn a_slow_broker_fills_the_slots_and_not_the_memory() {
                 .expect("the page");
             assert!(body.len() > ENTITIES * 900, "a whole page");
         } else {
-            assert_busy(answer).await;
+            assert_too_many(answer).await;
             busy += 1;
         }
     }
     let grown_mib = peak_kib().saturating_sub(before) / 1024;
-    eprintln!("cap {CAP}: {busy} of {SENT} answered 503 in {shed:?}; peak memory grew {grown_mib} MiB; broker held at most {}", broker.most.load(Ordering::SeqCst));
+    eprintln!("cap {CAP}: {busy} of {SENT} answered 429 in {shed:?}; peak memory grew {grown_mib} MiB; broker held at most {}", broker.most.load(Ordering::SeqCst));
 
     assert_eq!(
         broker.most.load(Ordering::SeqCst),
-        CAP,
-        "the broker held at most the cap"
+        admitted,
+        "the broker held at most the anonymous share"
     );
     assert_eq!(
         broker.reads.load(Ordering::SeqCst),
-        CAP,
-        "no 503 reached the broker"
+        admitted,
+        "no 429 reached the broker"
     );
-    assert_eq!(busy, SENT - CAP);
+    assert_eq!(busy, SENT - admitted);
     // Measured (debug build, 1 MiB pages): cap 16 grew 8 MiB and shed 496 in 12 ms, cap 64 grew
     // 15 MiB; without a cap all 512 reached the broker and the peak grew 83 MiB.
     assert!(grown_mib < 48, "peak memory grew {grown_mib} MiB");
+}
+
+/// T-5124: anonymous readers from as many addresses as they like hold the anonymous half and are
+/// answered 429 past it, while a caller with a token is still admitted: here the handler answers
+/// it 401, as no realm is configured, which it can only do once the gateway let it in.
+#[tokio::test]
+async fn an_anonymous_flood_is_answered_429_and_a_signed_in_caller_still_gets_in() {
+    let broker = slow_broker(ENTITIES).await;
+    let app = gateway(&broker, 8, 8);
+    let flood: Vec<_> = (0..anonymous_share(8))
+        .map(|n| tokio::spawn(app.clone().oneshot(read(&format!("192.0.2.{n}")))))
+        .collect();
+    holding(&broker, anonymous_share(8)).await;
+    assert_too_many(
+        app.clone()
+            .oneshot(read("198.51.100.7"))
+            .await
+            .expect("an answer"),
+    )
+    .await;
+
+    let mut signed = read("198.51.100.8");
+    signed.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_static("Bearer a.b.c"),
+    );
+    let answer = app.clone().oneshot(signed).await.expect("an answer");
+    assert_eq!(answer.status(), StatusCode::UNAUTHORIZED);
+
+    broker.release.add_permits(flood.len());
+    for answer in flood {
+        assert_eq!(
+            answer.await.expect("joined").expect("answered").status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(broker.reads.load(Ordering::SeqCst), anonymous_share(8));
 }
 
 #[tokio::test]
@@ -380,6 +431,8 @@ async fn a_load_of_reads_and_downloads() -> (u64, u64) {
                 axum::body::to_bytes(answer.into_body(), 256 << 20)
                     .await
                     .expect("the answer");
+            } else if answer.status() == StatusCode::TOO_MANY_REQUESTS {
+                assert_too_many(answer).await;
             } else {
                 assert_busy(answer).await;
             }

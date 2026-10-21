@@ -24,6 +24,16 @@
 //! more than a quarter as many of them as a caller's share. A slow read that finds no room is
 //! answered 503 then, and one unanswered at [`READ_DEADLINE`] is answered 503 with a problem
 //! document; either way its handler future is dropped, which drops the broker call with it.
+//!
+//! The slots are shared by class (T-5124: a burst of anonymous reads held every slot, and the
+//! pipelines' writes got 503). An anonymous request (no bearer token) takes one of the
+//! [`anonymous_share`] slots besides, and an anonymous read a quarter of the slow budget at most;
+//! a read, or anything anonymous, takes one of the total less the [`write_reserve`], which only a
+//! token holder's write may use. So an anonymous flood from any number of addresses leaves the
+//! signed-in readers half the gateway and the writers their reserve, and the flood itself is
+//! answered 429 with `Retry-After`. A made-up bearer counts as signed in here, and the handler
+//! refuses it 401 in microseconds, before any broker call: it holds a slot for no time worth having.
+//! The probes (`/healthz`, `/livez`) and `/metrics` never pass this layer.
 // ponytail: counts, not bytes. An answer's size is unknown until the broker sends it; the
 // per-request ceiling is MAX_BODY. A byte budget like the writes' when a measurement shows
 // large pages in flight together.
@@ -69,6 +79,45 @@ pub const READ_DEADLINE: Duration = Duration::from_secs(10);
 /// The seconds a read that ran out of time is told to wait: the broker just spent the deadline on it.
 const RETRY_SLOW_SECONDS: u32 = 10;
 
+/// The slots anonymous requests may hold of `total` (T-5124): half.
+pub fn anonymous_share(total: usize) -> usize {
+    (total / 2).max(1)
+}
+
+/// The slots of `total` only a token holder's write may take (T-5124): an eighth, at least one
+/// while the total leaves a read one too.
+pub fn write_reserve(total: usize) -> usize {
+    (total / 8).max(1).min(total.saturating_sub(1))
+}
+
+/// What the class shares look at in a request (T-5124).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Class {
+    /// No bearer token: the anonymous public.
+    pub anonymous: bool,
+    /// A GET, HEAD or OPTIONS, the WebSocket upgrade included.
+    pub read: bool,
+}
+
+impl Class {
+    pub(crate) fn of(request: &Request) -> Self {
+        let method = request.method();
+        Self {
+            anonymous: !jc_core::auth::token::presents(request.headers()),
+            read: method == Method::GET || method == Method::HEAD || method == Method::OPTIONS,
+        }
+    }
+}
+
+/// Why a request was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refused {
+    /// The gateway, its readers or the caller hold all they may: 503.
+    Busy,
+    /// The anonymous share is taken: 429, the anonymous public is over its rate.
+    AnonymousShare,
+}
+
 /// The slots of the whole gateway and the ones each caller holds.
 pub struct InFlight {
     total: Arc<Semaphore>,
@@ -76,14 +125,19 @@ pub struct InFlight {
     callers: Arc<Mutex<HashMap<String, usize>>>,
     downloads: Arc<Semaphore>,
     slow: Arc<Semaphore>,
+    /// The total less the write reserve: every read and every anonymous request takes one.
+    reads: Arc<Semaphore>,
+    anonymous: Arc<Semaphore>,
+    /// The part of the slow budget anonymous reads may weigh on: half of it.
+    anonymous_slow: Arc<Semaphore>,
     slow_after: Duration,
     deadline: Duration,
 }
 
 /// One admitted request: its slots come back when it is dropped, answered or abandoned.
 pub(crate) struct Ticket {
-    _total: OwnedSemaphorePermit,
-    _slow: Option<OwnedSemaphorePermit>,
+    _slots: Vec<OwnedSemaphorePermit>,
+    anonymous: bool,
     caller: String,
     weight: usize,
     callers: Arc<Mutex<HashMap<String, usize>>>,
@@ -105,12 +159,17 @@ impl InFlight {
     /// At most `total` requests at once, `per_caller` of them one caller's, and `downloads`
     /// `file.csv` answers built at once.
     pub fn new(total: usize, per_caller: usize, downloads: usize) -> Self {
+        let total = total.max(1);
+        let slow = (total / 2).max(SLOW_WEIGHT);
         Self {
-            total: Arc::new(Semaphore::new(total.max(1))),
+            total: Arc::new(Semaphore::new(total)),
             per_caller: per_caller.max(1),
             callers: Arc::default(),
             downloads: Arc::new(Semaphore::new(downloads.max(1))),
-            slow: Arc::new(Semaphore::new((total / 2).max(SLOW_WEIGHT))),
+            slow: Arc::new(Semaphore::new(slow)),
+            reads: Arc::new(Semaphore::new((total - write_reserve(total)).max(1))),
+            anonymous: Arc::new(Semaphore::new(anonymous_share(total))),
+            anonymous_slow: Arc::new(Semaphore::new((slow / 2).max(SLOW_WEIGHT))),
             slow_after: SLOW_AFTER,
             deadline: READ_DEADLINE,
         }
@@ -121,29 +180,57 @@ impl InFlight {
         Arc::clone(&self.downloads).try_acquire_owned().ok()
     }
 
-    /// A ticket for `caller`, or `None` when the gateway or the caller holds all it may.
-    pub(crate) fn admit(&self, caller: String) -> Option<Ticket> {
-        let total = Arc::clone(&self.total).try_acquire_owned().ok()?;
+    /// A ticket for `caller` of `class`, or why there is none: the gateway, its class share or
+    /// the caller holds all it may.
+    pub(crate) fn admit(&self, caller: String, class: Class) -> Result<Ticket, Refused> {
+        let slots = self.slots(class)?;
         let mut callers = self.callers.lock().unwrap_or_else(|held| held.into_inner());
         let count = callers.entry(caller.clone()).or_insert(0);
         if *count >= self.per_caller {
-            return None;
+            return Err(Refused::Busy);
         }
         *count += 1;
-        Some(Ticket {
-            _total: total,
-            _slow: None,
+        Ok(Ticket {
+            _slots: slots,
+            anonymous: class.anonymous,
             caller,
             weight: 1,
             callers: Arc::clone(&self.callers),
         })
     }
 
+    /// The total's slot, and the anonymous share's and the readers' ones `class` takes besides.
+    fn slots(&self, class: Class) -> Result<Vec<OwnedSemaphorePermit>, Refused> {
+        let take = |slots: &Arc<Semaphore>, refused| {
+            Arc::clone(slots).try_acquire_owned().map_err(|_| refused)
+        };
+        let share = match class.anonymous {
+            true => Refused::AnonymousShare,
+            false => Refused::Busy,
+        };
+        let mut slots = vec![take(&self.total, Refused::Busy)?];
+        if class.anonymous {
+            slots.push(take(&self.anonymous, share)?);
+        }
+        if class.read || class.anonymous {
+            slots.push(take(&self.reads, share)?);
+        }
+        Ok(slots)
+    }
+
     /// Makes `ticket` a slow read's: [`SLOW_WEIGHT`] against its caller's share and the slow
     /// budget, or `false` when either has no room for it.
     fn weigh(&self, ticket: &mut Ticket) -> bool {
         let extra = SLOW_WEIGHT - ticket.weight;
-        let Ok(slow) = Arc::clone(&self.slow).try_acquire_many_owned(SLOW_WEIGHT as u32) else {
+        let weight = SLOW_WEIGHT as u32;
+        let anonymous_slow = match ticket.anonymous {
+            true => match Arc::clone(&self.anonymous_slow).try_acquire_many_owned(weight) {
+                Ok(slots) => Some(slots),
+                Err(_) => return false,
+            },
+            false => None,
+        };
+        let Ok(slow) = Arc::clone(&self.slow).try_acquire_many_owned(weight) else {
             return false;
         };
         let mut callers = self.callers.lock().unwrap_or_else(|held| held.into_inner());
@@ -155,7 +242,8 @@ impl InFlight {
         }
         *count += extra;
         ticket.weight = SLOW_WEIGHT;
-        ticket._slow = Some(slow);
+        ticket._slots.push(slow);
+        ticket._slots.extend(anonymous_slow);
         true
     }
 
@@ -221,9 +309,16 @@ pub async fn enforce(
     next: Next,
 ) -> Response<Body> {
     let caller = rate_limit::caller_key(request.headers());
-    let Some(ticket) = gateway.in_flight.admit(caller) else {
-        tracing::info!(path = %request.uri().path(), "answered 503: the gateway or the caller holds as many requests as it may");
-        return busy("the gateway works on as many requests as it may at once");
+    let ticket = match gateway.in_flight.admit(caller, Class::of(&request)) {
+        Ok(ticket) => ticket,
+        Err(Refused::AnonymousShare) => {
+            tracing::info!(path = %request.uri().path(), "answered 429: the anonymous share of the gateway is taken");
+            return anonymous_share_taken();
+        }
+        Err(Refused::Busy) => {
+            tracing::info!(path = %request.uri().path(), "answered 503: the gateway or the caller holds as many requests as it may");
+            return busy("the gateway works on as many requests as it may at once");
+        }
     };
     if !is_plain_read(&request) {
         return next.run(request).await;
@@ -240,6 +335,20 @@ pub(crate) fn busy(what: &str) -> Response<Body> {
     )
 }
 
+/// The 429 of a full anonymous share (T-5124): nothing of the request was read or forwarded.
+fn anonymous_share_taken() -> Response<Body> {
+    let mut answer = ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
+        .with_detail(
+            "the gateway serves as many requests without a token as it may at once; send this \
+             request again after the seconds Retry-After names, or sign in",
+        )
+        .into_response();
+    answer
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from(RETRY_SECONDS));
+    answer
+}
+
 fn unavailable(detail: String, retry: u32) -> Response<Body> {
     let mut answer = ProblemDetails::new(503, "service-unavailable", "Service Unavailable")
         .with_detail(detail)
@@ -254,32 +363,160 @@ fn unavailable(detail: String, retry: u32) -> Response<Body> {
 mod tests {
     use super::*;
 
+    const SIGNED_READ: Class = Class {
+        anonymous: false,
+        read: true,
+    };
+    const SIGNED_WRITE: Class = Class {
+        anonymous: false,
+        read: false,
+    };
+    const ANONYMOUS_READ: Class = Class {
+        anonymous: true,
+        read: true,
+    };
+
+    #[test]
+    fn the_shares_follow_the_total() {
+        assert_eq!(
+            (anonymous_share(MAX_IN_FLIGHT), write_reserve(MAX_IN_FLIGHT)),
+            (64, 16)
+        );
+        assert_eq!((anonymous_share(1), write_reserve(1)), (1, 0));
+        assert_eq!((anonymous_share(2), write_reserve(2)), (1, 1));
+    }
+
+    #[test]
+    fn an_anonymous_flood_leaves_signed_in_readers_and_writers_their_slots() {
+        let gate = InFlight::new(16, 16, 1);
+        let flood: Vec<_> = (0..8)
+            .map(|n| gate.admit(format!("address:{n}"), ANONYMOUS_READ))
+            .collect::<Result<_, _>>()
+            .expect("the anonymous half");
+        assert_eq!(
+            gate.admit("address:8".into(), ANONYMOUS_READ).err(),
+            Some(Refused::AnonymousShare)
+        );
+        let readers: Vec<_> = (0..6)
+            .map(|n| gate.admit(format!("credential:{n}"), SIGNED_READ))
+            .collect::<Result<_, _>>()
+            .expect("the readers' rest: 16 less the reserve of 2 less the 8 anonymous");
+        assert_eq!(
+            gate.admit("credential:r".into(), SIGNED_READ).err(),
+            Some(Refused::Busy)
+        );
+        let _write = gate
+            .admit("credential:pipeline".into(), SIGNED_WRITE)
+            .expect("a write takes the reserve");
+        drop((flood, readers));
+    }
+
+    #[test]
+    fn an_anonymous_write_never_takes_the_write_reserve() {
+        let gate = InFlight::new(8, 8, 1);
+        let anonymous_write = Class {
+            anonymous: true,
+            read: false,
+        };
+        let _anonymous: Vec<_> = (0..4)
+            .map(|n| gate.admit(format!("address:{n}"), anonymous_write))
+            .collect::<Result<_, _>>()
+            .expect("the anonymous half");
+        let _reads: Vec<_> = (0..3)
+            .map(|n| gate.admit(format!("credential:{n}"), SIGNED_READ))
+            .collect::<Result<_, _>>()
+            .expect("the rest of the readers' 7");
+        assert_eq!(
+            gate.admit("address:x".into(), anonymous_write).err(),
+            Some(Refused::AnonymousShare)
+        );
+        assert_eq!(
+            gate.admit("credential:r".into(), SIGNED_READ).err(),
+            Some(Refused::Busy)
+        );
+        assert!(gate.admit("credential:w".into(), SIGNED_WRITE).is_ok());
+    }
+
+    #[test]
+    fn anonymous_slow_reads_weigh_on_half_the_slow_budget_at_most() {
+        let gate = InFlight::new(16, 16, 1);
+        let mut first = gate.admit("address:a".into(), ANONYMOUS_READ).expect("a");
+        assert!(gate.weigh(&mut first));
+        let mut second = gate.admit("address:b".into(), ANONYMOUS_READ).expect("b");
+        assert!(
+            !gate.weigh(&mut second),
+            "the anonymous half of a slow budget of 8 is taken"
+        );
+        let mut signed = gate.admit("credential:s".into(), SIGNED_READ).expect("s");
+        assert!(
+            gate.weigh(&mut signed),
+            "a signed-in slow read still has room"
+        );
+        drop(first);
+        assert!(gate.weigh(&mut second), "the anonymous weight came back");
+    }
+
+    #[test]
+    fn the_class_of_a_request() {
+        let request = |method: Method, bearer: bool| {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri("/api/endpoint/e/ngsi-ld/v1/entities");
+            if bearer {
+                builder = builder.header(header::AUTHORIZATION, "Bearer x.y.z");
+            }
+            builder.body(Body::empty()).expect("a request")
+        };
+        assert_eq!(Class::of(&request(Method::GET, false)), ANONYMOUS_READ);
+        assert_eq!(Class::of(&request(Method::POST, true)), SIGNED_WRITE);
+        assert_eq!(Class::of(&request(Method::HEAD, true)), SIGNED_READ);
+        let basic = Request::builder()
+            .method(Method::GET)
+            .header(header::AUTHORIZATION, "Basic YTpi")
+            .body(Body::empty())
+            .expect("a request");
+        assert_eq!(Class::of(&basic), ANONYMOUS_READ, "only a bearer signs in");
+    }
+
+    #[test]
+    fn an_anonymous_refusal_is_429_with_retry_after() {
+        let answer = anonymous_share_taken();
+        assert_eq!(answer.status(), 429);
+        assert_eq!(answer.headers()["retry-after"], "1");
+    }
+
     #[test]
     fn a_caller_past_its_share_is_refused_while_another_still_gets_in() {
         let gate = InFlight::new(4, 2, 1);
-        let first = gate.admit("a".into()).expect("a's first");
-        let _second = gate.admit("a".into()).expect("a's second");
-        assert!(gate.admit("a".into()).is_none(), "a's third");
-        let _other = gate.admit("b".into()).expect("b's first");
+        let first = gate.admit("a".into(), SIGNED_READ).expect("a's first");
+        let _second = gate.admit("a".into(), SIGNED_READ).expect("a's second");
+        assert!(gate.admit("a".into(), SIGNED_READ).is_err(), "a's third");
+        let _other = gate.admit("b".into(), SIGNED_READ).expect("b's first");
         drop(first);
-        assert!(gate.admit("a".into()).is_some(), "a's slot came back");
+        assert!(
+            gate.admit("a".into(), SIGNED_READ).is_ok(),
+            "a's slot came back"
+        );
     }
 
     #[test]
     fn the_total_is_held_across_callers_and_comes_back_on_drop() {
         let gate = InFlight::new(2, 2, 1);
-        let a = gate.admit("a".into()).expect("a");
-        let _b = gate.admit("b".into()).expect("b");
-        assert!(gate.admit("c".into()).is_none(), "the gateway is full");
+        let a = gate.admit("a".into(), SIGNED_WRITE).expect("a");
+        let _b = gate.admit("b".into(), SIGNED_WRITE).expect("b");
+        assert!(
+            gate.admit("c".into(), SIGNED_WRITE).is_err(),
+            "the gateway is full"
+        );
         drop(a);
-        assert!(gate.admit("c".into()).is_some());
+        assert!(gate.admit("c".into(), SIGNED_WRITE).is_ok());
     }
 
     #[test]
     fn a_refused_caller_leaves_no_entry_behind() {
         let gate = InFlight::new(1, 1, 1);
-        let held = gate.admit("a".into()).expect("a");
-        assert!(gate.admit("b".into()).is_none());
+        let held = gate.admit("a".into(), SIGNED_READ).expect("a");
+        assert!(gate.admit("b".into(), SIGNED_READ).is_err());
         drop(held);
         assert!(gate.callers.lock().expect("the map").is_empty());
     }
@@ -304,10 +541,10 @@ mod tests {
     #[test]
     fn a_slow_read_weighs_against_its_caller_and_the_slow_budget() {
         let gate = InFlight::new(8, 8, 1);
-        let mut first = gate.admit("a".into()).expect("a's first");
+        let mut first = gate.admit("a".into(), SIGNED_READ).expect("a's first");
         assert!(gate.weigh(&mut first));
         assert_eq!(gate.callers.lock().expect("the map")["a"], SLOW_WEIGHT);
-        let mut second = gate.admit("b".into()).expect("b's first");
+        let mut second = gate.admit("b".into(), SIGNED_READ).expect("b's first");
         assert!(!gate.weigh(&mut second), "the slow budget of 4 is taken");
         drop(first);
         assert!(gate.weigh(&mut second), "the weight came back");
@@ -318,8 +555,8 @@ mod tests {
     #[test]
     fn a_slow_read_past_its_callers_share_is_refused() {
         let gate = InFlight::new(64, SLOW_WEIGHT, 1);
-        let mut slow = gate.admit("a".into()).expect("a's first");
-        let _fast = gate.admit("a".into()).expect("a's second");
+        let mut slow = gate.admit("a".into(), SIGNED_READ).expect("a's first");
+        let _fast = gate.admit("a".into(), SIGNED_READ).expect("a's second");
         assert!(
             !gate.weigh(&mut slow),
             "a slow read of 4 and a quick one are past a share of 4"
@@ -332,7 +569,7 @@ mod tests {
         let gate = timed(8, 8);
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let guard = Dropped(Arc::clone(&dropped));
-        let ticket = gate.admit("a".into()).expect("a");
+        let ticket = gate.admit("a".into(), SIGNED_READ).expect("a");
         let answer = gate
             .time(ticket, async move {
                 let _guard = guard;
@@ -348,16 +585,16 @@ mod tests {
     #[tokio::test]
     async fn a_slow_read_without_room_is_refused_at_once_and_a_quick_one_answered() {
         let gate = timed(8, 8);
-        let mut held = gate.admit("b".into()).expect("b");
+        let mut held = gate.admit("b".into(), SIGNED_READ).expect("b");
         assert!(gate.weigh(&mut held), "b takes the whole slow budget");
-        let ticket = gate.admit("a".into()).expect("a");
+        let ticket = gate.admit("a".into(), SIGNED_READ).expect("a");
         let answer = gate
             .time(ticket, std::future::pending::<Response<Body>>())
             .await;
         assert_eq!(answer.status(), 503);
         assert_eq!(answer.headers()["retry-after"], "1");
 
-        let ticket = gate.admit("a".into()).expect("a again");
+        let ticket = gate.admit("a".into(), SIGNED_READ).expect("a again");
         let answer = gate
             .time(ticket, async { Response::new(Body::empty()) })
             .await;

@@ -171,8 +171,9 @@ async fn a_read_past_the_deadline_is_answered_503_and_its_broker_call_dropped() 
 #[tokio::test]
 async fn slow_reads_weigh_more_and_leave_room_for_another_callers_quick_read() {
     let (url, live) = broker().await;
-    // A slow budget of 8 holds two slow reads; a caller's share of 8 holds two slow reads too.
-    let app = gateway(&url, 16, 8);
+    // Of a slow budget of 16, anonymous reads weigh on 8 (T-5124): two slow reads; a caller's
+    // share of 8 holds two slow reads too.
+    let app = gateway(&url, 32, 8);
     let slow: Vec<_> = (0..3)
         .map(|_| tokio::spawn(app.clone().oneshot(read("Slow", "192.0.2.1"))))
         .collect();
