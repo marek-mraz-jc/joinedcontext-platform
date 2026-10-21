@@ -102,11 +102,50 @@ pub(crate) async fn odata(
     Path(params): Path<HashMap<String, String>>,
     request: Request,
 ) -> Response<Body> {
-    if [Method::GET, Method::HEAD].contains(request.method()) {
+    let answer = if [Method::GET, Method::HEAD].contains(request.method()) {
         read_surface(&gateway, &params, request, &ODATA).await
     } else {
         odata_write(&gateway, &params, request).await
+    };
+    odata_error(answer).await
+}
+
+/// A problem of the gateway on the OData surface as the OData JSON error object (OData Part 1
+/// 9.4, JSON Format 21.1, T-4929); the broker's own OData answers pass as they are.
+async fn odata_error(answer: Response<Body>) -> Response<Body> {
+    let problem = answer
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/problem+json"));
+    if !problem {
+        return answer;
     }
+    let (mut parts, body) = answer.into_parts();
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    let Ok(document) = serde_json::from_slice::<Value>(&held) else {
+        return proxy::with_body(parts, held.to_vec());
+    };
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    proxy::with_body(parts, odata_error_object(document).to_string().into_bytes())
+}
+
+/// `{"error": {code, message, innererror}}`: the platform's slug (or the broker's `code`) as
+/// `code`, the detail or else the title as `message`, the problem document whole beside them.
+fn odata_error_object(problem: Value) -> Value {
+    let text = |key: &str| problem.get(key).and_then(Value::as_str).map(str::to_owned);
+    let code = text("code")
+        .or_else(|| text("type").and_then(|t| t.rsplit(['/', ':']).next().map(str::to_owned)))
+        .filter(|code| !code.is_empty())
+        .unwrap_or_else(|| "error".to_owned());
+    let message = text("detail")
+        .or_else(|| text("title"))
+        .unwrap_or_else(|| code.clone());
+    serde_json::json!({"error": {"code": code, "message": message, "innererror": problem}})
 }
 
 /// The iCalendar feed of the view's Events (EP-125): read-only, the broker's alone.
@@ -219,6 +258,23 @@ async fn answered(
 ) -> Response<Body> {
     let prefix = format!("{}/{}", endpoint.base_path, surface.path);
     let root = format!("/x/views/{}/{}", endpoint.slug, surface.path);
+    if answer.status() == StatusCode::NOT_IMPLEMENTED
+        && surface.representation == Representation::Odata
+    {
+        // The view names an OData feature it does not serve ($crossjoin, $all, $entity): an
+        // answer to pass on, not a failure to retry; its words stay in the log (T-2260, T-4929).
+        let (_, body) = answer.into_parts();
+        let held = axum::body::to_bytes(body, MAX_BODY)
+            .await
+            .unwrap_or_default();
+        tracing::info!(slug = %endpoint.slug, broker = %String::from_utf8_lossy(&held), "odata feature not served");
+        return ProblemDetails::new(501, "odata-not-implemented", "Not Implemented")
+            .with_detail(
+                "this OData request needs a feature the endpoint does not serve; ask the entity \
+                 sets its $metadata lists",
+            )
+            .into_response();
+    }
     if answer.status().is_server_error() {
         let (parts, body) = answer.into_parts();
         return broker_failure(
@@ -711,6 +767,26 @@ mod tests {
             "n": {"C": {"S": {"$Type": "n.A"}}, "A": {"$BaseType": "n.A"}}
         });
         assert_eq!(entity_key(&looped, "S"), None);
+    }
+
+    #[test]
+    fn a_problem_becomes_the_odata_error_object() {
+        let problem = serde_json::json!({
+            "type": "https://joinedcontext.com/errors/odata-not-implemented",
+            "title": "Not Implemented", "status": 501, "detail": "not served"
+        });
+        let error = odata_error_object(problem.clone());
+        assert_eq!(error["error"]["code"], "odata-not-implemented");
+        assert_eq!(error["error"]["message"], "not served");
+        assert_eq!(error["error"]["innererror"], problem);
+        let refused = odata_error_object(serde_json::json!({
+            "type": "urn:antares:error:AccessDenied", "title": "AccessDenied", "code": "forbidden"
+        }));
+        assert_eq!(refused["error"]["code"], "forbidden");
+        assert_eq!(refused["error"]["message"], "AccessDenied");
+        let bare = odata_error_object(serde_json::json!({"type": "https://x/"}));
+        assert_eq!(bare["error"]["code"], "error");
+        assert_eq!(bare["error"]["message"], "error");
     }
 
     #[test]
