@@ -23,9 +23,9 @@ pub const PROBLEM_FROM: &str = "lifetime-from";
 /// It starts with `_`, which no slot name does.
 const MARKER: &str = "_jc_lifetime_from";
 
-/// The entity members that are no attribute, skipped when the newest `observedAt` is looked for.
-const ENTITY_MEMBERS: &str =
-    r#""id", "type", "scope", "@context", "createdAt", "modifiedAt", "deletedAt", "expiresAt""#;
+/// The newest `observedAt` among the record's attributes as unix seconds, `null` when none; the
+/// entity members that are no attribute are skipped.
+const NEWEST_OBSERVED_AT: &str = r#"this.without("id", "type", "scope", "@context", "createdAt", "modifiedAt", "deletedAt", "expiresAt").values().map_each(a -> if a.type() == "array" { a } else { [a] }).flatten().map_each(i -> if i.type() == "object" { i.observedAt.or("").ts_unix().catch(null) } else { null }).filter(t -> t != null).max().catch(null)"#;
 
 const FORMAT: &str = r#".ts_format("2006-01-02T15:04:05Z", "UTC")"#;
 
@@ -122,15 +122,16 @@ pub fn step(spec: &PipelineSpec) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
-/// Sets the entity's `expiresAt`, or marks the record when its `from` gives no time.
+/// Sets the entity's `expiresAt`, and marks the record when its `from` gives no time.
 fn entity_block(end: &End) -> Result<String> {
-    let mut text = format!(
+    let mut text = start_line(end, "    ")?;
+    text.push_str(&format!(
         "    let end = {}\n    if $end != null {{\n      root.expiresAt = $end{FORMAT}\n    }}\n",
-        end_expression(end)?
-    );
+        end_expression(end)
+    ));
     if matches!(end, End::From { .. }) {
         text.push_str(&format!(
-            "    if $end == null {{\n      root.{MARKER} = true\n    }}\n"
+            "    if $start == null {{\n      root.{MARKER} = true\n    }}\n"
         ));
     }
     Ok(text)
@@ -160,11 +161,9 @@ fn attribute_targets(path: &str, entry: &Lifetime) -> Result<Vec<(String, End)>>
 
 /// Sets the `expiresAt` member of every instance of `name`, when the record carries it.
 fn attribute_block(name: &str, end: &End) -> Result<String> {
-    let mut text = format!(
-        "    if this.exists({}) {{\n      let end = {}\n",
-        literal(name),
-        end_expression(end)?
-    );
+    let mut text = format!("    if this.exists({}) {{\n", literal(name));
+    text.push_str(&start_line(end, "      ")?);
+    text.push_str(&format!("      let end = {}\n", end_expression(end)));
     text.push_str(&format!(
         "      if $end != null {{\n        let at = $end{FORMAT}\n        root.{name} = \
          this.{name}.(a -> if a.type() == \"array\" {{ a.map_each(i -> if i.type() == \
@@ -173,7 +172,7 @@ fn attribute_block(name: &str, end: &End) -> Result<String> {
     ));
     if matches!(end, End::From { .. }) {
         text.push_str(&format!(
-            "      if $end == null {{\n        root.{MARKER} = true\n      }}\n"
+            "      if $start == null {{\n        root.{MARKER} = true\n      }}\n"
         ));
     }
     text.push_str("    }\n");
@@ -192,9 +191,33 @@ fn tail() -> String {
     )
 }
 
-/// The end as unix seconds, or `null` when a `from` field gives no date-time.
-fn end_expression(end: &End) -> Result<String> {
-    Ok(match end {
+/// `let start = ...` for a `from` end: the field's time as unix seconds, `null` when the record
+/// carries no date-time there. Empty for the other modes.
+fn start_line(end: &End, indent: &str) -> Result<String> {
+    let End::From { field, .. } = end else {
+        return Ok(String::new());
+    };
+    let start = if field == OBSERVED_AT {
+        NEWEST_OBSERVED_AT.to_owned()
+    } else if is_slot_name(field) {
+        format!(
+            "this.{field}.value.(v -> if v.type() == \"object\" {{ v.\"@value\" }} else \
+             {{ v }}).ts_unix().catch(null)"
+        )
+    } else {
+        return Err(Error::Invalid {
+            field: "spec.lifetime".to_owned(),
+            reason: format!("`{}` is not a slot name (PL-80)", field.escape_debug()),
+        });
+    };
+    Ok(format!("{indent}let start = {start}\n"))
+}
+
+/// The end as unix seconds, or `null` when a `from` field gives no date-time and no `notAfter`
+/// is set; with `notAfter`, a missing field ends at the write time plus it (PL-82). A `from`
+/// end reads `$start` from [`start_line`].
+fn end_expression(end: &End) -> String {
+    match end {
         End::Rolling(seconds) => format!("timestamp_unix() + {seconds}"),
         End::At(instant) => format!(
             "{}.ts_unix()",
@@ -205,37 +228,15 @@ fn end_expression(end: &End) -> Result<String> {
             )
         ),
         End::From {
-            field,
-            plus,
-            not_after,
-        } => {
-            let start = if field == OBSERVED_AT {
-                format!(
-                    "this.without({ENTITY_MEMBERS}).values().map_each(a -> if a.type() == \"array\" \
-                     {{ a }} else {{ [a] }}).flatten().map_each(i -> if i.type() == \"object\" {{ \
-                     i.observedAt.or(\"\").ts_unix().catch(null) }} else {{ null }}).filter(t -> t \
-                     != null).max().catch(null)"
-                )
-            } else if is_slot_name(field) {
-                format!(
-                    "this.{field}.value.(v -> if v.type() == \"object\" {{ v.\"@value\" }} else \
-                     {{ v }}).ts_unix().catch(null)"
-                )
-            } else {
-                return Err(Error::Invalid {
-                    field: "spec.lifetime".to_owned(),
-                    reason: format!("`{}` is not a slot name (PL-80)", field.escape_debug()),
-                });
-            };
-            let shifted = format!("({start}).(t -> if t != null {{ t + {plus} }} else {{ null }})");
-            match not_after {
-                None => shifted,
-                Some(cap) => format!(
-                    "{shifted}.(t -> if t != null {{ [t, timestamp_unix() + {cap}].min() }} else {{ null }})"
-                ),
-            }
-        }
-    })
+            plus, not_after, ..
+        } => match not_after {
+            None => format!("if $start != null {{ $start + {plus} }} else {{ null }}"),
+            Some(cap) => format!(
+                "if $start != null {{ [$start + {plus}, timestamp_unix() + {cap}].min() }} else \
+                 {{ timestamp_unix() + {cap} }}"
+            ),
+        },
+    }
 }
 
 /// A Bloblang string literal: JSON's quoting is Bloblang's.

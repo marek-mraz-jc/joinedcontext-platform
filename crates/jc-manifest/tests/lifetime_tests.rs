@@ -1,6 +1,7 @@
 //! T-4838: `spec.lifetime` checked against the space's model (PL-81) and compiled into the one
 //! Bloblang step (PL-82), which is run here in the Bento the runner pins over the fixtures of the
-//! task: bus (observedAt + PT10M), alert (validTo, notAfter P30D, and one without validTo), a
+//! task: bus (observedAt + PT10M, and one without), alert (validTo, notAfter P30D, and one without
+//! validTo, which ends at notAfter: T-5018), a
 //! fixed date, an attribute rolling PT5M, and that attribute absent from the record.
 
 use std::process::Command;
@@ -206,6 +207,7 @@ fn the_generated_step_writes_each_mode_in_the_runners_bento() {
                 "location": {"type": "GeoProperty", "value": {"type": "Point", "coordinates": [24.9, 60.1]}, "observedAt": "2026-10-20T10:00:00.250Z"},
                 "speed": {"type": "Property", "value": 7, "observedAt": "2026-10-20T10:01:00Z"}}),
             json!({"id": "urn:ngsi-ld:Bus:2", "type": "Bus", "speed": {"type": "Property", "value": 3, "observedAt": "2026-10-20T11:00:00+03:00"}}),
+            json!({"id": "urn:ngsi-ld:Bus:3", "type": "Bus", "routeName": {"type": "Property", "value": "55"}}),
             json!({"id": "urn:ngsi-ld:Alert:1", "type": "Alert",
                 "validTo": {"type": "Property", "value": {"@type": "DateTime", "@value": "2026-10-21T00:00:00+02:00"}}}),
             json!({"id": "urn:ngsi-ld:Alert:2", "type": "Alert", "validTo": {"type": "Property", "value": "2099-01-01T00:00:00Z"}}),
@@ -235,6 +237,12 @@ fn the_generated_step_writes_each_mode_in_the_runners_bento() {
     assert_eq!(bus.get("location"), None, "{bus}");
     assert_eq!(problem, None);
 
+    // No observedAt and no notAfter: no end, the record kept and counted.
+    let (bus, problem) = by_id("urn:ngsi-ld:Bus:3");
+    assert_eq!(bus.get("expiresAt"), None, "{bus}");
+    assert_eq!(bus.get("_jc_lifetime_from"), None, "{bus}");
+    assert_eq!(problem.as_deref(), Some("lifetime-from"));
+
     // Alert: validTo when it is sooner than thirty days, else thirty days from the write.
     let (alert, _) = by_id("urn:ngsi-ld:Alert:1");
     assert_eq!(alert["expiresAt"], "2026-10-20T22:00:00Z", "{alert}");
@@ -244,9 +252,14 @@ fn the_generated_step_writes_each_mode_in_the_runners_bento() {
         (before + 2_592_000..=after + 2_592_000).contains(&capped),
         "{alert}"
     );
-    // No validTo: the record is kept, with no expiresAt, and counted as a lifetime-from problem.
+    // No validTo (T-5018): the record ends at the write plus notAfter, and still counts as a
+    // lifetime-from problem so a feed that drops validTo shows in the run's problems.
     let (alert, problem) = by_id("urn:ngsi-ld:Alert:3");
-    assert_eq!(alert.get("expiresAt"), None, "{alert}");
+    let fallback = instant(&alert["expiresAt"]);
+    assert!(
+        (before + 2_592_000..=after + 2_592_000).contains(&fallback),
+        "{alert}"
+    );
     assert_eq!(alert["description"]["value"], "no end", "{alert}");
     assert_eq!(alert.get("_jc_lifetime_from"), None, "{alert}");
     assert_eq!(problem.as_deref(), Some("lifetime-from"));
