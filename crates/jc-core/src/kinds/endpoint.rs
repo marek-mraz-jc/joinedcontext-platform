@@ -162,7 +162,8 @@ pub enum Representation {
     /// OGC API - Features Part 1 collections and items (`/ogc/features/`).
     #[serde(rename = "ogc-features")]
     OgcFeatures,
-    /// SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).
+    /// SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104),
+    /// and only on a space whose model has a numeric attribute with a unit (EP-125).
     Sta,
     /// OData v4 service of the Endpoint's view (`/odata/v4/`, EP-104).
     Odata,
@@ -173,6 +174,45 @@ pub enum Representation {
     /// through the mapping `spec.representations.ical` checked against the space's model (EP-125).
     Ical,
 }
+
+/// What a domain-standard representation with a fixed mapping needs of the space's data model
+/// (EP-125): `sta` today; `ical` maps through `spec.representations.ical` instead
+/// ([`super::ical_mapping`]). Static code, never read from a manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurfaceRequirement {
+    /// The Smart Data Models type, by the NGSI-LD type name the view filters on; [`ANY_TYPE`]
+    /// when the standard maps every type that has a measurement.
+    pub entity_type: &'static str,
+    /// Its IRI, for the documentation.
+    pub type_iri: &'static str,
+    /// The standard and the section that makes the fields below mandatory.
+    pub standard: &'static str,
+    /// `(field, standard section, source attribute, mandatory)`.
+    pub fields: &'static [(&'static str, &'static str, &'static str, bool)],
+}
+
+/// The [`SurfaceRequirement::entity_type`] of a standard that maps no fixed type: it serves any
+/// class of the model with a slot whose `range` is numeric and that declares its `unit`.
+pub const ANY_TYPE: &str = "*";
+
+/// The source column of a measurement in the SensorThings fields.
+pub const MEASUREMENT: &str = "a numeric slot with its unit";
+
+// Every entity is a Thing, every numeric Property a Datastream (antares-sta mapping rules 1-6).
+const STA: SurfaceRequirement = SurfaceRequirement {
+    entity_type: ANY_TYPE,
+    type_iri: "https://docs.ogc.org/is/18-088/18-088.html",
+    standard: "OGC SensorThings API v1.1",
+    fields: &[
+        ("Thing", "§9.2.1", "id", true),
+        ("Datastream", "§9.2.5", MEASUREMENT, true),
+        ("Datastream.unitOfMeasurement", "§9.2.5", MEASUREMENT, true),
+        ("Observation.result", "§9.2.7", MEASUREMENT, true),
+        ("Observation.phenomenonTime", "§9.2.7", "observedAt", true),
+        ("ObservedProperty", "§9.2.4", "type", true),
+        ("Location", "§9.2.2", "location", false),
+    ],
+};
 
 impl Representation {
     /// Returns the wire name string for this representation.
@@ -189,14 +229,46 @@ impl Representation {
         }
     }
 
-    /// Whether the Endpoint's space model must fit the representation's mapping (EP-125).
+    /// Whether the Endpoint's space model must fit the representation: its fixed requirement
+    /// (`sta`) or its mapping (`ical`, EP-125).
     pub const fn needs_model(&self) -> bool {
-        matches!(self, Self::Ical)
+        matches!(self, Self::Ical) || self.requirement().is_some()
+    }
+
+    /// What this representation needs of the space's data model; `None` for the generic ones,
+    /// which serve any type, and for `ical`, whose mapping says it (EP-125).
+    pub const fn requirement(&self) -> Option<&'static SurfaceRequirement> {
+        match self {
+            Self::Sta => Some(&STA),
+            _ => None,
+        }
     }
 
     /// Served only where `enabledRepresentations` lists it, never by the default (EP-104).
     pub const fn opt_in(&self) -> bool {
         matches!(self, Self::Sta | Self::Ical)
+    }
+
+    /// Why a space whose model is `linkml` cannot serve this representation's fixed requirement,
+    /// or `None` when it can (EP-125): for `sta`, no slot that is a measurement.
+    pub fn model_gap(&self, linkml: &str) -> std::result::Result<Option<String>, String> {
+        if self.requirement().is_none() {
+            return Ok(None);
+        }
+        let measured = super::model_projection::linkml_measurements(linkml)?;
+        Ok(measured
+            .is_empty()
+            .then(|| self.missing_model_gap())
+            .flatten())
+    }
+
+    /// What a space without a usable data model lacks for this representation's fixed
+    /// requirement, `None` for the others (EP-125).
+    pub fn missing_model_gap(&self) -> Option<String> {
+        self.requirement().map(|need| match need.entity_type {
+            ANY_TYPE => "a type with a numeric attribute that declares its unit".to_owned(),
+            named => format!("the type {named}"),
+        })
     }
 
     /// Every representation, in the order a record lists them.
@@ -565,8 +637,18 @@ impl EndpointSpec {
         &self,
         linkml: Option<&str>,
     ) -> std::result::Result<Vec<String>, String> {
-        self.ical_mapping()
-            .map_or(Ok(Vec::new()), |mapping| mapping.model_gaps(linkml))
+        let mut gaps = match self.ical_mapping() {
+            Some(mapping) => mapping.model_gaps(linkml)?,
+            None => Vec::new(),
+        };
+        for representation in self.served_representations() {
+            let gap = match linkml {
+                None => representation.missing_model_gap(),
+                Some(text) => representation.model_gap(text)?,
+            };
+            gaps.extend(gap.map(|gap| format!("`{representation}` needs {gap}")));
+        }
+        Ok(gaps)
     }
 
     /// Validates endpoint audience, representations, limits, and policy reference.

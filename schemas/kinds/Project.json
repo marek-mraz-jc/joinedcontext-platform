@@ -180,6 +180,128 @@
       ],
       "type": "object"
     },
+    "MqttAddress": {
+      "description": "How a broker is addressed from outside (ADR-N-048 §2.11).",
+      "oneOf": [
+        {
+          "description": "`<name>.<project>.mqtt.<domain>` on 8883.",
+          "enum": [
+            "platform"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A port of the allowance's `ports`.",
+          "enum": [
+            "dedicatedPort"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MqttAllowance": {
+      "additionalProperties": false,
+      "description": "`spec.limits.mqtt` of an Organization or `spec.quotas.mqtt` of a Project. Every number is optional; an absent one is its catalog default once `enabled` is `true`.",
+      "properties": {
+        "addresses": {
+          "description": "The address kinds the project may use; absent is `[platform]`.",
+          "items": {
+            "$ref": "#/definitions/MqttAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "brokers": {
+          "description": "How many `MqttBroker` manifests the project may hold.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "connections": {
+          "description": "The sum of `spec.limits.maxConnections` over the project's brokers.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": false,
+          "description": "Whether the project may declare brokers at all; off unless an org admin turns it on.",
+          "type": "boolean"
+        },
+        "maxMessageBytes": {
+          "description": "The ceiling of each broker's `spec.limits.maxMessageBytes`.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messagesPerSecond": {
+          "description": "The sum of `maxConnections` × `messagesPerSecond` over the project's brokers.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "modes": {
+          "description": "The broker modes the project may use; absent is `[ingest]`.",
+          "items": {
+            "$ref": "#/definitions/MqttMode"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "ports": {
+          "description": "Dedicated ports from 18830–18849 an org admin assigned to this project.",
+          "items": {
+            "format": "uint16",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MqttMode": {
+      "description": "What a broker does with a message (ADR-N-048 §2.10).",
+      "oneOf": [
+        {
+          "description": "Devices publish and nothing else; the project's pipelines are the only subscribers.",
+          "enum": [
+            "ingest"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`ingest`, and the Portal keeps the newest messages for the project's stewards.",
+          "enum": [
+            "capture"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Devices may also subscribe, each under its own `${clientid}`.",
+          "enum": [
+            "relay"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "MultiLanguageMap": {
       "additionalProperties": {
         "type": "string"
@@ -668,6 +790,17 @@
             "integer",
             "null"
           ]
+        },
+        "mqtt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MqttAllowance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The project's own MQTT allowance, written only by an org admin; it replaces the organization's `spec.limits.mqtt` as a whole (PF-117, ADR-N-048 §2.9)."
         },
         "publicEndpoints": {
           "description": "Maximum number of public endpoints.",

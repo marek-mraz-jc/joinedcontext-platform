@@ -46,3 +46,17 @@ Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this 
 | `GEO` | `location` |
 | `URL` | `url` |
 | `STATUS` | `eventStatus`, mapped (10 values), default `CONFIRMED` |
+
+## `sta` (OGC SensorThings API v1.1)
+
+A fixed requirement: the space's model needs any type with a slot of numeric `range` that declares its `unit` (https://docs.ogc.org/is/18-088/18-088.html).
+
+| Field | Section | Source attribute | Mandatory |
+|---|---|---|---|
+| `Thing` | §9.2.1 | `id` | yes |
+| `Datastream` | §9.2.5 | `a numeric slot with its unit` | yes |
+| `Datastream.unitOfMeasurement` | §9.2.5 | `a numeric slot with its unit` | yes |
+| `Observation.result` | §9.2.7 | `a numeric slot with its unit` | yes |
+| `Observation.phenomenonTime` | §9.2.7 | `observedAt` | yes |
+| `ObservedProperty` | §9.2.4 | `type` | yes |
+| `Location` | §9.2.2 | `location` | no |

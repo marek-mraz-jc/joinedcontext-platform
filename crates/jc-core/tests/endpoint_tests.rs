@@ -747,12 +747,17 @@ fn disabled_representations_are_checked() {
     );
 }
 
-/// EP-125: only `ical` checks a mapping against the model; the generic ones serve any type.
+/// EP-125: `ical` checks its mapping and `sta` its fixed requirement against the model; the
+/// generic ones serve any type.
 #[test]
-fn only_ical_needs_the_model() {
+fn only_ical_and_sta_need_the_model() {
     use Representation as R;
     for r in R::ALL {
-        assert_eq!(r.needs_model(), r == R::Ical, "{r}");
+        assert_eq!(r.needs_model(), matches!(r, R::Ical | R::Sta), "{r}");
+        if !matches!(r, R::Sta) {
+            assert_eq!(r.requirement(), None, "{r}");
+            assert_eq!(r.model_gap("classes: {}").unwrap(), None, "{r}");
+        }
     }
 }
 
@@ -833,6 +838,27 @@ fn markdown() -> String {
             out.push_str(&format!("| `{field}` | {source} |\n"));
         }
     }
+    for representation in Representation::ALL {
+        let Some(need) = representation.requirement() else {
+            continue;
+        };
+        let kind = match need.entity_type {
+            jc_core::kinds::endpoint::ANY_TYPE => {
+                "any type with a slot of numeric `range` that declares its `unit`".to_owned()
+            }
+            named => format!("`{named}`"),
+        };
+        out.push_str(&format!(
+            "\n## `{representation}` ({})\n\nA fixed requirement: the space's model needs {kind} ({}).\n\n| Field | Section | Source attribute | Mandatory |\n|---|---|---|---|\n",
+            need.standard, need.type_iri
+        ));
+        for (field, section, attribute, mandatory) in need.fields {
+            out.push_str(&format!(
+                "| `{field}` | {section} | `{attribute}` | {} |\n",
+                if *mandatory { "yes" } else { "no" }
+            ));
+        }
+    }
     out
 }
 
@@ -853,4 +879,39 @@ fn the_committed_surface_requirements_are_the_generated_ones() {
         .unwrap_or_else(|e| panic!("{}: {e} — run with UPDATE_SCHEMAS=1", path.display()));
     assert_eq!(committed, generated, "{} is stale", path.display());
     assert!(committed.contains("| `DTSTART` | §3.6.1, §3.8.2.4 | yes | date or datetime |"));
+}
+
+/// EP-125 (T-4886): `sta` serves any type of the model with a measurement, a numeric slot that
+/// declares its unit; anything else, an unreadable model included, is named.
+#[test]
+fn sta_needs_a_numeric_slot_with_its_unit_in_some_class() {
+    use Representation as R;
+    let gap = Some("a type with a numeric attribute that declares its unit");
+    let cases = [
+        // A global slot with range and unit, listed by the class.
+        ("slots:\n  pm10: { range: float, unit: { ucum_code: ug/m3 } }\nclasses:\n  Air:\n    slots: [pm10]\n", None),
+        // The class's slot_usage gives the unit to a numeric global slot.
+        ("slots:\n  speed: { range: double }\nclasses:\n  Vehicle:\n    slots: [speed]\n    slot_usage:\n      speed: { unit: { ucum_code: km/h } }\n", None),
+        // An attribute of the class.
+        ("classes:\n  Meter:\n    attributes:\n      reading: { range: integer, unit: { symbol: kWh } }\n", None),
+        // A number without a unit.
+        ("classes:\n  Article:\n    attributes:\n      wordCount: { range: integer }\n", gap),
+        // A unit on a text.
+        ("classes:\n  Note:\n    attributes:\n      text: { range: string, unit: { symbol: m } }\n", gap),
+        // A measured slot no class lists.
+        ("slots:\n  pm10: { range: float, unit: { ucum_code: ug/m3 } }\nclasses:\n  Air:\n    slots: [name]\n", gap),
+        ("classes: {}", gap),
+    ];
+    for (linkml, want) in cases {
+        assert_eq!(
+            R::Sta.model_gap(linkml).unwrap().as_deref(),
+            want,
+            "{linkml}"
+        );
+    }
+    assert!(R::Sta.model_gap("classes: [").is_err());
+    assert_eq!(R::Sta.missing_model_gap().as_deref(), gap);
+    // `ical` has no fixed requirement: its mapping names the type (ical_mapping_tests).
+    assert_eq!(R::Ical.missing_model_gap(), None);
+    assert_eq!(R::Odata.missing_model_gap(), None);
 }

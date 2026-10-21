@@ -304,3 +304,52 @@ pub fn linkml_classes(
     }
     Ok(classes)
 }
+
+/// The `(class, slot)` pairs of a LinkML source whose slot is a measurement: its `range` is
+/// numeric and it declares a `unit`, as a class's `slot_usage` or attribute, or the global slot
+/// (EP-125, T-4886). `Err` when the source does not parse.
+pub fn linkml_measurements(linkml: &str) -> std::result::Result<Vec<(String, String)>, String> {
+    use serde_norway::Value;
+    const NUMERIC: [&str; 4] = ["integer", "float", "double", "decimal"];
+    let schema: Value = serde_norway::from_str(linkml).map_err(|err| err.to_string())?;
+    let measured = |nodes: &[Option<&Value>]| {
+        let first = |key: &str| nodes.iter().flatten().find_map(|n| n.get(key));
+        first("range")
+            .and_then(Value::as_str)
+            .is_some_and(|range| NUMERIC.contains(&range))
+            && first("unit").is_some_and(|unit| !unit.is_null())
+    };
+    let mut found = Vec::new();
+    let Some(classes) = schema.get("classes").and_then(Value::as_mapping) else {
+        return Ok(found);
+    };
+    for (class, declared) in classes {
+        let Some(class) = class.as_str() else {
+            continue;
+        };
+        for slot in declared
+            .get("slots")
+            .and_then(Value::as_sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let usage = declared.get("slot_usage").and_then(|u| u.get(slot));
+            let global = schema.get("slots").and_then(|s| s.get(slot));
+            if measured(&[usage, global]) {
+                found.push((class.to_owned(), slot.to_owned()));
+            }
+        }
+        for (name, attribute) in declared
+            .get("attributes")
+            .and_then(Value::as_mapping)
+            .into_iter()
+            .flatten()
+        {
+            if let (Some(name), true) = (name.as_str(), measured(&[Some(attribute)])) {
+                found.push((class.to_owned(), name.to_owned()));
+            }
+        }
+    }
+    Ok(found)
+}

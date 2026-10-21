@@ -1415,7 +1415,7 @@
           "type": "string"
         },
         {
-          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104).",
+          "description": "SensorThings API v1.1 read projection (`/sta/v1.1/`); served only where listed (EP-104), and only on a space whose model has a numeric attribute with a unit (EP-125).",
           "enum": [
             "sta"
           ],

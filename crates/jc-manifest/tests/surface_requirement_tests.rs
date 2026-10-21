@@ -48,6 +48,20 @@ classes:
 "#;
 
 fn repo_with(test_name: &str, linkml: Option<&str>, representations: &str) -> PathBuf {
+    repo_at(test_name, linkml, PUBLISHED, representations)
+}
+
+/// A published model commits its four generated artifacts (DM-02).
+const PUBLISHED: &str = "published\n  artifacts:\n    jsonSchema: ./events.schema.json\n    \
+                         context: ./events.context.jsonld\n    docs: ./events.md\n    \
+                         example: ./events.example.jsonld";
+
+fn repo_at(
+    test_name: &str,
+    linkml: Option<&str>,
+    lifecycle: &str,
+    representations: &str,
+) -> PathBuf {
     let dir = temp_repo(test_name);
     write(
         &dir,
@@ -91,17 +105,11 @@ spec:
         write(
             &dir,
             "projects/city/spaces/events/datamodels/events.yaml",
-            r#"apiVersion: joinedcontext.com/v1alpha1
-kind: DataModel
-metadata:
-  name: events
-  namespace: city
-spec:
-  contextSpaceRef: events
-  linkml: ./events.linkml.yaml
-  version: 1.0.0
-  lifecycle: draft
-"#,
+            &format!(
+                "apiVersion: joinedcontext.com/v1alpha1\nkind: DataModel\nmetadata:\n  name: events\n  \
+                 namespace: city\nspec:\n  contextSpaceRef: events\n  linkml: ./events.linkml.yaml\n  \
+                 version: 1.0.0\n  lifecycle: {lifecycle}\n"
+            ),
         );
         write(
             &dir,
@@ -294,5 +302,74 @@ fn the_documented_mapping_validates_and_each_gap_is_one_finding() {
             "Endpoint city/calendar, space events: `ical` maps SUMMARY to `description`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)",
         ]
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T-4886: an air-quality model, each pollutant a float with its UCUM unit (as the dev seed).
+const AIR_MODEL: &str = r#"id: https://example.org/models/air
+name: air
+slots:
+  name: {}
+  dateObserved:
+    range: datetime
+  pm10:
+    range: float
+    unit:
+      ucum_code: ug/m3
+classes:
+  AirQualityObserved:
+    slots: [name, dateObserved, pm10]
+"#;
+
+const STA: &str = "  enabledRepresentations: [ngsi-ld, sta]\n";
+
+#[test]
+fn sta_on_a_model_with_a_measured_attribute_is_accepted() {
+    let dir = repo_with("sta-air", Some(AIR_MODEL), STA);
+    assert_eq!(surface_findings(&dir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sta_on_a_model_without_a_measurement_is_refused() {
+    // Article: texts and dates; a number without a unit is no Datastream either (STA §9.2.5).
+    let article = "classes:\n  Article:\n    attributes:\n      headline: {}\n      \
+                   datePublished: { range: datetime }\n      wordCount: { range: integer }\n";
+    let refusal = "Endpoint city/calendar, space events: `sta` needs a type with a numeric \
+                   attribute that declares its unit (EP-125)";
+    let dir = repo_with("sta-article", Some(article), STA);
+    assert_eq!(surface_findings(&dir), [refusal]);
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir = repo_with("sta-no-model", None, STA);
+    assert_eq!(surface_findings(&dir), [refusal]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_draft_model_backs_no_domain_standard() {
+    for (name, lifecycle) in [("draft", "draft"), ("retired", "retired")] {
+        let dir = repo_at(name, Some(EVENT_MODEL), lifecycle, ICAL);
+        assert_eq!(
+            surface_findings(&dir),
+            [format!(
+                "Endpoint city/calendar: `ical` needs a published data model in space events; its \
+                 model is {lifecycle} (EP-125, DM-26)"
+            )]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_published_model_wins_over_a_draft_of_the_next_version() {
+    let dir = repo_with("published-and-draft", Some(EVENT_MODEL), ICAL);
+    write(
+        &dir,
+        "projects/city/spaces/events/datamodels/events-v2.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: DataModel\nmetadata:\n  name: events-v2\n  \
+         namespace: city\nspec:\n  contextSpaceRef: events\n  linkml: ./events.linkml.yaml\n  \
+         version: 2.0.0\n  lifecycle: draft\n",
+    );
+    assert_eq!(surface_findings(&dir), Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&dir);
 }
