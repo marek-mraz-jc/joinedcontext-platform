@@ -312,9 +312,15 @@ async fn answered(
     if let Some(restricted) = parts.headers.remove(ANTARES_RESTRICTED) {
         parts.headers.insert(RESULTS_RESTRICTED, restricted);
     }
-    let text = String::from_utf8_lossy(&held)
-        .replace(&from, &to)
-        .replace(&view_from, &view_to);
+    // A vector tile (T-5121) or another binary body holds no link: its bytes go as sent.
+    let tile = parts.headers.get(CONTENT_TYPE).is_some_and(|v| {
+        v.as_bytes()
+            .starts_with(b"application/vnd.mapbox-vector-tile")
+    });
+    let Some(text) = std::str::from_utf8(&held).ok().filter(|_| !tile) else {
+        return proxy::with_body(parts, held.to_vec());
+    };
+    let text = text.replace(&from, &to).replace(&view_from, &view_to);
     proxy::with_body(parts, text.into_bytes())
 }
 

@@ -36,6 +36,9 @@ struct Hop {
 
 type Hops = Arc<Mutex<Vec<Hop>>>;
 
+/// A vector tile's first bytes: no UTF-8, and a broker URL inside its tag strings.
+const TILE: &[u8] = b"\x1a\xff\xfe\x0a\x03Car http://127.0.0.1/x/views/";
+
 /// A broker that records every hop and answers `status` with a page naming itself by its
 /// `Host`, as Antares' `public_base` does, in the body and in a `Link` header.
 async fn broker(
@@ -54,6 +57,10 @@ async fn broker(
                 query: request.uri().query().map(str::to_owned),
                 headers: request.headers().clone(),
             });
+            if request.uri().path().contains("/tiles/WebMercatorQuad/") {
+                let tile = [("content-type", "application/vnd.mapbox-vector-tile"), ("etag", "W/\"t1\"")];
+                return (status, tile, TILE.to_vec()).into_response();
+            }
             let root = format!("http://{host}/x/views/{SLUG}/ogc/features");
             // Antares links a feature to its entity on the same view's NGSI-LD surface (T-4403).
             let entity = format!("http://{host}/x/views/{SLUG}/ngsi-ld/v1/entities/urn%3Angsi-ld%3ACar%3A1");
@@ -317,4 +324,33 @@ async fn a_narrowed_page_says_so_to_a_caller_who_asked() {
     let (_, headers, _) = call(&upstream, endpoint(), get(&items)).await;
     assert!(headers.get("antares-results-restricted").is_none());
     assert!(headers.get("ngsild-results-restricted").is_none());
+}
+
+/// T-5121: a vector tile is binary: the gateway passes its bytes and its cache headers as the
+/// broker sent them, with no link rewrite that would corrupt the protobuf.
+#[tokio::test]
+async fn a_vector_tile_passes_byte_for_byte() {
+    let (upstream, hops) = broker(StatusCode::OK, &[]).await;
+    let gateway =
+        Gateway::new(Broker::new(&upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]);
+    let tile =
+        format!("/api/endpoint/{SLUG}/ogc/features/collections/Car/tiles/WebMercatorQuad/0/0/0");
+    let response = router(Arc::new(gateway))
+        .oneshot(get(&tile))
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/vnd.mapbox-vector-tile"
+    );
+    assert_eq!(response.headers()["etag"], "W/\"t1\"");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("a body");
+    assert_eq!(bytes.as_ref(), TILE);
+    assert_eq!(
+        hops_of(&hops)[0].path,
+        format!("/x/views/{SLUG}/ogc/features/collections/Car/tiles/WebMercatorQuad/0/0/0")
+    );
 }
