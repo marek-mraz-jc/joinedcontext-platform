@@ -833,6 +833,17 @@
           ],
           "description": "Optional context source query or subscription trigger for derived pipelines (PL-31)."
         },
+        "sourceDeletes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SourceDeletes"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the pipeline follows a record its source removed (PL-96…PL-100); absent, nothing is deleted, as with `mode: never`."
+        },
         "sources": {
           "description": "The inputs, merged by a Bento `broker` when there are several (PL-52, PL-53); `v1alpha2`.",
           "items": {
@@ -921,6 +932,82 @@
       },
       "required": [
         "name"
+      ],
+      "type": "object"
+    },
+    "SourceDeleteMode": {
+      "description": "How a pipeline follows deletions at its source (PL-96).",
+      "oneOf": [
+        {
+          "description": "Nothing is deleted when the source drops a record; said so in the editor.",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An id missing from `misses` consecutive complete runs is deleted, within `maxShare`.",
+          "enum": [
+            "snapshot"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A mapped record for which `deletedWhen` holds deletes the entity of its id.",
+          "enum": [
+            "events"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The entity ends by a rolling `spec.lifetime`, renewed by each write.",
+          "enum": [
+            "lease"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SourceDeletes": {
+      "additionalProperties": false,
+      "description": "`spec.sourceDeletes` (PL-96).",
+      "properties": {
+        "deletedWhen": {
+          "description": "`events`: a Bloblang query on the mapped record, true when the source says the record is deleted (for example `this.status.value == \"withdrawn\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maxShare": {
+          "description": "`snapshot`: the most of the ledger, in percent (1 to 100, default 10), one run deletes; a run that would delete more deletes nothing and is held.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "misses": {
+          "description": "`snapshot`: consecutive complete runs an id is missing from before it goes, 1 to 10 (default 2).",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SourceDeleteMode"
+            }
+          ],
+          "description": "`never`, `snapshot`, `events` or `lease`."
+        }
+      },
+      "required": [
+        "mode"
       ],
       "type": "object"
     },

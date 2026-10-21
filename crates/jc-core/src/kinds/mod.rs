@@ -30,6 +30,7 @@ pub mod organization;
 pub mod pipeline;
 pub mod pipeline_identity;
 pub mod pipeline_lifetime;
+pub mod pipeline_source_deletes;
 pub mod policy;
 pub mod role;
 pub mod service_account;
@@ -108,6 +109,7 @@ pub use pipeline::{
     ReplaceConflict, SourceQuery, Step, SubscriptionTrigger, TemplatePart, TemporalWindow, Trigger,
 };
 pub use pipeline_lifetime::{AttributeLifetime, End, Lifetime, LifetimeMode};
+pub use pipeline_source_deletes::{SourceDeleteMode, SourceDeletes};
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PlatformAction, PolicyEffect,
     PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
