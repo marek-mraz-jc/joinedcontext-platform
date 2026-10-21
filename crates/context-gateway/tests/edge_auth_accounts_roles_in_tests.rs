@@ -20,6 +20,7 @@ fn role(role: &str, space: Option<&str>, project: Option<&str>, organization: bo
         context_space: space.map(str::to_owned),
         project: project.map(str::to_owned),
         organization,
+        validity: None,
     }
 }
 
@@ -181,4 +182,35 @@ fn a_hundred_bindings_answer_only_the_ones_in_scope() {
     roles.push(role("reader", Some("mobility"), None, false));
     let a = account(roles);
     assert_eq!(a.roles_in("helsinki", "mobility"), set(&["reader"]));
+}
+
+/// A grant with a validity window is a role only inside it (AG-131): an expired grant stops at
+/// its `notAfter`, before the Portal removes it from the manifest.
+#[test]
+fn a_grant_outside_its_validity_is_not_a_role() {
+    use chrono::{TimeZone, Utc};
+    use jc_core::kinds::role::BindingValidity;
+    let until = Utc.with_ymd_and_hms(2026, 10, 21, 12, 0, 0).unwrap();
+    let mut scoped = role("writer", Some("mobility"), None, false);
+    scoped.validity = Some(BindingValidity {
+        not_before: Some(Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap()),
+        not_after: Some(until),
+    });
+    let a = account(vec![scoped, role("reader", Some("mobility"), None, false)]);
+    assert_eq!(
+        a.roles_in_at("helsinki", "mobility", until),
+        set(&["reader", "writer"])
+    );
+    assert_eq!(
+        a.roles_in_at("helsinki", "mobility", until + chrono::Duration::seconds(1)),
+        set(&["reader"])
+    );
+    assert_eq!(
+        a.roles_in_at(
+            "helsinki",
+            "mobility",
+            Utc.with_ymd_and_hms(2026, 9, 30, 23, 59, 59).unwrap()
+        ),
+        set(&["reader"])
+    );
 }

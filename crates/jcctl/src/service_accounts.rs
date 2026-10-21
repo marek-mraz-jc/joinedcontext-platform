@@ -92,6 +92,23 @@ fn policy_spec(
         "operations": binding.operations,
     });
 
+    // The grant's window is the Policy's, so the PDP stops granting its operations at the
+    // binding's `notAfter`, not when the Portal next removes the binding (AG-131).
+    if let Some(window) = binding
+        .validity
+        .as_ref()
+        .filter(|w| w.not_before.is_some() || w.not_after.is_some())
+    {
+        let mut validity = serde_json::Map::new();
+        if let Some(from) = window.not_before {
+            validity.insert("from".to_owned(), json!(from));
+        }
+        if let Some(to) = window.not_after {
+            validity.insert("to".to_owned(), json!(to));
+        }
+        spec["validity"] = Value::Object(validity);
+    }
+
     // The types whitelist becomes the policy's entity selector; without one the grant
     // covers every type in the space, which is what an unrestricted role binding means.
     if !binding.types.is_empty() {

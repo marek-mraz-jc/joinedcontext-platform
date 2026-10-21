@@ -207,3 +207,28 @@ fn a_long_account_role_and_space_still_give_a_valid_policy_name() {
         "two bindings that differ past the cut keep two names",
     );
 }
+
+/// AG-131: a grant's window travels into the Policy it compiles to, so the PDP (whose Policy
+/// validity is tested in context-gateway's evaluator tests) refuses its operations after
+/// `notAfter`, before the Portal removes the binding.
+#[test]
+fn a_grant_window_becomes_the_policy_validity() {
+    let timed = SERVICE_ACCOUNT.replace(
+        "      operations: [createEntity, updateAttrs]\n",
+        "      operations: [createEntity, updateAttrs]\n      validity: { notBefore: \"2026-10-01T00:00:00Z\", notAfter: \"2026-11-01T00:00:00Z\" }\n",
+    );
+    let policies = owner_policies(&manifest(&timed), "banskabystrica.sk");
+    assert_eq!(policies.len(), 1);
+    let spec: jc_core::kinds::PolicySpec =
+        serde_json::from_value(policies[0].spec.clone()).expect("the rendered Policy parses");
+    let validity = spec.validity.expect("the window is carried");
+    assert_eq!(validity.from, Some("2026-10-01T00:00:00Z".parse().unwrap()));
+    assert_eq!(validity.to, Some("2026-11-01T00:00:00Z".parse().unwrap()));
+    // No window, no validity: an open grant stays open.
+    assert!(
+        owner_policies(&manifest(SERVICE_ACCOUNT), "banskabystrica.sk")[0]
+            .spec
+            .get("validity")
+            .is_none()
+    );
+}
