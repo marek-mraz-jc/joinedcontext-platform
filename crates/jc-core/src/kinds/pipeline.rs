@@ -101,6 +101,10 @@ pub struct PipelineSpec {
     /// rendered stream writes their `expiresAt` after the author's steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
+    /// Which history rows the broker keeps of each written attribute and where the time of a
+    /// row comes from (PL-102…PL-106).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<super::pipeline_history::History>,
 }
 
 /// The longest expiry window, in hours: a year (PL-64).
@@ -1037,6 +1041,14 @@ impl PipelineSpec {
                 author_texts: &self.author_texts(),
             };
             super::pipeline_lifetime::validate(&self.lifetime, &context)?;
+        }
+        if !self.history.is_empty() {
+            let outputs = self.outputs();
+            let written: Option<std::collections::BTreeSet<&str>> = outputs
+                .iter()
+                .map(|out| out.entity_type.as_deref())
+                .collect();
+            super::pipeline_history::validate(&self.history, written.as_ref())?;
         }
 
         Ok(())
