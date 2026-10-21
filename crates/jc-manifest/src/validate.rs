@@ -1675,36 +1675,71 @@ fn surfaces_without_their_model(repo_dir: &Path, repo: &Repository) -> Vec<(Loca
         if wanted.is_empty() {
             continue;
         }
+        let location = (resource.path.clone(), resource.document, resource.line);
+        let endpoint = format!(
+            "{}/{}",
+            id.namespace.as_deref().unwrap_or_default(),
+            id.name
+        );
+        // A draft can still change under a public feed (DM-26).
+        let lifecycle = space_model(repo, id.namespace.as_deref(), space)
+            .map(|(model, _)| model.lifecycle)
+            .filter(|lifecycle| !lifecycle.backs_surfaces());
+        if let Some(lifecycle) = lifecycle {
+            for representation in wanted {
+                refused.push((
+                    location.clone(),
+                    format!(
+                        "Endpoint {endpoint}: `{representation}` needs a published data model in space {space}; its model is {} (EP-125, DM-26)",
+                        lifecycle.as_str()
+                    ),
+                ));
+            }
+            continue;
+        }
         let linkml = space_linkml(repo_dir, repo, id.namespace.as_deref(), space);
         for representation in wanted {
             let gap = match &linkml {
                 // A space without a model has no type at all.
-                None => Ok(representation
-                    .requirement()
-                    .map(|need| format!("the type {}", need.entity_type))),
+                None => Ok(representation.missing_model_gap()),
                 Some(Err(err)) => Err(err.clone()),
                 Some(Ok(text)) => representation.model_gap(text),
             };
             let message = match gap {
                 Ok(None) => continue,
                 Ok(Some(gap)) => format!(
-                    "Endpoint {}/{}: `{representation}` needs {gap} in the data model of space {space} (EP-125)",
-                    id.namespace.as_deref().unwrap_or_default(),
-                    id.name
+                    "Endpoint {endpoint}: `{representation}` needs {gap} in the data model of space {space} (EP-125)"
                 ),
                 Err(err) => format!(
-                    "Endpoint {}/{}: `{representation}` cannot be checked against the data model of space {space}: {err} (EP-125)",
-                    id.namespace.as_deref().unwrap_or_default(),
-                    id.name
+                    "Endpoint {endpoint}: `{representation}` cannot be checked against the data model of space {space}: {err} (EP-125)"
                 ),
             };
-            refused.push((
-                (resource.path.clone(), resource.document, resource.line),
-                message,
-            ));
+            refused.push((location.clone(), message));
         }
     }
     refused
+}
+
+/// A space's own data model and its manifest path, a published one first: `None` when the space
+/// has none.
+fn space_model(
+    repo: &Repository,
+    namespace: Option<&str>,
+    space: &str,
+) -> Option<(DataModelSpec, PathBuf)> {
+    repo.iter()
+        .filter(|(model, _)| model.kind == "DataModel" && model.namespace.as_deref() == namespace)
+        .filter_map(|(_, model)| {
+            serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
+                .ok()
+                .map(|spec| (spec, model.path.clone()))
+        })
+        .filter(|(model, _)| {
+            model.context_space_ref.as_deref() == Some(space)
+                && model.lifecycle != DataModelLifecycle::Mirrored
+                && model.validate().is_ok()
+        })
+        .min_by_key(|(model, _)| !model.lifecycle.backs_surfaces())
 }
 
 /// The LinkML source of a space's own data model: `None` when the space has none, `Err` when its
@@ -1715,31 +1750,19 @@ fn space_linkml(
     namespace: Option<&str>,
     space: &str,
 ) -> Option<std::result::Result<String, String>> {
-    repo.iter()
-        .filter(|(model, _)| model.kind == "DataModel" && model.namespace.as_deref() == namespace)
-        .filter_map(|(_, model)| {
-            serde_json::from_value::<DataModelSpec>(model.manifest.spec.clone())
-                .ok()
-                .map(|spec| (spec, model.path.clone()))
+    space_model(repo, namespace, space).map(|(model, path)| {
+        let file = repo_dir
+            .join(&path)
+            .parent()
+            .map(|dir| dir.join(&model.linkml))
+            .unwrap_or_else(|| repo_dir.join(&model.linkml));
+        std::fs::read_to_string(&file).map_err(|err| {
+            format!(
+                "its LinkML source cannot be read at `{}`: {err}",
+                file.display()
+            )
         })
-        .find(|(model, _)| {
-            model.context_space_ref.as_deref() == Some(space)
-                && model.lifecycle != DataModelLifecycle::Mirrored
-                && model.validate().is_ok()
-        })
-        .map(|(model, path)| {
-            let file = repo_dir
-                .join(&path)
-                .parent()
-                .map(|dir| dir.join(&model.linkml))
-                .unwrap_or_else(|| repo_dir.join(&model.linkml));
-            std::fs::read_to_string(&file).map_err(|err| {
-                format!(
-                    "its LinkML source cannot be read at `{}`: {err}",
-                    file.display()
-                )
-            })
-        })
+    })
 }
 
 /// An Endpoint's `spec.display` names only types and slots of its projection: the space's model,
