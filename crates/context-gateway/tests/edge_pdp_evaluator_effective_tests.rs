@@ -58,6 +58,7 @@ fn jana() -> Subject {
         groups: BTreeSet::from(["ovzdusie-stewards".to_owned()]),
         roles: BTreeSet::from(["portal-viewer".to_owned()]),
         service_account: Some("pipeline-runner".to_owned()),
+        service_account_project: None,
         did: Some("did:web:banskabystrica.sk:agents:kpi".to_owned()),
         agreement: None,
         via: None,
@@ -88,6 +89,7 @@ fn a_principal_kind_matches_only_its_own_field() {
         groups: BTreeSet::from(["shared-name".to_owned()]),
         roles: BTreeSet::new(),
         service_account: None,
+        service_account_project: None,
         did: None,
         agreement: None,
         // The account a delegated call came through is never a principal of it (AG-95).

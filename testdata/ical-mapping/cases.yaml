@@ -1,0 +1,133 @@
+# Mapping -> the gaps the model check reports, in order (empty: accepted). The broker's render
+# cases (entities -> .ics and skips, T-4901) extend each case with `entities`, `ics` and `skips`.
+default-preset:
+  ical: {}
+  gaps: []
+sdm-event-explicit:
+  ical: { preset: sdm-event }
+  gaps: []
+schema-org-preset:
+  ical: { preset: schema-org }
+  gaps: []
+preset-with-overrides:
+  ical:
+    preset: sdm-event
+    mapping:
+      LOCATION: { join: [address.streetAddress, address.addressLocality], separator: ", " }
+      SUMMARY: { attribute: name, language: sk, truncate: 200 }
+      DTEND: { attribute: lastDay, date: date, endInclusive: true }
+      CATEGORIES: { attribute: category, map: { sport: Šport, music: Hudba } }
+      STATUS: { attribute: eventStatus, map: { EventScheduled: CONFIRMED, EventCancelled: CANCELLED }, default: TENTATIVE }
+      CLASS: { constant: PUBLIC }
+  gaps: []
+custom-firstof-ending-required:
+  ical:
+    mapping:
+      DTSTART: startDate
+      SUMMARY: { firstOf: [title, name] }
+      URL: url
+  gaps: []
+missing-dtstart:
+  ical:
+    mapping: { SUMMARY: name }
+  gaps:
+    - "`ical` maps no DTSTART, which every calendar entry needs"
+dtstart-from-text:
+  ical:
+    preset: sdm-event
+    mapping: { DTSTART: name }
+  gaps:
+    - "`ical` maps DTSTART to `name`, a LanguageProperty; DTSTART takes date or datetime"
+summary-not-required:
+  ical:
+    preset: sdm-event
+    mapping: { SUMMARY: description }
+  gaps:
+    - "`ical` maps SUMMARY to `description`, which is not a required attribute of Event: mark it required or end a firstOf with a required one"
+unknown-attribute:
+  ical:
+    preset: sdm-event
+    mapping: { DESCRIPTION: summaryText }
+  gaps:
+    - "`ical` maps DESCRIPTION to `summaryText`, which Event does not have"
+unknown-member:
+  ical:
+    preset: sdm-event
+    mapping: { LOCATION: address.city }
+  gaps:
+    - "`ical` maps LOCATION to `address.city`, and PostalAddress has no `city`"
+member-of-plain-value:
+  ical:
+    preset: sdm-event
+    mapping: { LOCATION: description.text }
+  gaps:
+    - "`ical` maps LOCATION to `description.text`, but `Event`'s value has no members (range string)"
+url-from-plain-string:
+  ical:
+    preset: sdm-event
+    mapping: { URL: homepage }
+  gaps:
+    - "`ical` maps URL to `homepage`, range string; URL takes uri"
+geo-from-text:
+  ical:
+    preset: sdm-event
+    mapping: { GEO: address }
+  gaps:
+    - "`ical` maps GEO to `address`, range PostalAddress; GEO takes a GeoProperty"
+organizer-relationship:
+  ical:
+    preset: sdm-event
+    mapping: { ORGANIZER: organizer }
+  gaps:
+    - "`ical` maps ORGANIZER to `organizer`, a Relationship; ORGANIZER takes uri"
+status-enum-not-covered:
+  ical:
+    preset: sdm-event
+    mapping: { STATUS: { attribute: eventStatus, map: { EventScheduled: CONFIRMED } } }
+  gaps:
+    - "`ical` maps STATUS from an enum without EventCancelled, EventPostponed: map each value or name a default"
+status-bad-value:
+  ical:
+    preset: sdm-event
+    mapping: { STATUS: { attribute: eventStatus, default: DONE } }
+  gaps:
+    - "`ical` STATUS: STATUS takes TENTATIVE, CONFIRMED or CANCELLED, not DONE"
+dtend-and-duration:
+  ical:
+    mapping: { DTSTART: startDate, SUMMARY: name, DTEND: endDate, DURATION: description }
+  gaps:
+    - "`ical` maps both DTEND and DURATION; RFC 5545 allows one"
+fixed-uid:
+  ical:
+    preset: sdm-event
+    mapping: { UID: url }
+  gaps:
+    - "`ical` UID: UID is fixed to the entity id and cannot be mapped"
+remap-not-allowed:
+  ical:
+    preset: sdm-event
+    mapping: { GEO: { attribute: location, truncate: 10 } }
+  gaps:
+    - "`ical` GEO: does not take `truncate`; it takes firstOf"
+class-not-public:
+  ical:
+    preset: sdm-event
+    mapping: { CLASS: { constant: PRIVATE } }
+  gaps:
+    - "`ical` CLASS: CLASS takes only `constant: PUBLIC`"
+expression-refused:
+  ical:
+    preset: sdm-event
+    mapping: { SUMMARY: "{{ name }}" }
+  gaps:
+    - "`ical` SUMMARY: `{{ name }}` is not an attribute path (names joined by dots, at most three)"
+two-sources:
+  ical:
+    preset: sdm-event
+    mapping: { SUMMARY: { attribute: name, firstOf: [title, name] } }
+  gaps:
+    - "`ical` SUMMARY: needs exactly one of attribute, firstOf, join or constant"
+type-missing:
+  ical: { type: Festival }
+  gaps:
+    - "`ical` maps the type Festival, which the data model does not have"

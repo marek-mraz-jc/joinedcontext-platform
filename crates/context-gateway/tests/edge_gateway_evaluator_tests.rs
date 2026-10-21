@@ -111,6 +111,7 @@ fn a_policy_is_about_exactly_one_kind_of_principal() {
         groups: set(&["stewards"]),
         roles: set(&["public"]),
         service_account: Some("collector".to_owned()),
+        service_account_project: None,
         ..Subject::default()
     };
 

@@ -27,6 +27,9 @@ pub struct Subject {
     pub user: Option<String>,
     /// The service account, when a workload is calling (PF-34).
     pub service_account: Option<String>,
+    /// The project that service account belongs to: a `{project}/{name}` assignee matches only
+    /// that project's account (PL-92).
+    pub service_account_project: Option<String>,
     /// The groups the token asserts.
     pub groups: BTreeSet<String>,
     /// The roles the token asserts. An anonymous caller holds exactly `public` (GW22).
@@ -62,7 +65,13 @@ impl Subject {
             PrincipalKind::User => self.user.as_deref() == Some(id),
             PrincipalKind::Group => self.groups.contains(id),
             PrincipalKind::Role => self.roles.contains(id),
-            PrincipalKind::ServiceAccount => self.service_account.as_deref() == Some(id),
+            PrincipalKind::ServiceAccount => match id.split_once('/') {
+                Some((project, name)) => {
+                    self.service_account_project.as_deref() == Some(project)
+                        && self.service_account.as_deref() == Some(name)
+                }
+                None => self.service_account.as_deref() == Some(id),
+            },
             PrincipalKind::Did => self.did.as_deref() == Some(id),
         }
     }
@@ -592,3 +601,30 @@ fn parses(filter: &str) -> bool {
 /// A filter no entity satisfies, whether it has the attribute or not: what a policy whose own
 /// `q` does not parse grants.
 pub const NOTHING: &str = "(jcUnreadablePolicyQ==0;jcUnreadablePolicyQ!=0)";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PL-92: `{project}/{name}` names one project's account; a bare name any admitted project's.
+    #[test]
+    fn a_qualified_service_account_assignee_matches_only_that_projects_account() {
+        let account = |project: &str| Subject {
+            service_account: Some("pl-air-index".to_owned()),
+            service_account_project: Some(project.to_owned()),
+            ..Subject::default()
+        };
+        let qualified = Principal::new(PrincipalKind::ServiceAccount, "city-kpis/pl-air-index");
+        let bare = Principal::new(PrincipalKind::ServiceAccount, "pl-air-index");
+        assert!(account("city-kpis").is(&qualified));
+        assert!(!account("other").is(&qualified));
+        assert!(account("other").is(&bare));
+        let no_project = Subject {
+            service_account: Some("pl-air-index".to_owned()),
+            ..Subject::default()
+        };
+        assert!(!no_project.is(&qualified));
+        let wrong_name = Principal::new(PrincipalKind::ServiceAccount, "city-kpis/pl-other");
+        assert!(!account("city-kpis").is(&wrong_name));
+    }
+}

@@ -1,0 +1,36 @@
+# The Event model every case of this directory is checked against (EP-125, API/02 §8b).
+id: https://example.org/events
+name: events
+default_range: string
+slots:
+  name:
+    required: true
+    annotations: { ngsi_ld_kind: LanguageProperty }
+  startDate: { range: datetime, required: true }
+  endDate: { range: datetime }
+  lastDay: { range: date }
+  description: {}
+  title: {}
+  address: { range: PostalAddress, inlined: true }
+  streetAddress: {}
+  addressLocality: {}
+  url: { range: uri }
+  homepage: {}
+  eventStatus: { range: EventStatus }
+  category: { range: EventCategory }
+  organizer: { range: Organization, annotations: { ngsi_ld_kind: Relationship } }
+classes:
+  Entity:
+    abstract: true
+  Event:
+    is_a: Entity
+    slots: [name, startDate, endDate, lastDay, description, title, address, url, homepage, eventStatus, category, organizer]
+  PostalAddress:
+    slots: [streetAddress, addressLocality]
+  Organization:
+    slots: [name]
+enums:
+  EventStatus:
+    permissible_values: { EventScheduled: {}, EventCancelled: {}, EventPostponed: {} }
+  EventCategory:
+    permissible_values: { sport: {}, music: {} }

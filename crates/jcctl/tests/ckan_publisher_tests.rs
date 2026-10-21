@@ -206,6 +206,7 @@ fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
             format!("{base}/mcp"),
             format!("{base}/ogc/features/"),
             format!("{base}/schema/index.json"),
+            format!("{base}/"),
         ]
     );
     let formats: Vec<&str> = dataset["resources"]
@@ -216,7 +217,7 @@ fn every_enabled_representation_becomes_a_resource_under_the_endpoint() {
         .collect();
     assert_eq!(
         formats,
-        vec!["NGSI-LD", "STA", "CSV", "MCP", "OGCFEAT", "JSON"]
+        vec!["NGSI-LD", "STA", "CSV", "MCP", "OGCFEAT", "JSON", "JSON-LD"]
     );
 }
 
@@ -412,6 +413,7 @@ fn a_disabled_representation_loses_its_resource() {
             // GeoJSON and MCP stay without being listed (EP-10, EP-24); the CSV is gone.
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/mcp",
             "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/schema/index.json",
+            "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y/",
         ]
     );
     // The update addresses the dataset by the id CKAN minted, not by a name that may move.
@@ -699,6 +701,7 @@ fn every_schema_artifact_the_record_lists_becomes_its_own_resource() {
             format!("{base}/ngsi-ld/v1/"),
             format!("{base}/mcp"),
             format!("{base}/schema/index.json"),
+            format!("{base}/"),
             format!("{base}/schema/v2/model.shacl.ttl"),
             format!("{base}/schema/v2/context.jsonld"),
         ],
@@ -1252,8 +1255,20 @@ fn a_default_endpoint_publishes_every_surface_with_its_usage() {
         let said = description(&dataset, suffix);
         assert!(said.contains(says), "{suffix}: {said}");
     }
-    // T-4597: CSV is the one file, beside the APIs and the schema.
-    assert_eq!(resource_urls(&dataset).len(), 7, "{dataset:#}");
+    // EP-143, T-4846: the record the dataset is made from.
+    let record = dataset["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .find(|r| r["url"] == json!(format!("{base}/")))
+        .expect("the DCAT-AP record");
+    assert_eq!(record["format"], "JSON-LD");
+    assert_eq!(record["mimetype"], "application/ld+json");
+    assert!(record["description"]
+        .as_str()
+        .is_some_and(|d| d.contains("DCAT-AP")));
+    // T-4597: CSV is the one file, beside the APIs, the schema and the record.
+    assert_eq!(resource_urls(&dataset).len(), 8, "{dataset:#}");
     assert!(!resource_urls(&dataset)
         .iter()
         .any(|url| url.contains("/sta/")));
