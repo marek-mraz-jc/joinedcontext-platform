@@ -584,6 +584,7 @@ fn a_retention_rule_records_on_change_with_a_heartbeat_dm_108() {
         "{ entityType: Spot, history: P90D, record: every, attributes: { status: { record: onChange, heartbeat: PT1H }, location: { record: onChange, minDistance: 5, heartbeat: PT1H } } }",
         "{ entityType: Spot, history: P90D, record: onChange, heartbeat: PT1H, deadband: 0.5, attributes: { count: { record: every } } }",
         "{ entityType: Spot, record: onChange, heartbeat: PT15M }",
+        "{ entityType: Dock, history: P7D, record: observed, attributes: { dateModified: { record: never } } }",
     ] {
         assert!(rule(valid).is_ok(), "{valid}");
     }
@@ -603,6 +604,14 @@ fn a_retention_rule_records_on_change_with_a_heartbeat_dm_108() {
         (
             "{ entityType: Spot, heartbeat: PT1H }",
             "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, record: observed, heartbeat: PT1H }",
+            "spec.retention.record",
+        ),
+        (
+            "{ entityType: Spot, attributes: { dateModified: { record: never, deadband: 1 } } }",
+            "spec.retention.attributes",
         ),
         (
             "{ entityType: Spot, record: onChange, heartbeat: PT1H, deadband: -1 }",

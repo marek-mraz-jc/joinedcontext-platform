@@ -502,7 +502,8 @@ pub struct RetentionRule {
     /// Why the type keeps its whole history: required with `history: forever` (T-4275).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// How the type records history: `every` (the default) or `onChange` (DM-108).
+    /// How the type records history: `every`, `observed`, `never` or `onChange` (DM-108); unset,
+    /// the broker's default, `observed` on the platform (DM-132).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<String>,
     /// With `onChange`, the longest gap between two rows of an attribute, PT1M to P3650D (DM-109).
@@ -523,7 +524,7 @@ pub struct RetentionRule {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AttributeRecording {
-    /// `every` or `onChange`; absent takes the type's.
+    /// `every`, `observed`, `never` or `onChange`; absent takes the type's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<String>,
     /// As the type's, for this attribute.
@@ -541,6 +542,10 @@ pub struct AttributeRecording {
 pub const RECORD_EVERY: &str = "every";
 /// `record` of a rule that writes a row on a change and once per `heartbeat` (DM-109).
 pub const RECORD_ON_CHANGE: &str = "onChange";
+/// `record` of a rule that writes a row only for a newer `observedAt` (DM-132).
+pub const RECORD_OBSERVED: &str = "observed";
+/// `record` of an attribute that keeps no history, as a bookkeeping `dateModified` (DM-132).
+pub const RECORD_NEVER: &str = "never";
 
 /// What is wrong with one level of a recording, the type's or an attribute's, whose `record` is
 /// `record` once the type's is taken in: a name other than the two, an `onChange` without a
@@ -550,8 +555,16 @@ fn recording_problem(
     heartbeat: Option<&str>,
     thresholds: [Option<&serde_json::Number>; 2],
 ) -> Option<&'static str> {
-    if record.is_some_and(|r| r != RECORD_EVERY && r != RECORD_ON_CHANGE) {
-        return Some("record is every or onChange (DM-108)");
+    if record.is_some_and(|r| {
+        ![
+            RECORD_EVERY,
+            RECORD_ON_CHANGE,
+            RECORD_OBSERVED,
+            RECORD_NEVER,
+        ]
+        .contains(&r)
+    }) {
+        return Some("record is every, observed, never or onChange (DM-108, DM-132)");
     }
     let on_change = record == Some(RECORD_ON_CHANGE);
     if on_change && !heartbeat.is_some_and(|h| retention_seconds(h).is_some()) {
