@@ -36,6 +36,7 @@ pub mod secret;
 pub mod system_members;
 pub mod units;
 pub mod urn;
+pub mod yaml_fmt;
 
 pub use envelope::{
     annotations, de_api_version_of, de_kind, serves, validate_locales, Build, Condition, Kind,

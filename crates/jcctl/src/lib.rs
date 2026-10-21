@@ -14,6 +14,7 @@ pub mod commands;
 pub mod csr;
 pub mod diff;
 pub mod entities;
+pub mod fmt;
 pub mod gateway;
 pub mod lanes;
 pub mod login;
