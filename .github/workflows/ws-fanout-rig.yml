@@ -1,6 +1,8 @@
 # The WebSocket fan-out rig (T-4133, ADR-N-049 §2.9, EP-115): N clients with random filters on one
 # Endpoint, every notification checked against antares-matcher's ground truth, latency, memory
-# and CPU measured. On a runner of its own, never dev and never a shared host. On demand, and on a
+# and CPU measured. Job `abuse` (T-4902, API/07 §3): the gateway's limits under abuse (10 000
+# upgrades from one address, a slow consumer, 1 MiB frames, a deflate bomb, a subscribe flood, a
+# reconnect storm), each with the control client's p99, the resident memory cap and no panic. On a runner of its own, never dev and never a shared host. On demand, and on a
 # push that changes the rig or the fan-out, so a change to either is proven before it is merged.
 name: ws-fanout-rig
 
@@ -13,7 +15,10 @@ on:
     paths:
       - "crates/context-gateway/src/fanout.rs"
       - "crates/context-gateway/src/fanout/**"
+      - "crates/context-gateway/src/handlers/ws.rs"
       - "crates/context-gateway/tests/ws_fanout_rig.rs"
+      - "crates/context-gateway/tests/ws_abuse_rig.rs"
+      - "crates/context-gateway/tests/rig/**"
       - ".github/workflows/ws-fanout-rig.yml"
 
 permissions:
@@ -49,5 +54,23 @@ jobs:
         with:
           name: ws-fanout-${{ matrix.sockets }}-${{ matrix.rate }}
           path: ${{ runner.temp }}/ws-fanout-${{ matrix.sockets }}-${{ matrix.rate }}.json
+          if-no-files-found: ignore
+          retention-days: 30
+  abuse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # 10 000 upgrade attempts from one address need more descriptors than the default.
+      - run: ulimit -n 65536 && cargo test --release --locked -p context-gateway --test ws_abuse_rig -- --nocapture
+        env:
+          RIG_REPORT: ${{ runner.temp }}/ws-abuse.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ws-abuse
+          path: ${{ runner.temp }}/ws-abuse.json
           if-no-files-found: ignore
           retention-days: 30

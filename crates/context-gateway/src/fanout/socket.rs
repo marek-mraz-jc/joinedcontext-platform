@@ -73,6 +73,9 @@ const TICK: Duration = Duration::from_secs(5);
 const PING: Duration = Duration::from_secs(30);
 /// A connection with no subscription that sent nothing for this long ends (API/07 §3).
 const IDLE: Duration = Duration::from_secs(60);
+/// A client whose socket takes no frame for this long is not reading: it is closed as `overflow`
+/// and gives its slot back, instead of parking its session on a full send buffer (T-4902).
+const STALL: Duration = Duration::from_secs(10);
 /// The entities a snapshot page asks for.
 const PAGE: usize = 1000;
 /// What the broker writes: a notification of up to 1 MiB (Antares `MAX_NOTIFICATION_BYTES`).
@@ -660,23 +663,36 @@ pub async fn session(
                     ended = Some(Ended::NoPong);
                 } else if hub.subscriptions(conn) == 0 && last_message.elapsed() > IDLE {
                     ended = Some(Ended::Closing("idle"));
-                } else if to_client.send(ws::Message::Ping(Vec::new().into())).await.is_err() {
-                    ended = Some(Ended::Closed);
+                } else {
+                    ended = deliver(&mut to_client, ws::Message::Ping(Vec::new().into())).await;
                 }
             }
             () = &mut expired => ended = Some(Ended::Closing("lifetime")),
         }
         for text in outgoing {
-            if to_client.send(ws::Message::text(text)).await.is_err() {
-                ended = Some(Ended::Closed);
+            if let Some(end) = deliver(&mut to_client, ws::Message::text(text)).await {
+                ended = Some(end);
                 break;
             }
         }
     }
     let ended = ended.unwrap_or(Ended::Closed);
-    finish(&mut to_client, &ended).await;
+    // A stalled client takes no close frame either.
+    let _ = tokio::time::timeout(STALL, finish(&mut to_client, &ended)).await;
     hub.close(conn, &name, &token, sent);
     ended
+}
+
+/// Sends one frame within [`STALL`]: how the session ends when it cannot.
+async fn deliver(
+    to_client: &mut SplitSink<WebSocket, ws::Message>,
+    message: ws::Message,
+) -> Option<Ended> {
+    match tokio::time::timeout(STALL, to_client.send(message)).await {
+        Ok(Ok(())) => None,
+        Ok(Err(_)) => Some(Ended::Closed),
+        Err(_) => Some(Ended::Closing("overflow")),
+    }
 }
 
 /// The close frame that ends a session. After the client's own close, the answering close frame
