@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::extract::ws::{self, WebSocket};
 use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Method};
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
@@ -26,14 +27,41 @@ pub const PER_SPACE: usize = 1000;
 /// `JC_GATEWAY_WS_PER_SPACE`: the space cap, raised for a measurement (the `ws-fanout` rig).
 pub fn per_space() -> usize {
     static CAP: OnceLock<usize> = OnceLock::new();
-    *CAP.get_or_init(|| {
-        std::env::var("JC_GATEWAY_WS_PER_SPACE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(PER_SPACE)
-    })
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_PER_SPACE", PER_SPACE))
 }
+/// Hubs the gateway holds when `JC_GATEWAY_WS_HUBS` names no other number (API/07 §3): each is one
+/// broker WebSocket and up to `JC_GATEWAY_WS_ENTITIES` entities, so this bounds both.
+pub const HUBS: usize = 64;
+/// Hubs one space may hold when `JC_GATEWAY_WS_HUBS_PER_SPACE` names no other number: under the
+/// broker's 50 connections per tenant, so the broker never refuses a hub the gateway admitted.
+pub const HUBS_PER_SPACE: usize = 32;
+
+/// A positive whole number from `name`, else `default`.
+fn env_cap(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(default)
+}
+
+/// `JC_GATEWAY_WS_HUBS`: the hubs, and so the broker connections, of this replica.
+pub fn hubs_cap() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_HUBS", HUBS))
+}
+
+/// `JC_GATEWAY_WS_HUBS_PER_SPACE`: the hubs one space may hold in this replica.
+pub fn hubs_per_space() -> usize {
+    static CAP: OnceLock<usize> = OnceLock::new();
+    *CAP.get_or_init(|| env_cap("JC_GATEWAY_WS_HUBS_PER_SPACE", HUBS_PER_SPACE))
+}
+
+/// Frames a client may send at once, then [`MESSAGES_PER_SEC`] a second; past that the
+/// connection closes with `1008` (API/07 §3).
+const MESSAGE_BURST: f64 = 100.0;
+const MESSAGES_PER_SEC: f64 = 20.0;
+
 /// How long a hub keeps its upstream after its last client left (ADR-N-049 §2.1).
 const LINGER: Duration = Duration::from_secs(60);
 /// The upstream's reconnect delay grows to this.
@@ -53,18 +81,13 @@ const FROM_BROKER: usize = 1024 * 1024;
 const NORMAL: u16 = 1000;
 const UNSUPPORTED: u16 = 1003;
 const TOO_BIG: u16 = 1009;
+const POLICY: u16 = 1008;
 const INTERNAL: u16 = 1011;
 
 /// `JC_GATEWAY_WS_ENTITIES`, the entity table's bound per Endpoint (ADR-N-049 §2.2).
 fn bound() -> usize {
     static BOUND: OnceLock<usize> = OnceLock::new();
-    *BOUND.get_or_init(|| {
-        std::env::var("JC_GATEWAY_WS_ENTITIES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(hub::DEFAULT_ENTITIES)
-    })
+    *BOUND.get_or_init(|| env_cap("JC_GATEWAY_WS_ENTITIES", hub::DEFAULT_ENTITIES))
 }
 
 /// Every hub, keyed by `hub_key`: one per Endpoint and caller identity (T-4755).
@@ -78,6 +101,8 @@ pub enum Refused {
     SpaceFull,
     /// The caller's identity is no header value.
     NoIdentity,
+    /// The gateway holds [`hubs_cap`] hubs, or the space [`hubs_per_space`], each with a client.
+    HubsFull,
 }
 
 impl Hubs {
@@ -105,8 +130,10 @@ impl Hubs {
         let hub = match hubs.get(&key) {
             Some((_, hub)) => Arc::clone(hub),
             None => {
+                make_room(&mut hubs, &endpoint.space, hubs_cap(), hubs_per_space())?;
                 let hub = Arc::new(Hub::new(&endpoint.slug, bound()));
                 hubs.insert(key, (endpoint.space.clone(), Arc::clone(&hub)));
+                metrics::gauge!("jc_gateway_ws_hubs").set(hubs.len() as f64);
                 tokio::spawn(upstream(Arc::clone(gateway), Arc::clone(&hub), headers));
                 hub
             }
@@ -115,13 +142,68 @@ impl Hubs {
         Ok(hub::Joined::new(hub, conn, queue))
     }
 
-    /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did.
+    /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did, or
+    /// when [`make_room`] dropped it already.
     fn leave_if_idle(&self, hub: &Arc<Hub>) -> bool {
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
+        let held = hubs.values().any(|(_, held)| Arc::ptr_eq(held, hub));
+        if held && !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
             return false;
         }
         hubs.retain(|_, (_, held)| !Arc::ptr_eq(held, hub));
+        metrics::gauge!("jc_gateway_ws_hubs").set(hubs.len() as f64);
+        true
+    }
+}
+
+/// Makes room for one more hub in `space`: at a cap, drops the hub idle longest (no connection, in
+/// its linger), whose upstream then stops at its next tick; refused when every hub has a client.
+fn make_room(
+    hubs: &mut HashMap<String, (String, Arc<Hub>)>,
+    space: &str,
+    total: usize,
+    per_space: usize,
+) -> Result<(), Refused> {
+    for (cap, in_space) in [(per_space, true), (total, false)] {
+        let counted = |held: &str| !in_space || held == space;
+        if hubs.values().filter(|(held, _)| counted(held)).count() < cap {
+            continue;
+        }
+        let idlest = hubs
+            .iter()
+            .filter(|(_, (held, _))| counted(held))
+            .filter_map(|(key, (_, hub))| Some((hub.idle_for()?, key.clone())))
+            .max();
+        let (_, key) = idlest.ok_or(Refused::HubsFull)?;
+        hubs.remove(&key);
+    }
+    Ok(())
+}
+
+/// A token bucket over the frames one client sends (API/07 §3). It runs before a message is
+/// parsed, so a flood of `x-subscribe`, `x-update` or Pings costs a comparison a frame.
+struct Rate {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Rate {
+    fn new(now: Instant) -> Self {
+        Self {
+            tokens: MESSAGE_BURST,
+            at: now,
+        }
+    }
+
+    /// Whether one more frame at `now` stays within the bound.
+    fn take(&mut self, now: Instant) -> bool {
+        let earned = now.duration_since(self.at).as_secs_f64() * MESSAGES_PER_SEC;
+        self.tokens = (self.tokens + earned).min(MESSAGE_BURST);
+        self.at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
         true
     }
 }
@@ -442,6 +524,24 @@ pub enum Ended {
     NoPong,
     /// The broker refused the hub's upstream subscription.
     Refused,
+    /// The client broke RFC 6455; closed with this code (7.4.1).
+    Broken(u16, &'static str),
+}
+
+impl Ended {
+    /// The `reason` label of `jc_gateway_ws_closed_total`.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::TooBig => "too-big",
+            Self::Binary => "binary",
+            Self::Closing(reason) => reason,
+            Self::NoPong => "no-pong",
+            Self::Refused => "refused",
+            Self::Broken(1007, _) => "not-utf8",
+            Self::Broken(..) => "protocol-error",
+        }
+    }
 }
 
 /// One client connection: welcome, then its messages answered and its queue written, until it
@@ -475,6 +575,7 @@ pub async fn session(
     let mut last_pong = Instant::now();
     let mut last_message = Instant::now();
     let mut first = true;
+    let mut rate = Rate::new(Instant::now());
     let expired = tokio::time::sleep(lifetime);
     tokio::pin!(expired);
     while ended.is_none() {
@@ -482,6 +583,10 @@ pub async fn session(
         tokio::select! {
             read = from_client.next() => {
                 last_message = Instant::now();
+                if matches!(read, Some(Ok(_))) && !rate.take(last_message) {
+                    tracing::warn!(slug = %hub.slug, %principal, "WebSocket client past its message rate");
+                    ended = Some(Ended::Closing("rate"));
+                } else {
                 match read {
                     Some(Ok(ws::Message::Text(text))) => {
                         let replies = answer(&hub, conn, &principal, text.as_str(), first, &mut seq, &mut sent);
@@ -492,9 +597,8 @@ pub async fn session(
                     Some(Ok(ws::Message::Pong(_))) => last_pong = Instant::now(),
                     Some(Ok(ws::Message::Ping(_))) => {}
                     Some(Ok(ws::Message::Close(_))) | None => ended = Some(Ended::Closed),
-                    Some(Err(error)) => {
-                        ended = Some(if too_big(&error) { Ended::TooBig } else { Ended::Closed });
-                    }
+                    Some(Err(error)) => ended = Some(read_error(&error)),
+                }
                 }
             }
             () = queue.ready() => {
@@ -545,11 +649,19 @@ pub async fn session(
         }
     }
     let ended = ended.unwrap_or(Ended::Closed);
-    let close = match &ended {
+    finish(&mut to_client, &ended).await;
+    hub.close(conn, &name, &token, sent);
+    ended
+}
+
+/// The close frame that ends a session. After the client's own close, the answering close frame
+/// tungstenite queued (RFC 6455 5.5.1) reaches the client only when the sink is flushed.
+async fn finish(to_client: &mut SplitSink<WebSocket, ws::Message>, ended: &Ended) {
+    let close = match ended {
         Ended::Closing(reason) => {
             let closing = json!({"metadata": {"x-op": "x-closing", "x-reason": reason}});
             let _ = to_client.send(ws::Message::text(closing.to_string())).await;
-            Some((NORMAL, *reason))
+            Some((if *reason == "rate" { POLICY } else { NORMAL }, *reason))
         }
         Ended::TooBig => Some((TOO_BIG, "a message over 64 KiB")),
         Ended::Binary => Some((UNSUPPORTED, "text frames only")),
@@ -558,6 +670,7 @@ pub async fn session(
             INTERNAL,
             "the context broker refuses this Endpoint's fan-out",
         )),
+        Ended::Broken(code, reason) => Some((*code, *reason)),
         Ended::Closed => None,
     };
     if let Some((code, reason)) = close {
@@ -566,21 +679,27 @@ pub async fn session(
             reason: reason.into(),
         };
         let _ = to_client.send(ws::Message::Close(Some(frame))).await;
+    } else {
+        let _ = to_client.flush().await;
     }
-    hub.close(conn, &name, &token, sent);
-    ended
 }
 
 fn gap(from: u64, to: u64) -> String {
     json!({"metadata": {"x-op": "x-gap", "x-from": from, "x-to": to}}).to_string()
 }
 
-/// Whether a read failed because the client broke the message or frame bound.
-fn too_big(error: &axum::Error) -> bool {
-    use tokio_tungstenite::tungstenite;
-    std::error::Error::source(error)
-        .and_then(|source| source.downcast_ref::<tungstenite::Error>())
-        .is_some_and(|error| matches!(error, tungstenite::Error::Capacity(_)))
+/// How a failed read ends the session: a broken bound or frame closes with its code, any other
+/// error, a dropped connection included, means the client is gone.
+fn read_error(error: &axum::Error) -> Ended {
+    use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+    match std::error::Error::source(error).and_then(|s| s.downcast_ref::<Error>()) {
+        Some(Error::Capacity(_)) => Ended::TooBig,
+        Some(Error::Protocol(p)) if !matches!(p, ProtocolError::ResetWithoutClosingHandshake) => {
+            Ended::Broken(1002, "protocol error")
+        }
+        Some(Error::Utf8(_)) => Ended::Broken(1007, "text is not UTF-8"),
+        _ => Ended::Closed,
+    }
 }
 
 /// The messages that answer one client message, in order.
@@ -763,6 +882,46 @@ mod tests {
             .is_none());
     }
 
+    /// API/07 §3: at either hub cap the hub idle longest goes; one hub past the cap with every hub
+    /// holding a client is refused, and the other space's hubs stay.
+    #[test]
+    fn hubs_are_capped_per_space_and_in_all_and_idle_ones_make_room() {
+        let endpoint = crate::fanout::hub::tests_support::endpoint();
+        let busy = |slug: &str| {
+            let hub = Arc::new(Hub::new(slug, 10));
+            hub.open(Arc::clone(&endpoint), "anonymous".into());
+            hub
+        };
+        let mut hubs: HashMap<String, (String, Arc<Hub>)> = HashMap::new();
+        hubs.insert("a1".into(), ("a".into(), busy("a1")));
+        hubs.insert("b1".into(), ("b".into(), busy("b1")));
+        hubs.insert("a2".into(), ("a".into(), busy("a2")));
+        assert_eq!(make_room(&mut hubs, "a", 10, 2), Err(Refused::HubsFull));
+        assert_eq!(make_room(&mut hubs, "b", 3, 2), Err(Refused::HubsFull));
+        assert_eq!(make_room(&mut hubs, "b", 4, 2), Ok(()));
+
+        hubs.insert("a3".into(), ("a".into(), Arc::new(Hub::new("a3", 10))));
+        assert_eq!(make_room(&mut hubs, "a", 10, 3), Ok(()), "a3 lingers");
+        assert!(!hubs.contains_key("a3"), "{:?}", hubs.keys());
+        assert_eq!(hubs.len(), 3);
+    }
+
+    /// API/07 §3: the burst passes, the next frame is refused, a twentieth of a second earns one
+    /// back, and idle time saves no more than the burst.
+    #[test]
+    fn the_message_rate_holds_a_burst_then_the_pace() {
+        let start = Instant::now();
+        let mut rate = Rate::new(start);
+        assert!((0..100).all(|_| rate.take(start)));
+        assert!(!rate.take(start), "one past the burst");
+        let later = start + Duration::from_millis(50);
+        assert!(rate.take(later));
+        assert!(!rate.take(later));
+        let idle = later + Duration::from_secs(60);
+        assert!((0..100).all(|_| rate.take(idle)));
+        assert!(!rate.take(idle));
+    }
+
     #[test]
     fn a_resume_sends_what_was_missed_after_the_clients_seq() {
         let (hub, conn) = hub_with_closed(&[3, 4, 5]);
@@ -854,5 +1013,70 @@ mod tests {
             echoed[0].contains("\"x-id\":\"s1\"") && echoed[0].contains("\"x-status\":201"),
             "{echoed:?}"
         );
+    }
+
+    /// A session behind a real upgrade, for the RFC 6455 tests.
+    async fn served() -> String {
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(|up: ws::WebSocketUpgrade| async move {
+                up.on_upgrade(|client| async move {
+                    let hub = Arc::new(Hub::new("s", 10));
+                    let endpoint = crate::fanout::hub::tests_support::endpoint();
+                    let (conn, queue) = hub.open(endpoint, "anonymous".into());
+                    let lifetime = Duration::from_secs(60);
+                    session(client, hub, conn, queue, "anonymous".into(), lifetime).await;
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        format!("ws://{addr}/ws")
+    }
+
+    /// The code of the close frame the gateway answers `message` with, skipping its own messages.
+    async fn closes_with(url: &str, message: Message) -> Option<u16> {
+        let (mut ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect");
+        ws.send(message).await.expect("send");
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(Some(Ok(Message::Close(frame)))) => return frame.map(|f| f.code.into()),
+                Ok(Some(Ok(_))) => {}
+                _ => return None,
+            }
+        }
+    }
+
+    /// RFC 6455 5.5.1 and 7.4.1: a client's close is answered with a close frame, and a frame
+    /// that breaks the protocol closes with 1002, text that is not UTF-8 with 1007.
+    #[tokio::test]
+    async fn a_close_is_answered_and_a_broken_frame_closes_with_its_code() {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+        use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        let url = served().await;
+        let bye = CloseFrame {
+            code: NORMAL.into(),
+            reason: "bye".into(),
+        };
+        assert_eq!(
+            closes_with(&url, Message::Close(Some(bye))).await,
+            Some(NORMAL)
+        );
+        let mut rsv = Frame::message(b"{}".to_vec(), OpCode::Data(Data::Text), true);
+        rsv.header_mut().rsv1 = true;
+        assert_eq!(closes_with(&url, Message::Frame(rsv)).await, Some(1002));
+        let reserved = Frame::message(Vec::new(), OpCode::Data(Data::Reserved(3)), true);
+        assert_eq!(
+            closes_with(&url, Message::Frame(reserved)).await,
+            Some(1002)
+        );
+        let latin = Frame::message(vec![0xce, 0xba, 0xff], OpCode::Data(Data::Text), true);
+        assert_eq!(closes_with(&url, Message::Frame(latin)).await, Some(1007));
     }
 }
