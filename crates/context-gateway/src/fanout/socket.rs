@@ -1048,7 +1048,7 @@ mod tests {
                 up.on_upgrade(|client| async move {
                     let hub = Arc::new(Hub::new("s", 10));
                     let endpoint = crate::fanout::hub::tests_support::endpoint();
-                    let (conn, queue) = hub.open(endpoint, "anonymous".into());
+                    let (conn, queue) = hub.open(endpoint, "anonymous".into(), None);
                     let lifetime = Duration::from_secs(60);
                     session(client, hub, conn, queue, "anonymous".into(), lifetime).await;
                 })
