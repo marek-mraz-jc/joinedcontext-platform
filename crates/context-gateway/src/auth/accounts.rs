@@ -41,6 +41,8 @@ pub struct ScopedRole {
     pub project: Option<String>,
     /// Whether it is scoped to the whole organization.
     pub organization: bool,
+    /// When it applies; outside the window it is no role (AG-131).
+    pub validity: Option<jc_core::kinds::role::BindingValidity>,
 }
 
 impl Account {
@@ -49,8 +51,20 @@ impl Account {
     /// A role scoped to another space is not a role here: that is the whole point of
     /// scoping it (PF-35).
     pub fn roles_in(&self, project: &str, space: &str) -> BTreeSet<String> {
+        self.roles_in_at(project, space, chrono::Utc::now())
+    }
+
+    /// [`Self::roles_in`] at `now`: a grant outside its validity window is no role, so an
+    /// expired grant stops at its `notAfter` even before the Portal removes it (AG-131).
+    pub fn roles_in_at(
+        &self,
+        project: &str,
+        space: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> BTreeSet<String> {
         self.roles
             .iter()
+            .filter(|scoped| scoped.validity.as_ref().is_none_or(|v| v.contains(now)))
             .filter(|scoped| {
                 scoped.organization
                     || scoped.project.as_deref() == Some(project)
@@ -164,6 +178,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                             .map(|name| repo.space_segment(&project, name)),
                         project: binding.scope.project.clone(),
                         organization: binding.scope.organization.is_some(),
+                        validity: binding.validity.clone(),
                     })
                     .collect(),
                 delegates: spec.delegation
@@ -194,6 +209,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                     .map(|name| repo.space_segment(&project, name)),
                 project: None,
                 organization: false,
+                validity: None,
             })
             .collect();
         by_client_id.insert(

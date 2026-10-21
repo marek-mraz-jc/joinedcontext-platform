@@ -168,6 +168,7 @@ pub fn derive(
                     },
                     types: Vec::new(),
                     operations: Vec::new(),
+                    validity: None,
                 })
                 .collect(),
             credentials: vec![Credential {

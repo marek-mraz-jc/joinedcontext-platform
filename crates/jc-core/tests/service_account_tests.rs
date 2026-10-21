@@ -374,3 +374,26 @@ fn keys_belong_on_an_account_bound_to_no_workload() {
     );
     assert!(refusal(&bound).contains("pod's token"));
 }
+
+/// A grant may carry a validity window (AG-131): it reads, it is in force only inside the window,
+/// and a window that ends before it starts is refused.
+#[test]
+fn a_grant_with_a_validity_window_is_in_force_only_inside_it() {
+    use chrono::{TimeZone, Utc};
+    let timed = GOLDEN.replace(
+        "operations: [createEntity, updateAttrs] }",
+        "operations: [createEntity, updateAttrs], validity: { notAfter: \"2026-11-01T00:00:00Z\" } }",
+    );
+    let sa = ServiceAccount::from_yaml(&timed).expect("parses");
+    sa.validate().expect("a grant with an end is valid");
+    let grant = &sa.spec.roles[0];
+    let end = Utc.with_ymd_and_hms(2026, 11, 1, 0, 0, 0).unwrap();
+    assert!(grant.in_force(end));
+    assert!(!grant.in_force(end + chrono::Duration::seconds(1)));
+
+    let backwards = GOLDEN.replace(
+        "operations: [createEntity, updateAttrs] }",
+        "operations: [createEntity, updateAttrs], validity: { notBefore: \"2026-11-02T00:00:00Z\", notAfter: \"2026-11-01T00:00:00Z\" } }",
+    );
+    assert!(refusal(&backwards).contains("notAfter must be after notBefore"));
+}
