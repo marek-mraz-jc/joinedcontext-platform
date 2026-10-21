@@ -1,0 +1,147 @@
+[
+  {
+    "constraint": "required",
+    "path": "temperature",
+    "record": {
+      "address": {
+        "streetAddress": "streetAddress"
+      },
+      "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+      "label": {
+        "en": "label"
+      },
+      "location": {
+        "coordinates": [
+          0.0,
+          0.0
+        ],
+        "type": "Point"
+      },
+      "measuredAt": [
+        0.0
+      ],
+      "observedAt": "2026-01-01T00:00:00Z",
+      "pollutant": "pm10",
+      "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+      "reliability": "low",
+      "type": "AirQualityObserved"
+    }
+  },
+  {
+    "constraint": "datatype",
+    "path": "temperature",
+    "record": {
+      "address": {
+        "streetAddress": "streetAddress"
+      },
+      "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+      "label": {
+        "en": "label"
+      },
+      "location": {
+        "coordinates": [
+          0.0,
+          0.0
+        ],
+        "type": "Point"
+      },
+      "measuredAt": [
+        0.0
+      ],
+      "observedAt": "2026-01-01T00:00:00Z",
+      "pollutant": "pm10",
+      "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+      "reliability": "low",
+      "temperature": "not a float",
+      "type": "AirQualityObserved"
+    }
+  },
+  {
+    "constraint": "enum",
+    "path": "reliability",
+    "record": {
+      "address": {
+        "streetAddress": "streetAddress"
+      },
+      "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+      "label": {
+        "en": "label"
+      },
+      "location": {
+        "coordinates": [
+          0.0,
+          0.0
+        ],
+        "type": "Point"
+      },
+      "measuredAt": [
+        0.0
+      ],
+      "observedAt": "2026-01-01T00:00:00Z",
+      "pollutant": "pm10",
+      "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+      "reliability": "not-a-permitted-value",
+      "temperature": 0.0,
+      "type": "AirQualityObserved"
+    }
+  },
+  {
+    "constraint": "enum",
+    "path": "pollutant",
+    "record": {
+      "address": {
+        "streetAddress": "streetAddress"
+      },
+      "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+      "label": {
+        "en": "label"
+      },
+      "location": {
+        "coordinates": [
+          0.0,
+          0.0
+        ],
+        "type": "Point"
+      },
+      "measuredAt": [
+        0.0
+      ],
+      "observedAt": "2026-01-01T00:00:00Z",
+      "pollutant": "not-a-permitted-value",
+      "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+      "reliability": "low",
+      "temperature": 0.0,
+      "type": "AirQualityObserved"
+    }
+  },
+  {
+    "constraint": "closed",
+    "path": "undeclaredAttribute",
+    "record": {
+      "address": {
+        "streetAddress": "streetAddress"
+      },
+      "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+      "label": {
+        "en": "label"
+      },
+      "location": {
+        "coordinates": [
+          0.0,
+          0.0
+        ],
+        "type": "Point"
+      },
+      "measuredAt": [
+        0.0
+      ],
+      "observedAt": "2026-01-01T00:00:00Z",
+      "pollutant": "pm10",
+      "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+      "reliability": "low",
+      "temperature": 0.0,
+      "type": "AirQualityObserved",
+      "undeclaredAttribute": "x"
+    }
+  }
+]

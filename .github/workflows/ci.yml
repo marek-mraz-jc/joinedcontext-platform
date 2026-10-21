@@ -105,7 +105,7 @@ jobs:
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults: { run: { working-directory: tools/model-tools } }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -139,6 +139,20 @@ jobs:
           # Exit 2 means a committed artifact is stale: regenerate with `jcctl model generate`
           # and commit the result beside the source (DM-01, DM-02).
           cargo run -q -p jcctl -- model diff --repo-dir examples/datamodels --url http://127.0.0.1:8080
+      # T-5066: the generated valid and invalid datasets of each fixture and committed model, held
+      # to its SHACL shapes and JSON Schema (gen_datasets exits 1 on a record they disagree on) and
+      # then to the ModelSchema the gateway checks a write with: valid passes, invalid fails at its slot.
+      - name: SHACL, the JSON Schema and the write path agree on every generated record
+        working-directory: ${{ github.workspace }}
+        env:
+          MODEL_TOOLS_MODELS: tools/model-tools/models
+          MODEL_DATASETS_DIR: ${{ runner.temp }}/model-datasets
+        run: |
+          mapfile -t committed < <(find examples/datamodels -name '*.linkml.yaml')
+          python3 tools/model-tools/src/gen_datasets.py -o "$MODEL_DATASETS_DIR" \
+            tools/model-tools/tests/fixtures/senzor.linkml.yaml tools/model-tools/tests/fixtures/constraints.linkml.yaml \
+            "${committed[@]}"
+          cargo test -p jc-manifest --test model_datasets_tests --locked
   pipelines:
     # PL-21, PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
     # Bento is pinned by version and verified by checksum, the way an image is pinned by digest.
