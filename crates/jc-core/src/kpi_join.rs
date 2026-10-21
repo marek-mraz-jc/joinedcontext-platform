@@ -2,16 +2,15 @@
 //!
 //! A `kpi` step names two to five sources by their `name`, a join (`time`, `entity`, `area`) and
 //! a formula over aggregates of their attributes, `sum(parking.occupiedSpotNumber) /
-//! count(stops)`. This module parses and checks the formula, computes it over pages of entities
-//! (the Portal's preview), and compiles it to the Bloblang mapping the runner folds the run's
-//! pages with. Both paths refuse the same inputs with the same words: a division by zero, an
-//! average over nothing or a source that did not answer writes no value (PL-104).
+//! count(stops)`. This module parses and checks the formula and compiles it to the Bloblang
+//! mapping the runner folds the run's pages with; its tests hold the mapping to a reference
+//! evaluator. A division by zero, an average over nothing or a source that did not answer
+//! writes no value (PL-104).
 
 use crate::error::{Error, Result};
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::LazyLock;
@@ -578,62 +577,6 @@ impl KpiStep {
     }
 }
 
-/// The number an attribute holds on a row: a Property's `value` or a keyValues number.
-fn number(row: &Value, attr: &str) -> Option<f64> {
-    let member = row.get(attr)?;
-    member
-        .get("value")
-        .unwrap_or(member)
-        .as_f64()
-        .filter(|n| n.is_finite())
-}
-
-/// The key a row meets the other sources on: `id`, a Relationship's object, a Property's value.
-fn key(row: &Value, attr: &str) -> Option<String> {
-    let member = row.get(attr)?;
-    let member = member
-        .get("value")
-        .or_else(|| member.get("object"))
-        .unwrap_or(member);
-    match member {
-        Value::String(text) if !text.is_empty() => Some(text.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-fn eval(expr: &Expr, rows: &BTreeMap<&str, Vec<&Value>>) -> std::result::Result<f64, String> {
-    Ok(match expr {
-        Expr::Num(n) => *n,
-        Expr::Term { agg, input, attr } => {
-            let rows = rows.get(input.as_str()).map(Vec::as_slice).unwrap_or(&[]);
-            let Some(attr) = attr else {
-                return Ok(rows.len() as f64);
-            };
-            let values: Vec<f64> = rows.iter().filter_map(|row| number(row, attr)).collect();
-            match agg {
-                Agg::Count => values.len() as f64,
-                Agg::Sum => values.iter().sum(),
-                _ if values.is_empty() => return Err(format!("{expr} has no values")),
-                Agg::Avg => values.iter().sum::<f64>() / values.len() as f64,
-                Agg::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
-                Agg::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            }
-        }
-        Expr::Neg(inner) => -eval(inner, rows)?,
-        Expr::Bin(op, a, b) => {
-            let (x, y) = (eval(a, rows)?, eval(b, rows)?);
-            match op {
-                '+' => x + y,
-                '-' => x - y,
-                '*' => x * y,
-                _ if y == 0.0 => return Err(format!("division by zero: {b} is 0")),
-                _ => x / y,
-            }
-        }
-    })
-}
-
 /// The slug of a key in an indicator's `{localId}`: what the compiled mapping writes too.
 pub fn slug(key: &str) -> String {
     let mut out = String::new();
@@ -651,86 +594,6 @@ pub fn slug(key: &str) -> String {
     } else {
         out.to_owned()
     }
-}
-
-/// One computed value: the key it is for (`None` for a join by time) and the number.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct Computed {
-    /// The entity or area key.
-    pub key: Option<String>,
-    /// The indicator's `{localId}`.
-    pub name: String,
-    /// The value.
-    pub value: f64,
-}
-
-/// Computes the step over each source's page (the Portal's preview, PL-105). A missing source,
-/// a division by zero or an average over nothing is the run's problem, and nothing is computed.
-pub fn evaluate(
-    step: &KpiStep,
-    expr: &Expr,
-    pages: &BTreeMap<String, Vec<Value>>,
-) -> std::result::Result<Vec<Computed>, String> {
-    for name in step.join.keys.keys() {
-        if !pages.contains_key(name) {
-            return Err(format!("input {name} did not answer in this run"));
-        }
-    }
-    let mut used = Vec::new();
-    terms(expr, &mut used);
-    for (name, _, _) in &used {
-        if !pages.contains_key(*name) {
-            return Err(format!("input {name} did not answer in this run"));
-        }
-    }
-    if step.join.by == JoinBy::Time {
-        let rows = pages
-            .iter()
-            .map(|(name, rows)| (name.as_str(), rows.iter().collect()))
-            .collect();
-        return Ok(vec![Computed {
-            key: None,
-            name: step.name.clone(),
-            value: eval(expr, &rows)?,
-        }]);
-    }
-    let mut common: Option<BTreeSet<String>> = None;
-    for (name, attr) in &step.join.keys {
-        let keys: BTreeSet<String> = pages[name].iter().filter_map(|r| key(r, attr)).collect();
-        common = Some(match common {
-            None => keys,
-            Some(before) => before.intersection(&keys).cloned().collect(),
-        });
-    }
-    let common = common.unwrap_or_default();
-    if common.len() > MAX_KEYS {
-        return Err(format!(
-            "{} keys meet in every source; one run writes at most {MAX_KEYS}",
-            common.len()
-        ));
-    }
-    common
-        .into_iter()
-        .map(|k| {
-            let rows = step
-                .join
-                .keys
-                .iter()
-                .map(|(name, attr)| {
-                    let rows = pages[name]
-                        .iter()
-                        .filter(|row| key(row, attr).as_deref() == Some(k.as_str()))
-                        .collect();
-                    (name.as_str(), rows)
-                })
-                .collect();
-            Ok(Computed {
-                name: format!("{}-{}", step.name, slug(&k)),
-                value: eval(expr, &rows)?,
-                key: Some(k),
-            })
-        })
-        .collect()
 }
 
 /// A Bloblang string literal.
@@ -943,7 +806,145 @@ pub fn bloblang(step: &KpiStep, expr: &Expr, inputs: &[Input], target: &Target<'
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    // The reference evaluator the compiled mapping is held to (the example's bento test asserts
+    // the same values); the Portal's preview (T-4935) makes it public when it calls it.
+    /// The number an attribute holds on a row: a Property's `value` or a keyValues number.
+    fn number(row: &Value, attr: &str) -> Option<f64> {
+        let member = row.get(attr)?;
+        member
+            .get("value")
+            .unwrap_or(member)
+            .as_f64()
+            .filter(|n| n.is_finite())
+    }
+
+    /// The key a row meets the other sources on: `id`, a Relationship's object, a Property's value.
+    fn key(row: &Value, attr: &str) -> Option<String> {
+        let member = row.get(attr)?;
+        let member = member
+            .get("value")
+            .or_else(|| member.get("object"))
+            .unwrap_or(member);
+        match member {
+            Value::String(text) if !text.is_empty() => Some(text.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+
+    fn eval(expr: &Expr, rows: &BTreeMap<&str, Vec<&Value>>) -> std::result::Result<f64, String> {
+        Ok(match expr {
+            Expr::Num(n) => *n,
+            Expr::Term { agg, input, attr } => {
+                let rows = rows.get(input.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+                let Some(attr) = attr else {
+                    return Ok(rows.len() as f64);
+                };
+                let values: Vec<f64> = rows.iter().filter_map(|row| number(row, attr)).collect();
+                match agg {
+                    Agg::Count => values.len() as f64,
+                    Agg::Sum => values.iter().sum(),
+                    _ if values.is_empty() => return Err(format!("{expr} has no values")),
+                    Agg::Avg => values.iter().sum::<f64>() / values.len() as f64,
+                    Agg::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
+                    Agg::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                }
+            }
+            Expr::Neg(inner) => -eval(inner, rows)?,
+            Expr::Bin(op, a, b) => {
+                let (x, y) = (eval(a, rows)?, eval(b, rows)?);
+                match op {
+                    '+' => x + y,
+                    '-' => x - y,
+                    '*' => x * y,
+                    _ if y == 0.0 => return Err(format!("division by zero: {b} is 0")),
+                    _ => x / y,
+                }
+            }
+        })
+    }
+
+    /// One computed value: the key it is for (`None` for a join by time) and the number.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Computed {
+        /// The entity or area key.
+        key: Option<String>,
+        /// The indicator's `{localId}`.
+        name: String,
+        /// The value.
+        value: f64,
+    }
+
+    /// Computes the step over each source's page (the Portal's preview, PL-105). A missing source,
+    /// a division by zero or an average over nothing is the run's problem, and nothing is computed.
+    fn evaluate(
+        step: &KpiStep,
+        expr: &Expr,
+        pages: &BTreeMap<String, Vec<Value>>,
+    ) -> std::result::Result<Vec<Computed>, String> {
+        for name in step.join.keys.keys() {
+            if !pages.contains_key(name) {
+                return Err(format!("input {name} did not answer in this run"));
+            }
+        }
+        let mut used = Vec::new();
+        terms(expr, &mut used);
+        for (name, _, _) in &used {
+            if !pages.contains_key(*name) {
+                return Err(format!("input {name} did not answer in this run"));
+            }
+        }
+        if step.join.by == JoinBy::Time {
+            let rows = pages
+                .iter()
+                .map(|(name, rows)| (name.as_str(), rows.iter().collect()))
+                .collect();
+            return Ok(vec![Computed {
+                key: None,
+                name: step.name.clone(),
+                value: eval(expr, &rows)?,
+            }]);
+        }
+        let mut common: Option<BTreeSet<String>> = None;
+        for (name, attr) in &step.join.keys {
+            let keys: BTreeSet<String> = pages[name].iter().filter_map(|r| key(r, attr)).collect();
+            common = Some(match common {
+                None => keys,
+                Some(before) => before.intersection(&keys).cloned().collect(),
+            });
+        }
+        let common = common.unwrap_or_default();
+        if common.len() > MAX_KEYS {
+            return Err(format!(
+                "{} keys meet in every source; one run writes at most {MAX_KEYS}",
+                common.len()
+            ));
+        }
+        common
+            .into_iter()
+            .map(|k| {
+                let rows = step
+                    .join
+                    .keys
+                    .iter()
+                    .map(|(name, attr)| {
+                        let rows = pages[name]
+                            .iter()
+                            .filter(|row| key(row, attr).as_deref() == Some(k.as_str()))
+                            .collect();
+                        (name.as_str(), rows)
+                    })
+                    .collect();
+                Ok(Computed {
+                    name: format!("{}-{}", step.name, slug(&k)),
+                    value: eval(expr, &rows)?,
+                    key: Some(k),
+                })
+            })
+            .collect()
+    }
 
     fn inputs() -> Vec<Input> {
         vec![
