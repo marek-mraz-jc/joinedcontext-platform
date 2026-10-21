@@ -14,8 +14,13 @@ permissions: { contents: read }
 # verdict, and `dev-apply` deploys it. With merges a few minutes apart, cancelling killed five
 # builds in a row on 2026-09-20 and `:main` stayed on the one commit that happened to be
 # followed by a quiet five minutes, which is not how `dev` trails `main` by an hour (T-2318).
-# Queued per ref, so each run publishes its own `:sha` and moves `:main` in order.
-concurrency: { group: "image-${{ github.ref }}", cancel-in-progress: false }
+# Main runs are keyed by commit (T-5024, as ci.yml in T-5022): GitHub keeps one pending run per
+# concurrency group, so with image-<ref> each merge replaced the pending main run and most main
+# commits got no image to pin. Every main commit now publishes its own `:sha`; runs may overlap,
+# so `:main` can briefly name an older commit. Deployments pin digests, never `:main`.
+concurrency:
+  group: "image-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}"
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
