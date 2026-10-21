@@ -163,6 +163,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "odata-view-unavailable", status: 501, title: "OData View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its OData surface needs a broker view it does not have." },
     ProblemType { slug: "ical-view-unavailable", status: 501, title: "iCalendar View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its iCalendar feed needs a broker view it does not have." },
     ProblemType { slug: "odata-batch-unavailable", status: 501, title: "OData Batch Unavailable", hint: "Send each OData write as a request of its own; $batch is not served through an endpoint." },
+    ProblemType { slug: "odata-not-implemented", status: 501, title: "OData Feature Not Implemented", hint: "Ask the entity sets the service document and $metadata list; this endpoint does not serve every OData feature, such as $crossjoin, $all or $entity." },
     ProblemType { slug: "broker-failure", status: 0, title: "Broker Failure", hint: "The context broker failed this request; try again in a minute, and report the requestId if it repeats." },
     ProblemType { slug: "federation-exchange-failed", status: 0, title: "Federation Exchange Failed", hint: "The identity provider did not issue your token for a federated read; sign in again or try again shortly." },
     ProblemType { slug: "broker-unavailable", status: 502, title: "Broker Unavailable", hint: "The context broker did not open the WebSocket; try again in a minute." },
