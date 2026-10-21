@@ -105,6 +105,10 @@ pub struct PipelineSpec {
     /// row comes from (PL-102…PL-106).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<super::pipeline_history::History>,
+    /// How the pipeline follows a record its source removed (PL-96…PL-100); absent, nothing is
+    /// deleted, as with `mode: never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_deletes: Option<super::pipeline_source_deletes::SourceDeletes>,
 }
 
 /// The longest expiry window, in hours: a year (PL-64).
@@ -1049,6 +1053,21 @@ impl PipelineSpec {
                 .map(|out| out.entity_type.as_deref())
                 .collect();
             super::pipeline_history::validate(&self.history, written.as_ref())?;
+        }
+        if let Some(source_deletes) = &self.source_deletes {
+            source_deletes.validate(&super::pipeline_source_deletes::Context {
+                has_clock: self.period.is_some() || self.schedule.is_some(),
+                has_expiry: self.expiry.is_some(),
+                has_rolling_entity_lifetime: self.lifetime.iter().any(|entry| {
+                    entry
+                        .entity
+                        .as_ref()
+                        .is_some_and(|mode| mode.rolling.is_some())
+                }),
+            })?;
+            if let Some(marker) = &source_deletes.deleted_when {
+                validate_author_bloblang("spec.sourceDeletes.deletedWhen", marker)?;
+            }
         }
 
         Ok(())
