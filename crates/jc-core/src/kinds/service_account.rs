@@ -65,6 +65,17 @@ pub struct RoleBinding {
     /// CIM 009 operations or operation groups granted (R8).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<OperationRef>,
+    /// When the grant applies; outside the window it grants nothing, and the Portal removes it
+    /// once `notAfter` has passed (AG-131).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity: Option<crate::kinds::role::BindingValidity>,
+}
+
+impl RoleBinding {
+    /// Whether the grant is in force at `now`: no window, or `now` inside it (AG-131).
+    pub fn in_force(&self, now: DateTime<Utc>) -> bool {
+        self.validity.as_ref().is_none_or(|v| v.contains(now))
+    }
 }
 
 /// Target scope of a role grant: exactly one of `contextSpace`, `project`, or `organization`.
@@ -408,6 +419,17 @@ impl ServiceAccountSpec {
             names::validate_dns1123_label(&role_binding.role)?;
 
             role_binding.scope.validate("spec.roles.scope")?;
+            if let Some(validity) = &role_binding.validity {
+                if let (Some(from), Some(to)) = (validity.not_before, validity.not_after) {
+                    if to <= from {
+                        return Err(Error::Name {
+                            field: "spec.roles.validity.notAfter",
+                            value: to.to_rfc3339(),
+                            reason: "notAfter must be after notBefore",
+                        });
+                    }
+                }
+            }
 
             for t in &role_binding.types {
                 names::validate_entity_type(t)?;
