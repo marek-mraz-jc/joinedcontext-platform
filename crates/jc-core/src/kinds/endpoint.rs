@@ -198,7 +198,7 @@ const SYSTEM_ATTRIBUTES: [&str; 3] = ["id", "type", "modifiedAt"];
 /// class of the model with a slot whose `range` is numeric and that declares its `unit`.
 pub const ANY_TYPE: &str = "*";
 
-/// The source column of a measurement in [`STA`]'s fields.
+/// The source column of a measurement in the SensorThings fields.
 pub const MEASUREMENT: &str = "a numeric slot with its unit";
 
 // Every entity is a Thing, every numeric Property a Datastream (antares-sta mapping rules 1-6).
