@@ -1,0 +1,100 @@
+# One model with a constraint of every kind the test datasets break (T-5066): bounds, a pattern,
+# an enum, a link, an inline object, a language map, a list and a geometry. gen_datasets makes a
+# record at each edge and one past it; SHACL and the JSON Schema must agree on every one.
+id: https://banskabystrica.sk/ns/constraints
+name: constraints
+prefixes:
+  linkml: https://w3id.org/linkml/
+  bb: https://banskabystrica.sk/ns/
+default_prefix: bb
+default_range: string
+imports:
+  - linkml:types
+  - ngsi-ld-core
+
+classes:
+  Station:
+    class_uri: bb:Station
+    is_a: Entity
+    slots: [name, code, capacity, level, temperature, homepage, refOperator, address, depths, location]
+  Operator:
+    class_uri: bb:Operator
+    is_a: Entity
+    slots: [name, stations]
+  Address:
+    class_uri: bb:Address
+    attributes:
+      street:
+        slot_uri: bb:street
+        range: string
+        annotations:
+          ngsi_ld_kind: Property
+
+slots:
+  name:
+    slot_uri: bb:name
+    required: true
+    annotations:
+      ngsi_ld_kind: LanguageProperty
+  code:
+    slot_uri: bb:code
+    pattern: "^[A-Z]{2}[0-9]{3}$"
+    annotations:
+      ngsi_ld_kind: Property
+  capacity:
+    slot_uri: bb:capacity
+    range: integer
+    minimum_value: 1
+    maximum_value: 40
+    annotations:
+      ngsi_ld_kind: Property
+  temperature:
+    slot_uri: bb:temperature
+    range: float
+    minimum_value: -40
+    annotations:
+      ngsi_ld_kind: Property
+  level:
+    slot_uri: bb:level
+    range: Level
+    annotations:
+      ngsi_ld_kind: Property
+  homepage:
+    slot_uri: bb:homepage
+    range: uri
+    annotations:
+      ngsi_ld_kind: Property
+  refOperator:
+    slot_uri: bb:refOperator
+    range: Operator
+    inverse: stations
+    inlined: false
+    annotations:
+      ngsi_ld_kind: Relationship
+  stations:
+    slot_uri: bb:stations
+    range: Station
+    multivalued: true
+    inverse: refOperator
+    inlined: false
+    annotations:
+      ngsi_ld_kind: Relationship
+  address:
+    slot_uri: bb:address
+    range: Address
+    inlined: true
+    annotations:
+      ngsi_ld_kind: Property
+  depths:
+    slot_uri: bb:depths
+    range: float
+    multivalued: true
+    annotations:
+      ngsi_ld_kind: ListProperty
+
+enums:
+  Level:
+    permissible_values:
+      low:
+      medium:
+      high:

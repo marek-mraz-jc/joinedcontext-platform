@@ -19,7 +19,8 @@ from pathlib import Path
 from linkml.generators.owlgen import OwlSchemaGenerator
 from linkml.generators.shaclgen import ShaclGenerator
 from linkml_runtime import SchemaView
-from rdflib import Graph, Literal, URIRef
+from rdflib import BNode, Graph, Literal, URIRef
+from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, SH, XSD
 
 from common import (
@@ -30,6 +31,7 @@ from common import (
     load,
     ngsi_ld_kind,
 )
+from gen_context import compile_context
 from relationships import analyse
 
 OPEN_WORLD_ANNOTATION = "open_world"
@@ -63,6 +65,19 @@ def _apply_ngsi_ld_kinds(view: SchemaView, graph: Graph) -> None:
                 graph.remove((None, SH.property, shape))
             continue
         kind = ngsi_ld_kind(slot)
+        target = view.all_classes().get(slot.range or "")
+        if kind == "Property" and target is not None and "Entity" not in view.class_ancestors(target.name):
+            # An inline object expands to a blank node with no `rdf:type`: it is held to the
+            # shape of its class, never asked to be an instance of it (T-5066).
+            node = URIRef(view.get_uri(target, expand=True))
+            for shape in graph.subjects(SH.path, path):
+                if (shape, SH["class"], node) in graph:
+                    graph.remove((shape, SH["class"], node))
+                    graph.set((shape, SH.node, node))
+            continue
+        if kind in ("JsonProperty", "GeoProperty", "ListProperty"):
+            _apply_structured_kind(graph, path, kind)
+            continue
         if kind not in ("Relationship", "LanguageProperty"):
             continue
         for shape in graph.subjects(SH.path, path):
@@ -76,6 +91,62 @@ def _apply_ngsi_ld_kinds(view: SchemaView, graph: Graph) -> None:
                 graph.remove((shape, SH.maxCount, None))
                 graph.set((shape, SH.nodeKind, SH.Literal))
                 graph.set((shape, SH.uniqueLang, Literal(True, datatype=XSD.boolean)))
+
+
+def _apply_structured_kind(graph: Graph, path: URIRef, kind: str) -> None:
+    """The three kinds whose value the `@context` does not expand as the LinkML range says (T-5066).
+
+    A JsonProperty is `@type: @json`, one `rdf:JSON` literal however deep the object; a
+    GeoProperty is a GeoJSON geometry, a node; a ListProperty is `@container: @list`, one RDF
+    list whose members carry the range. The shapes LinkML rendered asked for a literal of the
+    range or an instance of the inline class, so every valid entity carrying one failed.
+    """
+    for shape in list(graph.subjects(SH.path, path)):
+        datatype = graph.value(shape, SH.datatype)
+        for constraint in (SH.datatype, SH["class"], SH.node, SH.pattern, SH["in"]):
+            graph.remove((shape, constraint, None))
+        if kind == "JsonProperty":
+            graph.set((shape, SH.datatype, RDF.JSON))
+            graph.set((shape, SH.nodeKind, SH.Literal))
+            continue
+        graph.set((shape, SH.nodeKind, SH.BlankNodeOrIRI))
+        if kind == "GeoProperty" or datatype is None:
+            continue
+        # The members keep the range: a second shape on the same node walks the list.
+        rest, members = BNode(), BNode()
+        sequence = BNode()
+        Collection(graph, sequence, [path, rest, RDF.first])
+        graph.add((rest, SH.zeroOrMorePath, RDF.rest))
+        graph.add((members, SH.path, sequence))
+        graph.add((members, SH.datatype, datatype))
+        for owner in list(graph.subjects(SH.property, shape)):
+            graph.add((owner, SH.property, members))
+
+
+def _agree_with_context(source: str | Path, graph: Graph) -> None:
+    """A term the `@context` types as an XSD literal is that literal in the shapes too (T-5066).
+
+    LinkML renders a `uri` range as `sh:nodeKind sh:IRI`, while the context it generates types
+    the same term `xsd:anyURI`, which expands to a literal. A consumer expanding a response with
+    the served context then saw every link fail its shape.
+    """
+    context = compile_context(source)["@context"]
+
+    def expand(curie: str) -> str:
+        prefix, _, local = curie.partition(":")
+        base = context.get(prefix, str(XSD) if prefix == "xsd" else None)
+        return base + local if isinstance(base, str) and not local.startswith("//") else curie
+
+    for definition in context.values():
+        if not isinstance(definition, dict):
+            continue
+        datatype, term = definition.get("@type"), definition.get("@id")
+        if not (isinstance(datatype, str) and datatype.startswith("xsd:") and isinstance(term, str)):
+            continue
+        for shape in list(graph.subjects(SH.path, URIRef(expand(term)))):
+            if (shape, SH.nodeKind, SH.IRI) in graph:
+                graph.set((shape, SH.nodeKind, SH.Literal))
+                graph.set((shape, SH.datatype, URIRef(expand(datatype))))
 
 
 def _drop_computed_ends(view: SchemaView, graph: Graph) -> None:
@@ -101,6 +172,7 @@ def compile_shacl(source: str | Path) -> str:
     graph = Graph()
     graph.parse(data=ShaclGenerator(view.schema, closed=True).serialize(), format="turtle")
     _apply_ngsi_ld_kinds(view, graph)
+    _agree_with_context(source, graph)
     _drop_computed_ends(view, graph)
 
     # The generator's `closed` flag is schema-wide, so the per-class opt-out is applied to the

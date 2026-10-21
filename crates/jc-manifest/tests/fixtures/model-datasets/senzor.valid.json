@@ -1,0 +1,629 @@
+[
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "medium",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "high",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "Air quality",
+      "sk": "Kvalita ovzdu\u0161ia"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm25",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "MultiPoint"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "LineString"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ]
+        ]
+      ],
+      "type": "MultiLineString"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ],
+          [
+            19.15,
+            48.74
+          ]
+        ]
+      ],
+      "type": "Polygon"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        [
+          [
+            [
+              19.15,
+              48.74
+            ],
+            [
+              19.16,
+              48.74
+            ],
+            [
+              19.16,
+              48.75
+            ],
+            [
+              19.15,
+              48.74
+            ]
+          ]
+        ]
+      ],
+      "type": "MultiPolygon"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "observedAt": "2026-01-01T00:00:00Z",
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "address": {
+      "streetAddress": "streetAddress"
+    },
+    "id": "urn:ngsi-ld:AirQualityObserved:banskabystrica.sk:example:1",
+    "label": {
+      "en": "label"
+    },
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "measuredAt": [
+      0.0
+    ],
+    "pollutant": "pm10",
+    "refDevice": "urn:ngsi-ld:Entity:banskabystrica.sk:example:1",
+    "reliability": "low",
+    "temperature": 0.0,
+    "type": "AirQualityObserved"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "MultiPoint"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "LineString"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ]
+        ]
+      ],
+      "type": "MultiLineString"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ],
+          [
+            19.15,
+            48.74
+          ]
+        ]
+      ],
+      "type": "Polygon"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            [
+              19.15,
+              48.74
+            ],
+            [
+              19.16,
+              48.74
+            ],
+            [
+              19.16,
+              48.75
+            ],
+            [
+              19.15,
+              48.74
+            ]
+          ]
+        ]
+      ],
+      "type": "MultiPolygon"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "FreeForm"
+  },
+  {
+    "id": "urn:ngsi-ld:FreeForm:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "type": "FreeForm"
+  }
+]
