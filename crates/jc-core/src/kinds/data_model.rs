@@ -162,6 +162,12 @@ pub enum DataModelLifecycle {
 }
 
 impl DataModelLifecycle {
+    /// Whether a model in this state backs a domain-standard representation (EP-125, DM-26): a
+    /// draft can still change under a public feed, a retired model takes no new references.
+    pub const fn backs_surfaces(&self) -> bool {
+        matches!(self, Self::Published | Self::Deprecated)
+    }
+
     /// Returns the kebab-case wire name for this lifecycle state.
     pub const fn as_str(&self) -> &'static str {
         match self {

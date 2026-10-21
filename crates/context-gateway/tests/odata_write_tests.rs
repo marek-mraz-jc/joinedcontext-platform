@@ -84,7 +84,8 @@ fn csdl() -> Value {
 }
 
 /// A broker view: `$metadata` as above, the set `Locked` read-only (405), the set `Refused`
-/// refused by the engine (403), every other write taken. Records `METHOD path body`.
+/// refused by the engine (403), `$crossjoin` not served (501), the set `Broken` failing (500),
+/// every other write taken. Records `METHOD path body`.
 async fn broker() -> (String, Hops) {
     let hops: Hops = Arc::default();
     let recorder = Arc::clone(&hops);
@@ -116,6 +117,18 @@ async fn broker() -> (String, Hops) {
                     .headers_mut()
                     .insert(header::ALLOW, "GET, HEAD".parse().expect("a header"));
                 return refused;
+            }
+            if path.contains("/$crossjoin") {
+                return answer(
+                    501,
+                    json!({"error": {"code": "NotImplemented", "message": "hunter2"}}),
+                );
+            }
+            if path.contains("/Broken") {
+                return answer(
+                    500,
+                    json!({"error": {"code": "Internal", "message": "hunter2"}}),
+                );
             }
             if path.contains("/Refused") {
                 return answer(
@@ -217,7 +230,9 @@ async fn a_form_mints_the_key_and_counts_the_days_creates() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["detail"].as_str().is_some_and(|d| d.contains("`id`")),
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|d| d.contains("`id`")),
         "{body}"
     );
     let (status, _, body) = send(
@@ -418,4 +433,57 @@ async fn a_batch_and_an_unreadable_body_stay_at_the_gateway() {
     assert!(headers[header::ALLOW]
         .to_str()
         .is_ok_and(|allow| allow.contains("POST") && allow.contains("DELETE")));
+}
+
+/// T-4929: every 501 and every problem of the gateway on the OData surface is the OData error
+/// object (OData Part 1 9.4); a feature the view does not serve is named, not a failure to retry,
+/// and the broker's words stay in the log (T-2260).
+#[tokio::test]
+async fn every_refusal_is_the_odata_error_object() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let app = app(&repo("error-object"), &upstream, &realm);
+    let cases = [
+        (
+            Method::GET,
+            OPEN,
+            "/$crossjoin(Feedback,Plate)",
+            StatusCode::NOT_IMPLEMENTED,
+            "odata-not-implemented",
+        ),
+        (
+            Method::POST,
+            OPEN,
+            "/$batch",
+            StatusCode::NOT_IMPLEMENTED,
+            "odata-batch-unavailable",
+        ),
+        (
+            Method::GET,
+            OPEN,
+            "/Broken",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "broker-failure",
+        ),
+        (
+            Method::GET,
+            "zzzzzzzzzzzzzzzzzzzzzzzzzz",
+            "/Feedback",
+            StatusCode::NOT_FOUND,
+            "",
+        ),
+    ];
+    for (method, slug, rest, want, code) in cases {
+        let body = (method == Method::POST).then(|| json!({"requests": []}));
+        let (status, headers, body) = send(&app, method, slug, rest, body).await;
+        assert_eq!(status, want, "{rest}: {body}");
+        assert_eq!(headers[header::CONTENT_TYPE], "application/json", "{rest}");
+        let error = &body["error"];
+        assert!(
+            error["code"].is_string() && error["message"].is_string(),
+            "{rest}: {body}"
+        );
+        assert!(code.is_empty() || error["code"] == code, "{rest}: {body}");
+        assert!(!body.to_string().contains("hunter2"), "{rest}: {body}");
+    }
 }
