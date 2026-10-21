@@ -1026,37 +1026,62 @@ fn replacing_shared_writes(repo: &Repository) -> Vec<(Location, String)> {
 /// its own grants alone (AP-139). The bbsk podujatia pipelines wrote through a read Endpoint's
 /// `policyRef` this way and every upsert answered 404 (T-5033).
 fn writes_nobody_can_make(repo: &Repository) -> Located {
-    use jc_core::kinds::pipeline_identity::{account_name, bounded, derive};
-    use jc_core::kinds::{EndpointSpec, PipelineSpec, PolicySpec};
-    let org_domain = repo.org_domain();
-    let mut endpoints: BTreeMap<(String, String), EndpointSpec> = BTreeMap::new();
-    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "Endpoint") {
-        if let Ok(spec) = serde_json::from_value(resource.manifest.spec.clone()) {
-            endpoints.insert(
-                (id.namespace.clone().unwrap_or_default(), id.name.clone()),
-                spec,
-            );
+    let bindings = WriteBindings::new(repo);
+    let mut found = bindings.unbound_write_policies();
+    found.extend(bindings.unreachable_pipeline_targets());
+    found
+}
+
+/// The Endpoints of a repository keyed by (project, name), with the gateway's binding rule.
+struct WriteBindings<'a> {
+    repo: &'a Repository,
+    org_domain: Option<&'a str>,
+    endpoints: BTreeMap<(String, String), jc_core::kinds::EndpointSpec>,
+}
+
+impl<'a> WriteBindings<'a> {
+    fn new(repo: &'a Repository) -> Self {
+        let mut endpoints = BTreeMap::new();
+        for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "Endpoint") {
+            if let Ok(spec) = serde_json::from_value(resource.manifest.spec.clone()) {
+                endpoints.insert(
+                    (id.namespace.clone().unwrap_or_default(), id.name.clone()),
+                    spec,
+                );
+            }
+        }
+        Self {
+            repo,
+            org_domain: repo.org_domain(),
+            endpoints,
         }
     }
-    let is_app = |project: &str, endpoint: &str| {
+
+    fn is_app(&self, project: &str, endpoint: &str) -> bool {
         endpoint.strip_prefix("app-").is_some_and(|app| {
-            repo.iter().any(|(id, _)| {
+            self.repo.iter().any(|(id, _)| {
                 id.kind == "App" && id.name == app && id.namespace.as_deref() == Some(project)
             })
         })
-    };
-    // Why `endpoint` does not bind `policy`, or `None` when it does.
-    let refusal = |(project, endpoint): &(String, String),
-                   spec: &EndpointSpec,
-                   name: &str,
-                   policy: &PolicySpec| {
+    }
+
+    /// Why `endpoint` does not bind `policy`, or `None` when it does.
+    fn refusal(
+        &self,
+        (project, endpoint): &(String, String),
+        spec: &jc_core::kinds::EndpointSpec,
+        name: &str,
+        policy: &jc_core::kinds::PolicySpec,
+    ) -> Option<String> {
         let space = spec.context_space_ref.name();
         if space != policy.context_space_ref.name() {
             return Some(format!("serves the space {space}"));
         }
         if let Some(reference) = &spec.policy_ref {
-            let segment = repo.space_segment(project, space);
-            let ours = org_domain.is_none_or(|domain| reference.org_domain() == Some(domain))
+            let segment = self.repo.space_segment(project, space);
+            let ours = self
+                .org_domain
+                .is_none_or(|domain| reference.org_domain() == Some(domain))
                 && reference.space() == Some(segment.as_str());
             if reference.local_id() != name {
                 return Some(format!("binds only its policyRef {reference}"));
@@ -1065,42 +1090,47 @@ fn writes_nobody_can_make(repo: &Repository) -> Located {
                 return Some(format!(
                     "names it as {reference}, which binds nothing: write \
                      urn:ngsi-ld:Policy:{}:{segment}:{name}",
-                    org_domain.unwrap_or("{orgDomain}")
+                    self.org_domain.unwrap_or("{orgDomain}")
                 ));
             }
         }
-        if is_app(project, endpoint) && !policy.is_endpoint_grant(project, endpoint) {
+        if self.is_app(project, endpoint) && !policy.is_endpoint_grant(project, endpoint) {
             return Some(format!(
                 "is the App {}'s own Endpoint",
                 &endpoint["app-".len()..]
             ));
         }
         None
-    };
+    }
 
-    let mut found = Vec::new();
-    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "Policy") {
-        let Ok(policy) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
-        else {
-            continue;
-        };
-        if policy.effect.is_prohibition() || !writes_entities(&policy) {
-            continue;
-        }
-        let project = id.namespace.clone().unwrap_or_default();
-        let space = policy.context_space_ref.name();
-        let mut reasons = Vec::new();
-        let mut bound = false;
-        for (key, spec) in endpoints.iter().filter(|((p, _), _)| *p == project) {
-            match refusal(key, spec, &id.name, &policy) {
-                None => bound = true,
-                Some(why) if spec.context_space_ref.name() == space => {
-                    reasons.push(format!("{} {why}", key.1))
-                }
-                Some(_) => {}
+    /// A Policy granting a write that no Endpoint of its project binds.
+    fn unbound_write_policies(&self) -> Located {
+        use jc_core::kinds::PolicySpec;
+        let mut found = Vec::new();
+        for (id, resource) in self.repo.iter().filter(|(id, _)| id.kind == "Policy") {
+            let Ok(policy) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
+            else {
+                continue;
+            };
+            if policy.effect.is_prohibition() || !writes_entities(&policy) {
+                continue;
             }
-        }
-        if !bound {
+            let project = id.namespace.clone().unwrap_or_default();
+            let space = policy.context_space_ref.name();
+            let mut reasons = Vec::new();
+            let mut bound = false;
+            for (key, spec) in self.endpoints.iter().filter(|((p, _), _)| *p == project) {
+                match self.refusal(key, spec, &id.name, &policy) {
+                    None => bound = true,
+                    Some(why) if spec.context_space_ref.name() == space => {
+                        reasons.push(format!("{} {why}", key.1))
+                    }
+                    Some(_) => {}
+                }
+            }
+            if bound {
+                continue;
+            }
             let why = if reasons.is_empty() {
                 format!("the space {space} has no Endpoint in project {project}")
             } else {
@@ -1116,58 +1146,66 @@ fn writes_nobody_can_make(repo: &Repository) -> Located {
                 ),
             ));
         }
+        found
     }
 
-    for (id, resource) in repo.iter().filter(|(id, _)| id.kind == "Pipeline") {
-        let Ok(spec) = serde_json::from_value::<PipelineSpec>(resource.manifest.spec.clone())
-        else {
-            continue;
-        };
-        let project = id.namespace.clone().unwrap_or_default();
-        let space_of = |endpoint: &str| {
-            endpoints
-                .get(&(project.clone(), endpoint.to_owned()))
-                .map(|spec| spec.context_space_ref.name().to_owned())
-        };
-        let derived = derive(
-            &project,
-            &id.name,
-            &spec,
-            "",
-            org_domain.unwrap_or_default(),
-            space_of,
-        );
-        let account = account_name(&id.name);
-        for (index, output) in spec.outputs().iter().enumerate() {
-            let target = output.target_endpoint.local_id();
-            let key = (project.clone(), target.to_owned());
-            let why = match endpoints.get(&key) {
-                None => Some(format!("project {project} declares no Endpoint {target}")),
-                Some(endpoint) => {
-                    let name = bounded(&format!("{account}-w-{}", index + 1));
-                    derived
-                        .policies
-                        .iter()
-                        .find(|(policy, _)| *policy == name)
-                        .and_then(|(name, policy)| refusal(&key, endpoint, name, policy))
-                        .map(|why| format!("{target} {why}"))
-                }
+    /// A Pipeline output whose `targetEndpoint` is not declared in the Pipeline's project or does
+    /// not bind that output's derived write Policy (PL-20).
+    fn unreachable_pipeline_targets(&self) -> Located {
+        use jc_core::kinds::pipeline_identity::{account_name, bounded, derive};
+        use jc_core::kinds::PipelineSpec;
+        let mut found = Vec::new();
+        for (id, resource) in self.repo.iter().filter(|(id, _)| id.kind == "Pipeline") {
+            let Ok(spec) = serde_json::from_value::<PipelineSpec>(resource.manifest.spec.clone())
+            else {
+                continue;
             };
-            if let Some(why) = why {
-                found.push((
-                    (resource.path.clone(), resource.document, resource.line),
-                    format!(
-                        "Pipeline {} output {} writes as {account}, but its targetEndpoint grants \
-                         that account no write ({why}), so every write answers 404: aim it at an \
-                         Endpoint of the space without policyRef (PL-20, ADR-N-057)",
-                        id.name,
-                        index + 1
-                    ),
-                ));
+            let project = id.namespace.clone().unwrap_or_default();
+            let space_of = |endpoint: &str| {
+                self.endpoints
+                    .get(&(project.clone(), endpoint.to_owned()))
+                    .map(|spec| spec.context_space_ref.name().to_owned())
+            };
+            let derived = derive(
+                &project,
+                &id.name,
+                &spec,
+                "",
+                self.org_domain.unwrap_or_default(),
+                space_of,
+            );
+            let account = account_name(&id.name);
+            for (index, output) in spec.outputs().iter().enumerate() {
+                let target = output.target_endpoint.local_id();
+                let key = (project.clone(), target.to_owned());
+                let why = match self.endpoints.get(&key) {
+                    None => Some(format!("project {project} declares no Endpoint {target}")),
+                    Some(endpoint) => {
+                        let name = bounded(&format!("{account}-w-{}", index + 1));
+                        derived
+                            .policies
+                            .iter()
+                            .find(|(policy, _)| *policy == name)
+                            .and_then(|(name, policy)| self.refusal(&key, endpoint, name, policy))
+                            .map(|why| format!("{target} {why}"))
+                    }
+                };
+                if let Some(why) = why {
+                    found.push((
+                        (resource.path.clone(), resource.document, resource.line),
+                        format!(
+                            "Pipeline {} output {} writes as {account}, but its targetEndpoint grants \
+                             that account no write ({why}), so every write answers 404: aim it at an \
+                             Endpoint of the space without policyRef (PL-20, ADR-N-057)",
+                            id.name,
+                            index + 1
+                        ),
+                    ));
+                }
             }
         }
+        found
     }
-    found
 }
 
 /// Whether `policy` grants a write of context data. A subscription is the caller's own state, so
