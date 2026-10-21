@@ -7,7 +7,7 @@ use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     publish, publish_views, series_charts, CkanApi, InMemoryCkan, Settings, Views, SERIES_WINDOW,
-    VISUALIZATION_VIEW,
+    VIEW_PAYLOAD, VISUALIZATION_VIEW,
 };
 use serde_json::{json, Value};
 
@@ -360,4 +360,47 @@ fn the_automatic_charts_stop_at_the_visualization_limit() {
     assert!(series_charts(&json!({ "definitions": { "T": {
         "properties": { "dateObserved": { "type": "string" }, "v": { "type": "number", "x-ngsi-ld-kind": "Property" } }
     }}})).is_empty(), "a dateObserved that is not a date-time");
+}
+
+/// EP-144, T-4846: CKAN answers `409 __extras` to a view field neither its core nor the view
+/// type's schema declares, so a create and an update send only the pinned fields, which the
+/// catalogue theme's `jc_visualization` schema lists (deployment tests/test_ckan_theme.py).
+#[test]
+fn a_view_create_or_update_sends_only_the_fields_the_view_schema_declares() {
+    let (mut ckan, _) = published(&endpoint(&[chart("no2-now", "NO2 teraz")]));
+    publish_views(
+        &mut ckan,
+        &endpoint(&[chart("no2-now", "NO2 teraz")]),
+        &settings(),
+        None,
+    )
+    .expect("created");
+    publish_views(
+        &mut ckan,
+        &endpoint(&[chart("no2-now", "NO2 now")]),
+        &settings(),
+        None,
+    )
+    .expect("updated");
+    let sent: Vec<&Value> = ckan
+        .calls()
+        .filter(|(action, _)| matches!(*action, "resource_view_create" | "resource_view_update"))
+        .map(|(_, payload)| payload)
+        .collect();
+    assert_eq!(sent.len(), 2, "one create, one update");
+    for payload in sent {
+        let fields = payload.as_object().expect("an object");
+        let unknown: Vec<&String> = fields
+            .keys()
+            .filter(|key| !VIEW_PAYLOAD.contains(&key.as_str()))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "fields CKAN refuses as __extras: {unknown:?}"
+        );
+        assert!(
+            fields.contains_key("jc_name"),
+            "the name the next run matches it by"
+        );
+    }
 }

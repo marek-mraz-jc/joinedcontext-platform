@@ -656,6 +656,21 @@ pub fn publish_views(
 /// What a visualization view holds; an update is sent when one of them differs.
 const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "source", "endpoint"];
 
+/// Every field a `jc_visualization` view create or update carries: CKAN core's view fields and
+/// the ones the catalogue theme's view schema declares. CKAN refuses any other field as
+/// `__extras` with a 409, so the theme's schema must list each (EP-144).
+pub const VIEW_PAYLOAD: [&str; 9] = [
+    "id",
+    "resource_id",
+    "view_type",
+    "title",
+    "description",
+    "jc_name",
+    "spec",
+    "source",
+    "endpoint",
+];
+
 /// How far back an automatic chart reads a value's history.
 pub const SERIES_WINDOW: &str = "P7D";
 
@@ -872,6 +887,15 @@ fn resources(enabled: &[Representation], url: &str, record: &Value) -> Value {
         "mimetype": "application/json",
         "description": "The data model in every formalism, for every model version, each artifact \
                         with its sha256 (EP-68).",
+    }));
+    // The record the dataset is made from (EP-63), so a reader reaches it from the page (EP-143).
+    resources.push(json!({
+        "name": "DCAT-AP record",
+        "url": format!("{url}/"),
+        "format": "JSON-LD",
+        "mimetype": "application/ld+json",
+        "description": "The Endpoint's own DCAT-AP 3.0 description, which this dataset is \
+                        published from (EP-63).",
     }));
     resources.extend(schema_resources(record));
     Value::Array(resources)
