@@ -203,6 +203,10 @@ pub struct Quotas {
     /// Maximum requests per minute one Endpoint of the project serves (PF-73, EP-17).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_minute: Option<u32>,
+    /// The project's own MQTT allowance, written only by an org admin; it replaces the
+    /// organization's `spec.limits.mqtt` as a whole (PF-117, ADR-N-048 §2.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt: Option<crate::kinds::MqttAllowance>,
 }
 
 impl Quotas {
@@ -231,6 +235,9 @@ impl Quotas {
                 });
             }
         }
+        if let Some(mqtt) = &self.mqtt {
+            mqtt.validate("spec.quotas.mqtt")?;
+        }
         Ok(())
     }
 
@@ -248,6 +255,12 @@ impl Quotas {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Whether the quota sets any of the PF-73 dimensions; one that sets only `mqtt` leaves them
+    /// to the organization's default.
+    pub fn sets_dimensions(&self) -> bool {
+        self.dimensions().iter().any(|(_, value)| value.is_some())
     }
 
     /// Whether every value of this quota is within `default` (PF-73).

@@ -80,6 +80,7 @@ fn project_quota_zero_fails_validation() {
         agent_runs_per_day: Some(1),
         entities_per_space: Some(1),
         requests_per_minute: Some(1),
+        mqtt: None,
     };
     assert!(full.validate().is_ok());
     assert_eq!(full.dimensions().len(), 8);
