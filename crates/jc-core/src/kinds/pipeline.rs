@@ -211,6 +211,10 @@ impl fmt::Display for PipelineClass {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PipelineSource {
+    /// The input's name, by which a `kpi` step's formula reads it (PL-102); a DNS label unique
+    /// among the sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Reference to source Endpoint for reading context entities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_ref: Option<Ref>,
@@ -332,6 +336,9 @@ pub struct Compute {
     /// mapping in `bento.yaml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bloblang: Option<String>,
+    /// The indicator of a `kpi` step over several sources (PL-102…PL-104).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kpi: Option<Box<crate::kpi_join::KpiStep>>,
 }
 
 /// Execution technology category for pipeline compute steps (PL-33).
@@ -346,6 +353,8 @@ pub enum ComputeKind {
     Wasm,
     /// Ephemeral containerized job (PL-35).
     Container,
+    /// One indicator over several named sources (PL-102), compiled to a mapping by jc-core.
+    Kpi,
 }
 
 impl ComputeKind {
@@ -356,6 +365,7 @@ impl ComputeKind {
             Self::Mapping => "mapping",
             Self::Wasm => "wasm",
             Self::Container => "container",
+            Self::Kpi => "kpi",
         }
     }
 }
@@ -932,6 +942,13 @@ impl PipelineSpec {
                 validate_source(source)?;
             }
             if let Some(compute) = &self.compute {
+                if compute.kind == ComputeKind::Kpi {
+                    return Err(Error::Name {
+                        field: "spec.compute.kind",
+                        value: "kpi".to_owned(),
+                        reason: "a `kpi` step reads several named sources: write the Pipeline as joinedcontext.com/v1alpha2 (PL-102)",
+                    });
+                }
                 validate_compute(compute, &own)?;
             }
             if let Some(ref out) = self.output {
@@ -1057,6 +1074,9 @@ fn validate_target(target: &Urn) -> Result<()> {
 /// One input: its own rule (PL-39) and its query, trigger and reference (PL-31, PL-42).
 fn validate_source(src: &PipelineSource) -> Result<()> {
     src.validate()?;
+    if let Some(name) = &src.name {
+        names::validate_dns1123_label(name)?;
+    }
 
     if let Some(ref q) = src.query {
         if let Some(ref et) = q.entity_type {
@@ -1469,6 +1489,13 @@ fn literal_argument(mapping: &str, from: usize) -> Option<String> {
 }
 
 fn validate_compute(c: &Compute, own: &[&str]) -> Result<()> {
+    if c.kpi.is_some() != (c.kind == ComputeKind::Kpi) {
+        return Err(Error::Name {
+            field: "spec.steps.kpi",
+            value: c.kind.to_string(),
+            reason: "a `kpi` step carries `kpi`, and only a `kpi` step does (PL-102)",
+        });
+    }
     if let Some(ref mapping) = c.bloblang {
         if c.kind != ComputeKind::Bloblang {
             return Err(Error::Name {
@@ -1574,7 +1601,61 @@ impl PipelineSpec {
             }
         }
         validate_steps("spec.steps", &self.steps, &own, self.is_scheduled())?;
+        self.validate_kpi()?;
         self.validate_routes()
+    }
+
+    /// A `kpi` step (PL-102, PL-103): the only step, no routes, over two to five named Endpoint
+    /// sources each reading one type, with its formula checked against their attributes. Units
+    /// from the space's model are checked where the model is at hand (the Portal's editor).
+    fn validate_kpi(&self) -> Result<()> {
+        let Some(kpi) = self.steps.iter().find_map(|step| match step {
+            Step::Compute(compute) => compute.kpi.as_ref(),
+            Step::Processor(_) => None,
+        }) else {
+            return Ok(());
+        };
+        if self.steps.len() > 1 || !self.routes.is_empty() {
+            return Err(Error::Name {
+                field: "spec.steps",
+                value: "kpi".to_owned(),
+                reason: "a `kpi` step is the pipeline's only step and takes no routes (PL-102)",
+            });
+        }
+        self.kpi_inputs()
+            .and_then(|inputs| kpi.validate(&inputs))
+            .map(|_| ())
+    }
+
+    /// What a `kpi` step knows of each source (PL-102): its name, type and attributes, without
+    /// units or Endpoint URNs, which the caller adds.
+    pub fn kpi_inputs(&self) -> Result<Vec<crate::kpi_join::Input>> {
+        self.sources
+            .iter()
+            .map(|source| {
+                let (Some(name), Some(_), Some(query)) =
+                    (&source.name, &source.endpoint_ref, &source.query)
+                else {
+                    return Err(Error::Invalid {
+                        field: "spec.sources".to_owned(),
+                        reason: "each source of a `kpi` step has a `name`, an `endpointRef` and a `query` (PL-102)".to_owned(),
+                    });
+                };
+                let Some(entity_type) = query.entity_type.clone() else {
+                    return Err(Error::Invalid {
+                        field: "spec.sources.query.type".to_owned(),
+                        reason: format!("source `{name}` reads one entity type: name it in `query.type` (PL-102)"),
+                    });
+                };
+                Ok(crate::kpi_join::Input {
+                    name: name.clone(),
+                    entity_type,
+                    attrs: query.attrs.clone(),
+                    q: query.q.clone(),
+                    ..Default::default()
+                })
+            })
+            .collect()
     }
 
     /// The routes (PL-73): at most [`MAX_ROUTES`], unique DNS-label names, a `when` held to the

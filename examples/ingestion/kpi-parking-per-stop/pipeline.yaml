@@ -1,0 +1,31 @@
+# One indicator over two sources, joined by district (PL-102…PL-104, T-4864): occupied parking
+# places per transit stop, one KeyPerformanceIndicator per district both sources have, every
+# hour. jc-core compiles the `kpi` step; bento.yaml holds that compiled mapping, and the jc-core
+# test kpi_join_tests checks it is the one the compiler renders now.
+apiVersion: joinedcontext.com/v1alpha2
+kind: Pipeline
+metadata:
+  name: parking-per-stop
+  namespace: helsinki
+  title:
+    en: Occupied parking places per transit stop, by district
+spec:
+  class: scheduled
+  schedule: "0 * * * *"
+  sources:
+    - name: parking
+      endpointRef: { kind: Endpoint, name: helsinki-parking }
+      query: { type: ParkingSite, attrs: [occupiedSpotNumber, totalSpotNumber, district] }
+    - name: stops
+      endpointRef: { kind: Endpoint, name: helsinki-transit }
+      query: { type: TransitStop, attrs: [district] }
+  steps:
+    - kind: kpi
+      kpi:
+        name: parking-per-stop
+        title: Occupied parking places per transit stop
+        formula: sum(parking.occupiedSpotNumber) / count(stops)
+        unitCode: C62
+        join: { by: area, keys: { parking: district, stops: district } }
+  outputs:
+    - targetEndpoint: urn:ngsi-ld:Endpoint:hel.fi:helsinki-kpi:kpi-writer
