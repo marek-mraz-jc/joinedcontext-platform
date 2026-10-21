@@ -101,6 +101,10 @@ pub struct PipelineSpec {
     /// rendered stream writes their `expiresAt` after the author's steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
+    /// Which history rows the broker keeps of each written attribute and where the time of a
+    /// row comes from (PL-106…PL-110).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<super::pipeline_history::History>,
     /// How the pipeline follows a record its source removed (PL-96…PL-100); absent, nothing is
     /// deleted, as with `mode: never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1058,6 +1062,14 @@ impl PipelineSpec {
                 author_texts: &self.author_texts(),
             };
             super::pipeline_lifetime::validate(&self.lifetime, &context)?;
+        }
+        if !self.history.is_empty() {
+            let outputs = self.outputs();
+            let written: Option<std::collections::BTreeSet<&str>> = outputs
+                .iter()
+                .map(|out| out.entity_type.as_deref())
+                .collect();
+            super::pipeline_history::validate(&self.history, written.as_ref())?;
         }
         if let Some(source_deletes) = &self.source_deletes {
             source_deletes.validate(&super::pipeline_source_deletes::Context {
