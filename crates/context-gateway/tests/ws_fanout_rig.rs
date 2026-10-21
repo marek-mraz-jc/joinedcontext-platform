@@ -10,10 +10,8 @@
 //! clients' together. Run it on a GitHub runner (`ws-fanout-rig.yml`), never on the shared host.
 
 mod common;
+mod rig;
 
-use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
-use axum::routing::get;
-use axum::Router;
 use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::fanout::{changed, compile, hub::core};
@@ -23,14 +21,12 @@ use context_gateway::store;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
-const SLUG: &str = "vvvvvvvvvvvvvvvvvvvvvvvvvv";
 const VEHICLES: u64 = 50;
 const MODES: [&str; 3] = ["bus", "tram", "metro"];
 
@@ -39,90 +35,6 @@ fn env(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
-}
-
-fn repo() -> PathBuf {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after the epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("gw-ws-rig-{now}"));
-    std::fs::create_dir_all(&dir).expect("create the repository");
-    let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).expect("write");
-    write(
-        "space.yaml",
-        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: transport\n  \
-         namespace: helsinki\nspec:\n  isSandbox: false\n  urnSegment: transport\n",
-    );
-    write(
-        "endpoint.yaml",
-        &format!(
-            "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: vehicles\n  \
-             namespace: helsinki\nspec:\n  contextSpaceRef: transport\n  slug: {SLUG}\n  audience: public\n"
-        ),
-    );
-    write(
-        "policy.yaml",
-        "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: public-vehicles\n  \
-         namespace: helsinki\nspec:\n  contextSpaceRef: { kind: ContextSpace, name: transport }\n  \
-         assigner: did:web:hel.fi\n  assignee: { kind: role, id: public }\n  \
-         operations: [retrieveOps]\n  information:\n    - entities:\n        - type: Vehicle\n",
-    );
-    dir
-}
-
-/// A broker whose view socket welcomes, accepts the gateway's subscription and forwards every
-/// line the rig pushes; its entity query answers an empty page.
-async fn broker() -> (String, tokio::sync::broadcast::Sender<Arc<String>>) {
-    let (push, _) = tokio::sync::broadcast::channel::<Arc<String>>(1 << 16);
-    let held = push.clone();
-    let app = Router::new()
-        .route(
-            "/x/views/{view}/ws",
-            get(move |upgrade: WebSocketUpgrade| {
-                let mut pushed = held.subscribe();
-                async move {
-                    upgrade.on_upgrade(|mut socket| async move {
-                        let welcome = json!({"metadata": {"x-op": "x-welcome",
-                            "x-connection": "c", "x-resume-token": "t"}});
-                        let _ = socket.send(AxumMessage::Text(welcome.to_string().into())).await;
-                        loop {
-                            tokio::select! {
-                                read = socket.recv() => {
-                                    let Some(Ok(AxumMessage::Text(text))) = read else { return };
-                                    if text.as_str().contains("x-subscribe") {
-                                        let created = json!({"metadata": {"x-op": "x-result",
-                                            "x-id": "up", "x-status": 201}});
-                                        let _ = socket.send(AxumMessage::Text(created.to_string().into())).await;
-                                    }
-                                }
-                                Ok(text) = pushed.recv() => {
-                                    if socket.send(AxumMessage::Text(text.as_str().into())).await.is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    })
-                }
-            }),
-        )
-        .route(
-            "/x/views/{view}/ngsi-ld/v1/entities",
-            get(|| async { axum::Json(json!([])) }),
-        );
-    (serve(app).await, push)
-}
-
-async fn serve(app: Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a free port");
-    let address = listener.local_addr().expect("an address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("127.0.0.1:{}", address.port())
 }
 
 /// A small deterministic generator, so a run replays.
@@ -260,43 +172,6 @@ fn holds_coalesced(got: &[usize], expected: &[usize], stream: &[Value]) -> bool 
         })
 }
 
-fn percentile(sorted: &[Duration], p: f64) -> Duration {
-    if sorted.is_empty() {
-        return Duration::ZERO;
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    let at = ((sorted.len() - 1) as f64 * p).round() as usize;
-    sorted[at]
-}
-
-/// `VmRSS` and user + system CPU of this process, from `/proc` (Linux runners).
-fn usage() -> (u64, Duration) {
-    let rss = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-        })
-        .unwrap_or(0);
-    let cpu = std::fs::read_to_string("/proc/self/stat")
-        .ok()
-        .and_then(|s| {
-            let after = s.rsplit_once(')')?.1;
-            let fields: Vec<&str> = after.split_whitespace().collect();
-            let ticks: u64 =
-                fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
-            // ponytail: the usual 100 ticks per second; sysconf would be a libc dependency.
-            Some(Duration::from_millis(ticks * 10))
-        })
-        .unwrap_or_default();
-    (rss, cpu)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_socket_receives_exactly_what_its_filter_admits() {
     let sockets = env("RIG_SOCKETS", 100);
@@ -306,8 +181,8 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     std::env::set_var("JC_GATEWAY_WS_PER_SPACE", (sockets + 1).to_string());
 
     let realm = common::Realm::new();
-    let (upstream, push) = broker().await;
-    let (endpoints, ..) = store::load(&repo()).expect("the repository loads");
+    let (upstream, push) = rig::broker().await;
+    let (endpoints, ..) = store::load(&rig::repo()).expect("the repository loads");
     let gateway = Gateway::new(
         Broker::new(format!("http://{upstream}")),
         Box::new(PolicyPdp),
@@ -315,14 +190,14 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     )
     .serve(endpoints)
     .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None);
-    let at = serve(router(Arc::new(gateway))).await;
+    let at = rig::serve(router(Arc::new(gateway))).await;
 
     let mut rng = Rng(4133);
     let filters: Vec<Value> = (0..sockets).map(|_| filter(&mut rng)).collect();
     let stream: Vec<Value> = (0..changes).map(|n| change(&mut rng, n)).collect();
     let expected = ground_truth(&filters, &stream);
 
-    let (before_rss, before_cpu) = usage();
+    let (before_rss, before_cpu) = rig::usage();
     let received = Arc::new(AtomicUsize::new(0));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
     let sent_at: Arc<std::sync::Mutex<Vec<Option<Instant>>>> =
@@ -331,7 +206,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<Result<(), String>>(sockets.max(1));
     for (i, body) in filters.iter().enumerate() {
         // Ten connections per caller (EP-107): each client is its own address.
-        let mut request = format!("ws://{at}/api/endpoint/{SLUG}/ws")
+        let mut request = format!("ws://{at}/api/endpoint/{}/ws", rig::SLUG)
             .into_client_request()
             .expect("a request");
         request.headers_mut().insert(
@@ -484,7 +359,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         }
         latencies.append(&mut seen);
     }
-    let (after_rss, after_cpu) = usage();
+    let (after_rss, after_cpu) = rig::usage();
     latencies.sort_unstable();
     let report = json!({
         "sockets": sockets,
@@ -495,8 +370,8 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         "coalesced": coalesced,
         "gaps": gaps,
         "ended_by_server": ends,
-        "latency_p50_ms": percentile(&latencies, 0.50).as_secs_f64() * 1000.0,
-        "latency_p99_ms": percentile(&latencies, 0.99).as_secs_f64() * 1000.0,
+        "latency_p50_ms": rig::percentile(&latencies, 0.50).as_secs_f64() * 1000.0,
+        "latency_p99_ms": rig::percentile(&latencies, 0.99).as_secs_f64() * 1000.0,
         "rss_kib_before": before_rss,
         "rss_kib_after": after_rss,
         "cpu_s": (after_cpu.saturating_sub(before_cpu)).as_secs_f64(),
