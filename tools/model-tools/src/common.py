@@ -339,6 +339,20 @@ def generator_version() -> str:
     return f"linkml-{metadata.version('linkml')}"
 
 
+def uri_of(view: SchemaView, element: SlotDefinition | ClassDefinition) -> str:
+    """The element's IRI expanded with the model's own prefixes, as the @context and SHACL write it.
+
+    SchemaView expands a CURIE with LinkML's defaults first, so a model mapping `schema:` to
+    https://schema.org/ got http://schema.org/ here and its own https IRIs everywhere else (T-5066).
+    """
+    curie = view.get_uri(element, expand=False)
+    prefix, _, local = curie.partition(":")
+    declared = view.schema.prefixes.get(prefix) if local else None
+    if declared is not None:
+        return declared.prefix_reference + local
+    return view.get_uri(element, expand=True)
+
+
 def annotation_value(element: SlotDefinition | ClassDefinition, tag: str) -> str | None:
     """One annotation of a slot or class, or None where it carries none.
 

@@ -30,6 +30,7 @@ from common import (
     generator_version,
     load,
     ngsi_ld_kind,
+    uri_of,
 )
 from gen_context import compile_context
 from relationships import analyse
@@ -40,7 +41,7 @@ OPEN_WORLD_ANNOTATION = "open_world"
 def _open_world_classes(view: SchemaView) -> list[str]:
     """The classes that accept undeclared attributes (DM-28)."""
     return [
-        view.get_uri(cls, expand=True)
+        uri_of(view, cls)
         for cls in view.all_classes().values()
         if (annotation_value(cls, OPEN_WORLD_ANNOTATION) or "").lower() == "true"
     ]
@@ -55,7 +56,7 @@ def _apply_ngsi_ld_kinds(view: SchemaView, graph: Graph) -> None:
     against the untouched shapes would see every relationship and every translated label fail.
     """
     for slot in view.all_slots().values():
-        path = URIRef(view.get_uri(slot, expand=True))
+        path = URIRef(uri_of(view, slot))
         if annotation_value(slot, JSONLD_KEYWORD_ANNOTATION):
             # `id` and `type` are JSON-LD keywords: in the expanded graph the first is the
             # node's own IRI and the second is `rdf:type`, which the shape already ignores.
@@ -69,7 +70,7 @@ def _apply_ngsi_ld_kinds(view: SchemaView, graph: Graph) -> None:
         if kind == "Property" and target is not None and "Entity" not in view.class_ancestors(target.name):
             # An inline object expands to a blank node with no `rdf:type`: it is held to the
             # shape of its class, never asked to be an instance of it (T-5066).
-            node = URIRef(view.get_uri(target, expand=True))
+            node = URIRef(uri_of(view, target))
             for shape in graph.subjects(SH.path, path):
                 if (shape, SH["class"], node) in graph:
                     graph.remove((shape, SH["class"], node))
@@ -158,8 +159,8 @@ def _drop_computed_ends(view: SchemaView, graph: Graph) -> None:
     relationships, _ = analyse(view)
     for rel in relationships:
         computed = rel.computed_end
-        node = URIRef(view.get_uri(view.get_class(computed.cls), expand=True))
-        path = URIRef(view.get_uri(view.induced_slot(computed.slot, computed.cls), expand=True))
+        node = URIRef(uri_of(view, view.get_class(computed.cls)))
+        path = URIRef(uri_of(view, view.induced_slot(computed.slot, computed.cls)))
         for shape in list(graph.objects(node, SH.property)):
             if (shape, SH.path, path) in graph:
                 graph.remove((node, SH.property, shape))
@@ -215,7 +216,7 @@ def compile_owl(source: str | Path) -> str:
         return text
     graph = Graph().parse(data=text, format="turtle")
     for end in single:
-        graph.add((URIRef(view.get_uri(view.induced_slot(end.slot, end.cls), expand=True)), RDF.type, OWL.FunctionalProperty))
+        graph.add((URIRef(uri_of(view, view.induced_slot(end.slot, end.cls))), RDF.type, OWL.FunctionalProperty))
     return graph.serialize(format="turtle")
 
 

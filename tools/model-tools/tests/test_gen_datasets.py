@@ -123,3 +123,23 @@ def test_the_committed_write_path_fixtures_are_what_the_generator_renders(model,
         assert (tmp_path / name).read_text() == (committed / name).read_text(), (
             f"regenerate {name}: python3 src/gen_datasets.py tests/fixtures/{model}.linkml.yaml -o {committed}"
         )
+
+
+def test_a_model_mapping_schema_to_https_keeps_its_own_iris(tmp_path):
+    # LinkML maps `schema:` to http://schema.org/ by default; a model that maps it to https kept
+    # its own IRIs in the @context and the shapes, and the shape fixes looked for the http ones,
+    # so every valid event with an inline address was refused at `address` (T-5066).
+    model = tmp_path / "events.linkml.yaml"
+    model.write_text(
+        "id: https://banskabystrica.sk/ns/events\nname: events\n"
+        "prefixes: { linkml: https://w3id.org/linkml/, schema: https://schema.org/ }\n"
+        "default_range: string\nimports: [linkml:types, ngsi-ld-core]\n"
+        "classes:\n"
+        "  Event: { class_uri: schema:Event, is_a: Entity, slots: [address] }\n"
+        "  PostalAddress: { class_uri: schema:PostalAddress, slots: [addressLocality] }\n"
+        "slots:\n"
+        "  address: { slot_uri: schema:address, range: PostalAddress, inlined: true, required: true,"
+        " annotations: { ngsi_ld_kind: Property } }\n"
+        "  addressLocality: { slot_uri: schema:addressLocality, annotations: { ngsi_ld_kind: Property } }\n"
+    )
+    assert check(str(model)) == []

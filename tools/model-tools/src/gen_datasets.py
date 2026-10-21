@@ -32,7 +32,7 @@ from typing import Any
 from linkml_runtime import SchemaView
 from linkml_runtime.linkml_model.meta import ClassDefinition, SlotDefinition
 
-from common import ModelError, annotation_value, load, ngsi_ld_kind, slots_of
+from common import ModelError, annotation_value, load, ngsi_ld_kind, slots_of, uri_of
 from gen_context import compile_context
 from gen_example import _domain, _object, _scalar, _urn
 from gen_json_schema import compile_schema
@@ -318,7 +318,7 @@ class Checker:
         # Every entity a record refers to is `_urn(class)`: asserting each one's type stands in
         # for the referenced entities the space holds, which `sh:class` on a Relationship reads.
         self.referenced = [
-            (_urn(cls.name, domain), view.get_uri(cls, expand=True)) for cls in view.all_classes().values()
+            (_urn(cls.name, domain), uri_of(view, cls)) for cls in view.all_classes().values()
         ]
         self.context = compile_context(source)["@context"]
         self.shapes = Graph().parse(data=compile_shacl(source), format="turtle")
