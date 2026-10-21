@@ -138,8 +138,17 @@ impl Hubs {
                 hub
             }
         };
-        let (conn, queue) = hub.open(endpoint, principal);
+        let (conn, queue) = hub.open(endpoint, principal, subject.client);
         Ok(hub::Joined::new(hub, conn, queue))
+    }
+
+    /// Judges every open connection again after a reload of the Endpoint or account tables
+    /// (T-4874): what [`Hub::recheck`] names ends at once.
+    pub fn recheck(&self, gateway: &Gateway) {
+        let hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        for (_, hub) in hubs.values() {
+            recheck(gateway, hub);
+        }
     }
 
     /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did, or
@@ -205,6 +214,17 @@ impl Rate {
         }
         self.tokens -= 1.0;
         true
+    }
+}
+
+/// [`Hub::recheck`] of `hub` against the gateway's current tables.
+fn recheck(gateway: &Gateway, hub: &Hub) {
+    let accounts = gateway.accounts.load();
+    let closed = hub.recheck(gateway.resolver.resolve(&hub.slug).as_ref(), |azp| {
+        accounts.admits_on(azp, &hub.slug)
+    });
+    if !closed.is_empty() {
+        tracing::info!(slug = %hub.slug, closed = closed.len(), "WebSocket connections closed by a reload");
     }
 }
 
@@ -339,8 +359,9 @@ async fn run(
         let frame = tokio::select! {
             frame = from_broker.next() => frame,
             _ = tick.tick() => {
-                let now = gateway.resolver.resolve(&hub.slug);
-                hub.recheck(now.as_ref());
+                // The reload rechecks at once (Hubs::recheck); this tick catches a connection
+                // that joined on the old table while the reload ran.
+                recheck(gateway, hub);
                 // ponytail: an Endpoint with several identities' hubs reports the last one's
                 // table; a sum over the registry when a dashboard needs the Endpoint's total.
                 metrics::gauge!("jc_gateway_ws_entities", "endpoint" => hub.slug.clone())
@@ -621,7 +642,11 @@ pub async fn session(
                             seq += 1;
                             outgoing.push(gap(seq, seq));
                         }
-                        Out::Closing(reason) => ended = Some(Ended::Closing(reason)),
+                        Out::Closing(reason) => {
+                            // Nothing queued behind a close is sent (T-4874).
+                            ended = Some(Ended::Closing(reason));
+                            break;
+                        }
                         Out::Refused => ended = Some(Ended::Refused),
                     }
                 }
@@ -821,10 +846,10 @@ mod tests {
     fn hub_with_closed(sent: &[u64]) -> (Hub, u64) {
         let hub = Hub::new("s", 10);
         let endpoint = crate::fanout::hub::tests_support::endpoint();
-        let (old, _) = hub.open(Arc::clone(&endpoint), "anonymous".into());
+        let (old, _) = hub.open(Arc::clone(&endpoint), "anonymous".into(), None);
         let held: VecDeque<(u64, String)> = sent.iter().map(|n| (*n, format!("n{n}"))).collect();
         hub.close(old, "name", "token", held);
-        let (new, _) = hub.open(endpoint, "anonymous".into());
+        let (new, _) = hub.open(endpoint, "anonymous".into(), None);
         (hub, new)
     }
 
@@ -889,7 +914,7 @@ mod tests {
         let endpoint = crate::fanout::hub::tests_support::endpoint();
         let busy = |slug: &str| {
             let hub = Arc::new(Hub::new(slug, 10));
-            hub.open(Arc::clone(&endpoint), "anonymous".into());
+            hub.open(Arc::clone(&endpoint), "anonymous".into(), None);
             hub
         };
         let mut hubs: HashMap<String, (String, Arc<Hub>)> = HashMap::new();
@@ -1023,7 +1048,7 @@ mod tests {
                 up.on_upgrade(|client| async move {
                     let hub = Arc::new(Hub::new("s", 10));
                     let endpoint = crate::fanout::hub::tests_support::endpoint();
-                    let (conn, queue) = hub.open(endpoint, "anonymous".into());
+                    let (conn, queue) = hub.open(endpoint, "anonymous".into(), None);
                     let lifetime = Duration::from_secs(60);
                     session(client, hub, conn, queue, "anonymous".into(), lifetime).await;
                 })

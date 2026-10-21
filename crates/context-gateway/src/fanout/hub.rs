@@ -139,6 +139,8 @@ struct Sub {
 struct Conn {
     endpoint: Arc<Endpoint>,
     principal: String,
+    /// The Keycloak client its token was issued to (`azp`), which a reload may stop admitting.
+    client: Option<String>,
     queue: Arc<Queue>,
     subs: BTreeMap<u32, Sub>,
     next: u32,
@@ -265,7 +267,12 @@ impl Hub {
     }
 
     /// Opens a connection of `principal` on `endpoint`.
-    pub fn open(&self, endpoint: Arc<Endpoint>, principal: String) -> (u64, Arc<Queue>) {
+    pub fn open(
+        &self,
+        endpoint: Arc<Endpoint>,
+        principal: String,
+        client: Option<String>,
+    ) -> (u64, Arc<Queue>) {
         let queue = Arc::new(Queue::default());
         let mut state = self.state();
         let id = state.next_conn;
@@ -276,6 +283,7 @@ impl Hub {
             Conn {
                 endpoint,
                 principal,
+                client,
                 queue: Arc::clone(&queue),
                 subs: BTreeMap::new(),
                 next: 1,
@@ -469,21 +477,39 @@ impl Hub {
         self.state().conns.get(&conn).map_or(0, |c| c.subs.len())
     }
 
-    /// Follows every connection's Endpoint through a reload; a connection whose Endpoint is gone
-    /// or no longer serves the WebSocket is named, to close. A changed Policy needs nothing here:
-    /// the broker decides each delivery under the Policy in force when it is sent (R48).
-    pub fn recheck(&self, now: Option<&Arc<Endpoint>>) -> Vec<u64> {
+    /// Follows every connection's Endpoint through a reload (T-4874): a connection whose Endpoint
+    /// is gone or no longer serves the WebSocket ends with `view-removed`; one whose Endpoint
+    /// record changed in any way (audience, roles, grants, Policies, hidden attributes) or whose
+    /// token's client `admits` no longer passes ends with `endpoint-changed`, so no decision
+    /// taken at the upgrade outlives a change and the client reconnects under the new record.
+    /// The reason names no detail of the change. Answers the connections it closes.
+    pub fn recheck(&self, now: Option<&Arc<Endpoint>>, admits: impl Fn(&str) -> bool) -> Vec<u64> {
         let mut state = self.state();
         let mut gone = Vec::new();
         for (id, conn) in &mut state.conns {
-            match now {
-                Some(endpoint) if Arc::ptr_eq(endpoint, &conn.endpoint) => {}
-                Some(endpoint) if endpoint.serves(jc_core::kinds::Representation::WebSocket) => {
-                    conn.endpoint = Arc::clone(endpoint);
+            let reason = match now {
+                Some(endpoint) if !endpoint.serves(jc_core::kinds::Representation::WebSocket) => {
+                    "view-removed"
                 }
-                _ => {
-                    conn.queue.push(Out::Closing("view-removed"));
-                    gone.push(*id);
+                Some(endpoint)
+                    if **endpoint == *conn.endpoint
+                        && conn.client.as_deref().is_none_or(&admits) =>
+                {
+                    // The same record in a new table: nothing to judge again.
+                    conn.endpoint = Arc::clone(endpoint);
+                    continue;
+                }
+                Some(_) => "endpoint-changed",
+                None => "view-removed",
+            };
+            conn.queue.push(Out::Closing(reason));
+            gone.push(*id);
+        }
+        // A closing connection leaves the index now: no change applied after this sends it more.
+        for id in &gone {
+            if let Some(conn) = state.conns.get_mut(id) {
+                for (_, sub) in std::mem::take(&mut conn.subs) {
+                    state.index.remove(sub.filter);
                 }
             }
         }
@@ -734,7 +760,7 @@ mod tests {
     }
 
     fn open(hub: &Hub) -> (u64, Arc<Queue>) {
-        hub.open(endpoint(), "anonymous".into())
+        hub.open(endpoint(), "anonymous".into(), None)
     }
 
     /// A connection whose upgrade failed leaves the hub with its guard; a taken one stays.
@@ -751,6 +777,44 @@ mod tests {
         let (conn, queue) = open(&hub);
         let (_, taken, _) = Joined::new(Arc::clone(&hub), conn, queue).take();
         assert_eq!((taken, hub.connections()), (conn, 1));
+    }
+
+    /// T-4874: a reload judges each connection again. The same record in a new table keeps it;
+    /// a changed record, a client the accounts stop admitting, a removed Endpoint or one that
+    /// stops serving the WebSocket each end it, and a change applied after that sends nothing.
+    #[test]
+    fn a_reload_closes_what_changed_and_nothing_follows_the_close() {
+        let at = chrono::DateTime::UNIX_EPOCH;
+        let same = |_: &str| true;
+        let hub = Hub::new("s", 10);
+        let (kept, kept_queue) = open(&hub);
+        subscribe(&hub, kept, json!({}));
+        assert!(
+            hub.recheck(Some(&endpoint()), same).is_empty(),
+            "equal record, new Arc"
+        );
+
+        let mut narrowed = (*endpoint()).clone();
+        narrowed.audience = jc_core::kinds::Audience::ProjectList;
+        assert_eq!(hub.recheck(Some(&Arc::new(narrowed)), same), [kept]);
+        hub.apply(bus("urn:ngsi-ld:Vehicle:1", 1.0, "x"), at);
+        let (items, _) = kept_queue.take();
+        assert_eq!(items, [Out::Closing("endpoint-changed")]);
+        assert!(hub.state().index.is_empty(), "its filters left at once");
+
+        let (app, _) = hub.open(endpoint(), "user:jana".into(), Some("app-x".into()));
+        assert!(hub
+            .recheck(Some(&endpoint()), |azp| azp != "app-x")
+            .contains(&app));
+
+        let (_, gone_queue) = open(&hub);
+        hub.recheck(None, same);
+        assert_eq!(gone_queue.take().0, [Out::Closing("view-removed")]);
+        let mut quiet = (*endpoint()).clone();
+        quiet.representations.clear();
+        let (off, off_queue) = open(&hub);
+        assert!(hub.recheck(Some(&Arc::new(quiet)), same).contains(&off));
+        assert_eq!(off_queue.take().0, [Out::Closing("view-removed")]);
     }
 
     fn subscribe(hub: &Hub, conn: u64, extra: Value) -> String {

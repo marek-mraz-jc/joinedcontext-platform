@@ -128,6 +128,9 @@ impl Reaper {
                 self.gateway.resolver.replace(endpoints);
                 self.gateway.resolver.replace_spaces(spaces);
                 self.gateway.replace_accounts(accounts);
+                // An open WebSocket was admitted under the old tables: each is judged again now
+                // and closed when its Endpoint or its client changed (T-4874).
+                self.gateway.hubs.recheck(&self.gateway);
                 self.gateway.replace_federation(federations);
                 // DS-12: an agreement that ended stops authorising reads here in the same
                 // reconcile that withdraws the `Policy` entities compiled from it, so an

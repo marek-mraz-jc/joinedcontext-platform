@@ -250,7 +250,17 @@ async fn gateway(test: &str, upstream: &str, realm: &common::Realm) -> String {
 
 /// [`gateway`] with a token caller's socket ending after `lifetime`.
 async fn lived(test: &str, upstream: &str, realm: &common::Realm, lifetime: Duration) -> String {
-    let (endpoints, ..) = store::load(&repo(test)).expect("the repository loads");
+    held(&repo(test), upstream, realm, lifetime).await.0
+}
+
+/// [`lived`] over the repository `dir`, with the gateway itself, so a test can reload its tables.
+async fn held(
+    dir: &std::path::Path,
+    upstream: &str,
+    realm: &common::Realm,
+    lifetime: Duration,
+) -> (String, Arc<Gateway>) {
+    let (endpoints, ..) = store::load(dir).expect("the repository loads");
     let mut gateway = Gateway::new(
         Broker::new(format!("http://{upstream}")),
         Box::new(PolicyPdp),
@@ -263,11 +273,17 @@ async fn lived(test: &str, upstream: &str, realm: &common::Realm, lifetime: Dura
         Some(HOST.to_owned()),
     );
     gateway.ws_token_lifetime = lifetime;
-    serve(router(Arc::new(gateway))).await
+    let gateway = Arc::new(gateway);
+    (serve(router(Arc::clone(&gateway))).await, gateway)
 }
 
 /// A person of `project`, holding `data-steward`, with a token for `slug`.
 fn person(realm: &common::Realm, project: &str, slug: &str) -> String {
+    person_for(realm, project, slug, 300)
+}
+
+/// [`person`] with a token that expires `seconds` from now.
+fn person_for(realm: &common::Realm, project: &str, slug: &str, seconds: i64) -> String {
     realm.mint(&json!({
         "iss": common::ISSUER,
         "sub": format!("someone-of-{project}"),
@@ -275,7 +291,7 @@ fn person(realm: &common::Realm, project: &str, slug: &str) -> String {
         "preferred_username": format!("someone-of-{project}"),
         "groups": [format!("/{project}")],
         "realm_access": { "roles": ["data-steward"] },
-        "exp": common::in_seconds(300),
+        "exp": common::in_seconds(seconds),
         "iat": common::in_seconds(-10),
     }))
 }
@@ -780,4 +796,118 @@ async fn a_refused_upstream_is_an_error_for_every_client() {
     assert_eq!(refused["metadata"]["x-status"], 503, "{refused}");
     let detail = refused["body"]["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("403"), "{detail}");
+}
+
+/// Reloads the gateway's endpoint table from `dir`, as the reaper does after a reconcile.
+fn reload(gateway: &Gateway, dir: &std::path::Path) {
+    let (endpoints, ..) = store::load(dir).expect("the repository loads");
+    gateway.resolver.replace(endpoints);
+    gateway.hubs.recheck(gateway);
+}
+
+/// The `x-reason` of the `x-closing` that ends `socket` within a second, then its close code.
+async fn closed_within_a_second(socket: &mut Socket) -> (String, u16) {
+    let closing = tokio::time::timeout(Duration::from_secs(1), next_op(socket, "x-closing"))
+        .await
+        .expect("closed within 1 s")
+        .expect("told why");
+    let code = match socket.next().await.expect("a frame").expect("readable") {
+        Message::Close(Some(frame)) => u16::from(frame.code),
+        other => panic!("a close frame, not {other:?}"),
+    };
+    let reason = closing["metadata"]["x-reason"].as_str().expect("a reason");
+    (reason.to_owned(), code)
+}
+
+/// T-4874: a token caller's socket ends when its token expires, even below the gateway's cap;
+/// reconnecting needs a fresh token.
+#[tokio::test]
+async fn a_token_socket_ends_when_its_token_expires() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = gateway("expiry", &upstream, &realm).await;
+    let token = person_for(&realm, "hel-mobility", INTERNAL, 2);
+    let bearer = [("authorization", format!("Bearer {token}"))];
+    let (mut socket, _) = open(&at, INTERNAL, "", &bearer).await.expect("upgraded");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let closing = next_op(&mut socket, "x-closing")
+        .await
+        .expect("closed at the token's exp, not at the 300 s cap");
+    assert_eq!(closing["metadata"]["x-reason"], "lifetime");
+    // Within the realm's clock-skew leeway the expired token still upgrades, and its socket
+    // ends at once: the leeway never lengthens a socket past the token's exp.
+    let (mut again, _) = open(&at, INTERNAL, "", &bearer).await.expect("upgraded");
+    assert_eq!(closed_within_a_second(&mut again).await.0, "lifetime");
+}
+
+/// T-4874: an Endpoint that turns from public to restricted closes its anonymous sockets at the
+/// reload, and the broker's next change reaches none of them; the reason names no detail.
+#[tokio::test]
+async fn public_to_restricted_closes_anonymous_sockets_at_the_reload() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker().await;
+    let dir = repo("narrowed");
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    subscribe_docks(&mut socket).await;
+    upstreams(&stub, 1).await;
+
+    std::fs::write(
+        dir.join("public.yaml"),
+        endpoint(
+            "helsinki-bikes",
+            PUBLIC,
+            "project-list",
+            "  allowedProjects: [hel-mobility]\n",
+        ),
+    )
+    .expect("narrow the Endpoint");
+    reload(&gateway, &dir);
+    stub.notify(json!([dock("urn:ngsi-ld:BikeHireDockingStation:after", 9)]));
+    assert_eq!(
+        closed_within_a_second(&mut socket).await,
+        ("endpoint-changed".to_owned(), 1000)
+    );
+    assert_eq!(
+        open(&at, PUBLIC, "", &[]).await.err(),
+        Some(StatusCode::UNAUTHORIZED)
+    );
+}
+
+/// T-4874: a withdrawn Policy grant and a widened one both close a token caller's socket at the
+/// reload: no decision of the upgrade outlives a change, and a widening never reaches an open
+/// connection; a deleted Endpoint closes with `view-removed`.
+#[tokio::test]
+async fn a_policy_change_or_a_deleted_endpoint_closes_open_sockets() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let dir = repo("revoked");
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let token = person(&realm, "hel-mobility", INTERNAL);
+    let bearer = [("authorization", format!("Bearer {token}"))];
+
+    let (mut revoked, _) = open(&at, INTERNAL, "", &bearer).await.expect("upgraded");
+    std::fs::remove_file(dir.join("staff.yaml")).expect("revoke the grant");
+    reload(&gateway, &dir);
+    assert_eq!(
+        closed_within_a_second(&mut revoked).await.0,
+        "endpoint-changed"
+    );
+
+    let (mut widened, _) = open(&at, INTERNAL, "", &bearer).await.expect("upgraded");
+    std::fs::write(
+        dir.join("staff.yaml"),
+        policy("staff-bikes", "data-steward"),
+    )
+    .expect("grant again");
+    reload(&gateway, &dir);
+    assert_eq!(
+        closed_within_a_second(&mut widened).await.0,
+        "endpoint-changed"
+    );
+
+    let (mut deleted, _) = open(&at, INTERNAL, "", &bearer).await.expect("upgraded");
+    std::fs::remove_file(dir.join("internal.yaml")).expect("delete the Endpoint");
+    reload(&gateway, &dir);
+    assert_eq!(closed_within_a_second(&mut deleted).await.0, "view-removed");
 }
