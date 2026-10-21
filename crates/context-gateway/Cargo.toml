@@ -66,9 +66,16 @@ rustls-pki-types = "1"
 serde_norway = "0.9"
 # The binary's allocator (T-4782): glibc kept a 100 req/s load's memory, 928 Mi of the 1 Gi
 # limit, after it ended; jemalloc with a background thread gives it back. Antares runs the same.
-tikv-jemallocator = "0.7"
+# Optional (T-5017): the library's dependents (the Portal) never build jemalloc or need make;
+# the image build turns `jemalloc` on.
+tikv-jemallocator = { version = "0.7", optional = true }
+
+[features]
+jemalloc = ["dep:tikv-jemallocator"]
 
 [dev-dependencies]
+# `in_flight_tests` measures memory under the binary's allocator, with or without `jemalloc`.
+tikv-jemallocator = "0.7"
 # `bench_org` writes the synthetic organization the store tests and scale_bench load.
 jcctl = { path = "../jcctl", version = "0.1.0" }
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.

@@ -433,6 +433,13 @@ async fn the_memory_of_a_load_comes_back_once_it_ends() {
         include_str!("../src/main.rs").contains("static ALLOCATOR: tikv_jemallocator::Jemalloc"),
         "the binary no longer allocates with jemalloc, which this test measures"
     );
+    assert_eq!(
+        include_str!("../../../Dockerfile")
+            .matches("cargo build --release --locked --workspace --exclude assistant --features context-gateway/jemalloc")
+            .count(),
+        2,
+        "both workspace builds of the image turn on the gateway's jemalloc feature (T-5017)"
+    );
     let output = std::process::Command::new(std::env::current_exe().expect("this test"))
         .args(["--exact", NAME, "--nocapture"])
         .env(LOAD_CHILD, "1")

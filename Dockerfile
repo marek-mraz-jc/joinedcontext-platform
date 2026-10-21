@@ -52,12 +52,12 @@ RUN mkdir -p crates/jc-core/src crates/jc-dcat/src crates/jc-manifest/src crates
  && echo 'pub fn _dep_cache() {}' > crates/app-sdk/src/lib.rs \
  && echo 'fn main() {}' > crates/camera-sim/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
- && cargo build --release --locked --workspace --exclude assistant \
+ && cargo build --release --locked --workspace --exclude assistant --features context-gateway/jemalloc \
  && cargo build --release --locked -p assistant && rm -rf crates/*/src
 COPY . .
 # Two invocations, so kreuzberg's serde_json `preserve_order` stays in the assistant and never
 # reorders what the gateway and jcctl write (T-3206).
-RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --exclude assistant \
+RUN touch crates/*/src/*.rs && cargo build --release --locked --workspace --exclude assistant --features context-gateway/jemalloc \
  && cargo build --release --locked -p assistant \
  && strip target/release/context-gateway target/release/jcctl target/release/jc-agent-proxy target/release/jc-functions target/release/jc-assistant target/release/jc-token-sidecar target/release/jc-camera-sim
 
