@@ -440,6 +440,32 @@ pub(crate) fn fan_out_schemas(tools: &mut [Value]) {
                 ],
             });
         }
+        // Without `endpoint` the answer is `results`, one entry per member, not the member's
+        // own object: a client that validates structuredContent must accept both (T-4871).
+        let Some(output) = tool.get_mut("outputSchema").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(required) = output.remove("required") {
+            output.insert(
+                "anyOf".to_owned(),
+                json!([{ "required": required }, { "required": ["results"] }]),
+            );
+        }
+        if let Some(Value::Object(properties)) = output.get_mut("properties") {
+            properties.insert(
+                "results".to_owned(),
+                json!({ "type": "array", "items": { "type": "object", "required": ["endpoint", "space"] } }),
+            );
+            properties.insert("partial".to_owned(), json!({ "type": "boolean" }));
+            properties.insert(
+                "failed".to_owned(),
+                json!({ "type": "array", "items": { "type": "object", "required": ["endpoint", "reason"] } }),
+            );
+            properties.insert(
+                "nextCursor".to_owned(),
+                json!({ "type": ["string", "integer", "object"] }),
+            );
+        }
     }
 }
 
@@ -757,5 +783,34 @@ mod tests {
             "object"
         );
         assert_eq!(tools[1]["inputSchema"]["required"], json!(["endpoint"]));
+    }
+
+    /// T-4871: a strict MCP client (the inspector, the TypeScript SDK) checks structuredContent
+    /// against outputSchema; a fan-out answer and a one-Endpoint answer both pass, a fan-out
+    /// answer missing `results` does not.
+    #[test]
+    fn the_output_schema_admits_a_fan_out_answer_and_a_member_answer() {
+        let mut tools = vec![json!({
+            "name": "list_types",
+            "inputSchema": { "properties": { "endpoint": { "type": "string" } }, "required": ["endpoint"] },
+            "outputSchema": {
+                "type": "object",
+                "properties": { "entityTypes": {}, "restricted": { "type": "boolean" } },
+                "required": ["entityTypes"],
+            },
+        })];
+        fan_out_schemas(&mut tools);
+        let validator = jsonschema::validator_for(&tools[0]["outputSchema"]).expect("a schema");
+        let fan_out = json!({
+            "results": [{ "endpoint": "a", "space": "helsinki", "entityTypes": { "typeList": ["Event"] } }],
+            "partial": true,
+            "failed": [{ "endpoint": "b", "reason": "no answer within ten seconds" }],
+            "nextCursor": { "a": "c1" },
+        });
+        assert!(validator.is_valid(&fan_out), "fan-out answer refused");
+        assert!(validator
+            .is_valid(&json!({ "entityTypes": { "typeList": ["Event"] }, "nextCursor": "c1" })));
+        assert!(!validator.is_valid(&json!({ "partial": true })));
+        assert!(!validator.is_valid(&json!({ "results": [{ "endpoint": "a" }] })));
     }
 }
