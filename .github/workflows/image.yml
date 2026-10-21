@@ -91,9 +91,10 @@ jobs:
         with:
           image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
           format: cyclonedx
-          output: sbom.cdx.json
+          output: ${{ runner.temp }}/sbom.cdx.json
+          cache-dir: ${{ runner.temp }}/trivy
       - if: steps.has.outputs.df != ''
-        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+        run: cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
       # Read back what was just attested, by the same digest and under the identity of this
       # workflow: a lane that stops attesting, or attests under another identity, goes red here
       # instead of publishing an image nothing describes. Before the vulnerability gate below,
@@ -106,7 +107,16 @@ jobs:
             "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" > /dev/null
       - if: steps.has.outputs.df != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
+        with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true, cache-dir: "${{ runner.temp }}/trivy" }
+      # The checkouts build below reuses the gateway's `build` stage only while `COPY . .` sees the
+      # same tree. Trivy's SBOM and its DB cache (default `.cache/trivy` in the workspace) once
+      # landed in that context and recompiled the workspace, which after a lock bump ran the job
+      # past its 30 min (T-5041): every step above writes to $RUNNER_TEMP, and this checks it.
+      - if: steps.has.outputs.df != ''
+        name: the build context is still the checked-out tree
+        run: |
+          stray=$(git status --porcelain --untracked-files=all --ignored)
+          [ -z "$stray" ] || { echo "files written into the build context since checkout:"; echo "$stray"; exit 1; }
       # The checkouts sidecar (T-2646): the same build stage, so the layers above are reused and
       # jcctl is the binary of this commit; signed, attested and gated like the platform image.
       - if: steps.has.outputs.df != ''
