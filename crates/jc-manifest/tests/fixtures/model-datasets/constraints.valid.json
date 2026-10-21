@@ -1,0 +1,813 @@
+[
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "Air quality",
+      "sk": "Kvalita ovzdu\u0161ia"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 40,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "medium",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "high",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "MultiPoint"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "LineString"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ]
+        ]
+      ],
+      "type": "MultiLineString"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ],
+          [
+            19.15,
+            48.74
+          ]
+        ]
+      ],
+      "type": "Polygon"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        [
+          [
+            [
+              19.15,
+              48.74
+            ],
+            [
+              19.16,
+              48.74
+            ],
+            [
+              19.16,
+              48.75
+            ],
+            [
+              19.15,
+              48.74
+            ]
+          ]
+        ]
+      ],
+      "type": "MultiPolygon"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "address": {
+      "street": "street"
+    },
+    "capacity": 1,
+    "code": "AA000",
+    "depths": [
+      0.0
+    ],
+    "homepage": "https://example.org/homepage",
+    "id": "urn:ngsi-ld:Station:banskabystrica.sk:example:1",
+    "level": "low",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "refOperator": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "temperature": -40.0,
+    "type": "Station"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "Air quality",
+      "sk": "Kvalita ovzdu\u0161ia"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "MultiPoint"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          19.15,
+          48.74
+        ],
+        [
+          19.16,
+          48.75
+        ]
+      ],
+      "type": "LineString"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ]
+        ]
+      ],
+      "type": "MultiLineString"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            19.15,
+            48.74
+          ],
+          [
+            19.16,
+            48.74
+          ],
+          [
+            19.16,
+            48.75
+          ],
+          [
+            19.15,
+            48.74
+          ]
+        ]
+      ],
+      "type": "Polygon"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        [
+          [
+            [
+              19.15,
+              48.74
+            ],
+            [
+              19.16,
+              48.74
+            ],
+            [
+              19.16,
+              48.75
+            ],
+            [
+              19.15,
+              48.74
+            ]
+          ]
+        ]
+      ],
+      "type": "MultiPolygon"
+    },
+    "name": {
+      "en": "name"
+    },
+    "observedAt": "2026-01-01T00:00:00Z",
+    "type": "Operator"
+  },
+  {
+    "id": "urn:ngsi-ld:Operator:banskabystrica.sk:example:1",
+    "location": {
+      "coordinates": [
+        0.0,
+        0.0
+      ],
+      "type": "Point"
+    },
+    "name": {
+      "en": "name"
+    },
+    "type": "Operator"
+  }
+]
