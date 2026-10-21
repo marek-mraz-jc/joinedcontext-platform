@@ -209,7 +209,7 @@ impl IcalField {
         }
     }
 
-    /// Whether the field takes the remap `key` (one of [`REMAPS`]).
+    /// Whether the field takes the remap `key` (one of `REMAPS`).
     pub fn allows(self, key: &str) -> bool {
         let text = matches!(self.accepts(), Accepts::Text | Accepts::Place);
         match key {
