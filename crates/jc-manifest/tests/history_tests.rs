@@ -1,5 +1,5 @@
-//! T-4845: `spec.history` checked against the space's model (PL-102) and compiled into the one
-//! Bloblang step that sets each planned `observedAt` (PL-103), run here in the Bento the runner
+//! T-4845: `spec.history` checked against the space's model (PL-106) and compiled into the one
+//! Bloblang step that sets each planned `observedAt` (PL-107), run here in the Bento the runner
 //! pins: a time from a slot (string and typed literal), a slot that gives no time, `received`,
 //! an attribute with several instances, an absent attribute and an array of entities.
 

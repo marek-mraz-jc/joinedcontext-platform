@@ -1,4 +1,4 @@
-//! `spec.history` of a Pipeline (PL-102…PL-106): per written attribute, which history rows the
+//! `spec.history` of a Pipeline (PL-106…PL-110): per written attribute, which history rows the
 //! broker keeps (every reading, only changes, the latest value only) and where the time of a row
 //! comes from. The rendered stream sets the planned `observedAt` (`jc_manifest::history`), the
 //! reconciler folds `keep` into the space's retention document, and the record check refuses a
@@ -21,7 +21,7 @@ use super::pipeline_lifetime::{
 /// The `observedAt` that leaves the time of a row to the broker's receive time (DM-107).
 pub const RECEIVED: &str = "received";
 
-/// The history plan of one written type (PL-102).
+/// The history plan of one written type (PL-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct History {
@@ -32,7 +32,7 @@ pub struct History {
     pub attributes: Vec<AttributeHistory>,
 }
 
-/// What the broker keeps of an attribute's writes (PL-102).
+/// What the broker keeps of an attribute's writes (PL-106).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -47,7 +47,7 @@ pub enum Keep {
 }
 
 impl Keep {
-    /// The space rule's `record` this plan folds into, `None` for `latest` (PL-104).
+    /// The space rule's `record` this plan folds into, `None` for `latest` (PL-108).
     pub fn record(self) -> Option<&'static str> {
         match self {
             Keep::Every => Some(super::RECORD_EVERY),
@@ -57,7 +57,7 @@ impl Keep {
     }
 }
 
-/// The plan of chosen attributes of a type (PL-102).
+/// The plan of chosen attributes of a type (PL-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AttributeHistory {
@@ -74,14 +74,14 @@ pub struct AttributeHistory {
     pub observed_at: Option<String>,
 }
 
-/// The admission checks of PL-102 that need no model: `written` is the types the outputs write,
+/// The admission checks of PL-106 that need no model: `written` is the types the outputs write,
 /// `None` when an output names none.
 pub(super) fn validate(history: &[History], written: Option<&BTreeSet<&str>>) -> Result<()> {
     let refused = |field: String, reason: String| Error::Invalid { field, reason };
     if history.len() > LIFETIME_MAX_TYPES {
         return Err(refused(
             "spec.history".to_owned(),
-            format!("name one to {LIFETIME_MAX_TYPES} types (PL-102)"),
+            format!("name one to {LIFETIME_MAX_TYPES} types (PL-106)"),
         ));
     }
     for (index, entry) in history.iter().enumerate() {
@@ -94,7 +94,7 @@ pub(super) fn validate(history: &[History], written: Option<&BTreeSet<&str>>) ->
             return Err(refused(
                 format!("{path}.type"),
                 format!(
-                    "`{}` has a history plan already; write one entry per type (PL-102)",
+                    "`{}` has a history plan already; write one entry per type (PL-106)",
                     entry.entity_type
                 ),
             ));
@@ -104,7 +104,7 @@ pub(super) fn validate(history: &[History], written: Option<&BTreeSet<&str>>) ->
                 return Err(refused(
                     format!("{path}.type"),
                     format!(
-                        "no output of this pipeline writes `{}`; the outputs write {} (PL-102)",
+                        "no output of this pipeline writes `{}`; the outputs write {} (PL-106)",
                         entry.entity_type,
                         written.iter().copied().collect::<Vec<_>>().join(", ")
                     ),
@@ -114,7 +114,7 @@ pub(super) fn validate(history: &[History], written: Option<&BTreeSet<&str>>) ->
         if entry.attributes.is_empty() || entry.attributes.len() > LIFETIME_MAX_ATTRIBUTES {
             return Err(refused(
                 format!("{path}.attributes"),
-                format!("write one to {LIFETIME_MAX_ATTRIBUTES} attribute entries (PL-102)"),
+                format!("write one to {LIFETIME_MAX_ATTRIBUTES} attribute entries (PL-106)"),
             ));
         }
         let mut seen = BTreeSet::new();
@@ -134,7 +134,7 @@ fn validate_attribute<'a>(
     if attribute.names.is_empty() || attribute.names.len() > LIFETIME_MAX_ATTRIBUTES {
         return Err(refused(
             format!("{at}.names"),
-            format!("name one to {LIFETIME_MAX_ATTRIBUTES} attributes (PL-102)"),
+            format!("name one to {LIFETIME_MAX_ATTRIBUTES} attributes (PL-106)"),
         ));
     }
     for name in &attribute.names {
@@ -143,7 +143,7 @@ fn validate_attribute<'a>(
                 format!("{at}.names"),
                 format!(
                     "`{}` is not an attribute name: a letter, then letters, digits or `_`, and \
-                     no NGSI-LD system member (DM-130, PL-102)",
+                     no NGSI-LD system member (DM-130, PL-106)",
                     name.escape_debug()
                 ),
             ));
@@ -151,7 +151,7 @@ fn validate_attribute<'a>(
         if !seen.insert(name.as_str()) {
             return Err(refused(
                 format!("{at}.names"),
-                format!("`{name}` is planned twice; give each attribute one plan (PL-102)"),
+                format!("`{name}` is planned twice; give each attribute one plan (PL-106)"),
             ));
         }
     }
@@ -160,7 +160,7 @@ fn validate_attribute<'a>(
             return Err(refused(
                 format!("{at}.heartbeat"),
                 "keep: changes needs a heartbeat, the longest gap between two rows, such as \
-                 PT15M or P1D (DM-109, PL-102)"
+                 PT15M or P1D (DM-109, PL-106)"
                     .to_owned(),
             ))
         }
@@ -169,7 +169,7 @@ fn validate_attribute<'a>(
                 format!("{at}.heartbeat"),
                 format!(
                     "`{}` is not a duration from `PT1M` to `P3650D`, such as `PT15M` or `P1D` \
-                     (PL-102)",
+                     (PL-106)",
                     text.escape_debug()
                 ),
             ))
@@ -177,7 +177,7 @@ fn validate_attribute<'a>(
         (Keep::Every | Keep::Latest, Some(_)) => {
             return Err(refused(
                 format!("{at}.heartbeat"),
-                "a heartbeat belongs to keep: changes only (PL-102)".to_owned(),
+                "a heartbeat belongs to keep: changes only (PL-106)".to_owned(),
             ))
         }
         _ => {}
@@ -187,7 +187,7 @@ fn validate_attribute<'a>(
             return Err(refused(
                 format!("{at}.observedAt"),
                 format!(
-                    "`{}` is not a slot name or `received` (PL-102)",
+                    "`{}` is not a slot name or `received` (PL-106)",
                     field.escape_debug()
                 ),
             ));

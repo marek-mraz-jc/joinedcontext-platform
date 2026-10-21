@@ -102,7 +102,7 @@ pub struct PipelineSpec {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
     /// Which history rows the broker keeps of each written attribute and where the time of a
-    /// row comes from (PL-102…PL-106).
+    /// row comes from (PL-106…PL-110).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub history: Vec<super::pipeline_history::History>,
     /// How the pipeline follows a record its source removed (PL-96…PL-100); absent, nothing is

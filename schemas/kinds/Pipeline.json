@@ -4,7 +4,7 @@
   "definitions": {
     "AttributeHistory": {
       "additionalProperties": false,
-      "description": "The plan of chosen attributes of a type (PL-102).",
+      "description": "The plan of chosen attributes of a type (PL-106).",
       "properties": {
         "heartbeat": {
           "description": "With `changes` only: a row at least this often, `PT1M` to `P3650D`.",
@@ -279,7 +279,7 @@
     },
     "History": {
       "additionalProperties": false,
-      "description": "The history plan of one written type (PL-102).",
+      "description": "The history plan of one written type (PL-106).",
       "properties": {
         "attributes": {
           "description": "One to 64 entries, each attribute in one of them.",
@@ -332,7 +332,7 @@
       "type": "object"
     },
     "Keep": {
-      "description": "What the broker keeps of an attribute's writes (PL-102).",
+      "description": "What the broker keeps of an attribute's writes (PL-106).",
       "oneOf": [
         {
           "description": "A row per measurement: the space rule `record: every`.",
@@ -847,7 +847,7 @@
           "description": "Deletes the entities its source stopped sending; absent, nothing is deleted (PL-64)."
         },
         "history": {
-          "description": "Which history rows the broker keeps of each written attribute and where the time of a row comes from (PL-102…PL-106).",
+          "description": "Which history rows the broker keeps of each written attribute and where the time of a row comes from (PL-106…PL-110).",
           "items": {
             "$ref": "#/definitions/History"
           },
