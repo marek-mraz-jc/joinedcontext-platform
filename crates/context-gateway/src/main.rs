@@ -12,7 +12,9 @@ use std::sync::Arc;
 
 /// jemalloc, not glibc's malloc (T-4782): after a 100 req/s load glibc kept 928 Mi of the 1 Gi
 /// limit, the freed blocks of the broker answers spread over its heap. The image's
-/// `_RJEM_MALLOC_CONF` starts jemalloc's background thread, which gives them back.
+/// `_RJEM_MALLOC_CONF` starts jemalloc's background thread, which gives them back. Behind the
+/// `jemalloc` feature, which the image build turns on (T-5017).
+#[cfg(feature = "jemalloc")]
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -294,7 +296,12 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(bind = %config.bind, broker = %config.broker_url, "context-gateway listening");
+    tracing::info!(
+        bind = %config.bind,
+        broker = %config.broker_url,
+        allocator = if cfg!(feature = "jemalloc") { "jemalloc" } else { "system" },
+        "context-gateway listening"
+    );
 
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())

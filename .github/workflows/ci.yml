@@ -82,6 +82,11 @@ jobs:
       # And the contract those descriptions make: every field has one, and none of them is a
       # credential. `--lib --bins` above does not run an integration test (T-2145).
       - run: cargo test -p jc-core --test kind_documentation_tests --locked
+      # The gateway library builds no jemalloc for its dependents (the Portal); only the image's
+      # `--features context-gateway/jemalloc` links it (T-5017).
+      - run: |
+          tree="$(cargo tree -p context-gateway -e normal --prefix none --locked)"
+          if grep -q '^tikv-jemalloc' <<<"$tree"; then echo "context-gateway's default features pull jemalloc" >&2; exit 1; fi
       # Every environment variable a service reads is explained where it is read, and no
       # secret is read into a log line (T-2140, OPS-27). The configuration reference in the
       # docs is generated from those sentences, so a variable added without one is caught
