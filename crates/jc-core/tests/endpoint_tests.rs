@@ -756,6 +756,28 @@ fn only_ical_needs_the_model() {
     }
 }
 
+/// The RFC 5545 sections that define each field and, for UID, DTSTAMP and DTSTART, require it.
+fn section(field: &str) -> &'static str {
+    match field {
+        "UID" => "§3.6.1, §3.8.4.7",
+        "DTSTAMP" => "§3.6.1, §3.8.7.2",
+        "DTSTART" => "§3.6.1, §3.8.2.4",
+        "DTEND" => "§3.8.2.2",
+        "DURATION" => "§3.8.2.5",
+        "SUMMARY" => "§3.8.1.12",
+        "DESCRIPTION" => "§3.8.1.5",
+        "LOCATION" => "§3.8.1.7",
+        "GEO" => "§3.8.1.6",
+        "URL" => "§3.8.4.6",
+        "CATEGORIES" => "§3.8.1.2",
+        "STATUS" => "§3.8.1.11",
+        "ORGANIZER" => "§3.8.4.3",
+        "LAST-MODIFIED" => "§3.8.7.3",
+        "CLASS" => "§3.8.1.3",
+        other => panic!("no RFC 5545 section for {other}"),
+    }
+}
+
 /// The iCalendar fields, remaps and presets as the Markdown `schemas/surface-requirements.md`
 /// commits and API/02 §8b quotes (EP-125).
 fn markdown() -> String {
@@ -780,7 +802,7 @@ fn markdown() -> String {
         let remaps = field.remaps();
         out.push_str(&format!(
             "| `{field}` | {} | {required} | {} | {} |\n",
-            field.section(),
+            section(field.as_str()),
             field.accepts().words(),
             if remaps.is_empty() {
                 "none".to_owned()

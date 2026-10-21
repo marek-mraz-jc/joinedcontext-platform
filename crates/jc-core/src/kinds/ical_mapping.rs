@@ -188,27 +188,6 @@ impl IcalField {
         }
     }
 
-    /// The RFC 5545 sections that define the field and, for UID, DTSTAMP and DTSTART, require it.
-    pub const fn section(self) -> &'static str {
-        match self {
-            Self::Uid => "§3.6.1, §3.8.4.7",
-            Self::Dtstamp => "§3.6.1, §3.8.7.2",
-            Self::Dtstart => "§3.6.1, §3.8.2.4",
-            Self::Dtend => "§3.8.2.2",
-            Self::Duration => "§3.8.2.5",
-            Self::Summary => "§3.8.1.12",
-            Self::Description => "§3.8.1.5",
-            Self::Location => "§3.8.1.7",
-            Self::Geo => "§3.8.1.6",
-            Self::Url => "§3.8.4.6",
-            Self::Categories => "§3.8.1.2",
-            Self::Status => "§3.8.1.11",
-            Self::Organizer => "§3.8.4.3",
-            Self::LastModified => "§3.8.7.3",
-            Self::Class => "§3.8.1.3",
-        }
-    }
-
     /// DTSTART by RFC 5545; SUMMARY by the platform, as an entry without a title is of no use.
     /// UID and DTSTAMP are required too, and fixed.
     pub const fn required(self) -> bool {
@@ -939,7 +918,6 @@ mod tests {
         for field in IcalField::ALL {
             let wire = serde_json::to_value(field).expect("serializes");
             assert_eq!(wire.as_str(), Some(field.as_str()), "{field:?}");
-            assert!(field.section().starts_with('§'));
         }
         assert!(is_language("sk") && is_language("first") && !is_language("SK"));
         assert!(is_zone("Europe/Bratislava") && is_zone("UTC") && !is_zone("CET; x"));
