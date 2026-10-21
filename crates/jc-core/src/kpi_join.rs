@@ -37,6 +37,9 @@ pub const DIMENSIONLESS: [&str; 2] = ["C62", "P1"];
 static WINDOW_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"^P(T[1-9][0-9]{0,3}[HM]|[1-9][0-9]{0,2}D)$").expect("valid regex")
 });
+/// An attribute a kpi step reads: an NGSI-LD short name, which the compiled mapping quotes too.
+static ATTR_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$").expect("valid regex"));
 static UNIT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[A-Z0-9]{1,8}$").expect("valid regex"));
 
@@ -456,6 +459,15 @@ impl KpiStep {
         }
         let mut seen = BTreeSet::new();
         for input in inputs {
+            if let Some(attr) = input.attrs.iter().find(|a| !ATTR_RE.is_match(a)) {
+                return Err(Error::Invalid {
+                    field: "spec.sources.query.attrs".to_owned(),
+                    reason: format!(
+                        "`{attr}` of source `{}` is not an attribute name: letters, digits and _ (PL-103)",
+                        input.name
+                    ),
+                });
+            }
             if input.name.is_empty() {
                 return Err(Error::Invalid {
                     field: "spec.sources.name".to_owned(),
@@ -463,6 +475,7 @@ impl KpiStep {
                         .to_owned(),
                 });
             }
+            names::validate_dns1123_label(&input.name)?;
             if !seen.insert(input.name.as_str()) {
                 return Err(Error::Invalid {
                     field: "spec.sources.name".to_owned(),
@@ -601,17 +614,17 @@ fn lit(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
-/// The Bloblang query reading `attr` of row `e` as a key.
+/// The Bloblang query reading `attr` of row `e` as a key; the name is read as a quoted path.
 fn key_query(attr: &str) -> String {
-    if attr == "id" {
-        "e.id".to_owned()
-    } else {
-        format!("e.{attr}.value.or(e.{attr}.object).or(e.{attr})")
-    }
+    let at = lit(attr);
+    format!("e.get({at}).value.or(e.get({at}).object).or(e.get({at}))")
 }
 
 fn values(rows: &str, attr: &str) -> String {
-    format!("{rows}.map_each(e -> e.{attr}.value.or(e.{attr})).filter(v -> v.type() == \"number\")")
+    let at = lit(attr);
+    format!(
+        "{rows}.map_each(e -> e.get({at}).value.or(e.get({at}))).filter(v -> v.type() == \"number\")"
+    )
 }
 
 /// `expr` as a Bloblang query over the per-source row variables `rows(name)`.
@@ -1007,6 +1020,35 @@ mod tests {
         assert!(step("avg(parking)", "C62").validate(&inputs()).is_err());
         assert!(step("1 + 2", "C62").validate(&inputs()).is_err());
         assert!(step(&"1+".repeat(300), "C62").validate(&inputs()).is_err());
+    }
+
+    /// Review 2026-10-21 (integrator): an attribute or key is read into the compiled mapping, so
+    /// Bloblang written as an attribute name must be refused, and a hyphenated name too.
+    #[test]
+    fn bloblang_written_as_an_attribute_or_key_is_refused() {
+        let mut s = step("sum(parking.occupied) / count(stops)", "C62");
+        s.join.by = JoinBy::Area;
+        s.join.keys = BTreeMap::from([
+            ("parking".into(), "x.or(env(\"X\"))".into()),
+            ("stops".into(), "district".into()),
+        ]);
+        let mut ins = inputs();
+        ins[0].attrs.push("x.or(env(\"X\"))".into());
+        let err = s.validate(&ins).expect_err("an expression as a key");
+        assert!(
+            err.to_string().contains("is not an attribute name"),
+            "{err}"
+        );
+
+        let mut ins = inputs();
+        ins[0].attrs.push("my-attr".into());
+        let err = step("sum(parking.my-attr)", "C62")
+            .validate(&ins)
+            .expect_err("a hyphen reads as a subtraction");
+        assert!(
+            err.to_string().contains("is not an attribute name"),
+            "{err}"
+        );
     }
 
     #[test]
