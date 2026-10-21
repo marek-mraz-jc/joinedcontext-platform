@@ -5,7 +5,8 @@
 //! ledger, the guards and the deletes are the runner's (T-4891).
 //!
 //! The checks here read the Pipeline alone; the one that needs its DataSource (a snapshot of a
-//! source that never ends) is in [`crate::kinds::data_source::check_class`].
+//! source that never ends) is in `data_source::check_class`; the
+//! author-Bloblang rules on `deletedWhen` (PL-50) are applied by `PipelineSpec::validate`.
 
 use crate::error::{Error, Result};
 use schemars::JsonSchema;
@@ -131,10 +132,6 @@ impl SourceDeletes {
                          deleted at the source (PL-90)",
                     ));
                 }
-                super::pipeline::validate_author_bloblang(
-                    "spec.sourceDeletes.deletedWhen",
-                    marker,
-                )?;
             }
             SourceDeleteMode::Lease => {
                 if !context.has_rolling_entity_lifetime {

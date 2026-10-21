@@ -1053,6 +1053,9 @@ impl PipelineSpec {
                         .is_some_and(|mode| mode.rolling.is_some())
                 }),
             })?;
+            if let Some(marker) = &source_deletes.deleted_when {
+                validate_author_bloblang("spec.sourceDeletes.deletedWhen", marker)?;
+            }
         }
 
         Ok(())
