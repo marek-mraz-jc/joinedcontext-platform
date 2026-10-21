@@ -156,6 +156,7 @@ pub fn subject(
     Ok(Subject {
         user: None,
         service_account: None,
+        service_account_project: None,
         roles: std::collections::BTreeSet::new(),
         groups: std::collections::BTreeSet::new(),
         did: Some(participant.to_owned()),
