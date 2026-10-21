@@ -101,7 +101,7 @@ pub struct PipelineSpec {
     /// rendered stream writes their `expiresAt` after the author's steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lifetime: Vec<super::pipeline_lifetime::Lifetime>,
-    /// How the pipeline follows a record its source removed (PL-90…PL-94); absent, nothing is
+    /// How the pipeline follows a record its source removed (PL-96…PL-100); absent, nothing is
     /// deleted, as with `mode: never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_deletes: Option<super::pipeline_source_deletes::SourceDeletes>,

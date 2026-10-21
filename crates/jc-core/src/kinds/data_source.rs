@@ -836,7 +836,7 @@ impl DataSourceSpec {
 /// A scheduled pipeline (explicit `class: scheduled` or `auto` with period >= 30s) must only
 /// read terminating data sources (e.g. files, queries, batch fetches). Sockets, brokers, and
 /// streams never terminate on their own and must execute as resident pipelines.
-/// A `sourceDeletes` snapshot needs such a terminating source too (PL-93).
+/// A `sourceDeletes` snapshot needs such a terminating source too (PL-99).
 pub fn check_class(pipeline: &PipelineSpec, source: &DataSourceSpec) -> Result<()> {
     if pipeline.is_scheduled() && !source.terminates() {
         return Err(Error::Invalid {
@@ -847,7 +847,7 @@ pub fn check_class(pipeline: &PipelineSpec, source: &DataSourceSpec) -> Result<(
             ),
         });
     }
-    // A snapshot deletes what complete runs stopped reading (PL-91); an input that never ends
+    // A snapshot deletes what complete runs stopped reading (PL-97); an input that never ends
     // has no complete run, so absence in it means nothing.
     let snapshot = pipeline
         .source_deletes
@@ -858,7 +858,7 @@ pub fn check_class(pipeline: &PipelineSpec, source: &DataSourceSpec) -> Result<(
             field: "spec.sourceDeletes.mode".to_string(),
             reason: format!(
                 "{} never ends on its own, so no run reads it completely and a snapshot cannot \
-                 tell a removed record from a quiet one; use events or lease (PL-93)",
+                 tell a removed record from a quiet one; use events or lease (PL-99)",
                 source.source_type
             ),
         });

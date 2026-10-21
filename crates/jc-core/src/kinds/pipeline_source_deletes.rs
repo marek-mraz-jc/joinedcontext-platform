@@ -1,4 +1,4 @@
-//! `spec.sourceDeletes` of a Pipeline (PL-90…PL-94): how the pipeline follows a record its source
+//! `spec.sourceDeletes` of a Pipeline (PL-96…PL-100): how the pipeline follows a record its source
 //! removed. `never` keeps today's behaviour; `snapshot` deletes what complete runs no longer read;
 //! `events` deletes what the mapped record marks as deleted; `lease` relies on a rolling
 //! `spec.lifetime`. Only entities in the pipeline's own source ledger are ever candidates; the
@@ -12,14 +12,14 @@ use crate::error::{Error, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Consecutive complete runs an id must be missing from before it is deleted, by default (PL-91).
+/// Consecutive complete runs an id must be missing from before it is deleted, by default (PL-97).
 pub const MISSES_DEFAULT: u8 = 2;
-/// The most consecutive misses a snapshot may ask for (PL-90).
+/// The most consecutive misses a snapshot may ask for (PL-96).
 pub const MISSES_MAX: u8 = 10;
-/// The share of the ledger, in percent, one run may delete before it is held, by default (PL-91).
+/// The share of the ledger, in percent, one run may delete before it is held, by default (PL-97).
 pub const MAX_SHARE_DEFAULT: u8 = 10;
 
-/// How a pipeline follows deletions at its source (PL-90).
+/// How a pipeline follows deletions at its source (PL-96).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceDeleteMode {
@@ -33,7 +33,7 @@ pub enum SourceDeleteMode {
     Lease,
 }
 
-/// `spec.sourceDeletes` (PL-90).
+/// `spec.sourceDeletes` (PL-96).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SourceDeletes {
@@ -64,17 +64,17 @@ pub struct Context {
 }
 
 impl SourceDeletes {
-    /// The checked number of misses (PL-90, PL-91).
+    /// The checked number of misses (PL-96, PL-97).
     pub fn misses(&self) -> u8 {
         self.misses.unwrap_or(MISSES_DEFAULT)
     }
 
-    /// The checked share in percent (PL-90, PL-91).
+    /// The checked share in percent (PL-96, PL-97).
     pub fn max_share(&self) -> u8 {
         self.max_share.unwrap_or(MAX_SHARE_DEFAULT)
     }
 
-    /// Admission of the rule (PL-90, PL-93), each refusal naming its field.
+    /// Admission of the rule (PL-96, PL-99), each refusal naming its field.
     pub fn validate(&self, context: &Context) -> Result<()> {
         let refused = |field: &str, reason: &str| Error::Invalid {
             field: format!("spec.sourceDeletes.{field}"),
@@ -86,7 +86,7 @@ impl SourceDeletes {
             return Err(refused(
                 "mode",
                 "spec.expiry is the age sweep of a pipeline with no source-delete rule; keep one \
-                 of the two (PL-93)",
+                 of the two (PL-99)",
             ));
         }
         if !snapshot && (self.misses.is_some() || self.max_share.is_some()) {
@@ -97,29 +97,29 @@ impl SourceDeletes {
             };
             return Err(refused(
                 field,
-                "only a snapshot counts misses and shares (PL-90)",
+                "only a snapshot counts misses and shares (PL-96)",
             ));
         }
         if !events && self.deleted_when.is_some() {
             return Err(refused(
                 "deletedWhen",
-                "only mode events reads a delete marker (PL-90)",
+                "only mode events reads a delete marker (PL-96)",
             ));
         }
         match self.mode {
             SourceDeleteMode::Never => {}
             SourceDeleteMode::Snapshot => {
                 if !(1..=MISSES_MAX).contains(&self.misses()) {
-                    return Err(refused("misses", "misses is 1 to 10 complete runs (PL-90)"));
+                    return Err(refused("misses", "misses is 1 to 10 complete runs (PL-96)"));
                 }
                 if !(1..=100).contains(&self.max_share()) {
-                    return Err(refused("maxShare", "maxShare is 1 to 100 percent (PL-90)"));
+                    return Err(refused("maxShare", "maxShare is 1 to 100 percent (PL-96)"));
                 }
                 if !context.has_clock {
                     return Err(refused(
                         "mode",
                         "a snapshot compares complete runs, and a pipeline with no period or \
-                         schedule waits for pushes and has none; use events or lease (PL-93)",
+                         schedule waits for pushes and has none; use events or lease (PL-99)",
                     ));
                 }
             }
@@ -129,7 +129,7 @@ impl SourceDeletes {
                     return Err(refused(
                         "deletedWhen",
                         "mode events needs deletedWhen, the query that marks a mapped record as \
-                         deleted at the source (PL-90)",
+                         deleted at the source (PL-96)",
                     ));
                 }
             }
@@ -138,7 +138,7 @@ impl SourceDeletes {
                     return Err(refused(
                         "mode",
                         "mode lease needs a spec.lifetime entry whose entity is rolling (PL-80, \
-                         PL-90)",
+                         PL-96)",
                     ));
                 }
             }

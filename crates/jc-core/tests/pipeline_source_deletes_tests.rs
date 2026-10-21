@@ -1,5 +1,5 @@
 //! `spec.sourceDeletes` on a Pipeline: the four modes, their defaults and every refusal
-//! (PL-90…PL-93).
+//! (PL-96…PL-99).
 
 use jc_core::kinds::data_source::check_class;
 use jc_core::kinds::{DataSourceSpec, DataSourceType, Pipeline, SourceDeleteMode};
