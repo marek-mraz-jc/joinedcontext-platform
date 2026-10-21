@@ -19,6 +19,7 @@ pub mod field_order;
 pub mod i18n;
 pub mod kinds;
 pub mod kpi;
+pub mod kpi_join;
 #[cfg(feature = "logs")]
 pub mod logs;
 pub mod names;

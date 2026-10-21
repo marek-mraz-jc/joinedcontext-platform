@@ -1,0 +1,62 @@
+# Golden tests of the compiled kpi mapping (PL-104, T-4864): the input is the batch the broker
+# archives, one wrapped page per source; the values match jc-core's own evaluator
+# (kpi_join::tests::a_join_by_area_writes_one_value_per_area_every_source_has).
+#
+#   bento test ./examples/ingestion/kpi-parking-per-stop/...
+
+tests:
+  - name: one indicator per district both sources have, with each source in its provenance
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+      JC_SPACE: helsinki-kpi
+      JC_SOURCE_SPACE: helsinki
+      JC_SOURCE_SPACE_2: helsinki
+    input_batch:
+      - content: '[{"input":"parking","entities":[{"id":"urn:ngsi-ld:ParkingSite:a","occupiedSpotNumber":{"type":"Property","value":30},"district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:ParkingSite:b","occupiedSpotNumber":10,"district":"Kamppi"},{"id":"urn:ngsi-ld:ParkingSite:c","occupiedSpotNumber":5,"district":"Pasila"}]},{"input":"stops","entities":[{"id":"urn:ngsi-ld:TransitStop:1","district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:TransitStop:2","district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:TransitStop:3","district":{"type":"Property","value":"Kamppi"}}]}]'
+    output_batches:
+      - - bloblang: |
+            this.length() == 2 &&
+            this.index(0).id == "urn:ngsi-ld:KeyPerformanceIndicator:hel.fi:helsinki-kpi:parking-per-stop-kallio" &&
+            this.index(0).currentValue.value == 15 &&
+            this.index(1).id == "urn:ngsi-ld:KeyPerformanceIndicator:hel.fi:helsinki-kpi:parking-per-stop-kamppi" &&
+            this.index(1).currentValue.value == 10 &&
+            this.index(0).calculationFormula.value.contains("parking: ParkingSite from urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-parking, 1 rows; stops: TransitStop from urn:ngsi-ld:Endpoint:hel.fi:helsinki:helsinki-transit, 2 rows") &&
+            this.index(0).derivedFrom.value.length() == 2 &&
+            this.index(0).computedBy.value == "urn:ngsi-ld:Pipeline:hel.fi:helsinki:parking-per-stop"
+
+  - name: a source that lost its grant writes nothing and names the refusal
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+      JC_SPACE: helsinki-kpi
+      JC_SOURCE_SPACE: helsinki
+      JC_SOURCE_SPACE_2: helsinki
+    input_batch:
+      - content: '[{"input":"parking","entities":[{"id":"urn:ngsi-ld:ParkingSite:a","occupiedSpotNumber":{"type":"Property","value":30},"district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:ParkingSite:b","occupiedSpotNumber":10,"district":"Kamppi"},{"id":"urn:ngsi-ld:ParkingSite:c","occupiedSpotNumber":5,"district":"Pasila"}]},{"input":"stops","error":"unexpected response code (403)"}]'
+    output_batches:
+      - - bloblang: 'errored() && error().contains("input stops: unexpected response code (403)")'
+
+  - name: a source that did not answer writes nothing
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+      JC_SPACE: helsinki-kpi
+      JC_SOURCE_SPACE: helsinki
+      JC_SOURCE_SPACE_2: helsinki
+    input_batch:
+      - content: '[{"input":"parking","entities":[{"id":"urn:ngsi-ld:ParkingSite:a","occupiedSpotNumber":{"type":"Property","value":30},"district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:ParkingSite:b","occupiedSpotNumber":10,"district":"Kamppi"},{"id":"urn:ngsi-ld:ParkingSite:c","occupiedSpotNumber":5,"district":"Pasila"}]}]'
+    output_batches:
+      - - bloblang: 'errored() && error().contains("input stops did not answer in this run")'
+
+  - name: a district with no stop is no division by zero, it is no district
+    target_processors: '/pipeline/processors'
+    environment:
+      JC_ORG_DOMAIN: hel.fi
+      JC_SPACE: helsinki-kpi
+      JC_SOURCE_SPACE: helsinki
+      JC_SOURCE_SPACE_2: helsinki
+    input_batch:
+      - content: '[{"input":"parking","entities":[{"id":"urn:ngsi-ld:ParkingSite:a","occupiedSpotNumber":{"type":"Property","value":30},"district":{"type":"Property","value":"Kallio"}},{"id":"urn:ngsi-ld:ParkingSite:b","occupiedSpotNumber":10,"district":"Kamppi"},{"id":"urn:ngsi-ld:ParkingSite:c","occupiedSpotNumber":5,"district":"Pasila"}]},{"input":"stops","entities":[]}]'
+    output_batches:
+      - - bloblang: 'this.length() == 0'
