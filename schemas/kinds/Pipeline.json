@@ -157,6 +157,17 @@
           ],
           "description": "Engine kind executing compute logic."
         },
+        "kpi": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/KpiStep"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The indicator of a `kpi` step over several sources (PL-102…PL-104)."
+        },
         "mappingRef": {
           "anyOf": [
             {
@@ -209,6 +220,13 @@
           "description": "Ephemeral containerized job (PL-35).",
           "enum": [
             "container"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One indicator over several named sources (PL-102), compiled to a mapping by jc-core.",
+          "enum": [
+            "kpi"
           ],
           "type": "string"
         }
@@ -331,6 +349,55 @@
       ],
       "type": "object"
     },
+    "Join": {
+      "additionalProperties": false,
+      "description": "How the sources' rows meet (PL-102, PL-104).",
+      "properties": {
+        "by": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/JoinBy"
+            }
+          ],
+          "default": "time",
+          "description": "`time`, `entity` or `area`."
+        },
+        "keys": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Per source name, the attribute (or `id`) naming the entity or area a row is about.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "JoinBy": {
+      "description": "The join kinds.",
+      "oneOf": [
+        {
+          "description": "Every row of the run's window, one indicator.",
+          "enum": [
+            "time"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One indicator per entity every source names.",
+          "enum": [
+            "entity"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "One indicator per area every source has rows in.",
+          "enum": [
+            "area"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Keep": {
       "description": "What the broker keeps of an attribute's writes (PL-106).",
       "oneOf": [
@@ -356,6 +423,55 @@
           "type": "string"
         }
       ]
+    },
+    "KpiStep": {
+      "additionalProperties": false,
+      "description": "A `kpi` step (PL-102).",
+      "properties": {
+        "formula": {
+          "description": "Arithmetic over `sum|avg|min|max(input.attribute)` and `count(input)` (PL-103).",
+          "type": "string"
+        },
+        "join": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Join"
+            }
+          ],
+          "default": {
+            "by": "time"
+          },
+          "description": "How the sources' rows meet; `by: time` when absent."
+        },
+        "name": {
+          "description": "The indicator's `{localId}`; a key's slug is appended for an entity or area join.",
+          "type": "string"
+        },
+        "title": {
+          "description": "A title for people.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unitCode": {
+          "description": "The result's UN/CEFACT common code.",
+          "type": "string"
+        },
+        "window": {
+          "description": "The window the value covers, `PT15M`, `PT1H`, `P1D`; `PT1H` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "formula",
+        "name",
+        "unitCode"
+      ],
+      "type": "object"
     },
     "Lifetime": {
       "additionalProperties": false,
@@ -778,6 +894,13 @@
             }
           ],
           "description": "Reference to source Endpoint for reading context entities."
+        },
+        "name": {
+          "description": "The input's name, by which a `kpi` step's formula reads it (PL-102); a DNS label unique among the sources.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "query": {
           "anyOf": [

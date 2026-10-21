@@ -21,6 +21,7 @@ repository (PL-01), plus the `DataSource` the pipeline reads from (MF-35).
 | `helsinki-hri-population/` | Paavo postal-code statistics, CSV | daily, CronJob | `StatisticalPopulation` |
 | `helsinki-ev-charging/` | OpenStreetMap charging stations, Overpass | 30 min, CronJob | `EVChargingStation` |
 | `vehicle-reaper/` | a page of the space's own `Vehicle` entities | 60 s, CronJob | deletes what aged past ten minutes |
+| `kpi-parking-per-stop/` | two Endpoint pages, `ParkingSite` and `TransitStop` | hourly, CronJob | one `KeyPerformanceIndicator` per district (PL-102…PL-104) |
 
 Fourteen of them write into the documented demonstration instance: organization `hel.fi`, project
 `helsinki`, spaces `air-quality`, `transport`, `bikes`, `traffic`, `weather`, `marine`,
