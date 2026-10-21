@@ -358,7 +358,9 @@ macro_rules! list_sql {
                JOIN turns u ON u.id = s.turn_id WHERE u.conversation = t.conversation \
                AND u.deployment = t.deployment AND s.model IS NOT NULL \
                AND ($2::timestamptz IS NULL OR u.at >= $2::timestamptz) \
-               AND ($3::timestamptz IS NULL OR u.at < $3::timestamptz)) \
+               AND ($3::timestamptz IS NULL OR u.at < $3::timestamptz)), \
+             (array_agg(coalesce(t.error->>'detail', t.error->>'title') ORDER BY t.turn DESC) \
+               FILTER (WHERE t.error IS NOT NULL))[1] \
              FROM turns t LEFT JOIN LATERAL (SELECT count(*) FILTER (WHERE verdict = 'up') AS up, \
              count(*) FILTER (WHERE verdict = 'down') AS down FROM feedback \
              WHERE feedback.project = t.project AND feedback.conversation = t.conversation) f ON true \
@@ -400,6 +402,8 @@ fn list_row(r: &PgRow) -> Result<Value, sqlx::Error> {
         "cachedTokens": r.try_get::<Option<i64>, _>(17)?,
         "firstTokenMs": r.try_get::<Option<i64>, _>(18)?,
         "models": models.unwrap_or_default(),
+        // What the newest failed turn told the visitor, so the list says what failed (T-4994).
+        "lastError": r.try_get::<Option<String>, _>(20)?,
     }))
 }
 
