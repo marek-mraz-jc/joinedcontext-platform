@@ -19,6 +19,7 @@ pub mod endpoint;
 pub mod environment;
 pub mod grid;
 pub mod group;
+pub mod ical_mapping;
 pub mod mapping;
 pub mod mcp_server;
 pub mod model_projection;
@@ -86,6 +87,9 @@ pub use endpoint::{
 };
 pub use environment::{EnvironmentSpec, SecretBackend};
 pub use group::{GroupSpec, Member};
+pub use ical_mapping::{
+    Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping, Preset, Representations,
+};
 pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
     VocabularyAlignment,
