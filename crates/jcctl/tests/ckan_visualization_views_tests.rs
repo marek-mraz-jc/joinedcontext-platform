@@ -7,7 +7,7 @@ use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     publish, publish_views, series_charts, CkanApi, InMemoryCkan, Settings, Views, SERIES_WINDOW,
-    VIEW_PAYLOAD, VISUALIZATION_VIEW,
+    VISUALIZATION_VIEW,
 };
 use serde_json::{json, Value};
 
@@ -367,6 +367,17 @@ fn the_automatic_charts_stop_at_the_visualization_limit() {
 /// catalogue theme's `jc_visualization` schema lists (deployment tests/test_ckan_theme.py).
 #[test]
 fn a_view_create_or_update_sends_only_the_fields_the_view_schema_declares() {
+    const DECLARED: [&str; 9] = [
+        "id",
+        "resource_id",
+        "view_type",
+        "title",
+        "description",
+        "jc_name",
+        "spec",
+        "source",
+        "endpoint",
+    ];
     let (mut ckan, _) = published(&endpoint(&[chart("no2-now", "NO2 teraz")]));
     publish_views(
         &mut ckan,
@@ -392,7 +403,7 @@ fn a_view_create_or_update_sends_only_the_fields_the_view_schema_declares() {
         let fields = payload.as_object().expect("an object");
         let unknown: Vec<&String> = fields
             .keys()
-            .filter(|key| !VIEW_PAYLOAD.contains(&key.as_str()))
+            .filter(|key| !DECLARED.contains(&key.as_str()))
             .collect();
         assert!(
             unknown.is_empty(),
@@ -403,4 +414,17 @@ fn a_view_create_or_update_sends_only_the_fields_the_view_schema_declares() {
             "the name the next run matches it by"
         );
     }
+}
+
+/// The double refuses an undeclared field the way CKAN does, so a new field fails here first.
+#[test]
+fn an_undeclared_view_field_is_refused_like_ckan_does() {
+    let (mut ckan, first) = published(&endpoint(&[]));
+    let refused = ckan
+        .action(
+            "resource_view_create",
+            &json!({ "resource_id": first, "view_type": VISUALIZATION_VIEW, "jc_extra": "x" }),
+        )
+        .expect_err("409 __extras");
+    assert!(refused.to_string().contains("__extras"), "{refused}");
 }

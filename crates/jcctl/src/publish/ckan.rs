@@ -659,7 +659,7 @@ const VIEW_FIELDS: [&str; 5] = ["title", "description", "spec", "source", "endpo
 /// Every field a `jc_visualization` view create or update carries: CKAN core's view fields and
 /// the ones the catalogue theme's view schema declares. CKAN refuses any other field as
 /// `__extras` with a 409, so the theme's schema must list each (EP-144).
-pub const VIEW_PAYLOAD: [&str; 9] = [
+const VIEW_PAYLOAD: [&str; 9] = [
     "id",
     "resource_id",
     "view_type",
@@ -1460,6 +1460,15 @@ impl CkanApi for InMemoryCkan {
         self.calls.push((action.to_owned(), payload.clone()));
         if action.starts_with("datastore_") {
             return self.datastore(action, payload);
+        }
+        // CKAN refuses a view field neither its core nor the view type declares (EP-144).
+        if action.starts_with("resource_view_")
+            && payload.get("view_type").and_then(Value::as_str) == Some(VISUALIZATION_VIEW)
+            && payload
+                .as_object()
+                .is_some_and(|fields| fields.keys().any(|k| !VIEW_PAYLOAD.contains(&k.as_str())))
+        {
+            return Err(Self::rejected(action, "__extras: an unexpected field"));
         }
         if action == "resource_view_create" {
             let id = Self::resource_of(action, payload)?;
