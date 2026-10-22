@@ -186,10 +186,9 @@ pub fn package(
                 })
             })
             .collect();
-        if let (Some(extras), Ok(value)) = (
-            payload["extras"].as_array_mut(),
-            serde_json::to_string(&titled),
-        ) {
+        if let (Some(extras), Some(value)) =
+            (payload["extras"].as_array_mut(), source_extra(titled))
+        {
             extras.retain(|extra| extra["key"] != "source");
             extras.push(json!({ "key": "source", "value": value }));
         }
@@ -284,6 +283,37 @@ pub const SERVED_TYPES: &str = "jc:servedTypes";
 
 /// The most entity sets an OData text names.
 const MAX_ENTITY_SETS: usize = 20;
+
+/// Lucene refuses a term over this many bytes, and CKAN's Solr schema indexes every extra outside
+/// its own fields as one `string` term (`dynamicField name="*"`): a longer extra fails the whole
+/// dataset (T-5215: the 246 sources of slovensko-podujatia made 62 KB and never reached CKAN).
+pub const MAX_EXTRA_BYTES: usize = 32_766;
+
+/// The `source` extra within [`MAX_EXTRA_BYTES`]: every source with its description when that
+/// fits, else without descriptions (the catalogue page shows only address and title), else the
+/// first sources that fit. The Endpoint's own DCAT record still lists every source.
+fn source_extra(mut titled: Vec<Value>) -> Option<String> {
+    let fits = |sources: &[Value]| {
+        serde_json::to_string(sources)
+            .ok()
+            .filter(|text| text.len() <= MAX_EXTRA_BYTES)
+    };
+    if let Some(text) = fits(&titled) {
+        return Some(text);
+    }
+    for source in &mut titled {
+        if let Some(fields) = source.as_object_mut() {
+            fields.remove("description");
+        }
+    }
+    while !titled.is_empty() {
+        if let Some(text) = fits(&titled) {
+            return Some(text);
+        }
+        titled.pop();
+    }
+    None
+}
 
 /// What a usage text says about the dataset it sits in (EP-108, API/02 §10).
 struct Usage<'a> {
