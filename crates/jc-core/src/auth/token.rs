@@ -230,6 +230,19 @@ impl Verifier {
             // Nothing to bind the token to means nothing would refuse it.
             return Err(Rejected::WrongAudience);
         }
+        self.decode(token, Some(audiences))
+    }
+
+    /// Who a token names: signature, issuer and lifetime checked, the audience not (T-5290).
+    ///
+    /// For counting a caller only, never for admitting one: a rate limiter keys a quota by the
+    /// principal a genuine token names, whichever resource it is bound to, so a client cannot
+    /// buy a fresh bucket with a made-up token. Every admission goes through [`Self::verify`].
+    pub fn identify(&self, token: &str) -> Result<Claims, Rejected> {
+        self.decode(token, None)
+    }
+
+    fn decode(&self, token: &str, audiences: Option<&[String]>) -> Result<Claims, Rejected> {
         let header = decode_header(token).map_err(|_| Rejected::Malformed)?;
         let kid = header.kid.ok_or(Rejected::Malformed)?;
         let keys = self.keys.load();
@@ -237,7 +250,10 @@ impl Verifier {
 
         let mut validation = Validation::new(*algorithm);
         validation.set_issuer(&[&self.issuer]);
-        validation.set_audience(audiences);
+        match audiences {
+            Some(audiences) => validation.set_audience(audiences),
+            None => validation.validate_aud = false,
+        }
         validation.validate_exp = true;
         validation.validate_nbf = true;
         // Clock skew between Keycloak and this pod, and nothing more: a token is short
