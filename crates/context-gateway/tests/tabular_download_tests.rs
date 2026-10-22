@@ -395,14 +395,27 @@ fn modelled(hidden: &[&str]) -> Endpoint {
 /// hidden attribute is not one of them.
 #[tokio::test]
 async fn the_model_fixes_the_header_of_an_empty_answer() {
-    let endpoint = modelled(&["operatorNote"]);
+    let mut endpoint = modelled(&["operatorNote"]);
+    endpoint.policies = vec![serde_norway::from_str(
+        r#"contextSpaceRef: ovzdusie
+assigner: did:web:banskabystrica.sk
+assignee: { kind: role, id: public }
+operations: [queryEntity, retrieveEntity]
+information:
+  - entities:
+      - type: AirQualityObserved
+"#,
+    )
+    .expect("the policy spec parses")];
     let names: Vec<String> = endpoint
-        .csv_slots(&[])
+        .csv_slots(&[], |_, _| true)
         .into_iter()
         .map(|s| s.name)
         .collect();
     assert_eq!(names, vec!["pm10", "note"]);
-    assert!(endpoint.csv_slots(&["Other".to_owned()]).is_empty());
+    assert!(endpoint
+        .csv_slots(&["Other".to_owned()], |_, _| true)
+        .is_empty());
 
     let broker = BrokerStub::start(vec![json!([])]).await;
     let (status, _, body) = download(
@@ -412,4 +425,18 @@ async fn the_model_fixes_the_header_of_an_empty_answer() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "id,type,pm10.value,note.value\r\n");
+}
+
+/// EP-06 on a modelled Endpoint (T-5209 review): an attribute the model declares but the Policy
+/// does not grant is no column either, not even an empty one.
+#[tokio::test]
+async fn an_ungranted_model_attribute_is_not_a_column() {
+    let broker = BrokerStub::start(vec![json!([])]).await;
+    let (status, _, body) = download(
+        gateway(&broker.url, modelled(&[])),
+        &format!("/api/endpoint/{SLUG}/file.csv"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "id,type,pm10.value\r\n");
 }

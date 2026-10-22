@@ -8,6 +8,7 @@ use crate::auth::subject::admit;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
 use crate::handlers::respond::broker_speaks_json;
+use crate::handlers::schema;
 use crate::handlers::schema_routes::revalidated_text;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::translators::tabular;
@@ -81,7 +82,8 @@ pub(crate) async fn file_csv(
     let types: Vec<String> = query::first(&params, "type")
         .map(|types| types.split(',').map(str::to_owned).collect())
         .unwrap_or_default();
-    table.settle(&endpoint.csv_slots(&types));
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
     if human {
         tabular::humanize(&mut table);
     }

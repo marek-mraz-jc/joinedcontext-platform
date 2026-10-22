@@ -278,8 +278,13 @@ impl Endpoint {
 
     /// The model's slots `file.csv` always has columns for (T-5209): of `types`, or of every
     /// class when the caller named none, narrowed by the projection and `hiddenAttributes` as
-    /// the answer is. None for a view of another model or a space with no generated schema.
-    pub fn csv_slots(&self, types: &[String]) -> Vec<jc_tabular::Slot> {
+    /// the answer is, and to what `shows(class, attribute)` grants the caller (EP-06). None for
+    /// a view of another model or a space with no generated schema.
+    pub fn csv_slots(
+        &self,
+        types: &[String],
+        shows: impl Fn(&str, &str) -> bool,
+    ) -> Vec<jc_tabular::Slot> {
         let schema = self
             .declared_types
             .as_ref()
@@ -303,7 +308,8 @@ impl Endpoint {
             for attribute in attributes.unwrap_or_default() {
                 let hidden = self.hidden_attributes.contains(&attribute.name)
                     || kept.is_some_and(|kept| !kept.contains(&attribute.name))
-                    || slots.iter().any(|slot| slot.name == attribute.name);
+                    || slots.iter().any(|slot| slot.name == attribute.name)
+                    || !shows(class, &attribute.name);
                 if hidden {
                     continue;
                 }
