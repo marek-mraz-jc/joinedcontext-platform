@@ -1251,43 +1251,45 @@ impl<'a> WriteBindings<'a> {
         use jc_core::kinds::PolicySpec;
         let mut found = Vec::new();
         for (id, resource) in self.repo.iter().filter(|(id, _)| id.kind == "Policy") {
-            let Ok(policy) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
+            let Ok(spec) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
             else {
                 continue;
             };
-            if policy.effect.is_prohibition() || !writes_entities(&policy) {
-                continue;
-            }
-            let project = id.namespace.clone().unwrap_or_default();
-            let space = policy.context_space_ref.name();
-            let mut reasons = Vec::new();
-            let mut bound = false;
-            for (key, spec) in self.endpoints.iter().filter(|((p, _), _)| *p == project) {
-                match self.refusal(key, spec, &id.name, &policy) {
-                    None => bound = true,
-                    Some(why) if spec.context_space_ref.name() == space => {
-                        reasons.push(format!("{} {why}", key.1))
-                    }
-                    Some(_) => {}
+            // An invalid shape is the shape check's finding; each rule is its own grant.
+            for (rule, policy) in spec.expand(&id.name).unwrap_or_default() {
+                if policy.effect.is_prohibition() || !writes_entities(&policy) {
+                    continue;
                 }
-            }
-            if bound {
-                continue;
-            }
-            let why = if reasons.is_empty() {
-                format!("the space {space} has no Endpoint in project {project}")
-            } else {
-                reasons.join("; ")
-            };
-            found.push((
+                let project = id.namespace.clone().unwrap_or_default();
+                let space = policy.context_space_ref.name();
+                let mut reasons = Vec::new();
+                let mut bound = false;
+                for (key, spec) in self.endpoints.iter().filter(|((p, _), _)| *p == project) {
+                    match self.refusal(key, spec, &id.name, &policy) {
+                        None => bound = true,
+                        Some(why) if spec.context_space_ref.name() == space => {
+                            reasons.push(format!("{} {why}", key.1))
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if bound {
+                    continue;
+                }
+                let why = if reasons.is_empty() {
+                    format!("the space {space} has no Endpoint in project {project}")
+                } else {
+                    reasons.join("; ")
+                };
+                found.push((
                 (resource.path.clone(), resource.document, resource.line),
                 format!(
-                    "Policy {} grants a write on the space {space}, but no Endpoint binds it ({why}): \
+                    "Policy {rule} grants a write on the space {space}, but no Endpoint binds it ({why}): \
                      name it in an Endpoint's policyRef or add an Endpoint of the space without one \
-                     (EP-14, ADR-N-057)",
-                    id.name
+                     (EP-14, ADR-N-057)"
                 ),
             ));
+            }
         }
         found
     }

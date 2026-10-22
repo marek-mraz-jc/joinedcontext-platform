@@ -463,6 +463,16 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// The assignee of a Policy that lists `rules` instead: a role with no id, which no caller holds.
+    pub fn unset() -> Self {
+        Self::new(PrincipalKind::Role, "")
+    }
+
+    /// Whether this is [`Principal::unset`].
+    pub fn is_unset(&self) -> bool {
+        self.kind == PrincipalKind::Role && self.id.is_empty()
+    }
+
     /// Creates a new principal with kind and identifier.
     pub fn new(kind: PrincipalKind, id: impl Into<String>) -> Self {
         Self {
@@ -571,6 +581,11 @@ pub enum PolicyEffect {
 }
 
 impl PolicyEffect {
+    /// Whether this is the default, a grant.
+    pub const fn is_permission(&self) -> bool {
+        matches!(self, Self::Permission)
+    }
+
     /// Whether this policy takes access away rather than granting it.
     pub const fn is_prohibition(self) -> bool {
         matches!(self, Self::Prohibition)
@@ -622,15 +637,19 @@ pub struct PolicySpec {
     /// Reference to the target ContextSpace.
     pub context_space_ref: Ref,
     /// Whether this policy grants or takes away (GW4, GW8).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "PolicyEffect::is_permission")]
     pub effect: PolicyEffect,
     /// Granting data owner (e.g. `did:web:banskabystrica.sk`).
     pub assigner: String,
-    /// Grantee principal receiving permissions.
+    /// Grantee principal receiving permissions; unset when the Policy lists `rules`.
+    #[serde(
+        default = "Principal::unset",
+        skip_serializing_if = "Principal::is_unset"
+    )]
     pub assignee: Principal,
     /// Granted CIM 009 operations or operation groups (R8); empty when the Policy grants
     /// `actions` alone.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<OperationRef>,
     /// Granted platform actions CIM 009 has no operation for (ADR-N-054, T-4666).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -650,9 +669,46 @@ pub struct PolicySpec {
     /// Residual temporal query filter string (R7, GW11, EP-56).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal_q: Option<String>,
+    /// Several grants and prohibitions in one Policy (ADR-N-057 decision 1), instead of the
+    /// single rule above; [`PolicySpec::expand`] turns either shape into one grant per rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<PolicyRule>>,
     /// Optional time validity window for this policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validity: Option<Validity>,
+}
+
+/// One rule of a Policy's `rules[]` (ADR-N-057 decision 1): the single-rule members of
+/// [`PolicySpec`], while `assigner`, `contextSpaceRef` and `validity` stay on the Policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PolicyRule {
+    /// Whether this rule grants or takes away (GW4, GW8).
+    #[serde(default, skip_serializing_if = "PolicyEffect::is_permission")]
+    pub effect: PolicyEffect,
+    /// Grantee principal of this rule.
+    pub assignee: Principal,
+    /// Granted CIM 009 operations or operation groups (R8).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operations: Vec<OperationRef>,
+    /// Granted platform actions (ADR-N-054).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<PlatformAction>,
+    /// Target entity types and attribute whitelist (R6, R9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub information: Vec<RegistrationInfo>,
+    /// Residual NGSI-LD query filter string (R7, EP-56).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// Residual scope query filter string (R7, R13, EP-56).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_q: Option<String>,
+    /// Residual geographic query filter string (R7, GW11, EP-56).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_q: Option<String>,
+    /// Residual temporal query filter string (R7, GW11, EP-56).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal_q: Option<String>,
 }
 
 impl Kind for PolicySpec {
@@ -672,8 +728,100 @@ impl Kind for PolicySpec {
 }
 
 impl PolicySpec {
-    /// Validates assigner, assignee, operations, entity selectors, and validity constraints.
+    /// Every rule of this Policy as a single-rule spec, the one shape the PDP, the view compiler
+    /// and the lint read (ADR-N-057 decision 1). A single-rule Policy keeps its `name`; rule `n`
+    /// (from 1) of a `rules[]` Policy is named `{name}#{n}`, which `access/simulate` reports.
+    ///
+    /// Refused, like an unreadable manifest, when the shape is invalid: both shapes at once or an
+    /// empty `rules[]`.
+    pub fn expand(&self, name: &str) -> Result<Vec<(String, PolicySpec)>> {
+        self.check_shape()?;
+        let Some(rules) = &self.rules else {
+            return Ok(vec![(name.to_owned(), self.clone())]);
+        };
+        Ok(rules
+            .iter()
+            .zip(1..)
+            .map(|(rule, n)| (format!("{name}#{n}"), self.with_rule(rule)))
+            .collect())
+    }
+
+    /// The single-rule spec of `rule`, with this Policy's space, assigner and validity.
+    fn with_rule(&self, rule: &PolicyRule) -> PolicySpec {
+        let rule = rule.clone();
+        PolicySpec {
+            context_space_ref: self.context_space_ref.clone(),
+            effect: rule.effect,
+            assigner: self.assigner.clone(),
+            assignee: rule.assignee,
+            operations: rule.operations,
+            actions: rule.actions,
+            information: rule.information,
+            q: rule.q,
+            scope_q: rule.scope_q,
+            geo_q: rule.geo_q,
+            temporal_q: rule.temporal_q,
+            rules: None,
+            validity: self.validity.clone(),
+        }
+    }
+
+    /// The Policy name a rule named by [`PolicySpec::expand`] belongs to: `kiosks#2` is `kiosks`.
+    pub fn policy_of(rule_name: &str) -> &str {
+        rule_name
+            .split_once('#')
+            .map_or(rule_name, |(policy, _)| policy)
+    }
+
+    /// One shape or the other: `rules[]` with no single-rule member beside it, never empty.
+    fn check_shape(&self) -> Result<()> {
+        let refused = |value: &str, reason| Error::Name {
+            field: "spec.rules",
+            value: value.to_owned(),
+            reason,
+        };
+        match &self.rules {
+            None => Ok(()),
+            Some(rules) if rules.is_empty() => Err(refused(
+                "",
+                "rules must list at least one rule; omit it for a single-rule Policy",
+            )),
+            Some(_) => self.single_rule_member().map_or(Ok(()), |member| {
+                Err(refused(
+                    member,
+                    "a Policy with rules carries this member inside each rule, not beside rules",
+                ))
+            }),
+        }
+    }
+
+    /// The first single-rule member this spec sets, if any.
+    fn single_rule_member(&self) -> Option<&'static str> {
+        [
+            self.effect.is_prohibition().then_some("effect"),
+            (!self.assignee.is_unset()).then_some("assignee"),
+            (!self.operations.is_empty()).then_some("operations"),
+            (!self.actions.is_empty()).then_some("actions"),
+            (!self.information.is_empty()).then_some("information"),
+            self.q.as_ref().map(|_| "q"),
+            self.scope_q.as_ref().map(|_| "scopeQ"),
+            self.geo_q.as_ref().map(|_| "geoQ"),
+            self.temporal_q.as_ref().map(|_| "temporalQ"),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+    }
+
+    /// Validates the shape and every rule: assigner, assignee, operations, entity selectors,
+    /// and validity constraints.
     pub fn validate(&self) -> Result<()> {
+        if self.rules.is_some() {
+            return self
+                .expand("")?
+                .iter()
+                .try_for_each(|(_, rule)| rule.validate());
+        }
         let space_name = self.context_space_ref.name();
         names::validate_space_name(space_name)?;
         if let Some(kind) = self.context_space_ref.kind() {

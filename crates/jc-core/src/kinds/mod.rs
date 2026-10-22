@@ -123,7 +123,8 @@ pub use pipeline_lifetime::{AttributeLifetime, End, Lifetime, LifetimeMode};
 pub use pipeline_source_deletes::{SourceDeleteMode, SourceDeletes};
 pub use policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PlatformAction, PolicyEffect,
-    PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity,
+    PolicyRule, PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec,
+    Validity,
 };
 pub use role::{
     BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,
