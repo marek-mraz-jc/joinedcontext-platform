@@ -120,7 +120,7 @@ fn a_bad_shape_is_named() {
 - name: Kultura
   version: 2
   title: { slovak: x }
-  lang: svk
+  lang: s_k
   limit: 500
   filter: { q: 'a==1)', georel: near }
   sources: [{ type: Event }, { type: "Ev ent", preset: event }]
@@ -130,10 +130,10 @@ fn a_bad_shape_is_named() {
         "name is a slug",
         "is version 2",
         "title key `slovak`",
-        "lang `svk`",
+        "lang `s_k`",
         "limit is 1 to 200",
-        "filter.q is one NGSI-LD query",
-        "georel, geometry and coordinates together",
+        "`filter.q` is no NGSI-LD query",
+        "it needs georel, geometry and coordinates",
         "Event: no title role",
         "Event: no updated role",
         "`Ev ent`, which is not an NGSI-LD type name",

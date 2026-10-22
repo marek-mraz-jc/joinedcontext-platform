@@ -96,6 +96,7 @@ fn endpoint(granted: &str) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         base_path: format!("/api/endpoint/{SLUG}"),

@@ -161,6 +161,8 @@ pub struct Endpoint {
     pub deprecation: Option<std::sync::Arc<jc_core::kinds::endpoint_deprecation::Deprecation>>,
     /// The feed outputs it serves under `feed/v1/{name}/` (EP-150); empty: no feed.
     pub feeds: Vec<jc_core::kinds::FeedOutput>,
+    /// The iCalendar outputs it serves under `ical/v1/{name}.ics` (API/11 EP-159).
+    pub calendars: Vec<jc_core::kinds::IcalOutput>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).

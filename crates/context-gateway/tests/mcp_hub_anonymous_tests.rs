@@ -76,6 +76,7 @@ fn endpoint(
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![Model {
             name: "mesto".to_owned(),
