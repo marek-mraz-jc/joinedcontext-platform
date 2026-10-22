@@ -27,10 +27,11 @@ static AREA_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9._~-]{1,32}$").expect("valid regex"));
 static DATE_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$").expect("valid regex"));
-/// An https address of printable ASCII without quotes, backslashes or `%`, which Bloblang's
-/// `format` would read as a verb.
-static URL_RE: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r#"^https://[!#$&-\[\]-~]{1,2000}$"#).expect("valid regex"));
+/// An https address of printable ASCII without quotes, backslashes, `%` (a verb to Bloblang's
+/// `format`) or braces (a placeholder of the template).
+static URL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"^https://[!#$&-\[\]-z|~]{1,2000}$"#).expect("valid regex")
+});
 
 /// A `datacube` step (PL-112).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -89,7 +90,8 @@ impl DatacubeStep {
                 "a territory code of letters, digits and . _ ~ -, such as SK0",
             ));
         }
-        if !URL_RE.is_match(&self.dataset_page) || self.dataset_page.matches("{cube}").count() != 1
+        if self.dataset_page.matches("{cube}").count() != 1
+            || !URL_RE.is_match(&self.dataset_page.replacen("{cube}", "cube", 1))
         {
             return Err(invalid(
                 "spec.steps.datacube.datasetPage",
@@ -149,13 +151,16 @@ pub fn bloblang(step: &DatacubeStep) -> Result<String> {
     step.validate()?;
     let quoted = |s: &str| serde_json::to_string(s).unwrap_or_default();
     // The cube table last: what the step's own text holds is never read as a placeholder.
-    Ok(TEMPLATE
+    let mapping = TEMPLATE
         .replace("{whole_area}", &quoted(&step.whole_area))
         .replace(
             "{dataset_page}",
             &quoted(&step.dataset_page.replace("{cube}", "%v")),
         )
-        .replace("{cubes}", &cube_table(step)))
+        .replace("{cubes}", &cube_table(step));
+    // The author guard over the render too (PL-16, PL-50), whatever the parameters let through.
+    crate::kinds::pipeline::validate_author_bloblang("spec.steps.datacube", &mapping)?;
+    Ok(mapping)
 }
 
 /// The cubes as one JSON object with Python's `json.dumps(sort_keys=True)` spacing, as the copied
@@ -260,6 +265,12 @@ mod tests {
             step("SK0", PAGE, cube("ftp://x", None, &[])),
             step("SK0", PAGE, cube(SOURCE, Some("2025"), &[])),
             step("SK0", PAGE, cube(SOURCE, None, &["a-b"])),
+            step(
+                "SK0",
+                "https://o.example/{cubes}/{cube}",
+                cube(SOURCE, None, &[]),
+            ),
+            step("SK0", PAGE, cube("https://x.org/{cube}", None, &[])),
         ];
         for s in refusals {
             assert!(s.validate().is_err(), "{s:?}");

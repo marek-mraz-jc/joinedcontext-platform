@@ -134,3 +134,16 @@ fn a_datacube_step_without_its_parameters_or_parameters_on_another_kind_are_refu
         .replace("wholeArea: SK0", "wholeArea: SK0\n        town: x");
     assert!(Pipeline::from_yaml(&unknown).is_err());
 }
+
+#[test]
+fn a_placeholder_in_a_parameter_and_a_runner_read_in_a_source_are_refused() {
+    // integrator-2 on T-5295: `{cubes}` in datasetPage put the cube table outside a string literal.
+    let placeholder = refused(|s| s.dataset_page = "https://o.example/d/{cubes}{cube}".to_owned());
+    assert!(placeholder.contains("datasetPage"), "{placeholder}");
+    let read = refused(|s| {
+        if let Some(cube) = s.cubes.get_mut("vh3001rr") {
+            cube.source = "https://x.org/env(this.a)".to_owned();
+        }
+    });
+    assert!(read.contains("spec.steps.datacube"), "{read}");
+}
