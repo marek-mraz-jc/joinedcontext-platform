@@ -1282,13 +1282,13 @@ impl<'a> WriteBindings<'a> {
                     reasons.join("; ")
                 };
                 found.push((
-                (resource.path.clone(), resource.document, resource.line),
-                format!(
-                    "Policy {rule} grants a write on the space {space}, but no Endpoint binds it ({why}): \
-                     name it in an Endpoint's policyRef or add an Endpoint of the space without one \
-                     (EP-14, ADR-N-057)"
-                ),
-            ));
+                    (resource.path.clone(), resource.document, resource.line),
+                    format!(
+                        "Policy {rule} grants a write on the space {space}, but no Endpoint binds \
+                         it ({why}): name it in an Endpoint's policyRef or add an Endpoint of the \
+                         space without one (EP-14, ADR-N-057)"
+                    ),
+                ));
             }
         }
         found

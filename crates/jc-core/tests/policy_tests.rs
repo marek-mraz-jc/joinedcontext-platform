@@ -518,6 +518,10 @@ spec:
     let neither = Policy::from_yaml(&RULES_POLICY[..RULES_POLICY.find("  rules:").expect("rules")])
         .expect("parses");
     assert!(neither.validate().is_err(), "no assignee is refused");
+    assert!(
+        neither.spec.expand("kiosks").is_err(),
+        "a Policy with neither shape expands to no grant"
+    );
 
     let unknown = RULES_POLICY.replace("q: \"open==true\"", "validity: {}");
     assert!(

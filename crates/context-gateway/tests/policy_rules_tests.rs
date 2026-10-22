@@ -206,6 +206,20 @@ fn a_prohibition_rule_of_another_bound_policy_wins() {
 }
 
 #[test]
+fn a_policy_with_neither_shape_grants_nothing() {
+    let dir = repo("neither");
+    let start = KIOSKS.find("  rules:\n").expect("rules");
+    let neither = format!("{}  operations: [retrieveOps]\n", &KIOSKS[..start]);
+    write(&dir, "kiosks.yaml", &neither);
+    let bound = endpoint(&dir, "aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert!(bound.policies.is_empty(), "{:?}", bound.policy_names);
+    assert_eq!(
+        decide(&Subject::default(), Operation::QueryEntity, &bound),
+        Verdict::Deny
+    );
+}
+
+#[test]
 fn a_policy_with_both_shapes_grants_nothing() {
     let dir = repo("both");
     write(

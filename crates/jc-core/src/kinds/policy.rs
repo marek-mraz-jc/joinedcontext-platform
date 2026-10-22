@@ -773,7 +773,8 @@ impl PolicySpec {
             .map_or(rule_name, |(policy, _)| policy)
     }
 
-    /// One shape or the other: `rules[]` with no single-rule member beside it, never empty.
+    /// One shape or the other: an `assignee`, or `rules[]` with no single-rule member beside it,
+    /// never empty. Checked on every load, so a Policy with neither grants nothing.
     fn check_shape(&self) -> Result<()> {
         let refused = |value: &str, reason| Error::Name {
             field: "spec.rules",
@@ -781,6 +782,11 @@ impl PolicySpec {
             reason,
         };
         match &self.rules {
+            None if self.assignee.is_unset() => Err(Error::Name {
+                field: "spec.assignee",
+                value: String::new(),
+                reason: "a Policy names an assignee or lists rules",
+            }),
             None => Ok(()),
             Some(rules) if rules.is_empty() => Err(refused(
                 "",
