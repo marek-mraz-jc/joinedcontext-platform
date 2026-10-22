@@ -260,6 +260,35 @@ fn is_slug(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// One source's gaps: an NGSI-LD type name, attribute paths per role, the required roles.
+fn source_gaps(name: &str, source: &FeedSource, gaps: &mut Vec<String>) {
+    let ty = &source.entity_type;
+    if !is_name(ty) {
+        gaps.push(format!(
+            "feed output `{name}` names the type `{ty}`, which is not an NGSI-LD type name"
+        ));
+        return;
+    }
+    for (role, paths) in &source.mapping {
+        let paths = paths.list();
+        if paths.is_empty() || !paths.iter().all(|p| is_path(p)) {
+            gaps.push(format!(
+                "feed output `{name}`, {ty}: {} names attribute paths such as name or address.addressLocality",
+                role.as_str()
+            ));
+        }
+    }
+    let roles = source.effective();
+    for required in [FeedRole::Title, FeedRole::Updated] {
+        if !roles.contains_key(&required) {
+            gaps.push(format!(
+                "feed output `{name}`, {ty}: no {} role; name a preset or map it",
+                required.as_str()
+            ));
+        }
+    }
+}
+
 impl FeedOutput {
     /// The title in `lang`, else the first, else the name: what a menu or a catalogue lists.
     pub fn label(&self, lang: &str) -> &str {
@@ -318,42 +347,25 @@ impl FeedOutput {
                 "feed output `{name}`: sources lists 1 to {MAX_FEED_OUTPUTS} types"
             ));
         }
-        if !self.filter.is_empty() {
-            gaps.extend(
-                self.filter
-                    .gaps()
-                    .into_iter()
-                    .map(|gap| format!("feed output `{name}`: {gap}")),
-            );
-        }
+        self.filter_gaps(&mut gaps);
         for source in &self.sources {
-            let ty = &source.entity_type;
-            if !is_name(ty) {
-                gaps.push(format!(
-                    "feed output `{name}` names the type `{ty}`, which is not an NGSI-LD type name"
-                ));
-                continue;
-            }
-            for (role, paths) in &source.mapping {
-                let paths = paths.list();
-                if paths.is_empty() || !paths.iter().all(|p| is_path(p)) {
-                    gaps.push(format!(
-                        "feed output `{name}`, {ty}: {} names attribute paths such as name or address.addressLocality",
-                        role.as_str()
-                    ));
-                }
-            }
-            let roles = source.effective();
-            for required in [FeedRole::Title, FeedRole::Updated] {
-                if !roles.contains_key(&required) {
-                    gaps.push(format!(
-                        "feed output `{name}`, {ty}: no {} role; name a preset or map it",
-                        required.as_str()
-                    ));
-                }
-            }
+            source_gaps(name, source, &mut gaps);
         }
         gaps
+    }
+
+    /// The filter's gaps, from the one output-filter contract (EP-159), each naming the output.
+    fn filter_gaps(&self, gaps: &mut Vec<String>) {
+        if self.filter.is_empty() {
+            return;
+        }
+        let name = &self.name;
+        gaps.extend(
+            self.filter
+                .gaps()
+                .into_iter()
+                .map(|gap| format!("feed output `{name}`: {gap}")),
+        );
     }
 
     /// Every gap of the output against the space's LinkML model, one sentence each: a type the
