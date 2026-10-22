@@ -896,20 +896,17 @@ impl Repository {
             hosts = spec.hosts.clone();
             environment = Some(name);
         }
-        // Without an overlay, or one that sets no domain, the organization's own is what every
-        // manifest rendered with until now.
+        // Without an overlay, or one that sets no domain, the installation Organization's own is
+        // what every manifest rendered with until now (PF-121).
         if org_domain.is_none() {
-            org_domain = resources
-                .iter()
-                .find(|(id, _)| id.kind == "Organization")
-                .and_then(|(_, loaded)| {
-                    loaded
-                        .manifest
-                        .spec
-                        .get("domain")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                });
+            org_domain = installation_organization(&resources).and_then(|(_, loaded)| {
+                loaded
+                    .manifest
+                    .spec
+                    .get("domain")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            });
         }
         let mut literal_domains = Vec::new();
         if let Some(domain) = org_domain.as_deref() {
@@ -1058,6 +1055,11 @@ impl Repository {
         self
     }
 
+    /// The installation's Organization (PF-121, ADR-N-058).
+    pub fn installation_organization(&self) -> Option<(&ResourceId, &LoadedResource)> {
+        installation_organization(&self.resources)
+    }
+
     /// Returns the root path of the organization repository (CC-08).
     pub fn root(&self) -> &Path {
         &self.root
@@ -1076,6 +1078,9 @@ impl Repository {
     pub fn misplaced(&self) -> Vec<(ResourceId, PathBuf, String)> {
         let mut result = Vec::new();
         for (id, loaded) in &self.resources {
+            if is_legacy_organization(id, loaded) {
+                continue;
+            }
             if let Some(expected) = self.expected_path(id) {
                 if loaded.path != Path::new(&expected) {
                     result.push((id.clone(), loaded.path.clone(), expected));
@@ -1083,6 +1088,41 @@ impl Repository {
             }
         }
         result
+    }
+}
+
+/// Whether `loaded` is an Organization at the legacy `org.yaml`, which still loads and counts as
+/// the installation's (PF-121, ADR-N-058).
+pub fn is_legacy_organization(id: &ResourceId, loaded: &LoadedResource) -> bool {
+    id.kind == "Organization" && loaded.path == Path::new(jc_core::kinds::LEGACY_ORGANIZATION_PATH)
+}
+
+/// Whether `loaded` is an Organization that claims to be the installation's: it sets
+/// `spec.installation: true` or lives at the legacy `org.yaml` (PF-121).
+pub fn claims_installation(id: &ResourceId, loaded: &LoadedResource) -> bool {
+    id.kind == "Organization"
+        && (is_legacy_organization(id, loaded)
+            || loaded.manifest.spec.get("installation") == Some(&serde_json::Value::Bool(true)))
+}
+
+/// The installation's Organization: the only one, else the only one that claims to be it; none
+/// when several claim it or none does, which `validate` reports (PF-121).
+pub fn installation_organization(
+    resources: &BTreeMap<ResourceId, LoadedResource>,
+) -> Option<(&ResourceId, &LoadedResource)> {
+    let organizations: Vec<_> = resources
+        .iter()
+        .filter(|(id, _)| id.kind == "Organization")
+        .collect();
+    if let [only] = organizations[..] {
+        return Some(only);
+    }
+    let mut claims = organizations
+        .into_iter()
+        .filter(|(id, loaded)| claims_installation(id, loaded));
+    match (claims.next(), claims.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
     }
 }
 

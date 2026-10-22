@@ -528,6 +528,30 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
         });
     }
 
+    if organization {
+        for (location, message) in organizations_of_the_installation(&repo) {
+            report.findings.push(finding_at(location, message));
+        }
+        for (location, message) in projects_of_unknown_organizations(&repo) {
+            report.findings.push(finding_at(location, message));
+        }
+        for (id, loaded) in repo.iter() {
+            if crate::loader::is_legacy_organization(id, loaded) {
+                report.warnings.push(Finding {
+                    path: loaded.path.clone(),
+                    document: loaded.document,
+                    line: loaded.line,
+                    message: format!(
+                        "`{}` is the legacy place of an Organization; move it to \
+                         `organizations/{}.yaml` (PF-121, ADR-N-058).",
+                        jc_core::kinds::LEGACY_ORGANIZATION_PATH,
+                        id.name
+                    ),
+                });
+            }
+        }
+    }
+
     for (id, actual, expected) in repo.misplaced() {
         let resource = repo.get(&id).expect("misplaced reports loaded resources");
         report.findings.push(Finding {
@@ -543,6 +567,125 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
 
 /// Where a finding sits: the file, the document inside it and its first line.
 type Location = (PathBuf, usize, usize);
+
+fn finding_at((path, document, line): Location, message: String) -> Finding {
+    Finding {
+        path,
+        document,
+        line,
+        message,
+    }
+}
+
+fn location_of(loaded: &crate::loader::LoadedResource) -> Location {
+    (loaded.path.clone(), loaded.document, loaded.line)
+}
+
+/// With several Organizations exactly one is the installation's, by `spec.installation: true` or
+/// the legacy `org.yaml` (PF-121, ADR-N-058 section 2.2).
+fn organizations_of_the_installation(repo: &Repository) -> Located {
+    let organizations: Vec<_> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Organization")
+        .collect();
+    if organizations.len() < 2 {
+        return Vec::new();
+    }
+    let claims: Vec<_> = organizations
+        .iter()
+        .filter(|(id, loaded)| crate::loader::claims_installation(id, loaded))
+        .collect();
+    match claims[..] {
+        [_] => Vec::new(),
+        [] => organizations
+            .iter()
+            .map(|(_, loaded)| {
+                (
+                    location_of(loaded),
+                    "the repository holds several Organizations and none is the installation's: \
+                     set `spec.installation: true` on exactly one (PF-121)"
+                        .to_owned(),
+                )
+            })
+            .collect(),
+        _ => {
+            let files = claims
+                .iter()
+                .map(|(_, loaded)| format!("`{}`", loaded.path.display()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            claims
+                .iter()
+                .map(|(_, loaded)| {
+                    (
+                        location_of(loaded),
+                        format!(
+                            "`spec.installation`: exactly one Organization is the installation's, \
+                             and {files} all claim it (PF-121)"
+                        ),
+                    )
+                })
+                .collect()
+        }
+    }
+}
+
+/// A Project names an Organization of the repository, and a project of an Organization other
+/// than the installation's publishes under that Organization's domain (PF-122, ADR-N-058
+/// section 2.3).
+fn projects_of_unknown_organizations(repo: &Repository) -> Located {
+    let organizations: BTreeMap<
+        &str,
+        (&crate::loader::ResourceId, jc_core::kinds::OrganizationSpec),
+    > = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Organization")
+        .filter_map(|(id, loaded)| {
+            serde_json::from_value(loaded.manifest.spec.clone())
+                .ok()
+                .map(|spec| (id.name.as_str(), (id, spec)))
+        })
+        .collect();
+    if organizations.is_empty() {
+        return Vec::new();
+    }
+    let installation = repo.installation_organization().map(|(id, _)| id);
+    let mut found = Vec::new();
+    for (id, loaded) in repo.iter().filter(|(id, _)| id.kind == "Project") {
+        let Ok(project) =
+            serde_json::from_value::<jc_core::kinds::ProjectSpec>(loaded.manifest.spec.clone())
+        else {
+            continue;
+        };
+        let named = project.organization_ref.name();
+        let Some((org_id, org)) = organizations.get(named) else {
+            let known = organizations.keys().copied().collect::<Vec<_>>().join(", ");
+            found.push((
+                location_of(loaded),
+                format!(
+                    "Project `{}`: `spec.organizationRef` names `{named}`, which is no \
+                     Organization of this repository (it holds {known}) (PF-122)",
+                    id.name
+                ),
+            ));
+            continue;
+        };
+        if installation == Some(*org_id) {
+            continue;
+        }
+        if let Some(domain) = project.domain.as_deref().filter(|d| !org.owns_domain(d)) {
+            found.push((
+                location_of(loaded),
+                format!(
+                    "Project `{}`: `spec.domain` `{domain}` is not the domain of its Organization \
+                     `{named}` (`{}`) or a subdomain of it (PF-122)",
+                    id.name, org.domain
+                ),
+            ));
+        }
+    }
+    found
+}
 
 /// Messages, each at the place it is about.
 type Located = Vec<(Location, String)>;

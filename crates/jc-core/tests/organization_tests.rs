@@ -62,7 +62,7 @@ fn golden_organization_manifest_roundtrips_and_validates() {
     org.spec.validate().expect("spec should validate");
     assert_eq!(
         org.resource_path().expect("resource_path succeeds"),
-        "org.yaml"
+        "organizations/banskabystrica.yaml"
     );
 
     let serialized = org.to_yaml().expect("serialize to yaml");
@@ -191,6 +191,8 @@ fn organization_names_validators_smoke() {
             policies: Default::default(),
             limits: Default::default(),
             dcat_profiles: vec![],
+            installation: false,
+            catalog: None,
         }
     )
     .resource_path()
@@ -343,4 +345,29 @@ fn the_open_data_desk_is_a_contact_role() {
     let role: jc_core::kinds::organization::ContactRole =
         serde_norway::from_str("open-data").expect("parses");
     assert_eq!(role, jc_core::kinds::organization::ContactRole::OpenData);
+}
+
+/// PF-122: a project of a non-installation Organization publishes under its domain or a
+/// subdomain, never a lookalike that only ends with the same letters.
+#[test]
+fn an_organization_owns_its_domain_and_its_subdomains_only_pf122() {
+    let org = Organization::from_yaml(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata: { name: zilina, namespace: org }\n\
+         spec:\n  domain: zilina.sk\n  locales: [sk]\n  defaultLocale: sk\n  installation: true\n",
+    )
+    .expect("parses");
+    assert!(org.spec.installation);
+    assert_eq!(
+        org.resource_path().expect("path"),
+        "organizations/zilina.yaml"
+    );
+    for (domain, owned) in [
+        ("zilina.sk", true),
+        ("opendata.zilina.sk", true),
+        ("notzilina.sk", false),
+        ("sk", false),
+        ("hel.fi", false),
+    ] {
+        assert_eq!(org.spec.owns_domain(domain), owned, "{domain}");
+    }
 }

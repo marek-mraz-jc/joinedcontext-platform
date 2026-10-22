@@ -39,7 +39,20 @@ pub struct OrganizationSpec {
     /// DCAT-AP 3.0, which is always served (EP-27, docs API/08 section 5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dcat_profiles: Vec<DcatProfile>,
+    /// The installation's Organization, which owns the repository, the gateway's `{orgDomain}`
+    /// and the installation-wide kinds; with several Organizations exactly one sets it, and the
+    /// legacy `org.yaml` counts as setting it (PF-121, ADR-N-058).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installation: bool,
+    /// The catalogue publisher a project of this Organization takes when it names none of its
+    /// own (ADR-N-058 section 2.3, EP-127).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<crate::kinds::ProjectCatalog>,
 }
+
+/// Where an Organization lived before an installation held several (PF-121): it still loads,
+/// counts as the installation's and draws a deprecation warning.
+pub const LEGACY_ORGANIZATION_PATH: &str = "org.yaml";
 
 /// A national DCAT-AP profile an Organization serves its records in (docs API/08).
 #[derive(
@@ -178,7 +191,7 @@ impl Kind for OrganizationSpec {
     const KIND: &'static str = "Organization";
     const PLURAL: &'static str = "organizations";
     const SCOPE: Scope = Scope::Organization;
-    const PATH_TEMPLATE: &'static str = "org.yaml";
+    const PATH_TEMPLATE: &'static str = "organizations/{name}.yaml";
 
     fn validate_spec(&self, _meta: &ObjectMeta) -> Result<()> {
         self.validate()
@@ -227,6 +240,9 @@ impl OrganizationSpec {
         // The ranges no operator may widen; the Portal checks the operator's file on every door
         // (PF-97).
         self.check_limits(&OrganizationBounds::safety())?;
+        if let Some(catalog) = &self.catalog {
+            catalog.validate()?;
+        }
 
         Ok(())
     }
@@ -234,5 +250,14 @@ impl OrganizationSpec {
     /// Mints a deterministic entity URN in this organization's verified domain (PF-42, PF-44).
     pub fn urn(&self, entity_type: &str, space: &str, local_id: &str) -> Result<Urn> {
         Urn::new(entity_type, &self.domain, space, local_id)
+    }
+
+    /// Whether `domain` is this Organization's domain or a subdomain of it, the domains a
+    /// project of an Organization other than the installation's may publish under (PF-122).
+    pub fn owns_domain(&self, domain: &str) -> bool {
+        domain == self.domain
+            || domain
+                .strip_suffix(&self.domain)
+                .is_some_and(|label| label.ends_with('.'))
     }
 }
