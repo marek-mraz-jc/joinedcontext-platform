@@ -92,6 +92,9 @@ pub struct Snapshot {
     pub servers: BTreeMap<(String, String), McpServerSpec>,
     /// Every Endpoint's page by slug, for the context (T-4692).
     pub pages: BTreeMap<String, Page>,
+    /// Each project's own title in every language it gives, by project: the names a question
+    /// asks for its pages by (T-5368).
+    pub titles: BTreeMap<String, Vec<String>>,
 }
 
 /// Every `KnowledgeSource` of the organization, by project and name; a manifest that does not
@@ -219,10 +222,30 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
         }
     }
     resolver_inputs(&mut snapshot, &assembly.repository, &catalogues);
+    snapshot.titles = project_titles(&assembly.repository);
     for (public_id, owners) in snapshot.claimed_twice() {
         tracing::warn!(%public_id, deployments = %owners.join(" and "), "a publicId is declared twice; neither deployment answers until one gives it up (MF-52)");
     }
     Ok(snapshot)
+}
+
+/// Each `Project`'s title in every language it gives, by project (T-5368).
+fn project_titles(repository: &jc_manifest::loader::Repository) -> BTreeMap<String, Vec<String>> {
+    let mut titles = BTreeMap::new();
+    for (id, resource) in repository.iter().filter(|(id, _)| id.kind == "Project") {
+        let title = resource.manifest.metadata.rest.get("title");
+        let mut names: Vec<String> = title
+            .map(title_lines)
+            .unwrap_or_default()
+            .into_values()
+            .collect();
+        // A plain title is one name in no language.
+        if let Some(plain) = title.and_then(title_line).filter(|t| !names.contains(t)) {
+            names.push(plain);
+        }
+        titles.insert(id.name.clone(), names);
+    }
+    titles
 }
 
 /// What the resolver and the context page read of every Endpoint (AG-121, AG-123): its page
