@@ -81,6 +81,12 @@ impl Visible {
                 && (self.attrs.is_empty() || self.attrs.contains(name)))
     }
 
+    /// Whether the caller may read this attribute on this class, the type included: the columns
+    /// a table gives the class (EP-06, T-5209).
+    pub fn shows(&self, class: &str, name: &str) -> bool {
+        self.covers_type(class) && self.covers_slot(class, name)
+    }
+
     /// Whether the model may describe this attribute **on this class** (MP-02, EP-47).
     fn covers_slot(&self, class: &str, name: &str) -> bool {
         if !self.covers_attr(name) {
@@ -355,6 +361,7 @@ mod visible_tests {
             view_mapping: None,
             catalog: None,
             deprecation: None,
+            feeds: Vec::new(),
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
             policy_names: Vec::new(),

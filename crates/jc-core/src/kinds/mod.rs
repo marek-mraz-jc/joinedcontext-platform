@@ -18,6 +18,7 @@ pub mod dataspace;
 pub mod endpoint;
 pub mod endpoint_deprecation;
 pub mod environment;
+pub mod feed_output;
 pub mod grid;
 pub mod group;
 pub mod ical_mapping;
@@ -89,6 +90,10 @@ pub use endpoint::{
     SurfaceRequirement, ENDPOINT_ROLE_PREFIX,
 };
 pub use environment::{EnvironmentSpec, SecretBackend};
+pub use feed_output::{
+    feed_gaps, feed_links, FeedFilter, FeedOutput, FeedPaths, FeedPreset, FeedRole, FeedSort,
+    FeedSource, FEED_FORMATS, MAX_FEED_OUTPUTS,
+};
 pub use group::{GroupSpec, Member};
 pub use ical_mapping::{
     outputs_gaps, Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping, IcalOutput,

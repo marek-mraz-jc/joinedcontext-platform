@@ -159,6 +159,8 @@ pub struct Endpoint {
     pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
     /// The manifest's `spec.deprecation`, which the answer headers announce (EP-147).
     pub deprecation: Option<std::sync::Arc<jc_core::kinds::endpoint_deprecation::Deprecation>>,
+    /// The feed outputs it serves under `feed/v1/{name}/` (EP-150); empty: no feed.
+    pub feeds: Vec<jc_core::kinds::FeedOutput>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).
@@ -274,6 +276,64 @@ impl Endpoint {
             }
         }
         served
+    }
+
+    /// The model's slots `file.csv` always has columns for (T-5209): of `types`, or of every
+    /// class when the caller named none, narrowed by the projection and `hiddenAttributes` as
+    /// the answer is, and to what `shows(class, attribute)` grants the caller (EP-06). None for
+    /// a view of another model or a space with no generated schema.
+    pub fn csv_slots(
+        &self,
+        types: &[String],
+        shows: impl Fn(&str, &str) -> bool,
+    ) -> Vec<jc_tabular::Slot> {
+        let schema = self
+            .declared_types
+            .as_ref()
+            .and_then(|d| d.schema.as_deref());
+        let Some(schema) = schema.filter(|_| self.view_mapping.is_none()) else {
+            return Vec::new();
+        };
+        let mut slots: Vec<jc_tabular::Slot> = Vec::new();
+        for class in schema.classes.keys() {
+            if !types.is_empty() && !types.contains(class) {
+                continue;
+            }
+            let kept = match &self.projection {
+                None => None,
+                Some(projection) => match projection.classes.iter().find(|c| &c.name == class) {
+                    Some(projected) => Some(&projected.slots),
+                    None => continue,
+                },
+            };
+            let attributes = schema.attributes(class).map(|c| c.attributes);
+            for attribute in attributes.unwrap_or_default() {
+                let hidden = self.hidden_attributes.contains(&attribute.name)
+                    || kept.is_some_and(|kept| !kept.contains(&attribute.name))
+                    || slots.iter().any(|slot| slot.name == attribute.name)
+                    || !shows(class, &attribute.name);
+                if hidden {
+                    continue;
+                }
+                let scalar = match &attribute.relationship {
+                    Some(target) => !target.many,
+                    None => matches!(
+                        attribute.value_type.as_deref(),
+                        Some("string" | "number" | "integer" | "boolean")
+                    ),
+                };
+                slots.push(jc_tabular::Slot {
+                    unit: attribute
+                        .unit
+                        .as_ref()
+                        .is_some_and(|unit| unit.code.is_some()),
+                    name: attribute.name,
+                    kind: attribute.kind,
+                    scalar,
+                });
+            }
+        }
+        slots
     }
 }
 

@@ -34,6 +34,7 @@ fn with_subject<T>(
         catalog: endpoint.catalog.as_deref(),
         classes: &classes,
         assigners: &assigners,
+        feeds: &endpoint.feeds,
     })
 }
 

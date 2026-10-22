@@ -119,6 +119,7 @@ fn endpoint() -> Endpoint {
         declared_types: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

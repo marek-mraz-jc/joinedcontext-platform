@@ -1320,6 +1320,13 @@
             "ical"
           ],
           "type": "string"
+        },
+        {
+          "description": "Atom, RSS 2.0 and JSON Feed of the view's entities (`/feed/v1/{name}/`); served exactly where `spec.representations.feed` lists an output, never through `enabledRepresentations` (EP-150, EP-151).",
+          "enum": [
+            "feed"
+          ],
+          "type": "string"
         }
       ]
     },

@@ -628,6 +628,7 @@ mod tests {
             view_mapping: None,
             catalog: None,
             deprecation: None,
+            feeds: Vec::new(),
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),

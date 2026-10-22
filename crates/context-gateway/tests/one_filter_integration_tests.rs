@@ -144,6 +144,7 @@ impl Shape {
             view_mapping: None,
             catalog: None,
             deprecation: None,
+            feeds: Vec::new(),
             policy_names: Vec::new(),
             policies: vec![self.policy()],
         }

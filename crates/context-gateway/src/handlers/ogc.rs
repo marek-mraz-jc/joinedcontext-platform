@@ -77,6 +77,12 @@ const ICAL: Surface = Surface {
     name: "iCalendar",
 };
 
+const FEED: Surface = Surface {
+    representation: Representation::Feed,
+    path: "feed/v1",
+    name: "feed",
+};
+
 /// Every OGC API - Features request of one endpoint (EP-29, EP-39, EP-40).
 pub(crate) async fn ogc_features(
     State(gateway): State<Arc<Gateway>>,
@@ -155,6 +161,16 @@ pub(crate) async fn ical(
     request: Request,
 ) -> Response<Body> {
     read_surface(&gateway, &params, request, &ICAL).await
+}
+
+/// The Atom, RSS 2.0 and JSON Feed documents of the Endpoint's feed outputs (EP-150): read-only,
+/// the broker's alone; an Endpoint without an output has no `feed` and answers 404.
+pub(crate) async fn feed(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    read_surface(&gateway, &params, request, &FEED).await
 }
 
 /// The caller admitted to the Endpoint for `surface`, with the client's own platform headers
@@ -320,7 +336,10 @@ async fn answered(
     let Some(text) = std::str::from_utf8(&held).ok().filter(|_| !tile) else {
         return proxy::with_body(parts, held.to_vec());
     };
-    let text = text.replace(&from, &to).replace(&view_from, &view_to);
+    let mut text = text.replace(&from, &to).replace(&view_from, &view_to);
+    if surface.representation == Representation::Feed {
+        text = public_feed_host(&text, authority(gateway.broker.base()), gateway.base_url());
+    }
     proxy::with_body(parts, text.into_bytes())
 }
 
@@ -627,6 +646,31 @@ fn entity_key(csdl: &Value, set: &str) -> Option<String> {
     None
 }
 
+/// A feed names its host bare twice, beside its links: in every `tag:` id (RFC 4151) and as the
+/// feed's author. Both carry the public host, so an id stays the same wherever the broker runs
+/// and no document names the broker (API/02 §8b).
+fn public_feed_host(text: &str, broker: &str, public: &str) -> String {
+    let bare = |authority: &str| {
+        authority
+            .rsplit_once(':')
+            .map_or(authority, |(host, _)| host)
+            .to_owned()
+    };
+    let (from, to) = (bare(broker), bare(authority(public)));
+    if from.is_empty() || to.is_empty() {
+        return text.to_owned();
+    }
+    text.replace(&format!("tag:{from},"), &format!("tag:{to},"))
+        .replace(
+            &format!("<author><name>{from}</name></author><generator>"),
+            &format!("<author><name>{to}</name></author><generator>"),
+        )
+        .replace(
+            &format!("\"authors\":[{{\"name\":\"{from}\"}}]"),
+            &format!("\"authors\":[{{\"name\":\"{to}\"}}]"),
+        )
+}
+
 /// The `host[:port]` of an upstream URL.
 fn authority(base: &str) -> &str {
     let rest = base.split_once("://").map_or(base, |(_, rest)| rest);
@@ -645,6 +689,9 @@ fn no_view(surface: &Surface) -> Response<Body> {
         }
         Representation::Ical => {
             ProblemDetails::new(501, "ical-view-unavailable", "Not Implemented")
+        }
+        Representation::Feed => {
+            ProblemDetails::new(501, "feed-view-unavailable", "Not Implemented")
         }
         _ => ProblemDetails::new(501, "ogc-view-unavailable", "Not Implemented"),
     };
@@ -679,11 +726,29 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         .route("/api/endpoint/{slug}/odata/v4/{*rest}", any(odata))
         // The iCalendar feed of the view's Events (EP-125, T-4573), served by the broker.
         .route("/api/endpoint/{slug}/ical/v1/{*rest}", any(ical))
+        // The feed outputs of the view (EP-150, T-5203), `{name}/{atom.xml|rss.xml|feed.json}`.
+        .route("/api/endpoint/{slug}/feed/v1/{*rest}", any(feed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_feed_names_the_public_host_in_its_ids_and_author() {
+        let atom = "<id>tag:antares.broker,2026:v/feed/x</id><author><name>antares.broker</name></author><generator>Antares</generator><entry><title>antares.broker</title></entry>";
+        let json = r#"{"authors":[{"name":"antares.broker"}],"items":[{"id":"tag:antares.broker,2026:v/urn:a"}]}"#;
+        let public = "https://data.example.sk";
+        assert_eq!(
+            public_feed_host(atom, "antares.broker:9090", public),
+            "<id>tag:data.example.sk,2026:v/feed/x</id><author><name>data.example.sk</name></author><generator>Antares</generator><entry><title>antares.broker</title></entry>"
+        );
+        assert_eq!(
+            public_feed_host(json, "antares.broker:9090", public),
+            r#"{"authors":[{"name":"data.example.sk"}],"items":[{"id":"tag:data.example.sk,2026:v/urn:a"}]}"#
+        );
+        assert_eq!(public_feed_host(atom, "antares.broker", ""), atom);
+    }
 
     #[test]
     fn unmangle_decodes_the_brokers_escapes_only() {
