@@ -18,8 +18,9 @@ use crate::view_mapping::ViewMapping;
 use jc_core::kinds::mcp_server::{knowledge_source_id, Select};
 use jc_core::kinds::{
     AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
-    EndpointSpec, MappingSpec, McpServerSpec, ModelProjectionSpec, PolicySpec, ProjectSpec,
-    Representation,
+    EndpointSpec, EntitySelector, MappingSpec, McpServerSpec, ModelProjectionSpec, Operation,
+    OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal, PrincipalKind, ProjectSpec,
+    RegistrationInfo, Representation,
 };
 use jc_core::reach::{resolve_connectors, EndpointFacts};
 use jc_core::Urn;
@@ -859,6 +860,7 @@ fn view_mappings(
 fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
     let ModelSet { models, declared } = models;
     let policies = policies_by_space(repo);
+    let assigner = format!("did:web:{}", repo.org_domain().unwrap_or_default());
 
     let mut spaces = Vec::new();
     for (id, resource) in repo.iter() {
@@ -871,6 +873,22 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
         let project = id.namespace.clone().unwrap_or_default();
         let key = (project.clone(), id.name.clone());
         let segment = repo.space_segment(&project, &id.name);
+        let declared_types = declared.get(&key).cloned();
+        let (mut space_policies, mut policy_names): (Vec<PolicySpec>, Vec<String>) = policies
+            .get(&key)
+            .map(|named| {
+                named
+                    .iter()
+                    .map(|(name, spec)| (spec.clone(), name.clone()))
+                    .unzip()
+            })
+            .unwrap_or_default();
+        if let Some(grant) =
+            portal_personal_data_read(&id.name, declared_types.as_deref(), &assigner)
+        {
+            space_policies.push(grant);
+            policy_names.push(PORTAL_PERSONAL_DATA_POLICY.to_owned());
+        }
         spaces.push(Space {
             endpoint: Arc::new(Endpoint {
                 roles: Default::default(),
@@ -894,16 +912,10 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
                 // endpoint, and the canonical surface publishes nothing of its own.
                 hidden_attributes: BTreeSet::new(),
                 projection: None,
-                policies: policies
-                    .get(&key)
-                    .map(|named| named.iter().map(|(_, spec)| spec.clone()).collect())
-                    .unwrap_or_default(),
-                policy_names: policies
-                    .get(&key)
-                    .map(|named| named.iter().map(|(name, _)| name.clone()).collect())
-                    .unwrap_or_default(),
+                policies: space_policies,
+                policy_names,
                 models: models.get(&key).cloned().unwrap_or_default(),
-                declared_types: declared.get(&key).cloned(),
+                declared_types,
                 // A space's canonical surface serves the space's own model; a view is a
                 // decision of a published endpoint (SP-01, EP-54).
                 view_mapping: None,
@@ -918,6 +930,63 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
         });
     }
     spaces
+}
+
+/// The name the Portal's derived grant is decided and logged under.
+pub const PORTAL_PERSONAL_DATA_POLICY: &str = "portal-personal-data";
+
+/// The account the Portal reads a space's data subjects as: its `portal-reconciler` client,
+/// which no ServiceAccount manifest declares, so the gateway decides its token as this user.
+pub const PORTAL_RECONCILER_USER: &str = "service-account-portal-reconciler";
+
+/// The read the Portal's export and erasure of a data subject need on a space whose model
+/// marks personal data (API/01 §46, DM-124, DM-126, T-5168): find the Entities naming the
+/// subject and read their history, on the space's own surface only, never a write. The
+/// Portal decides who may ask (an owner of the space); without this grant every such space
+/// answered the Portal 404 and no export or erasure could find anything.
+fn portal_personal_data_read(
+    space: &str,
+    declared: Option<&DeclaredTypes>,
+    assigner: &str,
+) -> Option<PolicySpec> {
+    let schema = declared?.schema.as_deref()?;
+    let personal: Vec<&String> = schema
+        .classes
+        .keys()
+        .filter(|class| !schema.personal_attributes(class).is_empty())
+        .collect();
+    if personal.is_empty() {
+        return None;
+    }
+    Some(PolicySpec {
+        context_space_ref: jc_core::envelope::Ref::Name(space.to_owned()),
+        effect: PolicyEffect::default(),
+        assigner: assigner.to_owned(),
+        assignee: Principal::new(PrincipalKind::User, PORTAL_RECONCILER_USER),
+        operations: vec![
+            OperationRef::Group(OperationGroup::RetrieveOps),
+            OperationRef::Single(Operation::QueryTemporal),
+            OperationRef::Single(Operation::RetrieveTemporal),
+        ],
+        actions: Vec::new(),
+        information: vec![RegistrationInfo {
+            entities: personal
+                .into_iter()
+                .map(|class| EntitySelector {
+                    entity_type: class.clone(),
+                    id: None,
+                    id_pattern: None,
+                })
+                .collect(),
+            property_names: Vec::new(),
+            relationship_names: Vec::new(),
+        }],
+        q: None,
+        scope_q: None,
+        geo_q: None,
+        temporal_q: None,
+        validity: None,
+    })
 }
 
 /// One `metadata` text as a language map, or an empty one when the manifest carries none
@@ -1231,10 +1300,15 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_map, normalize};
+    use super::{language_map, normalize, portal_personal_data_read, PORTAL_RECONCILER_USER};
+    use crate::pdp::evaluator::{evaluate, Request, Subject};
+    use crate::resolver::DeclaredTypes;
+    use jc_core::kinds::Operation;
+    use jc_manifest::model_schema::ModelSchema;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
     /// AP-139: an App's endpoint owns its caller role and each of its named roles, and nothing
     /// that only starts like them or is not a role at all.
@@ -1259,6 +1333,115 @@ mod tests {
         assert!(!own("role", "public"));
         assert!(!own("user", "endpoint:helsinki/app-events"));
         assert!(!own("group", "endpoint:helsinki/app-events"));
+    }
+
+    fn declared(rider: serde_json::Value) -> DeclaredTypes {
+        let model = json!({
+            "definitions": {
+                "Rider": { "type": "object", "properties": { "id": {"type": "string"}, "rider": rider } },
+                "Station": { "type": "object", "properties": { "id": {"type": "string"} } }
+            }
+        });
+        let classes = ["Rider".to_owned(), "Station".to_owned()];
+        DeclaredTypes {
+            model: "riders".into(),
+            classes: classes.iter().cloned().collect(),
+            units: Default::default(),
+            relationships: Default::default(),
+            quality: Vec::new(),
+            schema: Some(Arc::new(ModelSchema::compile(
+                "riders", "1.0.0", &model, &classes, true,
+            ))),
+        }
+    }
+
+    fn decided(
+        user: &str,
+        operation: Operation,
+        types: &[&str],
+        grant: &jc_core::kinds::PolicySpec,
+    ) -> bool {
+        let subject = Subject {
+            user: Some(user.to_owned()),
+            ..Subject::default()
+        };
+        let request = Request {
+            types: types.iter().map(|t| (*t).to_owned()).collect(),
+            ..Request::default()
+        };
+        !evaluate(
+            &subject,
+            operation,
+            &request,
+            "t",
+            std::slice::from_ref(grant),
+            chrono::Utc::now(),
+        )
+        .is_deny()
+    }
+
+    /// T-5168: a space whose model marks personal data lets the Portal's own account find and
+    /// read the Entities of those classes and their history, and nothing more: no write, no
+    /// other class, no other caller.
+    #[test]
+    fn the_portal_reads_the_personal_classes_of_a_space_and_writes_nothing() {
+        let declared = declared(json!({ "type": "string", "x-personal-data": true }));
+        let grant = portal_personal_data_read("riders", Some(&declared), "did:web:hel.fi")
+            .expect("a space with personal data grants the Portal its read");
+        for operation in [
+            Operation::QueryEntity,
+            Operation::RetrieveEntity,
+            Operation::QueryTemporal,
+            Operation::RetrieveTemporal,
+        ] {
+            assert!(
+                decided(PORTAL_RECONCILER_USER, operation, &["Rider"], &grant),
+                "{operation:?}"
+            );
+        }
+        for operation in [
+            Operation::UpdateAttrs,
+            Operation::DeleteEntity,
+            Operation::CreateEntity,
+            Operation::DeleteAttrs,
+        ] {
+            assert!(
+                !decided(PORTAL_RECONCILER_USER, operation, &["Rider"], &grant),
+                "{operation:?}"
+            );
+        }
+        // a query of the space is narrowed to the personal classes: Station is never read
+        let portal = Subject {
+            user: Some(PORTAL_RECONCILER_USER.to_owned()),
+            ..Subject::default()
+        };
+        let verdict = evaluate(
+            &portal,
+            Operation::QueryEntity,
+            &Request::default(),
+            "t",
+            std::slice::from_ref(&grant),
+            chrono::Utc::now(),
+        );
+        assert_eq!(
+            verdict.constraints().map(|c| c.types.clone()),
+            Some(["Rider".to_owned()].into())
+        );
+        assert!(!decided("jana", Operation::QueryEntity, &["Rider"], &grant));
+        assert!(!decided(
+            "service-account-portal-api",
+            Operation::QueryEntity,
+            &["Rider"],
+            &grant
+        ));
+    }
+
+    /// A model that marks nothing personal, or a space with no model, grants the Portal nothing.
+    #[test]
+    fn a_space_without_personal_data_grants_the_portal_nothing() {
+        let plain = declared(json!({ "type": "string" }));
+        assert!(portal_personal_data_read("riders", Some(&plain), "did:web:hel.fi").is_none());
+        assert!(portal_personal_data_read("riders", None, "did:web:hel.fi").is_none());
     }
 
     /// A plain title reads as text of no locale, the legacy map as its locales, and a
