@@ -791,8 +791,7 @@ fn an_existing_organization_is_renamed_to_the_instance_title() {
     );
     let repo = Repository::load(&dir).expect("the repository loads");
     let found = targets(&repo, "ovzdusie").expect("the walk");
-    let mut api = InMemoryCkan::new()
-        .with_titled_organization("mesto-banska-bystrica", "Mesto Banská Bystrica a okolie");
+    let mut api = titled_organization("Mesto Banská Bystrica a okolie");
 
     publish_one(
         &mut api,
@@ -802,14 +801,21 @@ fn an_existing_organization_is_renamed_to_the_instance_title() {
         &settings(),
     )
     .expect("the run");
-    assert_eq!(api.actions(), vec!["organization_patch", "package_create"]);
-    let (_, patch) = api.calls().next().expect("the organization call");
+    assert_eq!(
+        api.actions(),
+        vec![
+            "organization_create",
+            "organization_patch",
+            "package_create"
+        ]
+    );
+    let (_, patch) = api.calls().nth(1).expect("the organization call");
     assert_eq!(
         patch,
         &json!({ "id": "mesto-banska-bystrica", "title": "Mesto Banská Bystrica" })
     );
     assert_eq!(
-        api.organization_title("mesto-banska-bystrica"),
+        organization_title(&api).as_deref(),
         Some("Mesto Banská Bystrica")
     );
 
@@ -829,6 +835,26 @@ fn an_existing_organization_is_renamed_to_the_instance_title() {
     );
 }
 
+/// A CKAN that already holds `mesto-banska-bystrica` under `title`, seeded through the API, so
+/// its first recorded call is that `organization_create`.
+fn titled_organization(title: &str) -> InMemoryCkan {
+    let mut api = InMemoryCkan::new();
+    api.action(
+        "organization_create",
+        &json!({ "name": "mesto-banska-bystrica", "title": title }),
+    )
+    .expect("the seed");
+    api
+}
+
+/// The title CKAN shows for `mesto-banska-bystrica`.
+fn organization_title(api: &InMemoryCkan) -> Option<String> {
+    let shown = api
+        .show("organization_show", "mesto-banska-bystrica")
+        .expect("the show")?;
+    shown["title"].as_str().map(str::to_owned)
+}
+
 /// The branding name only names an organization CKAN does not have: an instance without a
 /// title never renames an existing one to the installation's name.
 #[test]
@@ -837,8 +863,7 @@ fn the_branding_name_never_renames_an_existing_organization() {
     let repo = Repository::load(&dir).expect("the repository loads");
     let found = targets(&repo, "ovzdusie").expect("the walk");
     assert!(found[0].instance_title.is_none());
-    let mut api = InMemoryCkan::new()
-        .with_titled_organization("mesto-banska-bystrica", "Mesto Banská Bystrica");
+    let mut api = titled_organization("Mesto Banská Bystrica");
     let branded = Settings::new("data.example.org").titled("Helsinki Region Context");
 
     publish_one(&mut api, &found[0], &record("air-public"), None, &branded).expect("the run");
@@ -848,7 +873,7 @@ fn the_branding_name_never_renames_an_existing_organization() {
         api.actions()
     );
     assert_eq!(
-        api.organization_title("mesto-banska-bystrica"),
+        organization_title(&api).as_deref(),
         Some("Mesto Banská Bystrica")
     );
 }
