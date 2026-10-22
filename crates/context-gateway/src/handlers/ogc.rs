@@ -227,15 +227,24 @@ async fn read_surface(
         "request forwarded to the broker's view"
     );
     let (parts, _) = request.into_parts();
+    // A HEAD is the GET without its body (RFC 9110 9.3.2): the broker's GET is read and its
+    // links moved, so the Content-Length is the one the caller's GET gets (T-5204).
+    let head = method == Method::HEAD;
+    let upstream = if head { Method::GET } else { method };
     let answer = match gateway
         .broker
-        .send(method, &target, parts.headers, Body::empty())
+        .send(upstream, &target, parts.headers, Body::empty())
         .await
     {
         Ok(answer) => answer,
         Err(error) => return ProblemDetails::from(error).into_response(),
     };
-    answered(gateway, &endpoint, surface, answer).await
+    let answer = answered(gateway, &endpoint, surface, answer).await;
+    if head {
+        let (parts, _) = answer.into_parts();
+        return Response::from_parts(parts, Body::empty());
+    }
+    answer
 }
 
 /// `/x/views/{view}/{surface}{rest}` with the caller's query as sent.

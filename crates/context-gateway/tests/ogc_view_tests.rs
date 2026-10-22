@@ -355,3 +355,18 @@ async fn a_vector_tile_passes_byte_for_byte() {
         format!("/x/views/{SLUG}/ogc/features/collections/Car/tiles/WebMercatorQuad/0/0/0")
     );
 }
+
+/// T-5204: a HEAD answers the Content-Length of the GET the caller would get, its links moved
+/// under the Endpoint's URL, and no body.
+#[tokio::test]
+async fn a_head_answers_the_length_of_its_get() {
+    let (upstream, hops) = broker(StatusCode::OK, &[]).await;
+    let items = format!("/api/endpoint/{SLUG}/ogc/features/collections/Car/items?limit=1");
+    let (_, got, body) = call(&upstream, endpoint(), get(&items)).await;
+    let (status, headers, empty) = call(&upstream, endpoint(), request(Method::HEAD, &items)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(empty.is_empty());
+    assert_eq!(headers["content-length"], body.len().to_string());
+    assert_eq!(headers["content-length"], got["content-length"]);
+    assert!(hops_of(&hops).iter().all(|hop| hop.method == Method::GET));
+}
