@@ -1493,18 +1493,6 @@ impl InMemoryCkan {
         self
     }
 
-    /// An organization that already exists under `title`.
-    pub fn with_titled_organization(mut self, name: &str, title: &str) -> Self {
-        self.organizations
-            .insert(name.to_owned(), Some(title.to_owned()));
-        self
-    }
-
-    /// The title an organization holds, when it has one.
-    pub fn organization_title(&self, name: &str) -> Option<&str> {
-        self.organizations.get(name)?.as_deref()
-    }
-
     /// The API token the transport would send, which no payload may contain.
     pub fn with_token(mut self, token: &str) -> Self {
         self.token = token.to_owned();
