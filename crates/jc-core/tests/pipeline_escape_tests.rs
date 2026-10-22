@@ -189,16 +189,100 @@ fn a_processor_step_reads_the_runner_no_more_than_a_mapping_does() {
     }
 }
 
-/// A rule that refuses a mapping for saying `file(` in a comment would be a rule authors work
-/// around by deleting comments; the scan reads code, so a mention is not a call.
+/// T-5223: the scan reads every character instead of guessing where Bloblang's strings and
+/// comments end. A triple-quoted string (`""" " """`) once hid a real `env("…")` from a lexer
+/// that knew only `"` and `'`, and Bento 1.22.0 printed the secret. Each text below either runs
+/// the call on that image or only mentions it; both are refused, a mention for being
+/// indistinguishable from a call to anything short of Bento's own parser.
 #[test]
-fn a_mention_of_the_call_in_a_comment_or_a_string_is_not_a_call() {
+fn a_host_call_hidden_by_quotes_comments_or_expressions_is_refused() {
+    for (mapping, needle) in [
+        (
+            r#"'root = """ " """ + env("SECRET_X")'"#,
+            "env(\"SECRET_X\")",
+        ),
+        (
+            r#"'root = """ # """ + env("SECRET_X")'"#,
+            "env(\"SECRET_X\")",
+        ),
+        (
+            "|\n        root = \"\"\"\n        \" \"\"\" + file(\"/data/other.csv\")",
+            "file(…)",
+        ),
+        (r#"'root = "a" + env("JC_" + "CLIENT_SECRET")'"#, "env(…)"),
+        (r#"'root = env("""SECRET_X""")'"#, "env(…)"),
+        (r#"'root = env(meta("name"))'"#, "env(…)"),
+        (
+            r#"'root = this.(a -> env("SECRET_X"))'"#,
+            "env(\"SECRET_X\")",
+        ),
+        ("|\n        root = env(\n          \"JC_SPACE\")", "env(…)"),
+        (
+            "'root = this.file_rel_json(\"x.json\")'",
+            "file_rel_json(…)",
+        ),
+        (
+            "'root = this # env(\"MQTT_PASSWORD\") is not readable here'",
+            "env(\"MQTT_PASSWORD\")",
+        ),
+        (r#"'root.note = "call env(\"X\") at your peril"'"#, "env(…)"),
+    ] {
+        let message = refusal(&with_mapping(mapping));
+        assert!(message.contains(needle), "{mapping}: {message}");
+    }
+    // A name that only shares letters with a host function, and a method of another name, are
+    // still not calls.
     for mapping in [
-        "'root = this # env(\"MQTT_PASSWORD\") is not readable here'",
-        r#"'root.note = "call env(\"X\") at your peril"'"#,
         r#"'root.method = this.name.format("%v")'"#,
+        r#"'root.p = this.profile("x").environment(1)'"#,
+        "'root.file = this.file'",
+        r#"'root.space = env("JC_SPACE") # env("JC_SPACE") again'"#,
     ] {
         accepted(&with_mapping(mapping));
+    }
+}
+
+/// T-5223 (security critic F2): `import "…"` and `from "…"` load a mapping from the runner's
+/// disk; Bento 1.22.0 ran both from a line's start, so every such line is refused.
+#[test]
+fn a_mapping_that_loads_another_from_the_runners_disk_is_refused() {
+    for mapping in [
+        "|\n        import \"/data/other-project/maps.blobl\"\n        root = this.apply(\"m\")",
+        "|\n        root.a = 1\n          from \"/var/run/secrets/kubernetes.io/serviceaccount/token\"",
+        "'from\"/data/x.blobl\"'",
+    ] {
+        let message = refusal(&with_mapping(mapping));
+        assert!(
+            message.contains("runner's disk") && message.contains("PL-50"),
+            "{mapping}: {message}"
+        );
+    }
+    let message = refusal(&with_processor(
+        "branch: { request_map: \"import \\\"/data/m.blobl\\\"\\nroot = this\" }",
+    ));
+    assert!(message.contains("runner's disk"), "{message}");
+    for mapping in [
+        r#"'root.note = "measured from " + this.station'"#,
+        r#"'root.imported = this.import_date'"#,
+    ] {
+        accepted(&with_mapping(mapping));
+    }
+}
+
+/// T-5223: the `python` processor reaches no file, network or variable, but nothing caps its CPU
+/// or memory in the runner every project shares, so it is refused with that reason, at the top
+/// of a step and nested.
+#[test]
+fn the_python_processor_is_refused_until_the_runner_caps_it() {
+    for processor in [
+        "python: { script: 'while True: pass' }",
+        "try: [ { python: { script: 'root = this' } } ]",
+    ] {
+        let message = refusal(&with_processor(processor));
+        assert!(
+            message.contains("processor `python`") && message.contains("no CPU or memory cap"),
+            "{processor}: {message}"
+        );
     }
 }
 

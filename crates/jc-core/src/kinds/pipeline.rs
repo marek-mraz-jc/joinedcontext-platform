@@ -1153,12 +1153,15 @@ fn validate_source(src: &PipelineSource) -> Result<()> {
 /// deletes its files, and `wasm` is the compute kind (PL-34). `bento_processors::PROCESSORS`
 /// leaves those four out. `awk` (`getline`, `ENVIRON`, `system()`), `javascript` (`require`,
 /// `bento.v0_fetch`) and `template` (Sprig's `env`) are on that list and read the runner's files
-/// or environment all the same, measured on the pinned image (T-3833).
+/// or environment all the same, measured on the pinned image (T-3833). `python` reaches no file,
+/// network or variable, but nothing caps its CPU or memory inside the one runner every project
+/// shares: `while True: pass` holds a core and the runner's streams API (T-5223).
 const REFUSED_PROCESSORS: &[&str] = &[
     "awk",
     "command",
     "file",
     "javascript",
+    "python",
     "subprocess",
     "template",
     "wasm",
@@ -1213,14 +1216,14 @@ pub fn validate_processor_reading(
     }
     if REFUSED_PROCESSORS.contains(&name.as_str()) {
         return Err(refused(format!(
-            "processor `{name}` runs a program or reads the runner's files or environment, which \
-             no pipeline step may do (PL-52)"
+            "processor `{name}` {} (PL-52)",
+            refused_reason(name)
         )));
     }
     if let Some(nested) = nested_refused(&config[name]) {
         return Err(refused(format!(
-            "processor `{nested}` inside `{name}` runs a program or opens the runner's files, \
-             which no pipeline step may do (PL-52)"
+            "processor `{nested}` inside `{name}` {} (PL-52)",
+            refused_reason(nested)
         )));
     }
     // A `mapping` body and a `${! … }` interpolation are Bloblang too, and a step that reads
@@ -1242,6 +1245,16 @@ pub fn validate_processor_reading(
         ));
     }
     Ok(())
+}
+
+/// Why a processor of [`REFUSED_PROCESSORS`] is refused, in words the author can act on.
+fn refused_reason(name: &str) -> &'static str {
+    if name == "python" {
+        "has no CPU or memory cap in the runner every project shares, so one loop stalls every \
+         pipeline; write the step as a `mapping` (Bloblang) instead"
+    } else {
+        "runs a program or reads the runner's files or environment, which no pipeline step may do"
+    }
 }
 
 /// Whether a `url` or `urls` anywhere in a configuration is taken whole from the message.
@@ -1388,6 +1401,15 @@ const HOST_FUNCTIONS: &[&str] = &[
 /// what the reconciler injects for it, and `file(…)` reads nothing at all, because whatever a
 /// mapping reads it writes to the pipeline's own target.
 pub(crate) fn validate_author_bloblang(field: &'static str, mapping: &str) -> Result<()> {
+    if let Some(statement) = file_statement(mapping) {
+        return Err(Error::Name {
+            field,
+            value: statement.to_owned(),
+            reason: "a mapping is written whole in the manifest: `import` and `from` load a \
+                     mapping from the runner's disk, which carries the whole project's data and \
+                     credentials (PL-16, PL-18, PL-50)",
+        });
+    }
     for (function, argument) in host_calls(mapping) {
         if function == "env" {
             match argument.as_deref() {
@@ -1423,100 +1445,64 @@ pub(crate) fn validate_author_bloblang(field: &'static str, mapping: &str) -> Re
     Ok(())
 }
 
-/// Every call an author's mapping makes to one of [`HOST_FUNCTIONS`], with its first argument
-/// when that argument is a plain string literal.
+/// Every call an author's text makes to one of [`HOST_FUNCTIONS`], with its first argument when
+/// that argument is one plain double-quoted name.
 ///
-/// The scan walks the text rather than matching it, so a `#` comment and the inside of a string
-/// are not mistaken for code — a mapping that *mentions* `file(` in a comment is not a mapping
-/// that calls it — and a name is only a call when a `(` follows it and no `.` precedes it, which
-/// leaves Bloblang's methods (`this.foo.format(…)`) alone.
+/// The scan reads every character, comments and strings included, and never models Bloblang's
+/// lexer: a hand-written lexer that disagreed with Bento's about one quote form let a
+/// triple-quoted string hide a real `env("…")` call (T-5223). A host function's name followed by
+/// `(` is a call wherever it stands, so a comment or a string that only mentions one is refused
+/// too and the author rewords it.
 fn host_calls(mapping: &str) -> Vec<(String, Option<String>)> {
     let bytes = mapping.as_bytes();
     let mut calls = Vec::new();
     let mut i = 0;
-    let mut previous_was_dot = false;
     while i < bytes.len() {
-        let byte = bytes[i];
-        match byte {
-            b'#' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                previous_was_dot = false;
-            }
-            b'"' | b'\'' => {
-                i = skip_string(bytes, i).unwrap_or(bytes.len());
-                previous_was_dot = false;
-            }
-            b'.' => {
-                previous_was_dot = true;
-                i += 1;
-            }
-            b if b.is_ascii_alphabetic() || b == b'_' => {
-                let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                    i += 1;
-                }
-                let name = &mapping[start..i];
-                let mut after = i;
-                while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t') {
-                    after += 1;
-                }
-                let is_call = bytes.get(after) == Some(&b'(');
-                if is_call && !previous_was_dot && HOST_FUNCTIONS.contains(&name) {
-                    calls.push((name.to_owned(), literal_argument(mapping, after + 1)));
-                }
-                previous_was_dot = false;
-            }
-            b' ' | b'\t' | b'\r' | b'\n' => i += 1,
-            _ => {
-                previous_was_dot = false;
-                i += 1;
-            }
+        if !(bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        let name = &mapping[start..i];
+        if bytes.get(i) == Some(&b'(') && HOST_FUNCTIONS.contains(&name) {
+            calls.push((name.to_owned(), literal_argument(&mapping[i + 1..])));
         }
     }
     calls
 }
 
-/// The index just past the string literal starting at `open`, or `None` when it is never closed.
-fn skip_string(bytes: &[u8], open: usize) -> Option<usize> {
-    let quote = bytes[open];
-    let mut i = open + 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' if quote == b'"' => i += 2,
-            b if b == quote => return Some(i + 1),
-            _ => i += 1,
-        }
-    }
-    None
+/// The argument list after a call's `(` when it is exactly one `"NAME"` of letters, digits and
+/// `_` between optional blanks: `env("JC_SPACE")` yields the name; `env(this.pick)`,
+/// `env("A" + "B")` and `env("""A""")` yield `None`, so a name that cannot be read here is refused
+/// rather than allowed.
+fn literal_argument(arguments: &str) -> Option<String> {
+    let inner = arguments
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('"')?;
+    let end = inner.find('"')?;
+    let name = &inner[..end];
+    let closes = inner[end + 1..]
+        .trim_start_matches([' ', '\t'])
+        .starts_with(')');
+    (closes && !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .then(|| name.to_owned())
 }
 
-/// The first argument of a call opening at `from`, when it is one plain string literal and
-/// nothing else: `env("JC_SPACE")` yields the name, `env(this.pick)` and `env("A" + "B")`
-/// yield `None`, so a name that cannot be read here is refused rather than allowed.
-fn literal_argument(mapping: &str, from: usize) -> Option<String> {
-    let bytes = mapping.as_bytes();
-    let mut i = from;
-    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-        i += 1;
-    }
-    if bytes.get(i) != Some(&b'"') && bytes.get(i) != Some(&b'\'') {
-        return None;
-    }
-    let end = skip_string(bytes, i)?;
-    let mut after = end;
-    while after < bytes.len() && (bytes[after] == b' ' || bytes[after] == b'\t') {
-        after += 1;
-    }
-    if bytes.get(after) != Some(&b')') {
-        return None;
-    }
-    let raw = &mapping[i + 1..end - 1];
-    if raw.contains('\\') {
-        return None;
-    }
-    Some(raw.to_owned())
+/// The first line of an author's text that is a Bloblang `import "…"` or `from "…"` statement.
+///
+/// Both load a mapping from a path on the runner's disk (measured on the pinned Bento 1.22.0,
+/// T-5223), and Bento reads them only at the start of a line, so a line that starts with either
+/// word and a quote is refused wherever it stands, a multi-line string included.
+fn file_statement(mapping: &str) -> Option<&str> {
+    mapping.lines().map(str::trim).find(|line| {
+        ["import", "from"].iter().any(|word| {
+            line.strip_prefix(word)
+                .is_some_and(|rest| rest.trim_start().starts_with('"'))
+        })
+    })
 }
 
 fn validate_compute(c: &Compute, own: &[&str]) -> Result<()> {
