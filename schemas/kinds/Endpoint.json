@@ -1110,7 +1110,7 @@
     },
     "IcalMapping": {
       "additionalProperties": false,
-      "description": "`spec.representations.ical`.",
+      "description": "One source of an [`IcalOutput`] (`spec.representations.ical[].sources[]`), and the deprecated single mapping object.",
       "properties": {
         "mapping": {
           "additionalProperties": {
@@ -1142,6 +1142,89 @@
           "type": "integer"
         }
       },
+      "type": "object"
+    },
+    "IcalOutput": {
+      "additionalProperties": false,
+      "description": "One named calendar of `spec.representations.ical` (API/11 EP-159), served at `/ical/v1/{name}.ics`.",
+      "properties": {
+        "description": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The calendar's description per language tag.",
+          "type": "object"
+        },
+        "filter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OutputFilter"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A query that narrows the view for this calendar, never widens it."
+        },
+        "lang": {
+          "description": "The language tag (BCP 47) a LanguageProperty is read in when a field names none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "At most this many Events, 1 to 10000.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The URL slug: lowercase letters, digits and `-`, 1 to 40, unique on the Endpoint.",
+          "type": "string"
+        },
+        "sort": {
+          "description": "`start` or `-start`: the order the first `limit` Events are kept in.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "description": "The model classes the calendar maps, each with its preset or mapping; 1 to 10.",
+          "items": {
+            "$ref": "#/definitions/IcalMapping"
+          },
+          "type": "array"
+        },
+        "timezone": {
+          "description": "The IANA zone a time without offset is read in; default `Europe/Bratislava`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The calendar's title per language tag (`NAME`, `X-WR-CALNAME`).",
+          "type": "object"
+        },
+        "version": {
+          "description": "The contract version (API/11 EP-152); `1` when absent.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "sources"
+      ],
       "type": "object"
     },
     "Licence": {
@@ -1257,6 +1340,55 @@
       "required": [
         "name"
       ],
+      "type": "object"
+    },
+    "OutputFilter": {
+      "additionalProperties": false,
+      "description": "An output's NGSI-LD query on top of the view (TS 104 175 6.4.3.2): `q` and `scopeQ` are AND-ed with a caller's, and a geo-query here cannot be replaced by one.",
+      "properties": {
+        "coordinates": {
+          "description": "`coordinates`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geometry": {
+          "description": "`geometry`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geoproperty": {
+          "description": "`geoproperty`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "georel": {
+          "description": "`georel`; with `geometry` and `coordinates`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "`q`, such as `eventCategory==\"šport\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "`scopeQ`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "PersonalData": {
@@ -1508,15 +1640,11 @@
       "description": "`spec.representations`: the mappings of the domain-standard representations (EP-125).",
       "properties": {
         "ical": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IcalMapping"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The iCalendar feed's mapping; absent means the `sdm-event` preset over `Event`."
+          "description": "The iCalendar outputs (API/11 EP-159); none means no calendar is served. The single mapping object of version 1 loads as one output named `events` (deprecated).",
+          "items": {
+            "$ref": "#/definitions/IcalOutput"
+          },
+          "type": "array"
         }
       },
       "type": "object"
