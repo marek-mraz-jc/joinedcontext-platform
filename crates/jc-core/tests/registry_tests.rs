@@ -55,7 +55,7 @@ fn context_space_plural_is_spaces() {
 #[test]
 fn path_templates_render_the_documented_repository_layout() {
     let cases = [
-        ("Organization", "", "", "org", "org.yaml"),
+        ("Organization", "", "", "org", "organizations/org.yaml"),
         (
             "Project",
             "",

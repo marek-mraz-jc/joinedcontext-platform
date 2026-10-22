@@ -108,7 +108,8 @@ pub use mqtt_allowance::{MqttAddress, MqttAllowance, MqttUsage};
 pub use mqtt_broker::{MqttBrokerSpec, MqttCapture, MqttLimits, MqttMode, MqttRole};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
-    Contact, ContactRole, DcatProfile, OrganizationSpec, ProjectsPolicy, DEFAULT_NAME_COOLDOWN_DAYS,
+    Contact, ContactRole, DcatProfile, OrganizationSpec, ProjectsPolicy,
+    DEFAULT_NAME_COOLDOWN_DAYS, LEGACY_ORGANIZATION_PATH,
 };
 pub use pipeline::{
     replace_conflicts, Compute, ComputeKind, Expiry, IdMint, Mint, Output, OutputMode,

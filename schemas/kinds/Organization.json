@@ -263,6 +263,25 @@
       ],
       "type": "object"
     },
+    "ContactPoint": {
+      "additionalProperties": false,
+      "description": "The contact point of a dataset, a `vcard:Kind`.",
+      "properties": {
+        "email": {
+          "description": "A role address, never a person's own (EP-80): `vcard:hasEmail`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The desk's name: `vcard:fn`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "name"
+      ],
+      "type": "object"
+    },
     "ContactRole": {
       "description": "Functional responsibility of an organization contact.",
       "oneOf": [
@@ -734,6 +753,17 @@
       "additionalProperties": false,
       "description": "Desired specification of an [`Organization`][crate::kinds::Organization] resource (PF-01, PF-02, PF-25, PF-41).",
       "properties": {
+        "catalog": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectCatalog"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The catalogue publisher a project of this Organization takes when it names none of its own (ADR-N-058 section 2.3, EP-127)."
+        },
         "contacts": {
           "description": "Administrative, technical, data protection, or security contacts.",
           "items": {
@@ -762,6 +792,10 @@
             "string",
             "null"
           ]
+        },
+        "installation": {
+          "description": "The installation's Organization, which owns the repository, the gateway's `{orgDomain}` and the installation-wide kinds; with several Organizations exactly one sets it, and the legacy `org.yaml` counts as setting it (PF-121, ADR-N-058).",
+          "type": "boolean"
         },
         "limits": {
           "allOf": [
@@ -919,6 +953,35 @@
       },
       "type": "object"
     },
+    "ProjectCatalog": {
+      "additionalProperties": false,
+      "description": "A Project's `spec.catalog`: the body that publishes its data, which the project's own catalogue names and every record whose Endpoint names no publisher carries (EP-127, docs API/08 section 6).",
+      "properties": {
+        "contactPoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ContactPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The desk that answers for the project's datasets."
+        },
+        "publisher": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Publisher"
+            }
+          ],
+          "description": "The publishing body, with its registry IRI: a catalogue's publisher is an IRI."
+        }
+      },
+      "required": [
+        "publisher"
+      ],
+      "type": "object"
+    },
     "ProjectCreation": {
       "description": "Who may open a project (PF-65). `group:<name>` names a `Group` of the organization.",
       "oneOf": [
@@ -1033,6 +1096,30 @@
           "type": "string"
         }
       ]
+    },
+    "Publisher": {
+      "additionalProperties": false,
+      "description": "The publisher of a dataset, a `foaf:Agent`.",
+      "properties": {
+        "name": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The publisher's name per language: `foaf:name`.",
+          "type": "object"
+        },
+        "uri": {
+          "description": "The publisher's own IRI, its web site or registry entry.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
     },
     "Quotas": {
       "additionalProperties": false,

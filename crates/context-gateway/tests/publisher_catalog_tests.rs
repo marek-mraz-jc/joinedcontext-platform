@@ -526,6 +526,66 @@ fn a_project_without_a_publisher_publishes_no_catalogue_and_changes_no_record() 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ADR-N-058 section 2.3: a project of an Organization that names its publisher takes that
+/// publisher, and the Organization's domain, when it names neither itself; its own still wins.
+#[test]
+fn a_project_without_a_publisher_takes_its_organizations() {
+    let organization = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Organization
+metadata:
+  name: zilina
+  namespace: org
+spec:
+  domain: zilina.sk
+  locales: [sk, en]
+  defaultLocale: sk
+  catalog:
+    publisher:
+      name: { sk: "Mesto Žilina" }
+      uri: https://data.gov.sk/id/legal-subject/00321796
+"#;
+    let plain = PROJECT
+        .split("  domain:")
+        .next()
+        .expect("the head")
+        .replace("name: hel", "name: zilina");
+    let dir = repo(
+        "organization",
+        &[
+            ("organization.yaml", organization),
+            ("project.yaml", &plain),
+            ("space.yaml", SPACE),
+            ("bare.yaml", BARE),
+        ],
+    );
+    let (endpoints, publishers) = loaded(&dir);
+    let published = publishers
+        .get("ovzdusie")
+        .expect("the project takes its Organization's publisher");
+    assert_eq!(published.domain.as_deref(), Some("zilina.sk"));
+    let zilina = Some("https://data.gov.sk/id/legal-subject/00321796");
+    assert_eq!(published.catalog.publisher.uri.as_deref(), zilina);
+    let bare = endpoints
+        .iter()
+        .find(|e| e.slug == "zt4qm7ge2xdv6ksb3ncf5arw2y")
+        .and_then(|e| e.catalog.as_deref().cloned())
+        .expect("a catalogue block");
+    assert_eq!(bare.publisher.and_then(|p| p.uri).as_deref(), zilina);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The project's own publisher wins over its Organization's.
+    let own = PROJECT.replace("name: hel", "name: zilina");
+    let dir = repo(
+        "organization-own",
+        &[("organization.yaml", organization), ("project.yaml", &own)],
+    );
+    let (_, publishers) = loaded(&dir);
+    let published = publishers.get("ovzdusie").expect("the project's publisher");
+    assert_eq!(published.catalog.publisher.uri.as_deref(), Some(IRI));
+    assert_eq!(published.domain.as_deref(), Some("banskabystrica.sk"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Each national rendering of a publisher's catalogue, written to `DCAT_RECORDS_DIR` (else
 /// `target/tmp/dcat-records`) as the conformance repository's `publisher-*.jsonld` fixtures,
 /// which its profile suite holds to that profile's shapes (EP-127).
