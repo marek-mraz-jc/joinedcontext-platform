@@ -162,6 +162,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "ogc-view-unavailable", status: 501, title: "OGC View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its OGC surface needs a broker view it does not have." },
     ProblemType { slug: "odata-view-unavailable", status: 501, title: "OData View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its OData surface needs a broker view it does not have." },
     ProblemType { slug: "ical-view-unavailable", status: 501, title: "iCalendar View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its iCalendar feed needs a broker view it does not have." },
+    ProblemType { slug: "feed-view-unavailable", status: 501, title: "Feed View Unavailable", hint: "Read this endpoint through its NGSI-LD surface; its Atom, RSS and JSON Feed outputs need a broker view it does not have." },
     ProblemType { slug: "odata-batch-unavailable", status: 501, title: "OData Batch Unavailable", hint: "Send each OData write as a request of its own; $batch is not served through an endpoint." },
     ProblemType { slug: "odata-not-implemented", status: 501, title: "OData Feature Not Implemented", hint: "Ask the entity sets the service document and $metadata list; this endpoint does not serve every OData feature, such as $crossjoin, $all or $entity." },
     ProblemType { slug: "broker-failure", status: 0, title: "Broker Failure", hint: "The context broker failed this request; try again in a minute, and report the requestId if it repeats." },

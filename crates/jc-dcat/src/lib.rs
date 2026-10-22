@@ -20,7 +20,9 @@ pub mod profile;
 
 use jc_core::classification::classify;
 use jc_core::kinds::catalog::spatial_iri;
-use jc_core::kinds::{Audience, Catalog, ContactPoint, Duty, ProjectCatalog, Representation};
+use jc_core::kinds::{
+    feed_links, Audience, Catalog, ContactPoint, Duty, FeedOutput, ProjectCatalog, Representation,
+};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -52,6 +54,8 @@ pub struct Subject<'a> {
     pub classes: &'a [&'a str],
     /// The `assigner` of every policy in force on it.
     pub assigners: &'a [&'a str],
+    /// Its feed outputs, each one distribution per format (EP-150, EP-151).
+    pub feeds: &'a [FeedOutput],
 }
 
 /// What one representation is, as a catalogue needs to describe it (EP-05, EP-68).
@@ -122,7 +126,54 @@ fn served(representation: Representation) -> Served {
             media_type: "text/calendar",
             conforms_to: Some("https://www.rfc-editor.org/rfc/rfc5545"),
         },
+        // Listed per output and format by `feed_distributions`; this is the surface's root.
+        Representation::Feed => Served {
+            path: "feed/v1/",
+            title: "Feeds",
+            media_type: "application/atom+xml",
+            conforms_to: Some("https://www.rfc-editor.org/rfc/rfc4287"),
+        },
     }
+}
+
+/// The standard and EU file-type code of one feed format (API/02 §8b).
+fn feed_format(format: &str) -> (&'static str, &'static str) {
+    match format {
+        "RSS 2.0" => ("https://www.rssboard.org/rss-specification", "RSS"),
+        "JSON Feed" => ("https://www.jsonfeed.org/version/1.1/", "JSON"),
+        _ => ("https://www.rfc-editor.org/rfc/rfc4287", "ATOM"),
+    }
+}
+
+/// One distribution per feed output and format (EP-150, EP-151).
+fn feed_distributions(endpoint: &Subject<'_>, iri: &str) -> Vec<Value> {
+    feed_links(endpoint.feeds)
+        .into_iter()
+        .map(|(output, path, format, media_type)| {
+            let url = format!("{iri}/{path}");
+            let (standard, code) = feed_format(format);
+            let titled: BTreeMap<String, String> = output
+                .title
+                .iter()
+                .map(|(lang, text)| (lang.clone(), format!("{text} ({format})")))
+                .collect();
+            let mut distribution = json!({
+                "@id": url,
+                "@type": "dcat:Distribution",
+                "dct:title": localized(&titled, &format!("{} ({format})", output.name)),
+                "dct:format": format!("http://publications.europa.eu/resource/authority/file-type/{code}"),
+                "dcat:accessURL": url,
+                "dcat:mediaType": media_type_iri(media_type),
+                "dcat:accessService": service_iri(iri),
+                "dct:conformsTo": standard,
+            });
+            if !output.description.is_empty() {
+                distribution["dct:description"] = json!(language_values(&output.description));
+            }
+            licensed(&mut distribution, endpoint.catalog);
+            distribution
+        })
+        .collect()
 }
 
 /// The path of a representation under the Endpoint's root, as the record lists it.
@@ -260,6 +311,7 @@ fn file_type_iri(representation: Representation) -> String {
         Representation::OgcFeatures => "GEOJSON",
         Representation::Csv => "CSV",
         Representation::Ical => "ICS",
+        Representation::Feed => "ATOM",
         Representation::Mcp
         | Representation::Sta
         | Representation::Odata
@@ -296,6 +348,10 @@ fn licensed(distribution: &mut Value, catalog: Option<&Catalog>) {
 fn representation_distributions(endpoint: &Subject<'_>, iri: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for representation in endpoint.representations {
+        if *representation == Representation::Feed {
+            out.extend(feed_distributions(endpoint, iri));
+            continue;
+        }
         let served = served(*representation);
         let url = format!("{iri}/{}", served.path);
         let mut distribution = json!({
@@ -1081,10 +1137,16 @@ pub fn dataset_html(endpoint: &Subject<'_>, index: &Value, base: &str) -> String
         .iter()
         .filter_map(|distribution| {
             let url = distribution.get("dcat:accessURL").and_then(Value::as_str)?;
-            let label = distribution
-                .get("dct:title")
-                .and_then(Value::as_str)
-                .unwrap_or(url);
+            let label = match distribution.get("dct:title") {
+                Some(Value::String(title)) => title.as_str(),
+                Some(Value::Array(titles)) => titles
+                    .iter()
+                    .find(|t| t["@language"] == "en")
+                    .or_else(|| titles.first())
+                    .and_then(|t| t["@value"].as_str())
+                    .unwrap_or(url),
+                _ => url,
+            };
             // The WebSocket says how to use it, in English, beside its guide (T-4064).
             let note = distribution
                 .get("dct:description")
@@ -1125,9 +1187,20 @@ pub fn dataset_html(endpoint: &Subject<'_>, index: &Value, base: &str) -> String
         }
     }
 
+    // A feed reader finds each feed output from the page itself (EP-150).
+    let alternates: String = feed_links(endpoint.feeds)
+        .into_iter()
+        .map(|(output, path, format, media_type)| {
+            format!(
+                "<link rel=\"alternate\" type=\"{media_type}\" title=\"{} ({format})\" href=\"{iri}/{}\">",
+                escape(output.label("en")),
+                escape(&path)
+            )
+        })
+        .collect();
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <title>{title}</title></head><body><h1>{title}</h1><p>{description}</p>{about}\
+         <title>{title}</title>{alternates}</head><body><h1>{title}</h1><p>{description}</p>{about}\
          <p>Endpoint of context space <code>{}</code>, access {rights}.</p><ul>{items}</ul>\
          <p><a href=\"{iri}/\" type=\"application/ld+json\">DCAT-AP record</a></p>\
          </body></html>",

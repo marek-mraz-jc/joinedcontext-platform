@@ -223,6 +223,7 @@ fn endpoint() -> Endpoint {
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),
@@ -541,7 +542,8 @@ async fn every_representation_and_tool_has_a_probe() {
             | Representation::OgcFeatures
             | Representation::Odata
             | Representation::Sta
-            | Representation::Ical => continue,
+            | Representation::Ical
+            | Representation::Feed => continue,
             Representation::Mcp => "/mcp",
             Representation::Csv => "/file.csv",
             Representation::WebSocket => "/ws",

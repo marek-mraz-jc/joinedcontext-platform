@@ -18,6 +18,9 @@ pub struct Representations {
     /// The iCalendar feed's mapping; absent means the `sdm-event` preset over `Event`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ical: Option<IcalMapping>,
+    /// The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feed: Vec<super::feed_output::FeedOutput>,
 }
 
 /// `spec.representations.ical`.
@@ -507,7 +510,7 @@ impl IcalMapping {
 }
 
 /// An NGSI-LD attribute or type name: a letter or `_`, then letters, digits and `_`.
-fn is_name(name: &str) -> bool {
+pub(super) fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -517,13 +520,13 @@ fn is_name(name: &str) -> bool {
 }
 
 /// A dotted path of at most three names.
-fn is_path(path: &str) -> bool {
+pub(super) fn is_path(path: &str) -> bool {
     let segments: Vec<_> = path.split('.').collect();
     segments.len() <= 3 && segments.iter().all(|s| is_name(s))
 }
 
 /// A short plain value: no control characters, at most `max` characters.
-fn is_plain(value: &str, max: usize) -> bool {
+pub(super) fn is_plain(value: &str, max: usize) -> bool {
     !value.is_empty() && value.chars().count() <= max && !value.chars().any(char::is_control)
 }
 
@@ -653,7 +656,7 @@ fn status_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
 }
 
 /// A two-letter language code or `first`.
-fn is_language(language: &str) -> bool {
+pub(super) fn is_language(language: &str) -> bool {
     language == "first" || (language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase()))
 }
 
@@ -668,7 +671,7 @@ fn is_zone(zone: &str) -> bool {
 }
 
 /// What the model says of one attribute.
-struct Slot {
+pub(super) struct Slot {
     range: String,
     kind: Option<String>,
     required: bool,
@@ -698,12 +701,12 @@ fn core_slot(name: &str) -> Option<Slot> {
 }
 
 /// A LinkML schema, read as YAML.
-struct Model<'a> {
-    schema: &'a Value,
+pub(super) struct Model<'a> {
+    pub(super) schema: &'a Value,
 }
 
 impl Model<'_> {
-    fn class(&self, name: &str) -> Option<&Value> {
+    pub(super) fn class(&self, name: &str) -> Option<&Value> {
         self.schema.get("classes")?.get(name)
     }
 
@@ -781,7 +784,7 @@ impl Model<'_> {
 }
 
 /// Resolves a dotted path from `class`: the slot it ends at, or the sentence that says why not.
-fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, String> {
+pub(super) fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, String> {
     let mut segments = path.split('.');
     let first = segments.next().unwrap_or_default();
     let mut slot = match model.slot(class, first).or_else(|| core_slot(first)) {
@@ -809,7 +812,7 @@ fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, 
 }
 
 /// Whether a slot's value fits what a field accepts.
-fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
+pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
     let range = slot.range.as_str();
     let kind = slot.kind.as_deref();
     if kind == Some("Relationship") {
