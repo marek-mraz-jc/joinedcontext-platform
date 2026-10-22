@@ -1039,7 +1039,7 @@
 
   function showData(item, data) {
     var shown = JCRender.table(data, lang);
-    if (!shown) return;
+    if (!shown || !JCRender.firstTable(item.tables = item.tables || [], data)) return;
     var figure = el("details", "jc-data");
     figure.open = true;
     figure.appendChild(el("summary", "", shown.caption || w.table));

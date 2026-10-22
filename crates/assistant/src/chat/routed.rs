@@ -4438,6 +4438,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
         };
         let connector = |slug: &str| Connected {
+            titles: Default::default(),
             endpoint: slug.into(),
             title: None,
             surface: super::super::mcp::Surface {
@@ -4498,6 +4499,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
         };
         let connectors = [Connected {
+            titles: Default::default(),
             endpoint: "slovensko/catalog".into(),
             title: None,
             surface: super::super::mcp::Surface {
@@ -4559,6 +4561,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
         };
         let connectors = [Connected {
+            titles: Default::default(),
             endpoint: "bb-events".into(),
             title: None,
             surface: super::super::mcp::Surface {
@@ -4650,6 +4653,7 @@ mod tests {
                     .await
                     .expect("listed");
                 connectors.push(Connected {
+                    titles: Default::default(),
                     endpoint: slug.into(),
                     title: None,
                     surface: surface(slug),
@@ -4710,6 +4714,7 @@ mod tests {
         assert!(cache.waits("bbsk"));
         // While it waits, nothing calls it, and routing still names its old types.
         let connector = Connected {
+            titles: Default::default(),
             endpoint: "bbsk/bbsk-otvorene-data".into(),
             title: None,
             surface: surface.clone(),
@@ -4778,6 +4783,7 @@ mod tests {
             input_schema: json!({"type": "object"}),
         };
         let connectors = [Connected {
+            titles: Default::default(),
             endpoint: "helsinki/helsinki-transport".into(),
             title: Some("HSL public transport: vehicles, stops, departures".into()),
             surface: super::super::mcp::Surface {
@@ -6566,6 +6572,7 @@ classes:
 
     fn lent_connector(slug: &str, title: Option<&str>, token: bool) -> Connected {
         Connected {
+            titles: Default::default(),
             endpoint: slug.into(),
             title: title.map(str::to_owned),
             surface: super::super::mcp::Surface {

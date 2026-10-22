@@ -696,6 +696,7 @@ mod tests {
 
     fn connector(endpoint: &str, tools: &[&str]) -> Connected {
         Connected {
+            titles: Default::default(),
             endpoint: endpoint.into(),
             title: None,
             surface: super::super::mcp::Surface {

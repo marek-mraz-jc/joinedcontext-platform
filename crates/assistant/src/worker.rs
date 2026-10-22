@@ -63,6 +63,9 @@ pub struct EndpointRef {
     /// What it holds, in its manifest's words (`metadata.title`, English first), so the router
     /// tells apart Endpoints that serve the same type (T-4680).
     pub title: Option<String>,
+    /// Its title in each language the manifest writes, so a step names it in the visitor's
+    /// language (T-5343); empty for a plain title.
+    pub titles: BTreeMap<String, String>,
 }
 
 /// What a visitor of the context page may read of one Endpoint (AG-123, T-4692).
@@ -705,6 +708,7 @@ fn endpoint_ref(
             .and_then(publisher_name),
         space: space.to_owned(),
         title: title.and_then(title_line),
+        titles: title.map(title_lines).unwrap_or_default(),
     })
 }
 
@@ -730,8 +734,22 @@ const TITLE_CHARS: usize = 80;
 /// characters dropped, at most [`TITLE_CHARS`]; `None` when nothing is left.
 fn title_line(title: &serde_json::Value) -> Option<String> {
     let text: jc_core::i18n::Text = serde_json::from_value(title.clone()).ok()?;
+    one_line(text.resolve(&["en".to_owned()], "en"))
+}
+
+/// A localized manifest title as one short line per language, each as [`title_line`] cleans it.
+fn title_lines(title: &serde_json::Value) -> BTreeMap<String, String> {
+    match serde_json::from_value(title.clone()) {
+        Ok(jc_core::i18n::Text::Localized(map)) => map
+            .iter()
+            .filter_map(|(lang, text)| Some((lang.to_owned(), one_line(text)?)))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
+}
+
+fn one_line(text: &str) -> Option<String> {
     let line: String = text
-        .resolve(&["en".to_owned()], "en")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -850,6 +868,36 @@ mod tests {
         assert_eq!(line(serde_json::json!(7)), None);
     }
 
+    /// T-5343: a step names the source in the visitor's language, so each language's title is
+    /// kept, cleaned like the router's line; a plain or empty title keeps none.
+    #[test]
+    fn an_endpoint_keeps_its_title_in_each_language() {
+        let lines = |v: serde_json::Value| title_lines(&v);
+        let titles = lines(
+            serde_json::json!({"sk": "Podujatia —\n Banská Bystrica", "en": "Events — Banská Bystrica", "de": " "}),
+        );
+        assert_eq!(
+            titles.get("sk").map(String::as_str),
+            Some("Podujatia — Banská Bystrica")
+        );
+        assert_eq!(
+            titles.get("en").map(String::as_str),
+            Some("Events — Banská Bystrica")
+        );
+        assert_eq!(titles.len(), 2, "an empty language is dropped");
+        assert!(lines(serde_json::json!("Events")).is_empty());
+        assert!(lines(serde_json::json!(7)).is_empty());
+        let spec =
+            serde_json::json!({"slug": "abcdefghijklmnopqrstuvwxyz234567", "audience": "public"});
+        let title = serde_json::json!({"sk": "Podujatia", "en": "Events"});
+        let endpoint = endpoint_ref(&spec, Some(&title)).expect("a minted slug");
+        assert_eq!(endpoint.title.as_deref(), Some("Events"));
+        assert_eq!(
+            endpoint.titles.get("sk").map(String::as_str),
+            Some("Podujatia")
+        );
+    }
+
     /// T-3314: a slug that is not one the platform mints never becomes part of an address.
     #[test]
     fn only_a_minted_slug_is_connected() {
@@ -922,6 +970,7 @@ mod tests {
             snapshot.endpoints.insert(
                 key.clone(),
                 EndpointRef {
+                    titles: Default::default(),
                     slug: slug.into(),
                     audience: audience.into(),
                     title: None,

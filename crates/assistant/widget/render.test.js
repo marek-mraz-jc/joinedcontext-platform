@@ -667,25 +667,63 @@ test("a reply's reads are its steps, each naming the source, the query and the c
     { source: "Registre kraja", type: "Bridge", count: 1651, url: page },
     { source: "Registre kraja", type: "Bridge", q: "yearBuilt<1900", count: 32, url: page },
     { source: "Registre kraja", type: "Bridge", q: "heritageStatus==\"kultúrna pamiatka\"", count: 4 },
-    { source: "Registre kraja", type: "Bridge" }
+    // No count, and another source than the counted ones: kept (T-5343).
+    { source: "Registre kraja II", type: "Bridge" }
   ];
   const timed = { route: 900, search: 300, judge: 200, answer: 2400 };
   const took = steps([{ stage: "reading", topic: "Bridge" }], "sk", timed, reads);
   assert.equal(took.summary, "Postup (4)");
   assert.equal(took.lines.length, 4);
-  took.lines.forEach((line) => assert.ok(line.trim().length > 0 && line.includes("Registre kraja / Bridge"), line));
-  assert.equal(took.lines[0], "Hľadal som v: Registre kraja / Bridge · dotaz: všetky záznamy → 1\u00a0651");
-  assert.equal(took.lines[1], "Hľadal som v: Registre kraja / Bridge · dotaz: yearBuilt<1900 → 32");
-  assert.match(took.lines[2], /heritageStatus=="kultúrna pamiatka" → 4$/);
-  assert.equal(took.lines[3], "Hľadal som v: Registre kraja / Bridge", "a read without a count names only where it read");
+  took.lines.forEach((line) => assert.ok(line.trim().length > 0 && /Registre kraja( II)? \/ Mosty/.test(line), line));
+  assert.equal(took.lines[0], "Hľadal som v: Registre kraja / Mosty · všetky záznamy → 1\u00a0651");
+  assert.equal(took.lines[1], "Hľadal som v: Registre kraja / Mosty · Year built < 1900 → 32");
+  assert.match(took.lines[2], /Heritage status = kultúrna pamiatka → 4$/);
+  assert.equal(took.lines[3], "Hľadal som v: Registre kraja II / Mosty", "a read without a count names only where it read");
   assert.deepEqual(took.links, [page, page, null, null]);
-  assert.equal(steps([], "en", null, [reads[1]]).lines[0], "Searched: Registre kraja / Bridge · query: yearBuilt<1900 → 32");
-  assert.equal(steps([], "cs", null, [reads[0]]).lines[0], "Hledal jsem v: Registre kraja / Bridge · dotaz: všechny záznamy → 1\u00a0651");
+  assert.equal(steps([], "en", null, [reads[1]]).lines[0], "Searched: Registre kraja / Bridges · Year built < 1900 → 32");
+  assert.equal(steps([], "cs", null, [reads[0]]).lines[0], "Hledal jsem v: Registre kraja / Mosty · všechny záznamy → 1\u00a0651");
   // A step is checked: no script address, no negative or text count, and one naming nothing is dropped.
   const odd = steps([], "en", null, [{ source: "X", count: -1, url: "javascript:alert(1)" }, { count: 5 }, null, "x"]);
   assert.deepEqual(odd, { summary: "Steps (1)", lines: ["Searched: X"], links: [null] });
   // No reads: the stage times stand, as before.
   assert.equal(steps([], "en", timed, []).lines[0], "Choosing the sources 0.9 s");
+});
+
+test("a read names its source in the visitor's language and its q in words, once (T-5343)", () => {
+  // Supervisor 2026-10-20, prod bbsk-demo: "Events — Banská Bystrica / Event · dotaz: endDate>=… → 55" and a second line.
+  const titles = { sk: "Podujatia — Banská Bystrica", en: "Events — Banská Bystrica" };
+  const events = { source: "Events — Banská Bystrica", titles, type: "Event", q: "endDate>=\"2026-10-20T00:00:00Z\"", count: 55 };
+  const again = { source: "Events — Banská Bystrica", titles, type: "Event" };
+  const sk = steps([], "sk", null, [events, again]);
+  assert.deepEqual(sk.lines, ["Hľadal som v: Podujatia — Banská Bystrica · od 20. 10. 2026 → 55"], "the uncounted repeat is dropped");
+  assert.equal(sk.summary, "Postup (1)");
+  assert.deepEqual(steps([], "en", null, [events, again]).lines, ["Searched: Events — Banská Bystrica · from 10/20/2026 → 55"]);
+  // No title in the visitor's language: the English one, then the source as sent.
+  assert.equal(steps([], "de", null, [events]).lines[0], "Gesucht in: Events — Banská Bystrica · ab 20.10.2026 → 55");
+  assert.equal(steps([], "sk", null, [{ ...events, titles: { sk: 7, "x y": "z" } }]).lines[0].startsWith("Hľadal som v: Events — Banská Bystrica ·"), true);
+  // Two identical reads are one line.
+  assert.equal(steps([], "sk", null, [events, { ...events }]).lines.length, 1);
+  // Upper and both bounds, a plain date, an instant with its time, an unknown clause.
+  const q = (text) => steps([], "sk", null, [{ source: "S", q: text, count: 1 }]).lines[0].replace(/^Hľadal som v: S · | → 1$/g, "");
+  assert.equal(q("startDate<2026-10-31"), "do 31. 10. 2026");
+  assert.equal(q("startDate>=2026-10-20;endDate<=2026-10-31"), "od 20. 10. 2026, do 31. 10. 2026");
+  assert.equal(q("startDate==2026-10-20"), "Začiatok = 20. 10. 2026");
+  assert.match(q("dateObserved>2026-10-20T08:30:00Z"), /^od 20\. 10\. 2026 \d{2}:\d{2}$/);
+  assert.equal(q("pm10>40"), "PM10 > 40");
+  assert.equal(q("a==1|b==2"), "a==1|b==2", "an OR stays as written");
+  assert.equal(q("!dateExpired"), "!dateExpired", "a clause it does not know stays as written");
+});
+
+test("an answer shows one table per Endpoint and type (T-5343)", () => {
+  const { firstTable } = require("./render.js");
+  const seen = [];
+  assert.equal(firstTable(seen, { endpoint: "a", type: "Event", total: 55 }), true);
+  assert.equal(firstTable(seen, { endpoint: "a", type: "Event", total: 10 }), false, "the second heading of the same rows");
+  assert.equal(firstTable(seen, { endpoint: "b", type: "Event" }), true);
+  assert.equal(firstTable(seen, { endpoint: "a", type: "Bridge" }), true);
+  assert.equal(firstTable(seen, { endpoint: "a" }), true, "a table without a type is not matched");
+  const widget = require("node:fs").readFileSync(require("node:path").join(__dirname, "widget.js"), "utf8");
+  assert.match(widget, /JCRender\.firstTable\(item\.tables = item\.tables \|\| \[\], data\)/);
 });
 
 test("a message's time is the visitor's HH:MM with the UTC minute beside it, kept across a page change (T-4339)", () => {

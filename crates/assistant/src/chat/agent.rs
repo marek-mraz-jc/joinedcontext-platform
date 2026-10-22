@@ -58,6 +58,8 @@ pub struct Connected {
     pub endpoint: String,
     /// The Endpoint's title ([`crate::worker::EndpointRef::title`]).
     pub title: Option<String>,
+    /// The same title in each language the manifest writes (T-5343).
+    pub titles: BTreeMap<String, String>,
     pub surface: Surface,
     pub tools: Vec<Tool>,
     /// Its publisher's name, how an answer names it when it could not be reached (T-4683).
@@ -144,6 +146,9 @@ pub enum Event {
 pub struct Step {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The source's title per language, which the widget prefers in its own (T-5343).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub titles: BTreeMap<String, String>,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub entity_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,6 +200,7 @@ impl Step {
                 .clone()
                 .or_else(|| connector.label.clone())
                 .filter(|t| !t.trim().is_empty()),
+            titles: connector.titles.clone(),
             entity_type: kind,
             q: q.map(|q| cut(q.trim(), STEP_Q_CHARS))
                 .filter(|q| !q.is_empty()),
@@ -1386,6 +1392,7 @@ mod tests {
     #[test]
     fn the_agent_offers_the_standard_tools_and_lists_the_endpoints() {
         let connector = |endpoint: &str, title: Option<&str>| Connected {
+            titles: Default::default(),
             endpoint: endpoint.into(),
             title: title.map(str::to_owned),
             surface: Surface {
@@ -1428,6 +1435,7 @@ mod tests {
     #[test]
     fn a_read_is_a_step_with_its_source_query_and_count() {
         let connector = |title: Option<&str>, label: Option<&str>| Connected {
+            titles: Default::default(),
             endpoint: "omto6qk5sfn5ft7zl5pdiaxunj2ljnae".into(),
             title: title.map(str::to_owned),
             surface: Surface {
@@ -1462,6 +1470,20 @@ mod tests {
         assert_eq!(
             (old.q.as_deref(), old.count),
             (Some("yearBuilt<1900"), Some(32))
+        );
+        // Each language's title goes along, so the widget names the source in its own (T-5343).
+        let mut events = connector(Some("Events — Banská Bystrica"), None);
+        events.titles = [
+            ("sk", "Podujatia — Banská Bystrica"),
+            ("en", "Events — Banská Bystrica"),
+        ]
+        .into_iter()
+        .map(|(l, t)| (l.to_owned(), t.to_owned()))
+        .collect();
+        let read = Step::of(&events, &json!({"type": "Event"}), r#"{"total": 55}"#, None);
+        assert_eq!(
+            json!(read)["titles"],
+            json!({"sk": "Podujatia — Banská Bystrica", "en": "Events — Banská Bystrica"})
         );
         // Without a total no count, since a page is not how many match; the publisher when the
         // Endpoint has no title, and never the slug.
