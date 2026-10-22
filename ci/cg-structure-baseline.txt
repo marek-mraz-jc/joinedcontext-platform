@@ -21,9 +21,12 @@ edge | context-gateway -> jc-dcat
 # T-4771: the relationship rules left the gateway as a library crate of their own.
 edge | context-gateway -> jc-relationships
 edge | context-gateway -> jc-manifest
+# T-5209: file.csv's table left the gateway as a library crate (ADR-N-051), as T-4771 did.
+edge | context-gateway -> jc-tabular
 edge | functions -> jc-core
 edge | jc-dcat -> jc-core
 edge | jc-relationships -> jc-core
+edge | jc-tabular -> jc-core
 edge | jc-manifest -> jc-core
 edge | jcctl -> jc-core
 edge | jcctl -> jc-manifest

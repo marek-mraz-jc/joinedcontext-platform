@@ -8,15 +8,19 @@ use crate::auth::subject::admit;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
 use crate::handlers::respond::broker_speaks_json;
+use crate::handlers::schema;
+use crate::handlers::schema_routes::revalidated_text;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use jc_core::kinds::Representation;
+use jc_core::ProblemDetails;
 use std::sync::Arc;
 
 /// `file.csv`: the whole answer as one flat table (EP-08, EP-44, EP-45).
@@ -43,7 +47,23 @@ pub(crate) async fn file_csv(
             "the gateway builds as many downloads as it may at once",
         );
     };
-    let params = query::parse(request.uri().query().unwrap_or_default());
+    // Normalized NGSI-LD whatever the caller asked, so `options` cannot rename columns (T-5209).
+    let params: Vec<(String, String)> = query::parse(request.uri().query().unwrap_or_default())
+        .into_iter()
+        .filter(|(name, _)| name != "options" && name != "format")
+        .collect();
+    let human = query::first(&params, "humanHeaders") == Some("true");
+    let dialect = match tabular::Dialect::of(
+        query::first(&params, "delimiter"),
+        query::first(&params, "bom"),
+        human,
+    ) {
+        Ok(dialect) => dialect,
+        Err(bad) => {
+            let problem = ProblemDetails::new(400, "bad-request", "Bad Request");
+            return problem.with_detail(bad.to_string()).into_response();
+        }
+    };
     let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
     // The table is built page by page as the broker answers (T-4782).
     let (mut table, restricted) = match paged_entities(
@@ -59,20 +79,21 @@ pub(crate) async fn file_csv(
         Ok(answer) => answer,
         Err(problem) => return *problem,
     };
-    if query::first(&params, "humanHeaders") == Some("true") {
+    let types: Vec<String> = query::first(&params, "type")
+        .map(|types| types.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
+    table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
+    if human {
         tabular::humanize(&mut table);
     }
-    let text = match tabular::csv(&table, &limits) {
-        Ok(text) => text,
+    let bytes = match tabular::csv(&table, &limits, dialect) {
+        Ok(text) => text.into_bytes(),
         Err(_) => return too_large(),
     };
-
-    let mut response = Response::new(Body::from(text));
+    // A strong ETag over the bytes and a 304 when they still match (EP-43, T-5209).
+    let mut response = revalidated_text(bytes, tabular::CSV_MEDIA_TYPE, request.headers());
     let headers = response.headers_mut();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(tabular::CSV_MEDIA_TYPE),
-    );
     // The slug is base32 and the extension a literal, so the filename needs no quoting beyond
     // the quotes themselves (EP-43).
     if let Ok(disposition) =

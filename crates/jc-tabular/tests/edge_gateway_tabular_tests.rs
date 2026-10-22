@@ -12,7 +12,7 @@
 //! row ceiling. These are the shapes around them: what is not an entity, the bound and the bound
 //! plus one, and a header that collides.
 
-use context_gateway::translators::tabular::{flatten, humanize, table, Limits, Table};
+use jc_tabular::{flatten, humanize, table, Limits, Table};
 use serde_json::{json, Value};
 
 fn reading(id: usize) -> Value {
@@ -200,10 +200,10 @@ fn two_paths_that_spell_the_same_column_leave_the_first_value_and_drop_the_secon
 // --- humanize (T-1959) ------------------------------------------------------------------------
 
 fn table_of(columns: &[&str], rows: Vec<Vec<Value>>) -> Table {
-    Table {
-        columns: columns.iter().map(|name| (*name).to_owned()).collect(),
-        rows,
-    }
+    let mut table = Table::default();
+    table.columns = columns.iter().map(|name| (*name).to_owned()).collect();
+    table.rows = rows;
+    table
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn the_unit_column_leaves_the_header_and_every_row_with_it() {
         ],
     );
     humanize(&mut table);
-    assert_eq!(table.columns, vec!["id", "pm10 [GQ]", "pm25"]);
+    assert_eq!(table.columns, vec!["id", "pm10 [µg/m³]", "pm25"]);
     assert_eq!(table.rows[0], vec![json!("s-1"), json!(34.2), json!(12.0)]);
     assert_eq!(table.rows[1], vec![json!("s-2"), json!(30.0), json!(11.0)]);
 }
@@ -236,7 +236,7 @@ fn the_unit_is_the_first_one_any_row_carries_and_no_unit_leaves_a_plain_header()
         ],
     );
     humanize(&mut first_row_silent);
-    assert_eq!(first_row_silent.columns, vec!["pm10 [GQ]"]);
+    assert_eq!(first_row_silent.columns, vec!["pm10 [µg/m³]"]);
 
     for unitless in [Value::Null, json!(""), json!(7), json!({})] {
         let mut table = table_of(
@@ -275,7 +275,7 @@ fn a_unit_whose_value_column_is_not_there_takes_no_header_with_it() {
 
 #[test]
 fn humanizing_a_header_twice_changes_nothing_the_second_time() {
-    // A table is humanized once, but a second pass must not turn `pm10 [GQ]` into something else.
+    // A table is humanized once, but a second pass must not turn `pm10 [µg/m³]` into something else.
     let mut table = table_of(
         &["pm10.value", "pm10.unitCode"],
         vec![vec![json!(1), json!("GQ")]],
@@ -305,6 +305,6 @@ fn several_units_each_find_their_own_column() {
         vec![vec![json!(1), json!("GQ"), json!(-3), json!("CEL")]],
     );
     humanize(&mut table);
-    assert_eq!(table.columns, vec!["pm10 [GQ]", "temp [CEL]"]);
+    assert_eq!(table.columns, vec!["pm10 [µg/m³]", "temp [°C]"]);
     assert_eq!(table.rows[0], vec![json!(1), json!(-3)]);
 }

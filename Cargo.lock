@@ -1241,6 +1241,7 @@ dependencies = [
  "jc-dcat",
  "jc-manifest",
  "jc-relationships",
+ "jc-tabular",
  "jcctl",
  "jsonschema",
  "jsonwebtoken",
@@ -3600,6 +3601,15 @@ version = "0.1.0"
 dependencies = [
  "jc-core",
  "serde_json",
+]
+
+[[package]]
+name = "jc-tabular"
+version = "0.1.0"
+dependencies = [
+ "jc-core",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
