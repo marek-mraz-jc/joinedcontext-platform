@@ -316,6 +316,35 @@ fn is_slug(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// One source's gaps: an NGSI-LD type name, attribute paths per role, the required roles.
+fn source_gaps(name: &str, source: &FeedSource, gaps: &mut Vec<String>) {
+    let ty = &source.entity_type;
+    if !is_name(ty) {
+        gaps.push(format!(
+            "feed output `{name}` names the type `{ty}`, which is not an NGSI-LD type name"
+        ));
+        return;
+    }
+    for (role, paths) in &source.mapping {
+        let paths = paths.list();
+        if paths.is_empty() || !paths.iter().all(|p| is_path(p)) {
+            gaps.push(format!(
+                "feed output `{name}`, {ty}: {} names attribute paths such as name or address.addressLocality",
+                role.as_str()
+            ));
+        }
+    }
+    let roles = source.effective();
+    for required in [FeedRole::Title, FeedRole::Updated] {
+        if !roles.contains_key(&required) {
+            gaps.push(format!(
+                "feed output `{name}`, {ty}: no {} role; name a preset or map it",
+                required.as_str()
+            ));
+        }
+    }
+}
+
 impl FeedOutput {
     /// The title in `lang`, else the first, else the name: what a menu or a catalogue lists.
     pub fn label(&self, lang: &str) -> &str {
@@ -374,6 +403,16 @@ impl FeedOutput {
                 "feed output `{name}`: sources lists 1 to {MAX_FEED_OUTPUTS} types"
             ));
         }
+        self.filter_gaps(&mut gaps);
+        for source in &self.sources {
+            source_gaps(name, source, &mut gaps);
+        }
+        gaps
+    }
+
+    /// The filter's gaps: each query plain and balanced, a geo filter whole.
+    fn filter_gaps(&self, gaps: &mut Vec<String>) {
+        let name = &self.name;
         for (member, value) in self.filter.entries() {
             if let Some(value) = value {
                 if !is_plain(value, 1024) || !balanced(value) {
@@ -393,34 +432,6 @@ impl FeedOutput {
                 "feed output `{name}`: a geo filter names georel, geometry and coordinates together"
             ));
         }
-        for source in &self.sources {
-            let ty = &source.entity_type;
-            if !is_name(ty) {
-                gaps.push(format!(
-                    "feed output `{name}` names the type `{ty}`, which is not an NGSI-LD type name"
-                ));
-                continue;
-            }
-            for (role, paths) in &source.mapping {
-                let paths = paths.list();
-                if paths.is_empty() || !paths.iter().all(|p| is_path(p)) {
-                    gaps.push(format!(
-                        "feed output `{name}`, {ty}: {} names attribute paths such as name or address.addressLocality",
-                        role.as_str()
-                    ));
-                }
-            }
-            let roles = source.effective();
-            for required in [FeedRole::Title, FeedRole::Updated] {
-                if !roles.contains_key(&required) {
-                    gaps.push(format!(
-                        "feed output `{name}`, {ty}: no {} role; name a preset or map it",
-                        required.as_str()
-                    ));
-                }
-            }
-        }
-        gaps
     }
 
     /// Every gap of the output against the space's LinkML model, one sentence each: a type the
