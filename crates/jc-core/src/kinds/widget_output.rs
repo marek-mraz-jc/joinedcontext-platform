@@ -3,8 +3,13 @@
 //! Portal edits them, the gateway hands them to the widget at `widget.json`, and the widget starts
 //! its Mapa panel from them; a reader's own choice in the address still wins (EP-162). Presentation
 //! only: the broker never reads this member, and nothing here narrows or widens what a caller reads.
+//! A source's `table` sets where the widget's table starts (EP-164): a default filter, order, page
+//! length and columns, ranked above the model's `view_*` annotations; the reader can remove each.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -17,6 +22,12 @@ use super::ical_mapping::{
 
 /// The most popup fields one class names.
 pub const MAX_POPUP: usize = 10;
+
+/// The most columns a class's `table` names.
+pub const MAX_COLUMNS: usize = 30;
+
+/// The page lengths the widget offers (DM-134).
+pub const PAGE_LENGTHS: [u16; 4] = [10, 20, 50, 100];
 
 /// One named output of `spec.representations.widget`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -47,6 +58,106 @@ pub struct WidgetSource {
     /// Whether markers cluster; absent: the widget's own rule (above 200 in view, EP-161).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<bool>,
+    /// Where the table starts; absent: the model's `view_*` annotations (EP-164).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<WidgetTable>,
+}
+
+/// The table defaults of a class (EP-164): what the reader sees first and can remove.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WidgetTable {
+    /// The default filter, an NGSI-LD `q` whose dates may be `today`, `today+7d`, `today-1d`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+    /// The default order: one attribute, `;desc` for descending (`startDate`, `name;desc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<String>,
+    /// Rows per page: 10, 20, 50 or 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_length: Option<u16>,
+    /// The columns shown, in order; 1 to 30, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+impl WidgetTable {
+    /// The attribute `order_by` sorts by, without its direction.
+    pub fn order_attribute(&self) -> Option<&str> {
+        self.order_by.as_deref().map(|o| {
+            o.strip_suffix(";desc")
+                .or_else(|| o.strip_suffix(";asc"))
+                .unwrap_or(o)
+        })
+    }
+
+    fn shape_gaps(&self, at: &str) -> Vec<String> {
+        let mut gaps = Vec::new();
+        if let Some(q) = &self.filter {
+            if !is_plain(q, 1000) || antares_ql::parse_q(&dated(q)).is_err() {
+                gaps.push(format!(
+                    "{at}: `table.filter` is not an NGSI-LD q of at most 1000 characters, such as \
+                     `startDate>=today` or `category==\"concert\"`"
+                ));
+            }
+        }
+        if let Some(path) = self.order_attribute().filter(|p| !is_path(p)) {
+            gaps.push(format!(
+                "{at}: `table.orderBy: {path}` is not an attribute name with an optional `;desc`, \
+                 such as `startDate;desc`"
+            ));
+        }
+        if let Some(n) = self.page_length.filter(|n| !PAGE_LENGTHS.contains(n)) {
+            gaps.push(format!(
+                "{at}: `table.pageLength: {n}` is not one of 10, 20, 50 or 100"
+            ));
+        }
+        if self.columns.len() > MAX_COLUMNS {
+            gaps.push(format!(
+                "{at}: `table.columns` lists {} attributes, at most {MAX_COLUMNS}",
+                self.columns.len()
+            ));
+        }
+        if let Some(path) = self.columns.iter().find(|p| !is_path(p)) {
+            gaps.push(format!(
+                "{at}: `table.columns` names `{path}`, which is not an attribute name such as `name`"
+            ));
+        }
+        let mut shown = BTreeSet::new();
+        if let Some(twice) = self.columns.iter().find(|p| !shown.insert(p.as_str())) {
+            gaps.push(format!("{at}: `table.columns` names `{twice}` twice"));
+        }
+        gaps
+    }
+
+    fn model_gaps(&self, model: &Model, ty: &str, at: &str) -> Vec<String> {
+        let named = self
+            .order_attribute()
+            .map(|p| ("orderBy", p))
+            .into_iter()
+            .chain(self.columns.iter().map(|p| ("columns", p.as_str())));
+        let mut gaps = Vec::new();
+        for (member, path) in named {
+            match resolve(model, ty, path) {
+                Err(why) => gaps.push(format!("{at}: `table.{member}` names {why}")),
+                Ok(slot) if fits(model, &slot, Accepts::Geo) => gaps.push(format!(
+                    "{at}: `table.{member}` names `{path}`, a GeoProperty; the map draws it, the \
+                     table shows values"
+                )),
+                Ok(_) => {}
+            }
+        }
+        gaps
+    }
+}
+
+/// The widget's relative dates (`today`, `today+7d`, `today-1d`), as its `relativeDates` reads them.
+static TODAY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\btoday(?:[+-]\d{1,3}d)?\b").expect("valid regex"));
+
+/// `q` with each relative date read as a date, as the widget reads it (DM-134).
+fn dated(q: &str) -> std::borrow::Cow<'_, str> {
+    TODAY.replace_all(q, "2026-01-01")
 }
 
 /// The map roles of a class; an absent role keeps the widget's default (EP-161).
@@ -79,6 +190,9 @@ pub struct MapDefaults {
     /// [`WidgetSource::cluster`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cluster: Option<bool>,
+    /// [`WidgetSource::table`]: served beside the map, under `widget.json`'s `table` (EP-164).
+    #[serde(skip)]
+    pub table: Option<WidgetTable>,
 }
 
 /// The map defaults per class: the first output that lists a class sets its defaults.
@@ -91,6 +205,7 @@ pub fn map_defaults(outputs: &[WidgetOutput]) -> BTreeMap<String, MapDefaults> {
                 colour: source.mapping.colour.clone(),
                 popup: source.mapping.popup.clone(),
                 cluster: source.cluster,
+                table: source.table.clone(),
             });
     }
     map
@@ -164,6 +279,9 @@ impl WidgetOutput {
                     "widget output `{name}`, {ty}: `mapping.popup` names `{twice}` twice"
                 ));
             }
+            if let Some(table) = &source.table {
+                gaps.extend(table.shape_gaps(&format!("widget output `{name}`, {ty}")));
+            }
         }
         gaps
     }
@@ -217,6 +335,9 @@ impl WidgetOutput {
                     )),
                     Ok(_) => {}
                 }
+            }
+            if let Some(table) = &source.table {
+                gaps.extend(table.model_gaps(model, ty, &format!("widget output `{name}`, {ty}")));
             }
         }
         gaps
