@@ -84,6 +84,7 @@ fn endpoint(slug: &str, audience: Audience, policies: Vec<PolicySpec>) -> Endpoi
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies,

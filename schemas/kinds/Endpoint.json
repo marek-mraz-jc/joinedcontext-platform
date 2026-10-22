@@ -897,6 +897,218 @@
       ],
       "type": "object"
     },
+    "FeedFilter": {
+      "additionalProperties": false,
+      "description": "The NGSI-LD query an output adds to the view's.",
+      "properties": {
+        "coordinates": {
+          "description": "`coordinates` of a geo query.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geometry": {
+          "description": "`geometry` of a geo query.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geoproperty": {
+          "description": "`geoproperty` of a geo query.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "georel": {
+          "description": "`georel` of a geo query.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "q": {
+          "description": "An NGSI-LD `q`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "An NGSI-LD `scopeQ`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "FeedOutput": {
+      "additionalProperties": false,
+      "description": "One output of `spec.representations.feed`.",
+      "properties": {
+        "description": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The feed's description per language.",
+          "type": "object"
+        },
+        "filter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeedFilter"
+            }
+          ],
+          "description": "What narrows the view for this output; it never widens it."
+        },
+        "lang": {
+          "description": "The feed's language when the request names none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "description": "The default page size, 1 to 200 (50 when left out).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "A slug `[a-z0-9-]`, 1 to 63, unique on the Endpoint: the URL segment after `feed/v1/`.",
+          "type": "string"
+        },
+        "sort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FeedSort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The order: `updated`, newest first, the only one."
+        },
+        "sources": {
+          "description": "The model classes the feed lists, each with its roles.",
+          "items": {
+            "$ref": "#/definitions/FeedSource"
+          },
+          "type": "array"
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The feed's title per language (`sk`, `en`).",
+          "type": "object"
+        },
+        "version": {
+          "description": "The contract version, 1 when left out.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "FeedPaths": {
+      "anyOf": [
+        {
+          "description": "One path.",
+          "type": "string"
+        },
+        {
+          "description": "The first of several with a value.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "One attribute path, or a list of them: the first with a value wins."
+    },
+    "FeedPreset": {
+      "description": "A named starting mapping (API/02 §8b, the presets table).",
+      "oneOf": [
+        {
+          "description": "Smart Data Models `Event`.",
+          "enum": [
+            "event"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An article or a notice (schema.org `Article`).",
+          "enum": [
+            "article"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Any type with a `name`.",
+          "enum": [
+            "generic"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "FeedSort": {
+      "description": "The order of a feed's entries.",
+      "oneOf": [
+        {
+          "description": "Newest first by the `updated` role.",
+          "enum": [
+            "updated"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "FeedSource": {
+      "additionalProperties": false,
+      "description": "One model class of an output.",
+      "properties": {
+        "mapping": {
+          "additionalProperties": {
+            "$ref": "#/definitions/FeedPaths"
+          },
+          "description": "Roles on top of the preset, or the whole mapping without one.",
+          "type": "object"
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FeedPreset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The starting roles."
+        },
+        "type": {
+          "description": "The NGSI-LD type.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
     "FieldRemap": {
       "additionalProperties": false,
       "description": "The object form of a [`FieldSource`] (API/02 §8b): exactly one of `attribute`, `firstOf`, `join` and `constant`, and the remaps the field allows.",
@@ -1632,6 +1844,13 @@
             "ical"
           ],
           "type": "string"
+        },
+        {
+          "description": "Atom, RSS 2.0 and JSON Feed of the view's entities (`/feed/v1/{name}/`); served exactly where `spec.representations.feed` lists an output, never through `enabledRepresentations` (EP-150, EP-151).",
+          "enum": [
+            "feed"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -1639,6 +1858,13 @@
       "additionalProperties": false,
       "description": "`spec.representations`: the mappings of the domain-standard representations (EP-125).",
       "properties": {
+        "feed": {
+          "description": "The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).",
+          "items": {
+            "$ref": "#/definitions/FeedOutput"
+          },
+          "type": "array"
+        },
         "ical": {
           "description": "The iCalendar outputs (API/11 EP-159); none means no calendar is served. The single mapping object of version 1 loads as one output named `events` (deprecated).",
           "items": {

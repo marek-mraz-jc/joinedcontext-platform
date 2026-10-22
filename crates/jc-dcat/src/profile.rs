@@ -469,6 +469,7 @@ mod tests {
             catalog: Some(catalog),
             classes: &["AirQualityObserved"],
             assigners: &[],
+            feeds: &[],
         };
         dataset(&subject, &index(), BASE)
     }
@@ -536,6 +537,7 @@ mod tests {
             catalog: Some(catalog),
             classes: &["AirQualityObserved"],
             assigners: &[],
+            feeds: &[],
         };
         dataset(&subject, &index(), BASE)
     }
@@ -851,6 +853,7 @@ mod tests {
                 catalog: Some(&catalog),
                 classes: &[],
                 assigners: &[],
+                feeds: &[],
             };
             render(
                 dataset(&subject, &index(), BASE),
@@ -1030,6 +1033,7 @@ mod tests {
             catalog: Some(&catalog),
             classes: &[],
             assigners: &[],
+            feeds: &[],
         };
         let turtle = turtle(&dataset(&subject, &index(), BASE));
         assert!(

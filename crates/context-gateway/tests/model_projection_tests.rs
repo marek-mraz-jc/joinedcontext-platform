@@ -77,6 +77,7 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

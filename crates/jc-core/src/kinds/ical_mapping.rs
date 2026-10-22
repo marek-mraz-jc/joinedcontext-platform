@@ -24,6 +24,9 @@ pub struct Representations {
     )]
     #[schemars(with = "Vec<IcalOutput>")]
     pub ical: Vec<IcalOutput>,
+    /// The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feed: Vec<super::feed_output::FeedOutput>,
 }
 
 /// The most outputs of one format an Endpoint lists (owner 2026-10-22T09:30Z, EP-159).
@@ -246,34 +249,70 @@ impl IcalOutput {
 }
 
 impl OutputFilter {
-    fn gaps(&self) -> Vec<String> {
+    /// Whether no member is set.
+    pub fn is_empty(&self) -> bool {
+        self.entries().iter().all(|(_, v)| v.is_none())
+    }
+
+    fn entries(&self) -> [(&'static str, Option<&str>); 6] {
+        [
+            ("q", self.q.as_deref()),
+            ("scopeQ", self.scope_q.as_deref()),
+            ("georel", self.georel.as_deref()),
+            ("geometry", self.geometry.as_deref()),
+            ("coordinates", self.coordinates.as_deref()),
+            ("geoproperty", self.geoproperty.as_deref()),
+        ]
+    }
+
+    /// What the filter fails, one sentence each naming `filter.<member>` (API/11 EP-159). Each
+    /// member goes through the broker's own parser (`ngsild-ql`), so a filter the broker would
+    /// refuse at serve, and an output that would then serve unfiltered, is refused at save.
+    pub fn gaps(&self) -> Vec<String> {
         let mut gaps = Vec::new();
-        let members = [
-            ("q", &self.q),
-            ("scopeQ", &self.scope_q),
-            ("georel", &self.georel),
-            ("geometry", &self.geometry),
-            ("coordinates", &self.coordinates),
-            ("geoproperty", &self.geoproperty),
-        ];
-        for (member, _) in members
+        let entries = self.entries();
+        for (member, _) in entries
             .iter()
-            .filter(|(_, v)| v.as_deref().is_some_and(|v| !is_plain(v, 2000)))
+            .filter(|(_, v)| v.is_some_and(|v| !is_plain(v, 2000)))
         {
             gaps.push(format!(
                 "`filter.{member}` must be 1 to 2000 characters without control characters"
             ));
+        }
+        if !gaps.is_empty() {
+            return gaps;
+        }
+        if let Some(Err(why)) = self.q.as_deref().map(antares_ql::parse_q) {
+            gaps.push(format!("`filter.q` is no NGSI-LD query: {why}"));
+        }
+        if let Some(Err(why)) = self.scope_q.as_deref().map(antares_ql::scope::check_scope_q) {
+            gaps.push(format!("`filter.scopeQ` is no NGSI-LD scope query: {why}"));
         }
         let geo = [&self.georel, &self.geometry, &self.coordinates];
         if geo.iter().any(|v| v.is_some()) && !geo.iter().all(|v| v.is_some()) {
             gaps.push(
                 "`filter` names a geo-query: it needs georel, geometry and coordinates".to_owned(),
             );
+        } else if self.georel.is_some() {
+            let params = entries
+                .iter()
+                .filter(|(member, _)| !matches!(*member, "q" | "scopeQ"))
+                .filter_map(|(member, v)| v.map(|v| ((*member).to_owned(), v.to_owned())))
+                .collect();
+            if let Err(why) = antares_ql::geo::GeoQuery::from_params(&params) {
+                gaps.push(format!("`filter.georel` is no NGSI-LD geo-query: {why}"));
+            }
         }
-        if self.geoproperty.is_some() && self.georel.is_none() {
-            gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
+        match self.geoproperty.as_deref() {
+            Some(_) if self.georel.is_none() => {
+                gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
+            }
+            Some(name) if !is_name(name) => {
+                gaps.push(format!("`filter.geoproperty: {name}` is not an attribute name"));
+            }
+            _ => {}
         }
-        if members.iter().all(|(_, v)| v.is_none()) {
+        if self.is_empty() {
             gaps.push("`filter` is empty: name q, scopeQ or a geo-query, or drop it".to_owned());
         }
         gaps
@@ -790,7 +829,7 @@ impl IcalMapping {
 }
 
 /// An NGSI-LD attribute or type name: a letter or `_`, then letters, digits and `_`.
-fn is_name(name: &str) -> bool {
+pub(super) fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
@@ -800,13 +839,13 @@ fn is_name(name: &str) -> bool {
 }
 
 /// A dotted path of at most three names.
-fn is_path(path: &str) -> bool {
+pub(super) fn is_path(path: &str) -> bool {
     let segments: Vec<_> = path.split('.').collect();
     segments.len() <= 3 && segments.iter().all(|s| is_name(s))
 }
 
 /// A short plain value: no control characters, at most `max` characters.
-fn is_plain(value: &str, max: usize) -> bool {
+pub(super) fn is_plain(value: &str, max: usize) -> bool {
     !value.is_empty() && value.chars().count() <= max && !value.chars().any(char::is_control)
 }
 
@@ -943,7 +982,7 @@ fn status_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
 }
 
 /// A language tag or `first`.
-fn is_language(language: &str) -> bool {
+pub(super) fn is_language(language: &str) -> bool {
     language == "first" || is_tag(language)
 }
 
@@ -1014,7 +1053,7 @@ fn is_zone(zone: &str) -> bool {
 }
 
 /// What the model says of one attribute.
-struct Slot {
+pub(super) struct Slot {
     range: String,
     kind: Option<String>,
     required: bool,
@@ -1044,12 +1083,12 @@ fn core_slot(name: &str) -> Option<Slot> {
 }
 
 /// A LinkML schema, read as YAML.
-struct Model<'a> {
-    schema: &'a Value,
+pub(super) struct Model<'a> {
+    pub(super) schema: &'a Value,
 }
 
 impl Model<'_> {
-    fn class(&self, name: &str) -> Option<&Value> {
+    pub(super) fn class(&self, name: &str) -> Option<&Value> {
         self.schema.get("classes")?.get(name)
     }
 
@@ -1127,7 +1166,7 @@ impl Model<'_> {
 }
 
 /// Resolves a dotted path from `class`: the slot it ends at, or the sentence that says why not.
-fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, String> {
+pub(super) fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, String> {
     let mut segments = path.split('.');
     let first = segments.next().unwrap_or_default();
     let mut slot = match model.slot(class, first).or_else(|| core_slot(first)) {
@@ -1155,7 +1194,7 @@ fn resolve(model: &Model, class: &str, path: &str) -> std::result::Result<Slot, 
 }
 
 /// Whether a slot's value fits what a field accepts.
-fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
+pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
     let range = slot.range.as_str();
     let kind = slot.kind.as_deref();
     if kind == Some("Relationship") {

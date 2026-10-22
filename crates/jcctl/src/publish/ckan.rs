@@ -156,7 +156,12 @@ pub fn package(
     let url = public_base(record, spec.slug.as_str())
         .unwrap_or_else(|| settings.endpoint_url(spec.slug.as_str()));
     let language = settings.language.as_deref();
-    let served = spec.served_representations();
+    // The feed outputs are listed one resource per output and format, after the surfaces.
+    let served: Vec<Representation> = spec
+        .served_representations()
+        .into_iter()
+        .filter(|r| *r != Representation::Feed)
+        .collect();
 
     let mut payload = json!({
         "name": name,
@@ -253,6 +258,16 @@ pub fn package(
             documentation: settings.documentation.as_deref(),
         },
     );
+    if let Some(list) = payload["resources"].as_array_mut() {
+        let feeds = feed_resources(
+            spec.feed_outputs(),
+            &url,
+            language,
+            spec.audience == Audience::Public,
+        );
+        let at = served.len().min(list.len());
+        list.splice(at..at, feeds);
+    }
     Ok(Some(payload))
 }
 
@@ -462,6 +477,9 @@ impl Usage<'_> {
                  \n\n    curl{auth} '{address}?from=2026-01-01&to=2026-12-31'\n\n{live} {access}"
             ),
             Representation::Csv => file("A CSV table"),
+            Representation::Feed => format!(
+                "News of this dataset as Atom, RSS and JSON Feed under {address}.\n\n{live} {access}"
+            ),
         }
     }
 
@@ -1002,6 +1020,45 @@ fn format_of(url: &str) -> String {
     .to_owned()
 }
 
+/// One resource per feed output and format, titled by the output in the catalogue's language
+/// and saying where to paste it (EP-150, EP-151).
+fn feed_resources(
+    feeds: &[jc_core::kinds::FeedOutput],
+    url: &str,
+    language: Option<&str>,
+    public: bool,
+) -> Vec<Value> {
+    let access = if public {
+        "Open to anyone, with no sign-in."
+    } else {
+        "Answers what the endpoint's policy lets the caller read: a feed reader sends a bearer \
+         token for the endpoint; without one it answers 401."
+    };
+    jc_core::kinds::feed_links(feeds)
+        .into_iter()
+        .map(|(output, path, format, media_type)| {
+            let title = output.label(language.unwrap_or("en"));
+            let mut resource = json!({
+                "name": format!("{title} ({format})"),
+                "url": format!("{url}/{path}"),
+                "format": if format == "JSON Feed" { "JSON" } else if format == "RSS 2.0" { "RSS" } else { "Atom" },
+                "mimetype": media_type,
+                "description": format!(
+                    "New and changed items of this dataset as a {format} feed: add {url}/{path} to a \
+                     feed reader. Always live: the catalogue holds this link, never a copy. {access}"
+                ),
+            });
+            if let Some(about) = language
+                .and_then(|l| output.description.get(l))
+                .or_else(|| output.description.values().next())
+            {
+                resource["description"] = json!(format!("{about}\n\n{}", resource["description"].as_str().unwrap_or_default()));
+            }
+            resource
+        })
+        .collect()
+}
+
 /// Path under the Endpoint, CKAN format, media type and resource title (API/02).
 const fn distribution(
     representation: Representation,
@@ -1035,6 +1092,8 @@ const fn distribution(
             "text/calendar",
             "iCalendar feed",
         ),
+        // Listed per output by `feed_resources`; never reached through here.
+        Representation::Feed => ("/feed/v1/", "Atom", "application/atom+xml", "Feeds"),
         Representation::WebSocket => (
             "/ws",
             "WebSocket",
@@ -1793,5 +1852,41 @@ impl InMemoryCkan {
                 .map(|(key, _)| key.clone())
         });
         by_id.unwrap_or_else(|| name.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// EP-150, EP-151: one resource per feed output and format, titled in the catalogue's
+    /// language, the address to paste in its text.
+    #[test]
+    fn each_feed_output_is_a_resource_per_format() {
+        let feeds: Vec<jc_core::kinds::FeedOutput> = serde_json::from_value(json!([{
+            "name": "kultura", "title": {"sk": "Kultúra", "en": "Culture"},
+            "description": {"sk": "Podujatia kultúry"},
+            "sources": [{"type": "Event", "preset": "event"}]
+        }]))
+        .expect("the output parses");
+        let url = "https://data.example.sk/api/endpoint/podujatia";
+        let resources = feed_resources(&feeds, url, Some("sk"), false);
+        let names: Vec<&str> = resources
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["Kultúra (Atom)", "Kultúra (RSS 2.0)", "Kultúra (JSON Feed)"]
+        );
+        assert_eq!(
+            resources[1]["url"],
+            format!("{url}/feed/v1/kultura/rss.xml")
+        );
+        assert_eq!(resources[1]["format"], "RSS");
+        assert_eq!(resources[2]["mimetype"], "application/feed+json");
+        let said = resources[0]["description"].as_str().unwrap_or_default();
+        assert!(said.starts_with("Podujatia kultúry\n\n"), "{said}");
+        assert!(said.contains("answers 401"), "{said}");
     }
 }

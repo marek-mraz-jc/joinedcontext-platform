@@ -173,6 +173,10 @@ pub enum Representation {
     /// iCalendar (RFC 5545) feed of the view's entities (`/ical/v1/`); served only where listed,
     /// through the mapping `spec.representations.ical` checked against the space's model (EP-125).
     Ical,
+    /// Atom, RSS 2.0 and JSON Feed of the view's entities (`/feed/v1/{name}/`); served exactly
+    /// where `spec.representations.feed` lists an output, never through `enabledRepresentations`
+    /// (EP-150, EP-151).
+    Feed,
 }
 
 /// What a domain-standard representation with a fixed mapping needs of the space's data model
@@ -226,6 +230,7 @@ impl Representation {
             Self::Odata => "odata",
             Self::WebSocket => "websocket",
             Self::Ical => "ical",
+            Self::Feed => "feed",
         }
     }
 
@@ -246,7 +251,7 @@ impl Representation {
 
     /// Served only where `enabledRepresentations` lists it, never by the default (EP-104).
     pub const fn opt_in(&self) -> bool {
-        matches!(self, Self::Sta | Self::Ical)
+        matches!(self, Self::Sta | Self::Ical | Self::Feed)
     }
 
     /// Why a space whose model is `linkml` cannot serve this representation's fixed requirement,
@@ -272,7 +277,7 @@ impl Representation {
     }
 
     /// Every representation, in the order a record lists them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::NgsiLd,
         Self::Mcp,
         Self::Csv,
@@ -281,6 +286,7 @@ impl Representation {
         Self::Odata,
         Self::WebSocket,
         Self::Ical,
+        Self::Feed,
     ];
 }
 
@@ -614,6 +620,11 @@ impl EndpointSpec {
         if self.mcp != Some(false) {
             always.push(Representation::Mcp);
         }
+        // A feed is its outputs: listed or not, the Endpoint serves `feed` exactly when it has one.
+        served.retain(|r| *r != Representation::Feed);
+        if !self.feed_outputs().is_empty() {
+            always.push(Representation::Feed);
+        }
         for representation in always {
             if !served.contains(&representation) {
                 served.push(representation);
@@ -637,6 +648,13 @@ impl EndpointSpec {
         }
     }
 
+    /// The feed outputs this Endpoint serves, in the order it lists them (EP-150).
+    pub fn feed_outputs(&self) -> &[super::feed_output::FeedOutput] {
+        self.representations
+            .as_ref()
+            .map_or(&[], |r| r.feed.as_slice())
+    }
+
     /// Every gap between the mappings of the representations this Endpoint serves and its
     /// space's LinkML model (`None`: the space has none), one sentence each (EP-125, API/02
     /// §8b). `Err` when the model does not parse.
@@ -648,6 +666,7 @@ impl EndpointSpec {
         for output in self.ical_outputs() {
             gaps.extend(output.model_gaps(linkml)?);
         }
+        gaps.extend(super::feed_output::feed_gaps(self.feed_outputs(), linkml)?);
         for representation in self.served_representations() {
             let gap = match linkml {
                 None => representation.missing_model_gap(),
@@ -738,6 +757,15 @@ impl EndpointSpec {
             }
         }
 
+        let feed_gaps = super::feed_output::feed_gaps(self.feed_outputs(), None)
+            .unwrap_or_else(|never| vec![never]);
+        if !feed_gaps.is_empty() {
+            return Err(Error::Invalid {
+                field: "spec.representations.feed".to_owned(),
+                reason: feed_gaps.join("; "),
+            });
+        }
+
         if let Some(projection) = &self.projection_ref {
             if projection.kind != "ModelProjection" {
                 return Err(Error::Kind {
@@ -785,6 +813,17 @@ impl EndpointSpec {
                 field: "disabledRepresentations",
                 value: String::new(),
                 reason: "disabledRepresentations narrows the default set; beside enabledRepresentations drop one of the two (EP-104)",
+            });
+        }
+        if listed
+            .iter()
+            .chain(&self.disabled_representations)
+            .any(|r| *r == Representation::Feed)
+        {
+            return Err(Error::Name {
+                field: "enabledRepresentations",
+                value: "feed".to_string(),
+                reason: "a feed is served exactly where spec.representations.feed lists an output; drop feed from the list (EP-150)",
             });
         }
         let mut disabled = std::collections::BTreeSet::new();

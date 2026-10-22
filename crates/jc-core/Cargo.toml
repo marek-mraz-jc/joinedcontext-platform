@@ -12,6 +12,9 @@ serde_norway = "0.9"
 schemars = { version = "0.8", features = ["chrono"] }
 thiserror = "2"
 regex = "1"
+# The broker's own `q`, `scopeQ` and geo-query parser: an output filter is refused at save exactly
+# where the broker would refuse it at serve (API/11 EP-157, T-5217); the gateway and the Portal lock it.
+antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 sha2 = "0.10"
 # Folds diacritics out of the NGSI-LD catalogue's searchText (T-4500); already in the graph.
 unicode-normalization = "0.1.25"
