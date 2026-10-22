@@ -19,8 +19,8 @@ use jc_core::kinds::mcp_server::{knowledge_source_id, Select};
 use jc_core::kinds::{
     AssistantDeploymentSpec, Audience, ContextSpaceSpec, DataModelLifecycle, DataModelSpec,
     EndpointSpec, EntitySelector, MappingSpec, McpServerSpec, ModelProjectionSpec, Operation,
-    OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal, PrincipalKind, ProjectSpec,
-    RegistrationInfo, Representation,
+    OperationGroup, OperationRef, OrganizationSpec, PolicyEffect, PolicySpec, Principal,
+    PrincipalKind, ProjectSpec, RegistrationInfo, Representation,
 };
 use jc_core::reach::{resolve_connectors, EndpointFacts};
 use jc_core::Urn;
@@ -61,21 +61,36 @@ pub struct ProjectPublisher {
 /// Every Project that names its publisher, by name (EP-127).
 pub type Publishers = BTreeMap<String, Arc<ProjectPublisher>>;
 
-/// The Projects of the repository that name their publisher in `spec.catalog` (EP-127). A
-/// manifest whose spec does not parse is left out with a line in the log, as every kind here.
+/// The Projects of the repository that name their publisher in `spec.catalog`, or whose
+/// Organization names one in its own (EP-127, ADR-N-058 section 2.3): a project without a
+/// `spec.catalog` takes its Organization's, and its domain when it sets none. A manifest whose
+/// spec does not parse is left out with a line in the log, as every kind here.
 pub fn publishers_of(repo: &Repository) -> Publishers {
+    let organizations: BTreeMap<&str, OrganizationSpec> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Organization")
+        .filter_map(|(id, resource)| Some((id.name.as_str(), spec_of(&resource.manifest)?)))
+        .collect();
     repo.iter()
         .filter(|(id, _)| id.kind == "Project")
         .filter_map(|(id, resource)| {
             let spec = spec_of::<ProjectSpec>(&resource.manifest)?;
-            let catalog = spec.catalog?;
+            let organization = organizations.get(spec.organization_ref.name());
+            let (catalog, domain) = match spec.catalog {
+                Some(catalog) => (catalog, spec.domain),
+                None => {
+                    let organization = organization?;
+                    let domain = spec.domain.or_else(|| Some(organization.domain.clone()));
+                    (organization.catalog.clone()?, domain)
+                }
+            };
             let metadata = &resource.manifest.metadata.rest;
             Some((
                 id.name.clone(),
                 Arc::new(ProjectPublisher {
                     title: language_map(metadata, "title"),
                     description: language_map(metadata, "description"),
-                    domain: spec.domain,
+                    domain,
                     catalog,
                 }),
             ))
