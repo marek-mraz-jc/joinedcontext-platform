@@ -347,6 +347,27 @@ pub struct Compute {
     /// The indicator of a `kpi` step over several sources (PL-102…PL-104).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kpi: Option<Box<crate::kpi_join::KpiStep>>,
+    /// The cubes of a `datacube` step (PL-112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datacube: Option<Box<crate::datacube::DatacubeStep>>,
+}
+
+impl Compute {
+    /// The Bloblang a step runs as a `mapping` processor: a `bloblang` step's own, a connector
+    /// step's rendered from its parameters (PL-112); `None` for a step Bento does not run.
+    pub fn mapping(&self) -> Result<Option<std::borrow::Cow<'_, str>>> {
+        match (self.kind, &self.datacube) {
+            (ComputeKind::Bloblang, _) => Ok(self
+                .bloblang
+                .as_deref()
+                .filter(|b| !b.trim().is_empty())
+                .map(std::borrow::Cow::Borrowed)),
+            (ComputeKind::Datacube, Some(step)) => {
+                crate::datacube::bloblang(step).map(|b| Some(std::borrow::Cow::Owned(b)))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 /// Execution technology category for pipeline compute steps (PL-33).
@@ -363,6 +384,15 @@ pub enum ComputeKind {
     Container,
     /// One indicator over several named sources (PL-102), compiled to a mapping by jc-core.
     Kpi,
+    /// JSON-stat 2.0 statistical cubes (PL-112), rendered to a mapping by jc-core.
+    Datacube,
+}
+
+impl ComputeKind {
+    /// Whether Bento runs the step as a `mapping` processor in the stream (PL-52, PL-112).
+    pub const fn is_mapping(&self) -> bool {
+        matches!(self, Self::Bloblang | Self::Datacube)
+    }
 }
 
 impl ComputeKind {
@@ -374,6 +404,7 @@ impl ComputeKind {
             Self::Wasm => "wasm",
             Self::Container => "container",
             Self::Kpi => "kpi",
+            Self::Datacube => "datacube",
         }
     }
 }
@@ -1512,6 +1543,17 @@ fn validate_compute(c: &Compute, own: &[&str]) -> Result<()> {
             value: c.kind.to_string(),
             reason: "a `kpi` step carries `kpi`, and only a `kpi` step does (PL-102)",
         });
+    }
+    if c.datacube.is_some() != (c.kind == ComputeKind::Datacube) {
+        return Err(Error::Name {
+            field: "spec.steps.datacube",
+            value: c.kind.to_string(),
+            reason:
+                "a `datacube` step carries `datacube`, and only a `datacube` step does (PL-112)",
+        });
+    }
+    if let Some(step) = &c.datacube {
+        step.validate()?;
     }
     if let Some(ref mapping) = c.bloblang {
         if c.kind != ComputeKind::Bloblang {
