@@ -222,6 +222,10 @@ async fn main() -> ExitCode {
         }
         None => gateway,
     };
+    // The publishers' Usage tab: counts per Endpoint and surface, nothing personal (T-5118).
+    if let Some(url) = config.usage_url.clone() {
+        tokio::spawn(context_gateway::usage::follow(url, token.clone()));
+    }
     // A person's own connectors are the Portal's to keep and the gateway's to serve (EP-123).
     let gateway = Arc::new(match config.connectors_url.clone() {
         Some(url) => {
