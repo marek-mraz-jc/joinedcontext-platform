@@ -281,6 +281,7 @@ fn surface_of(rest: &str) -> Option<jc_core::kinds::Representation> {
         ("sta/v1.1", R::Sta),
         ("odata/v4", R::Odata),
         ("ical/v1", R::Ical),
+        ("feed/v1", R::Feed),
         ("mcp", R::Mcp),
         ("ws", R::WebSocket),
     ]

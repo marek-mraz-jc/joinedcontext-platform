@@ -51,6 +51,7 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),
