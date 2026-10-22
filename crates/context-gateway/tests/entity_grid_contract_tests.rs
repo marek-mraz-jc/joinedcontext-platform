@@ -147,6 +147,8 @@ fn endpoint(policy: PolicySpec) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policy_names: Vec::new(),

@@ -129,6 +129,12 @@ fn rows() -> Vec<Row> {
         row("GET", "/api/endpoint/{slug}/", get(ep("/")), Member),
         row(
             "GET",
+            "/api/endpoint/{slug}/widget.json",
+            get(ep("/widget.json")),
+            Member,
+        ),
+        row(
+            "GET",
             "/api/endpoint/{slug}/ngsi-ld/v1",
             get(ep("/ngsi-ld/v1")),
             Member,
@@ -561,6 +567,8 @@ fn endpoint(base_path: String) -> Endpoint {
             "name: news\nsources: [{ type: Device, preset: generic }]\n",
         )
         .expect("the feed output parses")],
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: vec!["readers".to_owned()],
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],

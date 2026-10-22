@@ -633,23 +633,33 @@ impl EndpointSpec {
         served
     }
 
+    /// The iCalendar outputs the Endpoint serves (EP-125, EP-159): none unless it serves `ical`
+    /// and lists them (owner 2026-10-22T09:25Z).
+    pub fn ical_outputs(&self) -> &[super::ical_mapping::IcalOutput] {
+        match &self.representations {
+            Some(r)
+                if self
+                    .served_representations()
+                    .contains(&Representation::Ical) =>
+            {
+                &r.ical
+            }
+            _ => &[],
+        }
+    }
+
+    /// The catalogue widget's outputs, in the order the Endpoint lists them (EP-163).
+    pub fn widget_outputs(&self) -> &[super::widget_output::WidgetOutput] {
+        self.representations
+            .as_ref()
+            .map_or(&[], |r| r.widget.as_slice())
+    }
+
     /// The feed outputs this Endpoint serves, in the order it lists them (EP-150).
     pub fn feed_outputs(&self) -> &[super::feed_output::FeedOutput] {
         self.representations
             .as_ref()
             .map_or(&[], |r| r.feed.as_slice())
-    }
-
-    /// The iCalendar mapping in force when the Endpoint serves `ical` (EP-125).
-    pub fn ical_mapping(&self) -> Option<super::ical_mapping::IcalMapping> {
-        self.served_representations()
-            .contains(&Representation::Ical)
-            .then(|| {
-                self.representations
-                    .as_ref()
-                    .and_then(|r| r.ical.clone())
-                    .unwrap_or_default()
-            })
     }
 
     /// Every gap between the mappings of the representations this Endpoint serves and its
@@ -659,11 +669,15 @@ impl EndpointSpec {
         &self,
         linkml: Option<&str>,
     ) -> std::result::Result<Vec<String>, String> {
-        let mut gaps = match self.ical_mapping() {
-            Some(mapping) => mapping.model_gaps(linkml)?,
-            None => Vec::new(),
-        };
+        let mut gaps = Vec::new();
+        for output in self.ical_outputs() {
+            gaps.extend(output.model_gaps(linkml)?);
+        }
         gaps.extend(super::feed_output::feed_gaps(self.feed_outputs(), linkml)?);
+        gaps.extend(super::widget_output::widget_gaps(
+            self.widget_outputs(),
+            linkml,
+        )?);
         for representation in self.served_representations() {
             let gap = match linkml {
                 None => representation.missing_model_gap(),
@@ -728,7 +742,12 @@ impl EndpointSpec {
             })?;
         }
 
-        if let Some(ical) = self.representations.as_ref().and_then(|r| r.ical.as_ref()) {
+        if let Some(ical) = self
+            .representations
+            .as_ref()
+            .map(|r| r.ical.as_slice())
+            .filter(|ical| !ical.is_empty())
+        {
             if !self
                 .served_representations()
                 .contains(&Representation::Ical)
@@ -740,7 +759,7 @@ impl EndpointSpec {
                         .to_owned(),
                 });
             }
-            let gaps = ical.shape_gaps();
+            let gaps = super::ical_mapping::outputs_gaps(ical);
             if !gaps.is_empty() {
                 return Err(Error::Invalid {
                     field: "spec.representations.ical".to_owned(),
@@ -755,6 +774,15 @@ impl EndpointSpec {
             return Err(Error::Invalid {
                 field: "spec.representations.feed".to_owned(),
                 reason: feed_gaps.join("; "),
+            });
+        }
+
+        let widget_gaps = super::widget_output::widget_gaps(self.widget_outputs(), None)
+            .unwrap_or_else(|never| vec![never]);
+        if !widget_gaps.is_empty() {
+            return Err(Error::Invalid {
+                field: "spec.representations.widget".to_owned(),
+                reason: widget_gaps.join("; "),
             });
         }
 

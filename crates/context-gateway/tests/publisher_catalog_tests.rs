@@ -69,6 +69,8 @@ fn endpoint(slug: &str, project: &str, space: &str, audience: Audience) -> Endpo
         catalog: Some(Arc::new(complete(project))),
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![policy],

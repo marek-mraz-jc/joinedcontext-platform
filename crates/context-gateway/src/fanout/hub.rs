@@ -769,6 +769,8 @@ pub(crate) mod tests_support {
             catalog: None,
             deprecation: None,
             feeds: Vec::new(),
+            calendars: Vec::new(),
+            map_defaults: Default::default(),
             base_path: "/api/endpoint/s".to_owned(),
             models: Vec::new(),
             policy_names: Vec::new(),

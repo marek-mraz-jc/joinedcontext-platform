@@ -362,6 +362,8 @@ mod visible_tests {
             catalog: None,
             deprecation: None,
             feeds: Vec::new(),
+            calendars: Vec::new(),
+            map_defaults: Default::default(),
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
             policy_names: Vec::new(),
