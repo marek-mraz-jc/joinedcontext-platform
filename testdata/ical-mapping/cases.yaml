@@ -6,6 +6,13 @@ default-preset:
 sdm-event-explicit:
   ical: { preset: sdm-event }
   gaps: []
+version-1-explicit:
+  ical: { version: 1, preset: sdm-event }
+  gaps: []
+version-newer-than-the-platform:
+  ical: { version: 2, preset: sdm-event }
+  gaps:
+    - "`ical` is version 2, and this platform writes version 1"
 schema-org-preset:
   ical: { preset: schema-org }
   gaps: []

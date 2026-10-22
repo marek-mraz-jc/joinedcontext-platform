@@ -1134,6 +1134,12 @@
           "default": "Event",
           "description": "The NGSI-LD type the feed maps.",
           "type": "string"
+        },
+        "version": {
+          "description": "The contract version (API/11 EP-152); `1` when absent, the one version the broker reads.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
