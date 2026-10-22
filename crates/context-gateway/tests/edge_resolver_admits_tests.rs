@@ -36,6 +36,7 @@ fn endpoint(audience: Audience, allowed: &[&str]) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: Vec::new(),

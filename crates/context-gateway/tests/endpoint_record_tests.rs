@@ -83,6 +83,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![air_quality()],
         policy_names: Vec::new(),

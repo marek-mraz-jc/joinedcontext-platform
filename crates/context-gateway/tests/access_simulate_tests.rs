@@ -118,6 +118,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         policy_names,
         manifest_name: String::new(),
         policies,

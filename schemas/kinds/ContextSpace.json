@@ -28,7 +28,7 @@
           ]
         },
         "record": {
-          "description": "`every` or `onChange`; absent takes the type's.",
+          "description": "`every`, `observed`, `never` or `onChange`; absent takes the type's.",
           "type": [
             "string",
             "null"
@@ -535,7 +535,7 @@
           ]
         },
         "record": {
-          "description": "How the type records history: `every` (the default) or `onChange` (DM-108).",
+          "description": "How the type records history: `every`, `observed`, `never` or `onChange` (DM-108); unset, the broker's default, `observed` on the platform (DM-132).",
           "type": [
             "string",
             "null"

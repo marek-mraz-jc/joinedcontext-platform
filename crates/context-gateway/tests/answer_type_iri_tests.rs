@@ -94,6 +94,7 @@ fn endpoint(granted: &str) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         base_path: format!("/api/endpoint/{SLUG}"),

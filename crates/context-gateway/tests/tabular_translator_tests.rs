@@ -291,6 +291,7 @@ fn endpoint(representations: Vec<Representation>, file_limits: Option<FileLimits
         models: Vec::new(),
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(

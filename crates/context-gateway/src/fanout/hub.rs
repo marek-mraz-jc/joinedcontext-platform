@@ -719,6 +719,7 @@ pub(crate) mod tests_support {
             projection: None,
             view_mapping: None,
             catalog: None,
+            deprecation: None,
             base_path: "/api/endpoint/s".to_owned(),
             models: Vec::new(),
             policy_names: Vec::new(),

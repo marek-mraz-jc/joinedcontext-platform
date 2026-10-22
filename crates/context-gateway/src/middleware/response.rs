@@ -188,14 +188,18 @@ pub async fn scrub(State(gateway): State<Arc<Gateway>>, request: Request, next: 
     // Read before the handler runs, because the path is what names the endpoint and the
     // request is moved into it.
     let described = describedby(&gateway, request.uri().path());
+    let deprecated = deprecation_headers(&gateway, request.uri().path());
     let mut response = next.run(request).await;
     let carries_data = response.status().is_success();
     let headers = response.headers_mut();
-    // EP-50: only on an answer that carries data. A refusal that named a schema would tell a
-    // caller who was refused that the endpoint exists (EP-03, R20).
+    // EP-50, EP-147: only on an answer that carries data. A refusal that named a schema or a
+    // sunset would tell a caller who was refused that the endpoint exists (EP-03, R20).
     if carries_data {
         for link in described {
             headers.append(axum::http::header::LINK, link);
+        }
+        for (name, value) in deprecated {
+            headers.append(name, value);
         }
     }
     // The tenant is an internal name and a probe for which spaces exist. It is pinned on the
@@ -242,6 +246,71 @@ fn describedby(gateway: &Gateway, path: &str) -> Vec<HeaderValue> {
         }
     }
     links
+}
+
+/// RFC 9745 `Deprecation`.
+pub const DEPRECATION: HeaderName = HeaderName::from_static("deprecation");
+/// RFC 8594 `Sunset`.
+pub const SUNSET: HeaderName = HeaderName::from_static("sunset");
+
+/// The headers that announce an Endpoint's `spec.deprecation` on an answer of `path` (EP-147):
+/// the two dates and the author's public link, nothing else. Only the published address
+/// carries one; a space's own surface has no manifest of its own to announce it.
+fn deprecation_headers(gateway: &Gateway, path: &str) -> Vec<(HeaderName, HeaderValue)> {
+    let Some(rest) = path.strip_prefix("/api/endpoint/") else {
+        return Vec::new();
+    };
+    let (slug, rest) = rest.split_once('/').unwrap_or((rest, ""));
+    let Some(endpoint) = gateway.resolver.resolve(slug) else {
+        return Vec::new();
+    };
+    match endpoint.deprecation.as_deref() {
+        Some(deprecation) if deprecation.covers(surface_of(rest)) => announce(deprecation),
+        _ => Vec::new(),
+    }
+}
+
+/// The surface a path under an Endpoint's address serves; `None` for the record, the schema
+/// and access documents, which belong to the Endpoint as a whole.
+fn surface_of(rest: &str) -> Option<jc_core::kinds::Representation> {
+    use jc_core::kinds::Representation as R;
+    [
+        ("ngsi-ld/v1", R::NgsiLd),
+        ("file.", R::Csv),
+        ("ogc/features", R::OgcFeatures),
+        ("sta/v1.1", R::Sta),
+        ("odata/v4", R::Odata),
+        ("ical/v1", R::Ical),
+        ("mcp", R::Mcp),
+        ("ws", R::WebSocket),
+    ]
+    .into_iter()
+    .find(|(prefix, _)| rest.starts_with(prefix))
+    .map(|(_, surface)| surface)
+}
+
+/// `Deprecation: @{since}`, `Sunset: {sunset}` and the `rel="deprecation"` link, each date at
+/// midnight UTC. A link is validated when the manifest is (EP-146); one that would still not
+/// make a header value is left out rather than sent broken.
+fn announce(
+    deprecation: &jc_core::kinds::endpoint_deprecation::Deprecation,
+) -> Vec<(HeaderName, HeaderValue)> {
+    let since = deprecation.since.and_time(chrono::NaiveTime::MIN).and_utc();
+    let sunset = deprecation.sunset.format("%a, %d %b %Y 00:00:00 GMT");
+    let mut headers = vec![
+        (DEPRECATION, format!("@{}", since.timestamp())),
+        (SUNSET, sunset.to_string()),
+    ];
+    if let Some(link) = &deprecation.link {
+        headers.push((
+            axum::http::header::LINK,
+            format!("<{link}>; rel=\"deprecation\"; type=\"text/html\""),
+        ));
+    }
+    headers
+        .into_iter()
+        .filter_map(|(name, value)| Some((name, HeaderValue::from_str(&value).ok()?)))
+        .collect()
 }
 
 /// The endpoint whose data this path serves, or `None` where the path serves something else.

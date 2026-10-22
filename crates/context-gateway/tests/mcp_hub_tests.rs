@@ -72,6 +72,7 @@ fn endpoint(slug: &str, policies: Vec<PolicySpec>) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![Model {
             name: "air-quality".to_owned(),
