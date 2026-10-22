@@ -37,6 +37,7 @@ fn run(words: &[&str]) -> ExitCode {
         ["get" | "describe", ..] | ["apply" | "diff" | "delete", "-f", ..] => client(words),
         ["login", rest @ ..] => login_command(rest),
         ["fmt", rest @ ..] => fmt_command(rest),
+        ["changelog", rest @ ..] => changelog(rest),
         ["validate" | "migrate" | "checkouts" | "plan" | "apply" | "drift", ..] => {
             repository_command(words)
         }
@@ -98,7 +99,7 @@ fn repository_command(words: &[&str]) -> ExitCode {
     }
 }
 
-/// `import`, `export`, `pipeline test`, `artifacts rebuild`, `sync`, `publish ckan` and `changelog`.
+/// `import`, `export`, `pipeline test`, `artifacts rebuild`, `sync` and `publish ckan`.
 fn bundle_command(words: &[&str]) -> ExitCode {
     match words {
         ["import", "--format", "git", source, "--out-dir", out] => {
@@ -134,10 +135,6 @@ fn bundle_command(words: &[&str]) -> ExitCode {
         },
         ["publish", "ckan", rest @ ..] => match publish_ckan_options(rest) {
             Some(options) => publish_ckan(&options),
-            None => usage(),
-        },
-        ["changelog", rest @ ..] => match jcctl::commands::changelog::Options::parse(rest) {
-            Some(options) => changelog(&options),
             None => usage(),
         },
         _ => usage(),
@@ -840,9 +837,11 @@ fn git_export(
     }
 }
 
-/// Every bundle of a git-native export cloned and checked against its index (MF-46, MF-47).
 /// The public changelog of the checkout's Endpoints on stdout (EP-148).
-fn changelog(options: &jcctl::commands::changelog::Options) -> ExitCode {
+fn changelog(words: &[&str]) -> ExitCode {
+    let Some(options) = jcctl::commands::changelog::Options::parse(words) else {
+        return usage();
+    };
     match options.render(chrono::Utc::now()) {
         Ok(page) => {
             println!("{page}");
@@ -855,6 +854,7 @@ fn changelog(options: &jcctl::commands::changelog::Options) -> ExitCode {
     }
 }
 
+/// Every bundle of a git-native export cloned and checked against its index (MF-46, MF-47).
 fn git_import(source: &Path, out: &Path) -> ExitCode {
     match jcctl::commands::git_bundle::import(source, out) {
         Ok(imported) => {
