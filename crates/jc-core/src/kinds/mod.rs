@@ -42,6 +42,7 @@ pub mod subscription;
 pub mod sync;
 pub mod ui_schema;
 pub mod visualization;
+pub mod widget_output;
 
 pub use agent_profile::{
     AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
@@ -96,7 +97,8 @@ pub use feed_output::{
 };
 pub use group::{GroupSpec, Member};
 pub use ical_mapping::{
-    Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping, Preset, Representations,
+    ical_links, outputs_gaps, Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping,
+    IcalOutput, OutputFilter, Preset, Representations, MAX_OUTPUTS, PRESET_TYPES,
 };
 pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,
@@ -145,6 +147,9 @@ pub use sync::{
     SyncMode, SyncOrigin, SyncSourceSpec, WebhookAuth,
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
+pub use widget_output::{
+    map_defaults, widget_gaps, MapDefaults, WidgetOutput, WidgetRoles, WidgetSource,
+};
 
 /// `kind: Organization` as a whole manifest.
 pub type Organization = crate::envelope::ResourceEnvelope<OrganizationSpec>;

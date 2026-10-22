@@ -11,7 +11,7 @@ Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this 
 | `DTSTART` | §3.6.1, §3.8.2.4 | yes | date or datetime | `firstOf`, `date`, `timezone` |
 | `SUMMARY` | §3.8.1.12 | yes | a string, an enum or a LanguageProperty | `firstOf`, `join`, `language`, `truncate` |
 | `DTEND` | §3.8.2.2 | no | date or datetime | `firstOf`, `date`, `timezone`, `endInclusive` |
-| `DURATION` | §3.8.2.5 | no | a string | `firstOf` |
+| `DURATION` | §3.8.2.5 | no | a string | `firstOf`, `constant` |
 | `DESCRIPTION` | §3.8.1.5 | no | a string, an enum or a LanguageProperty | `firstOf`, `join`, `language`, `truncate` |
 | `LOCATION` | §3.8.1.7 | no | a string, an enum, a LanguageProperty or a structured address | `firstOf`, `join`, `language` |
 | `GEO` | §3.8.1.6 | no | a GeoProperty | `firstOf` |

@@ -75,7 +75,14 @@ fn endpoint(extra: &str) -> Result<EndpointSpec, String> {
 #[test]
 fn the_endpoint_parses_and_shape_checks_its_mapping() {
     let ok = endpoint("enabledRepresentations: [ngsi-ld, ical]\nrepresentations:\n  ical:\n    mapping:\n      DTSTART: startDate\n      SUMMARY: { attribute: name, language: sk }\n").unwrap();
-    let ical = ok.ical_mapping().expect("serves ical");
+    let [output] = ok.ical_outputs() else {
+        panic!("the single object is one output: {:?}", ok.ical_outputs());
+    };
+    assert_eq!(
+        output.name, "events",
+        "the deprecated object is the output `events`"
+    );
+    let ical = &output.sources[0];
     assert_eq!(
         ical.base(),
         None,
@@ -84,8 +91,14 @@ fn the_endpoint_parses_and_shape_checks_its_mapping() {
     assert_eq!(ical.effective().len(), 2);
 
     let listed = endpoint("enabledRepresentations: [ngsi-ld, ical]\n").unwrap();
-    assert_eq!(listed.ical_mapping(), Some(IcalMapping::default()));
-    assert_eq!(endpoint("").unwrap().ical_mapping(), None, "ical is opt-in");
+    assert!(
+        listed.ical_outputs().is_empty(),
+        "no output listed serves no calendar (owner 2026-10-22T09:25Z)"
+    );
+    assert!(
+        endpoint("").unwrap().ical_outputs().is_empty(),
+        "ical is opt-in"
+    );
 
     let unknown_field = endpoint("enabledRepresentations: [ical]\nrepresentations:\n  ical:\n    mapping: { X-WR-CALNAME: name }\n").unwrap_err();
     assert!(
@@ -115,11 +128,120 @@ fn representation_gaps_reads_the_mapping_in_force() {
     let spec = endpoint("enabledRepresentations: [ngsi-ld, ical]\nrepresentations:\n  ical:\n    preset: sdm-event\n    mapping: { DTSTART: name }\n").unwrap();
     assert_eq!(
         spec.representation_gaps(Some(&model)).unwrap(),
-        ["`ical` maps DTSTART to `name`, a LanguageProperty; DTSTART takes date or datetime"]
+        ["`ical` output `events` maps DTSTART to `name`, a LanguageProperty; DTSTART takes date or datetime"]
     );
     assert!(endpoint("")
         .unwrap()
         .representation_gaps(None)
         .unwrap()
         .is_empty());
+}
+
+const OUTPUTS: &str = "enabledRepresentations: [ngsi-ld, ical]\nrepresentations:\n  ical:\n";
+
+fn output(yaml: &str) -> String {
+    format!(
+        "{OUTPUTS}{}",
+        yaml.lines()
+            .map(|l| format!("    {l}\n"))
+            .collect::<String>()
+    )
+}
+
+/// EP-159 (owner 2026-10-22T09:30Z): named outputs, unique names, at most 20, presets only over
+/// the event types, BCP 47 tags, a DURATION constant.
+#[test]
+fn the_endpoint_lists_named_outputs() {
+    let spec = endpoint(&output(
+        "- name: vsetky\n  title: { sk: Všetky podujatia, en-GB: All events }\n  lang: sk-SK\n  timezone: Europe/Bratislava\n  sources: [{ type: Event, preset: sdm-event, mapping: { DURATION: { constant: PT2H }, LAST-MODIFIED: dateModified } }]\n- name: sport\n  sort: start\n  limit: 500\n  filter: { q: 'eventCategory==\"sport\"' }\n  sources: [{ type: Event }, { type: CouncilMeeting }]\n",
+    ))
+    .unwrap();
+    let names: Vec<&str> = spec
+        .ical_outputs()
+        .iter()
+        .map(|o| o.name.as_str())
+        .collect();
+    assert_eq!(names, ["vsetky", "sport"]);
+    let wire = serde_json::to_value(&spec.representations).unwrap();
+    assert_eq!(
+        wire["ical"][1],
+        serde_json::json!({"name": "sport", "sources": [{"type": "Event"}, {"type": "CouncilMeeting"}],
+            "filter": {"q": "eventCategory==\"sport\""}, "sort": "start", "limit": 500}),
+        "the broker reads these member names (antares-ical Output)"
+    );
+
+    let refused = |yaml: &str, says: &str| {
+        let err = endpoint(&output(yaml)).unwrap_err();
+        assert!(err.contains(says), "{yaml}: {err}");
+    };
+    refused(
+        "- { name: a, sources: [{}] }\n- { name: a, sources: [{}] }\n",
+        "the output name `a` twice",
+    );
+    let many: String = (0..=20)
+        .map(|i| format!("- {{ name: o{i}, sources: [{{}}] }}\n"))
+        .collect();
+    refused(&many, "lists 21 outputs, at most 20");
+    refused(
+        "- { name: Sport, sources: [{}] }\n",
+        "`ical` output `Sport`: its name is not",
+    );
+    refused("- { name: preview, sources: [{}] }\n", "its name is not");
+    refused("- { name: a, sources: [] }\n", "it needs 1 to 10 sources");
+    refused(
+        "- { name: a, sources: [{ type: Article }] }\n",
+        "`ical` output `a` uses a preset for Article",
+    );
+    refused(
+        "- { name: a, lang: sk_SK, sources: [{}] }\n",
+        "`lang: sk_SK` is not a language tag",
+    );
+    refused("- { name: a, sort: name, sources: [{}] }\n", "`sort: name`");
+    refused(
+        "- { name: a, limit: 0, sources: [{}] }\n",
+        "`limit` must be 1 to 10000",
+    );
+    refused(
+        "- { name: a, filter: {}, sources: [{}] }\n",
+        "`filter` is empty",
+    );
+    refused(
+        "- { name: a, filter: { georel: near }, sources: [{}] }\n",
+        "needs georel, geometry and coordinates",
+    );
+    refused(
+        "- { name: a, filter: { q: \"a==1\\r\\nX:y\" }, sources: [{}] }\n",
+        "`filter.q` must be",
+    );
+    refused(
+        "- { name: a, title: { sk: \"a\\r\\nX-INJECT:1\" }, sources: [{}] }\n",
+        "`title` takes a language tag",
+    );
+    refused(
+        "- { name: a, sources: [{ mapping: { DURATION: { constant: \"PT2H\\r\\nX:y\" } } }] }\n",
+        "an RFC 5545 duration",
+    );
+    refused(
+        "- { name: a, version: 2, sources: [{}] }\n",
+        "it is version 2",
+    );
+    refused(
+        "- { name: a, sources: [{}], colour: red }\n",
+        "unknown field `colour`",
+    );
+    // a type other than the event types maps its own DTSTART and SUMMARY
+    endpoint(&output("- { name: a, sources: [{ type: Article, mapping: { DTSTART: datePublished, SUMMARY: headline } }] }\n")).unwrap();
+}
+
+#[test]
+fn an_output_names_itself_in_the_model_gaps() {
+    let model = testdata("model.linkml.yaml");
+    let spec = endpoint(&output(
+        "- { name: kultura, sources: [{ preset: sdm-event, mapping: { DTSTART: name } }] }\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        spec.representation_gaps(Some(&model)).unwrap(),
+        ["`ical` output `kultura` maps DTSTART to `name`, a LanguageProperty; DTSTART takes date or datetime"]
+    );
 }

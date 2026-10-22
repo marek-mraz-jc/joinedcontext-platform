@@ -203,46 +203,8 @@ impl FeedPaths {
     }
 }
 
-/// The NGSI-LD query an output adds to the view's.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct FeedFilter {
-    /// An NGSI-LD `q`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub q: Option<String>,
-    /// An NGSI-LD `scopeQ`.
-    #[serde(default, rename = "scopeQ", skip_serializing_if = "Option::is_none")]
-    pub scope_q: Option<String>,
-    /// `georel` of a geo query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub georel: Option<String>,
-    /// `geometry` of a geo query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geometry: Option<String>,
-    /// `coordinates` of a geo query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordinates: Option<String>,
-    /// `geoproperty` of a geo query.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geoproperty: Option<String>,
-}
-
-impl FeedFilter {
-    fn is_empty(&self) -> bool {
-        self.entries().iter().all(|(_, v)| v.is_none())
-    }
-
-    fn entries(&self) -> [(&'static str, Option<&str>); 6] {
-        [
-            ("q", self.q.as_deref()),
-            ("scopeQ", self.scope_q.as_deref()),
-            ("georel", self.georel.as_deref()),
-            ("geometry", self.geometry.as_deref()),
-            ("coordinates", self.coordinates.as_deref()),
-            ("geoproperty", self.geoproperty.as_deref()),
-        ]
-    }
-}
+/// The NGSI-LD query an output adds to the view's: the iCal outputs' filter, one contract (EP-159).
+pub type FeedFilter = super::ical_mapping::OutputFilter;
 
 fn preset_roles(preset: FeedPreset) -> BTreeMap<FeedRole, Vec<&'static str>> {
     use FeedRole as R;
@@ -287,24 +249,6 @@ impl FeedSource {
         }
         roles
     }
-}
-
-/// Parentheses and double quotes of an NGSI-LD query balance outside its strings, so the broker's
-/// `(filter);(request)` join keeps the filter whole.
-fn balanced(text: &str) -> bool {
-    let (mut depth, mut quoted) = (0usize, false);
-    for c in text.chars() {
-        match (c, quoted) {
-            ('"', _) => quoted = !quoted,
-            ('(', false) => depth += 1,
-            (')', false) => match depth.checked_sub(1) {
-                Some(d) => depth = d,
-                None => return false,
-            },
-            _ => {}
-        }
-    }
-    depth == 0 && !quoted
 }
 
 /// A slug: `[a-z0-9]` then `[a-z0-9-]`, 1 to 63.
@@ -374,7 +318,7 @@ impl FeedOutput {
         ] {
             for (lang, text) in texts {
                 if !is_language(lang) || lang == "first" {
-                    gaps.push(format!("feed output `{name}`: {member} key `{lang}` is a two-letter language such as sk"));
+                    gaps.push(format!("feed output `{name}`: {member} key `{lang}` is a language tag such as sk or en-GB"));
                 }
                 if !is_plain(text, max) {
                     gaps.push(format!("feed output `{name}`: {member} in `{lang}` is plain text of 1 to {max} characters"));
@@ -387,7 +331,7 @@ impl FeedOutput {
             .filter(|l| !is_language(l) || *l == "first")
         {
             gaps.push(format!(
-                "feed output `{name}`: lang `{lang}` is a two-letter language such as sk"
+                "feed output `{name}`: lang `{lang}` is a language tag such as sk or en-GB"
             ));
         }
         if self
@@ -410,28 +354,18 @@ impl FeedOutput {
         gaps
     }
 
-    /// The filter's gaps: each query plain and balanced, a geo filter whole.
+    /// The filter's gaps, when it has one: each query parsed as the broker parses it, a geo filter whole.
     fn filter_gaps(&self, gaps: &mut Vec<String>) {
+        if self.filter.is_empty() {
+            return;
+        }
         let name = &self.name;
-        for (member, value) in self.filter.entries() {
-            if let Some(value) = value {
-                if !is_plain(value, 1024) || !balanced(value) {
-                    gaps.push(format!(
-                        "feed output `{name}`: filter.{member} is one NGSI-LD query of at most 1024 characters with balanced parentheses and quotes"
-                    ));
-                }
-            }
-        }
-        let geo = [
-            &self.filter.georel,
-            &self.filter.geometry,
-            &self.filter.coordinates,
-        ];
-        if geo.iter().any(|g| g.is_some()) && !geo.iter().all(|g| g.is_some()) {
-            gaps.push(format!(
-                "feed output `{name}`: a geo filter names georel, geometry and coordinates together"
-            ));
-        }
+        gaps.extend(
+            self.filter
+                .gaps()
+                .into_iter()
+                .map(|gap| format!("feed output `{name}`: {gap}")),
+        );
     }
 
     /// Every gap of the output against the space's LinkML model, one sentence each: a type the
@@ -526,17 +460,4 @@ pub fn feed_gaps(outputs: &[FeedOutput], linkml: Option<&str>) -> Result<Vec<Str
         }
     }
     Ok(gaps)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_query_must_balance_outside_its_strings() {
-        assert!(balanced(r#"(a=="x)");b>1"#));
-        assert!(!balanced("a==1)"));
-        assert!(!balanced("(a==1"));
-        assert!(!balanced(r#"a=="x"#));
-    }
 }

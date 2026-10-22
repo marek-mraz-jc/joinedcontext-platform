@@ -62,6 +62,8 @@ fn space_named(space: &str, role: &str) -> Space {
             catalog: None,
             deprecation: None,
             feeds: Vec::new(),
+            calendars: Vec::new(),
+            map_defaults: Default::default(),
             policy_names: Vec::new(),
             manifest_name: String::new(),
             policies: vec![granted_to(space, role)],
