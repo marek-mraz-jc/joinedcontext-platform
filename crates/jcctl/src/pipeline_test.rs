@@ -75,6 +75,9 @@ pub enum HarnessError {
     /// The pipeline's compute stage is not a Bento processor this harness can run.
     #[error("compute kind {0} is not tested as a Bento processor")]
     NotABentoProcessor(ComputeKind),
+    /// A connector step whose parameters do not render (PL-112).
+    #[error("{0}")]
+    Step(String),
 }
 
 /// How much of a message the harness keeps after each step: a stage's sample, not its record.
@@ -193,14 +196,15 @@ pub fn harness(
         processors.push(json!({ "mapping": step_marker(at) }));
         match step {
             Step::Processor(step) => processors.push(json!(step.processor)),
-            Step::Compute(compute) => match compute.kind {
-                ComputeKind::Bloblang => {
-                    if let Some(mapping) = &compute.bloblang {
-                        processors.push(json!({ "mapping": mapping }));
-                    }
+            Step::Compute(compute) if compute.kind.is_mapping() => {
+                let mapping = compute
+                    .mapping()
+                    .map_err(|err| HarnessError::Step(err.to_string()))?;
+                if let Some(mapping) = mapping {
+                    processors.push(json!({ "mapping": mapping }));
                 }
-                kind => return Err(HarnessError::NotABentoProcessor(kind)),
-            },
+            }
+            Step::Compute(compute) => return Err(HarnessError::NotABentoProcessor(compute.kind)),
         }
         // What this step made of the message, so each stage of the flow shows its own sample
         // and not only the end of the chain (T-3089).

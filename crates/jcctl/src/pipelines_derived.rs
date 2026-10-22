@@ -100,6 +100,9 @@ pub enum DerivedError {
         /// The type on both sides.
         entity_type: String,
     },
+    /// A connector step whose parameters do not render (PL-112).
+    #[error("{0}")]
+    Step(String),
     /// A compute kind another renderer owns.
     #[error("compute.kind {kind} is not rendered here: {reason}")]
     Elsewhere {
@@ -330,9 +333,9 @@ fn compute_processor(
     match compute.kind {
         // Inline in the manifest it is the last processor (PL-41); otherwise the author writes
         // the mapping in the pipeline's own bento.yaml and there is nothing to add.
-        ComputeKind::Bloblang => Ok(compute
-            .bloblang
-            .as_ref()
+        ComputeKind::Bloblang | ComputeKind::Datacube => Ok(compute
+            .mapping()
+            .map_err(|err| DerivedError::Step(err.to_string()))?
             .map(|mapping| json!({ "mapping": mapping }))),
         ComputeKind::Mapping => Err(DerivedError::Elsewhere {
             kind: compute.kind,
