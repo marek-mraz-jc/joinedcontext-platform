@@ -164,6 +164,7 @@ fn endpoint(context: Option<Value>, whitelist: bool) -> Endpoint {
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

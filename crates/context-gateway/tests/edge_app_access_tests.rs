@@ -99,6 +99,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: two_grants("ovzdusie"),

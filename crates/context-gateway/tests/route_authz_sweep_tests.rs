@@ -324,6 +324,12 @@ fn rows() -> Vec<Row> {
             DATA,
         ),
         row(
+            "ANY",
+            "/api/endpoint/{slug}/feed/v1/{*rest}",
+            get(ep("/feed/v1/news/atom.xml")),
+            DATA,
+        ),
+        row(
             "GET",
             "/catalog.jsonld",
             get("/catalog.jsonld".to_owned()),
@@ -539,6 +545,7 @@ fn endpoint(base_path: String) -> Endpoint {
             Representation::Odata,
             Representation::WebSocket,
             Representation::Ical,
+            Representation::Feed,
         ],
         rate_limit: None,
         creates: None,
@@ -550,6 +557,10 @@ fn endpoint(base_path: String) -> Endpoint {
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: vec![serde_norway::from_str(
+            "name: news\nsources: [{ type: Device, preset: generic }]\n",
+        )
+        .expect("the feed output parses")],
         policy_names: vec!["readers".to_owned()],
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],

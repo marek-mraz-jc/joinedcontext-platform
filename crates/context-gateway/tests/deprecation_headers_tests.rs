@@ -91,6 +91,7 @@ fn endpoint(slug: &str, audience: Audience, deprecation: Option<Deprecation>) ->
         view_mapping: None,
         catalog: None,
         deprecation: deprecation.map(Arc::new),
+        feeds: Vec::new(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),

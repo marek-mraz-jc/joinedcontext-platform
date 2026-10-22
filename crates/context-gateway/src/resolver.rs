@@ -159,6 +159,8 @@ pub struct Endpoint {
     pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
     /// The manifest's `spec.deprecation`, which the answer headers announce (EP-147).
     pub deprecation: Option<std::sync::Arc<jc_core::kinds::endpoint_deprecation::Deprecation>>,
+    /// The feed outputs it serves under `feed/v1/{name}/` (EP-150); empty: no feed.
+    pub feeds: Vec<jc_core::kinds::FeedOutput>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).

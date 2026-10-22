@@ -50,6 +50,7 @@ information:
         view_mapping: None,
         catalog: None,
         deprecation: None,
+        feeds: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![grant],
