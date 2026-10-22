@@ -38,4 +38,5 @@ pub mod store;
 pub mod telemetry;
 pub mod translators;
 pub mod units;
+pub mod usage;
 pub mod view_mapping;

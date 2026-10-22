@@ -46,6 +46,9 @@ pub struct Config {
     /// The Portal's read of a person's connectors (`JC_GATEWAY_CONNECTORS_URL`, its internal
     /// listener's `/internal/connectors`); absent serves no `/api/mcp/me/{name}` (EP-123).
     pub connectors_url: Option<String>,
+    /// The Portal's intake of usage counts (`JC_GATEWAY_USAGE_URL`, its internal listener's
+    /// `/internal/usage`); absent counts nothing for the publishers' Usage tab (T-5118).
+    pub usage_url: Option<String>,
     /// `jc-assistant`, scheme and authority, for `search_documents` (`JC_GATEWAY_ASSISTANT_URL`,
     /// e.g. `http://jc-assistant.assistant:8080`, EP-133); absent offers the tool nowhere.
     pub assistant_url: Option<String>,
@@ -312,6 +315,9 @@ impl Config {
             connectors_url: std::env::var("JC_GATEWAY_CONNECTORS_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
+            usage_url: std::env::var("JC_GATEWAY_USAGE_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
             assistant_url: std::env::var("JC_GATEWAY_ASSISTANT_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty()),
@@ -439,6 +445,7 @@ mod tests {
             assembly_dir: PathBuf::from("/tmp/jc-assembly"),
             previews_url: Some("http://portal:8081/internal/previews".to_owned()),
             connectors_url: None,
+            usage_url: None,
             assistant_url: None,
             hub_knowledge_sources: String::new(),
             previews_dir: PathBuf::from("/tmp/jc-previews"),
