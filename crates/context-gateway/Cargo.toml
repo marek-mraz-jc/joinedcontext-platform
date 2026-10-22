@@ -10,6 +10,7 @@ jc-core = { path = "../jc-core", version = "0.1.0", features = ["auth", "axum", 
 jc-dcat = { path = "../jc-dcat", version = "0.1.0", features = ["dcat-ap-sk", "dcat-ap-cz"] }
 jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
 jc-relationships = { path = "../jc-relationships", version = "0.1.0" }
+jc-tabular = { path = "../jc-tabular", version = "0.1.0" }
 arc-swap = "1"
 # base64url for the egress subject; already in the tree via jsonwebtoken
 base64 = "0.22"
