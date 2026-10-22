@@ -285,7 +285,11 @@ impl OutputFilter {
         if let Some(Err(why)) = self.q.as_deref().map(antares_ql::parse_q) {
             gaps.push(format!("`filter.q` is no NGSI-LD query: {why}"));
         }
-        if let Some(Err(why)) = self.scope_q.as_deref().map(antares_ql::scope::check_scope_q) {
+        if let Some(Err(why)) = self
+            .scope_q
+            .as_deref()
+            .map(antares_ql::scope::check_scope_q)
+        {
             gaps.push(format!("`filter.scopeQ` is no NGSI-LD scope query: {why}"));
         }
         let geo = [&self.georel, &self.geometry, &self.coordinates];
@@ -308,7 +312,9 @@ impl OutputFilter {
                 gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
             }
             Some(name) if !is_name(name) => {
-                gaps.push(format!("`filter.geoproperty: {name}` is not an attribute name"));
+                gaps.push(format!(
+                    "`filter.geoproperty: {name}` is not an attribute name"
+                ));
             }
             _ => {}
         }

@@ -897,55 +897,6 @@
       ],
       "type": "object"
     },
-    "FeedFilter": {
-      "additionalProperties": false,
-      "description": "The NGSI-LD query an output adds to the view's.",
-      "properties": {
-        "coordinates": {
-          "description": "`coordinates` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "geometry": {
-          "description": "`geometry` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "geoproperty": {
-          "description": "`geoproperty` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "georel": {
-          "description": "`georel` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "q": {
-          "description": "An NGSI-LD `q`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scopeQ": {
-          "description": "An NGSI-LD `scopeQ`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "FeedOutput": {
       "additionalProperties": false,
       "description": "One output of `spec.representations.feed`.",
@@ -960,7 +911,7 @@
         "filter": {
           "allOf": [
             {
-              "$ref": "#/definitions/FeedFilter"
+              "$ref": "#/definitions/OutputFilter"
             }
           ],
           "description": "What narrows the view for this output; it never widens it."

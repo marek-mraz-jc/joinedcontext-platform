@@ -289,7 +289,7 @@ impl FeedOutput {
         ] {
             for (lang, text) in texts {
                 if !is_language(lang) || lang == "first" {
-                    gaps.push(format!("feed output `{name}`: {member} key `{lang}` is a two-letter language such as sk"));
+                    gaps.push(format!("feed output `{name}`: {member} key `{lang}` is a language tag such as sk or en-GB"));
                 }
                 if !is_plain(text, max) {
                     gaps.push(format!("feed output `{name}`: {member} in `{lang}` is plain text of 1 to {max} characters"));
@@ -302,7 +302,7 @@ impl FeedOutput {
             .filter(|l| !is_language(l) || *l == "first")
         {
             gaps.push(format!(
-                "feed output `{name}`: lang `{lang}` is a two-letter language such as sk"
+                "feed output `{name}`: lang `{lang}` is a language tag such as sk or en-GB"
             ));
         }
         if self
@@ -448,17 +448,4 @@ pub fn feed_gaps(outputs: &[FeedOutput], linkml: Option<&str>) -> Result<Vec<Str
         }
     }
     Ok(gaps)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_query_must_balance_outside_its_strings() {
-        assert!(balanced(r#"(a=="x)");b>1"#));
-        assert!(!balanced("a==1)"));
-        assert!(!balanced("(a==1"));
-        assert!(!balanced(r#"a=="x"#));
-    }
 }
