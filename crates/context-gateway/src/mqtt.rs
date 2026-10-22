@@ -6,7 +6,9 @@
 //! ask with another broker's roles. The password is a Keycloak access token for a device, and
 //! empty for the pipeline runner, which is admitted only from the address of one of its own
 //! pods (T-4004): a private address alone proves nothing, because a cluster pod that dials the
-//! public listener through Traefik arrives with its pod address in the PROXY header.
+//! public listener through Traefik arrives with its pod address in the PROXY header. The Portal's
+//! capture subscriber is admitted the same way, from one of the Portal's pods, on a `capture`
+//! broker only (ADR-N-048 §2.10).
 
 use crate::app::Gateway;
 use crate::auth::accounts::ServiceAccounts;
@@ -14,13 +16,17 @@ use crate::auth::token::Verifier;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use jc_core::kinds::mqtt_broker::{release_name, MqttRole, RUNNER_USERNAME};
+use jc_core::kinds::mqtt_broker::{release_name, MqttMode, MqttRole, RUNNER_USERNAME};
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
 use jc_manifest::loader::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+
+/// The username the Portal's capture subscriber connects with on a `capture` broker's internal
+/// listener (ADR-N-048 §2.10); the Portal's `mqtt_capture` module sends the same.
+pub const CAPTURE_USERNAME: &str = "jc-portal-capture";
 
 /// The header the Linkerd inbound proxy sets to the mTLS identity of the caller.
 pub const MESH_IDENTITY: &str = "l5d-client-id";
@@ -35,6 +41,30 @@ pub struct Broker {
     /// The topic filters of the DataSources of its project that name it, which the runner may
     /// subscribe to (PL-76).
     pub runner_topics: Vec<String>,
+    /// What the Portal's capture subscriber may subscribe to: the publish filters of the roles,
+    /// each `${clientid}` level widened to `+`; empty unless the broker is in `capture` mode.
+    pub capture_topics: Vec<String>,
+}
+
+/// The filters a capture subscribes to: every role's publish filter, a level that names
+/// `${clientid}` (or any other placeholder the broker binds) widened to `+`, since the
+/// subscriber's own client id would bind it otherwise. Only devices publish, under their own
+/// filters, so the widened filter reads nothing they could not write.
+pub fn capture_topics(roles: &[MqttRole]) -> Vec<String> {
+    let mut topics: Vec<String> = roles
+        .iter()
+        .flat_map(|role| &role.publish)
+        .map(|filter| {
+            filter
+                .split('/')
+                .map(|level| if level.contains("${") { "+" } else { level })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect();
+    topics.sort();
+    topics.dedup();
+    topics
 }
 
 /// Every broker, by release name `mqtt-{project}-{name}`, which is also its Keycloak client
@@ -59,6 +89,11 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
                     release_name(&project, &id.name),
                     Broker {
                         project,
+                        capture_topics: if spec.mode == Some(MqttMode::Capture) {
+                            capture_topics(&spec.roles)
+                        } else {
+                            Vec::new()
+                        },
                         roles: spec.roles,
                         runner_topics: Vec::new(),
                     },
@@ -188,15 +223,24 @@ pub fn broker_of(identity: &str) -> &str {
     identity.split('.').next().unwrap_or_default()
 }
 
-/// Decides one CONNECT (PL-75, PL-76). `caller` is the mesh identity of the broker asking;
-/// `runner` the addresses of the pipeline runner's pods, the only ones a tokenless CONNECT is
-/// admitted from.
+/// The addresses a tokenless CONNECT is admitted from: the pipeline runner's pods and the
+/// Portal's, each resolved from its headless Service.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pods {
+    /// The pipeline runner's pods (PL-76).
+    pub runner: Vec<IpAddr>,
+    /// The Portal's pods, for its capture subscriber (ADR-N-048 §2.10).
+    pub portal: Vec<IpAddr>,
+}
+
+/// Decides one CONNECT (PL-75, PL-76, ADR-N-048 §2.10). `caller` is the mesh identity of the
+/// broker asking; `pods` the addresses a tokenless CONNECT is admitted from.
 pub fn decide(
     brokers: &Brokers,
     verifier: Option<&Verifier>,
     accounts: &ServiceAccounts,
     caller: Option<&str>,
-    runner: &[IpAddr],
+    pods: &Pods,
     connect: &Connect,
 ) -> (Answer, &'static str) {
     let Some(release) = caller.map(broker_of) else {
@@ -209,22 +253,7 @@ pub fn decide(
         );
     };
     if connect.password.is_empty() {
-        let from_runner = connect
-            .ipaddr
-            .parse::<IpAddr>()
-            .is_ok_and(|ip| runner.contains(&ip.to_canonical()));
-        if connect.username != RUNNER_USERNAME || !from_runner {
-            return (Answer::deny(), "no token");
-        }
-        if broker.runner_topics.is_empty() {
-            return (Answer::deny(), "no DataSource reads this broker");
-        }
-        let acl = broker
-            .runner_topics
-            .iter()
-            .map(|topic| rule("subscribe", topic))
-            .collect();
-        return (Answer::allow(acl, None), "the pipeline runner");
+        return tokenless(broker, pods, connect);
     }
     let Some(verifier) = verifier else {
         return (Answer::deny(), "no realm configured");
@@ -262,13 +291,45 @@ pub fn decide(
     (Answer::allow(acl, Some(claims.exp)), "a device")
 }
 
-/// The addresses `host` resolves to: the runner's headless Service lists one per pod. A name
-/// that does not resolve admits nobody.
+/// A CONNECT without a token: the runner or the Portal's capture subscriber, each by its name
+/// from one of its own pods, with `subscribe` only and no `expire_at`.
+fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, &'static str) {
+    let from = |addresses: &[IpAddr]| {
+        connect
+            .ipaddr
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| addresses.contains(&ip.to_canonical()))
+    };
+    let (topics, who, none) = match connect.username.as_str() {
+        RUNNER_USERNAME if from(&pods.runner) => (
+            &broker.runner_topics,
+            "the pipeline runner",
+            "no DataSource reads this broker",
+        ),
+        CAPTURE_USERNAME if from(&pods.portal) => (
+            &broker.capture_topics,
+            "the Portal's capture",
+            "the broker is not in capture mode",
+        ),
+        _ => return (Answer::deny(), "no token"),
+    };
+    if topics.is_empty() {
+        return (Answer::deny(), none);
+    }
+    let acl = topics
+        .iter()
+        .map(|topic| rule("subscribe", topic))
+        .collect();
+    (Answer::allow(acl, None), who)
+}
+
+/// The addresses `host` resolves to: a headless Service lists one per pod. A name that does not
+/// resolve admits nobody.
 pub async fn runner_addresses(host: &str) -> Vec<IpAddr> {
     match tokio::net::lookup_host((host, 0)).await {
         Ok(found) => found.map(|address| address.ip().to_canonical()).collect(),
         Err(error) => {
-            tracing::warn!(%error, host, "the pipeline runner's pods do not resolve");
+            tracing::warn!(%error, host, "the pods admitted without a token do not resolve");
             Vec::new()
         }
     }
@@ -279,6 +340,7 @@ pub async fn runner_addresses(host: &str) -> Vec<IpAddr> {
 struct Internal {
     gateway: Arc<Gateway>,
     runner_host: Option<Arc<str>>,
+    portal_host: Option<Arc<str>>,
 }
 
 /// `POST /internal/mqtt/auth`, on the internal listener only. Always 200 with `allow` or `deny`:
@@ -287,6 +349,7 @@ async fn auth(
     State(Internal {
         gateway,
         runner_host,
+        portal_host,
     }): State<Internal>,
     headers: HeaderMap,
     Json(connect): Json<Connect>,
@@ -296,19 +359,24 @@ async fn auth(
         .and_then(|value| value.to_str().ok());
     let brokers = gateway.brokers();
     let accounts = gateway.service_accounts();
-    // Resolved per tokenless CONNECT only: a runner reconnects rarely, a pod moves its address.
-    let runner = match &runner_host {
-        Some(host) if connect.password.is_empty() && connect.username == RUNNER_USERNAME => {
-            runner_addresses(host).await
+    // Resolved per tokenless CONNECT only: a subscriber reconnects rarely, a pod moves its address.
+    let mut pods = Pods::default();
+    if connect.password.is_empty() {
+        let (host, addresses) = match connect.username.as_str() {
+            RUNNER_USERNAME => (&runner_host, &mut pods.runner),
+            CAPTURE_USERNAME => (&portal_host, &mut pods.portal),
+            _ => (&None, &mut pods.runner),
+        };
+        if let Some(host) = host {
+            *addresses = runner_addresses(host).await;
         }
-        _ => Vec::new(),
-    };
+    }
     let (answer, why) = decide(
         &brokers,
         gateway.verifier.as_deref(),
         &accounts,
         caller,
-        &runner,
+        &pods,
         &connect,
     );
     // The client id and the outcome, never the password.
@@ -322,14 +390,20 @@ async fn auth(
     Json(answer)
 }
 
-/// The internal listener's router: the CONNECT check and nothing else. `runner_host` names
-/// the pipeline runner's headless Service; without one no tokenless CONNECT is admitted.
-pub fn internal_router(gateway: Arc<Gateway>, runner_host: Option<String>) -> axum::Router {
+/// The internal listener's router: the CONNECT check and nothing else. `runner_host` and
+/// `portal_host` name the headless Services of the pipeline runner and of the Portal; without
+/// one, nobody connects under that name without a token.
+pub fn internal_router(
+    gateway: Arc<Gateway>,
+    runner_host: Option<String>,
+    portal_host: Option<String>,
+) -> axum::Router {
     axum::Router::new()
         .route("/internal/mqtt/auth", axum::routing::post(auth))
         .with_state(Internal {
             gateway,
             runner_host: runner_host.map(Arc::from),
+            portal_host: portal_host.map(Arc::from),
         })
 }
 
@@ -350,6 +424,24 @@ mod tests {
             text.contains("anna") && text.contains("<redacted>"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_capture_reads_the_publish_filters_with_each_placeholder_level_widened() {
+        let role = |publish: &[&str]| MqttRole {
+            name: "r".into(),
+            service_accounts: vec!["a".into()],
+            publish: publish.iter().map(|t| (*t).to_owned()).collect(),
+            subscribe: vec!["commands/${clientid}".into()],
+        };
+        assert_eq!(
+            capture_topics(&[
+                role(&["cams/${clientid}/frame", "cams/dev-${clientid}/#"]),
+                role(&["status", "cams/+/frame"]),
+            ]),
+            ["cams/+/#", "cams/+/frame", "status"]
+        );
+        assert!(capture_topics(&[role(&[])]).is_empty());
     }
 
     #[test]

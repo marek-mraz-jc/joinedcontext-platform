@@ -24,6 +24,11 @@ pub struct Config {
     /// `pipeline-runner-pods.dev.svc.cluster.local`): a broker admits the runner's tokenless
     /// CONNECT only from an address this name resolves to; absent admits none (PL-76, T-4004).
     pub mqtt_runner_host: Option<String>,
+    /// The Portal's headless Service (`JC_GATEWAY_MQTT_PORTAL_HOST`, e.g.
+    /// `portal-pods.portal.svc.cluster.local`): a `capture` broker admits the Portal's tokenless
+    /// capture subscriber only from an address this name resolves to; absent admits none
+    /// (ADR-N-048 §2.10).
+    pub mqtt_portal_host: Option<String>,
     /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`): the
     /// implicit `main`, and every space when the organization declares no broker.
     pub broker_url: String,
@@ -298,6 +303,10 @@ impl Config {
                 .ok()
                 .map(|host| host.trim().to_owned())
                 .filter(|host| !host.is_empty()),
+            mqtt_portal_host: std::env::var("JC_GATEWAY_MQTT_PORTAL_HOST")
+                .ok()
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty()),
             broker_url,
             broker_url_template,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
@@ -438,6 +447,7 @@ mod tests {
             bind: "0.0.0.0:8080".parse().expect("a socket address"),
             internal_bind: None,
             mqtt_runner_host: None,
+            mqtt_portal_host: None,
             broker_url: "http://broker:1026".to_owned(),
             broker_url_template: None,
             repo_dir: None,
