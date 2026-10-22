@@ -86,7 +86,18 @@ organizer-relationship:
     preset: sdm-event
     mapping: { ORGANIZER: organizer }
   gaps:
-    - "`ical` maps ORGANIZER to `organizer`, a Relationship; ORGANIZER takes uri"
+    - "`ical` maps ORGANIZER to `organizer`, a Relationship; ORGANIZER takes uri, or an object with a uri `url` and a `name`"
+organizer-object:
+  ical:
+    preset: sdm-event
+    mapping: { ORGANIZER: host }
+  gaps: []
+organizer-object-without-url:
+  ical:
+    preset: sdm-event
+    mapping: { ORGANIZER: address }
+  gaps:
+    - "`ical` maps ORGANIZER to `address`, range PostalAddress; ORGANIZER takes uri, or an object with a uri `url` and a `name`"
 status-enum-not-covered:
   ical:
     preset: sdm-event

@@ -18,7 +18,7 @@ Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this 
 | `URL` | §3.8.4.6 | no | uri | `firstOf` |
 | `CATEGORIES` | §3.8.1.2 | no | a string, an enum or a LanguageProperty | `firstOf`, `join`, `constant`, `language`, `map` |
 | `STATUS` | §3.8.1.11 | no | a string, an enum or a LanguageProperty | `firstOf`, `language`, `map` |
-| `ORGANIZER` | §3.8.4.3 | no | uri | `firstOf` |
+| `ORGANIZER` | §3.8.4.3 | no | uri, or an object with a uri `url` and a `name` | `firstOf` |
 | `LAST-MODIFIED` | §3.8.7.3 | no | date or datetime | `firstOf`, `date` |
 | `CLASS` | §3.8.1.3 | no | a constant | `constant` |
 
@@ -33,6 +33,7 @@ Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this 
 | `LOCATION` | `address` |
 | `GEO` | `location` |
 | `URL` | `url` |
+| `ORGANIZER` | `organizer` |
 
 ### Preset `schema-org`
 
@@ -46,6 +47,7 @@ Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this 
 | `GEO` | `location` |
 | `URL` | `url` |
 | `STATUS` | `eventStatus`, mapped (10 values), default `CONFIRMED` |
+| `ORGANIZER` | `organizer` |
 
 ## `sta` (OGC SensorThings API v1.1)
 
