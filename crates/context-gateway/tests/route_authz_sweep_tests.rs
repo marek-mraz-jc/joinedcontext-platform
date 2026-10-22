@@ -129,6 +129,12 @@ fn rows() -> Vec<Row> {
         row("GET", "/api/endpoint/{slug}/", get(ep("/")), Member),
         row(
             "GET",
+            "/api/endpoint/{slug}/widget.json",
+            get(ep("/widget.json")),
+            Member,
+        ),
+        row(
+            "GET",
             "/api/endpoint/{slug}/ngsi-ld/v1",
             get(ep("/ngsi-ld/v1")),
             Member,

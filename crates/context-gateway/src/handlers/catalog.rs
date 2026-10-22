@@ -206,7 +206,6 @@ pub(crate) async fn publisher_catalog(
     }
 }
 
-/// This surface's routes; `app::router` merges them under its guards.
 /// The catalogue widget's defaults per class (API/11 EP-163): the geometry, colour field, popup
 /// fields and clustering its map starts from. Admitted as the Endpoint's other routes are, and an
 /// attribute the Endpoint's projection hides is never named.
@@ -238,6 +237,7 @@ pub(crate) async fn widget_defaults(
     axum::Json(serde_json::json!({ "map": map })).into_response()
 }
 
+/// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
         // Both spellings, because EP-01 writes the base URL with the trailing slash and
