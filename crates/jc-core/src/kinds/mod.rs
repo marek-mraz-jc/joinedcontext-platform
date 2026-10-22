@@ -148,7 +148,7 @@ pub use sync::{
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
 pub use widget_output::{
-    map_defaults, widget_gaps, MapDefaults, WidgetOutput, WidgetRoles, WidgetSource,
+    map_defaults, widget_gaps, MapDefaults, WidgetOutput, WidgetRoles, WidgetSource, WidgetTable,
 };
 
 /// `kind: Organization` as a whole manifest.
