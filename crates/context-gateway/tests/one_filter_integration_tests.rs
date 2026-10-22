@@ -146,6 +146,7 @@ impl Shape {
             deprecation: None,
             feeds: Vec::new(),
             calendars: Vec::new(),
+            map_defaults: Default::default(),
             policy_names: Vec::new(),
             policies: vec![self.policy()],
         }

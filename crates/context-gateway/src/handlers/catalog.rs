@@ -207,12 +207,44 @@ pub(crate) async fn publisher_catalog(
 }
 
 /// This surface's routes; `app::router` merges them under its guards.
+/// The catalogue widget's defaults per class (API/11 EP-163): the geometry, colour field, popup
+/// fields and clustering its map starts from. Admitted as the Endpoint's other routes are, and an
+/// attribute the Endpoint's projection hides is never named.
+pub(crate) async fn widget_defaults(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, _) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let hidden = |path: &String| {
+        let first = path.split('.').next().unwrap_or_default();
+        endpoint.hidden_attributes.contains(first)
+    };
+    let map: std::collections::BTreeMap<_, _> = endpoint
+        .map_defaults
+        .iter()
+        .map(|(class, defaults)| {
+            let mut shown = defaults.clone();
+            shown.geometry = shown.geometry.filter(|p| !hidden(p));
+            shown.colour = shown.colour.filter(|p| !hidden(p));
+            shown.popup.retain(|p| !hidden(p));
+            (class.clone(), shown)
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "map": map })).into_response()
+}
+
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
         // Both spellings, because EP-01 writes the base URL with the trailing slash and
         // every client that stores a base URL drops it.
         .route("/api/endpoint/{slug}", get(endpoint_record))
         .route("/api/endpoint/{slug}/", get(endpoint_record))
+        .route("/api/endpoint/{slug}/widget.json", get(widget_defaults))
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))

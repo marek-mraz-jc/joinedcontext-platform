@@ -27,6 +27,10 @@ pub struct Representations {
     /// The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feed: Vec<super::feed_output::FeedOutput>,
+    /// The catalogue widget's defaults per class: the map's geometry, colour, popup and
+    /// clustering (API/11 EP-163). Never read by the broker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widget: Vec<super::widget_output::WidgetOutput>,
 }
 
 /// The most outputs of one format an Endpoint lists (owner 2026-10-22T09:30Z, EP-159).
@@ -1011,7 +1015,7 @@ pub(super) fn is_language(language: &str) -> bool {
 
 /// A BCP 47 language tag by its shape: a primary subtag of 2 or 3 letters, then subtags of 1 to
 /// 8 letters or digits.
-fn is_tag(tag: &str) -> bool {
+pub(super) fn is_tag(tag: &str) -> bool {
     let mut subtags = tag.split('-');
     subtags
         .next()
@@ -1023,7 +1027,7 @@ fn is_tag(tag: &str) -> bool {
 
 /// An output name: `[a-z0-9-]`, 1 to 40, a letter or digit at both ends, never `preview` (the
 /// broker's preview route).
-fn is_slug(name: &str) -> bool {
+pub(super) fn is_slug(name: &str) -> bool {
     let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     name.len() <= 40
         && edge(name.chars().next())
@@ -1077,8 +1081,8 @@ fn is_zone(zone: &str) -> bool {
 
 /// What the model says of one attribute.
 pub(super) struct Slot {
-    range: String,
-    kind: Option<String>,
+    pub(super) range: String,
+    pub(super) kind: Option<String>,
     required: bool,
 }
 
@@ -1115,7 +1119,7 @@ impl Model<'_> {
         self.schema.get("classes")?.get(name)
     }
 
-    fn enum_values(&self, name: &str) -> Option<Vec<String>> {
+    pub(super) fn enum_values(&self, name: &str) -> Option<Vec<String>> {
         let values = self
             .schema
             .get("enums")?
@@ -1235,7 +1239,7 @@ pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
     }
 }
 
-fn describe(model: &Model, slot: &Slot) -> String {
+pub(super) fn describe(model: &Model, slot: &Slot) -> String {
     match slot.kind.as_deref() {
         Some(kind @ ("LanguageProperty" | "GeoProperty" | "Relationship")) => {
             format!("a {kind}")

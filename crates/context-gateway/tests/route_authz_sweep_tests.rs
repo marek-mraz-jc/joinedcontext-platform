@@ -562,6 +562,7 @@ fn endpoint(base_path: String) -> Endpoint {
         )
         .expect("the feed output parses")],
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: vec!["readers".to_owned()],
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],

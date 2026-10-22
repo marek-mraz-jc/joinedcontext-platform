@@ -163,6 +163,8 @@ pub struct Endpoint {
     pub feeds: Vec<jc_core::kinds::FeedOutput>,
     /// The iCalendar outputs it serves under `ical/v1/{name}.ics` (API/11 EP-159).
     pub calendars: Vec<jc_core::kinds::IcalOutput>,
+    /// The catalogue widget's map defaults per class, served at `widget.json` (API/11 EP-163).
+    pub map_defaults: std::collections::BTreeMap<String, jc_core::kinds::MapDefaults>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).

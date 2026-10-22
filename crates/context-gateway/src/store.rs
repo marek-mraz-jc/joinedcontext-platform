@@ -682,6 +682,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         });
         let representations = spec.served_representations();
         let calendars = spec.ical_outputs().to_vec();
+        let map_defaults = jc_core::kinds::map_defaults(spec.widget_outputs());
         let catalog = with_publisher(
             spec.catalog.clone(),
             publishers.get(&project).map(Arc::as_ref),
@@ -717,6 +718,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             catalog,
             deprecation: spec.deprecation.clone().map(Arc::new),
             calendars,
+            map_defaults,
             feeds: spec.representations.map(|r| r.feed).unwrap_or_default(),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
@@ -926,6 +928,7 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
                 deprecation: None,
                 feeds: Vec::new(),
                 calendars: Vec::new(),
+                map_defaults: Default::default(),
                 base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),

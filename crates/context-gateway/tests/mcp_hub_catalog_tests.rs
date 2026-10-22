@@ -80,6 +80,7 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
         deprecation: None,
         feeds: Vec::new(),
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),

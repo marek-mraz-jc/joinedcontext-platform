@@ -162,6 +162,7 @@ fn endpoint(max_file_rows: Option<u32>) -> Endpoint {
         deprecation: None,
         feeds: Vec::new(),
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(

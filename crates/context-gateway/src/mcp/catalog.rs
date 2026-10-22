@@ -630,6 +630,7 @@ mod tests {
             deprecation: None,
             feeds: Vec::new(),
             calendars: Vec::new(),
+            map_defaults: Default::default(),
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),

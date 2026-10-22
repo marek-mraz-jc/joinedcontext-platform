@@ -42,6 +42,7 @@ pub mod subscription;
 pub mod sync;
 pub mod ui_schema;
 pub mod visualization;
+pub mod widget_output;
 
 pub use agent_profile::{
     AgentEgress, AgentLimits, AgentModel, AgentProfileRole, AgentProfileSpec, AgentRuntime,
@@ -145,6 +146,9 @@ pub use sync::{
     SyncMode, SyncOrigin, SyncSourceSpec, WebhookAuth,
 };
 pub use ui_schema::{UiSchemaField, UiSchemaGroup, UiSchemaSpec};
+pub use widget_output::{
+    map_defaults, widget_gaps, MapDefaults, WidgetOutput, WidgetRoles, WidgetSource,
+};
 
 /// `kind: Organization` as a whole manifest.
 pub type Organization = crate::envelope::ResourceEnvelope<OrganizationSpec>;

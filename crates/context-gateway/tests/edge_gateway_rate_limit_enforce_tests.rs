@@ -54,6 +54,7 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         deprecation: None,
         feeds: Vec::new(),
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: Vec::new(),

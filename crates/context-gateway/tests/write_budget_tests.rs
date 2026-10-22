@@ -85,6 +85,7 @@ fn endpoint() -> Endpoint {
         deprecation: None,
         feeds: Vec::new(),
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),
