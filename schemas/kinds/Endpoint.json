@@ -2321,6 +2321,17 @@
           "default": {},
           "description": "The roles: which attribute the map reads for each."
         },
+        "table": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WidgetTable"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the table starts; absent: the model's `view_*` annotations (EP-164)."
+        },
         "type": {
           "description": "The model class, by its local name (`Event`).",
           "type": "string"
@@ -2329,6 +2340,43 @@
       "required": [
         "type"
       ],
+      "type": "object"
+    },
+    "WidgetTable": {
+      "additionalProperties": false,
+      "description": "The table defaults of a class (EP-164): what the reader sees first and can remove.",
+      "properties": {
+        "columns": {
+          "description": "The columns shown, in order; 1 to 30, each once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "filter": {
+          "description": "The default filter, an NGSI-LD `q` whose dates may be `today`, `today+7d`, `today-1d`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orderBy": {
+          "description": "The default order: one attribute, `;desc` for descending (`startDate`, `name;desc`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageLength": {
+          "description": "Rows per page: 10, 20, 50 or 100.",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     }
   },
