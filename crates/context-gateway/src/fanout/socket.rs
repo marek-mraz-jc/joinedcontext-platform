@@ -361,6 +361,11 @@ async fn run(
     loop {
         let frame = tokio::select! {
             frame = from_broker.next() => frame,
+            // A first filter on a hub whose table is due: read it now (T-5182).
+            () = hub.snapshot_wanted(), if *started => {
+                read_if_wanted(gateway, hub, headers);
+                continue;
+            }
             _ = tick.tick() => {
                 // The reload rechecks at once (Hubs::recheck); this tick catches a connection
                 // that joined on the old table while the reload ran.
@@ -414,11 +419,7 @@ async fn run(
                     ("up", 200..=299) => {
                         *started = true;
                         hub.live();
-                        tokio::spawn(snapshot(
-                            Arc::clone(gateway),
-                            Arc::clone(hub),
-                            headers.clone(),
-                        ));
+                        read_if_wanted(gateway, hub, headers);
                     }
                     ("resume", _) => {
                         // The broker no longer holds our place: subscribe again, read again,
@@ -429,11 +430,7 @@ async fn run(
                         if to_broker.send(Message::text(again)).await.is_err() {
                             return None;
                         }
-                        tokio::spawn(snapshot(
-                            Arc::clone(gateway),
-                            Arc::clone(hub),
-                            headers.clone(),
-                        ));
+                        read_if_wanted(gateway, hub, headers);
                     }
                     (id, status) => {
                         tracing::warn!(slug = %hub.slug, id, status, ?body, "the broker refused the fan-out subscription");
@@ -465,11 +462,7 @@ async fn run(
             }
             "x-gap" => {
                 hub.gap();
-                tokio::spawn(snapshot(
-                    Arc::clone(gateway),
-                    Arc::clone(hub),
-                    headers.clone(),
-                ));
+                read_if_wanted(gateway, hub, headers);
             }
             "x-closing" => return lost(hub, &name, &token, seq),
             _ => {}
@@ -491,8 +484,28 @@ fn text_of(metadata: &Map<String, Value>, key: &str) -> String {
         .to_owned()
 }
 
-/// Reads the view's entities once, page by page, into the table (ADR-N-049 §2.2).
+/// Snapshots read at once across every hub: a sweep that subscribes on many Endpoints at once
+/// would otherwise hold a page of each in memory together (T-5182).
+const SNAPSHOTS: usize = 2;
+
+/// Starts [`snapshot`] when the hub's table is due and a filter needs it.
+fn read_if_wanted(gateway: &Arc<Gateway>, hub: &Arc<Hub>, headers: &HeaderMap) {
+    if hub.snapshot_now() {
+        tokio::spawn(snapshot(
+            Arc::clone(gateway),
+            Arc::clone(hub),
+            headers.clone(),
+        ));
+    }
+}
+
+/// Reads the view's entities once, page by page, into the table (ADR-N-049 §2.2), at most
+/// [`SNAPSHOTS`] hubs at a time.
 async fn snapshot(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
+    static TURNS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(SNAPSHOTS);
+    let Ok(_turn) = TURNS.acquire().await else {
+        return;
+    };
     let mut offset = 0;
     while offset < bound() {
         let mut headers = headers.clone();

@@ -9,7 +9,7 @@ use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::Request;
 use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -233,12 +233,17 @@ async fn paged_view(
     if seen as u64 > wanted || held > MAX_COLLECTED {
         return Err(Box::new(too_large()));
     }
-    let mut pages = stream::iter(further).map(read).buffered(PARALLEL_PAGES);
+    // Read ahead as bytes and parsed one at a time as each joins the table (T-5182).
+    let ahead = |target: String| {
+        let headers = &headers;
+        async move { view_bytes(gateway, slug, view, &target, headers).await }
+    };
+    let mut pages = stream::iter(further).map(ahead).buffered(PARALLEL_PAGES);
     while let Some(page) = pages.next().await {
-        let (page, narrowed_page, bytes, _) = page?;
+        let (bytes, narrowed_page, _) = page?;
         restricted |= narrowed_page;
-        held += bytes as u64;
-        table.append(&in_window(page, window, &mut seen));
+        held += bytes.len() as u64;
+        table.append(&in_window(parse_page(&bytes)?, window, &mut seen));
         if seen as u64 > wanted || held > MAX_COLLECTED {
             return Err(Box::new(too_large()));
         }
@@ -318,6 +323,19 @@ pub(super) async fn view_page(
     target: &str,
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
+    let (bytes, restricted, total) = view_bytes(gateway, slug, view, target, headers).await?;
+    Ok((parse_page(&bytes)?, restricted, bytes.len(), total))
+}
+
+/// [`view_page`] unparsed: a download holds the pages it reads ahead as JSON, about a fifteenth of
+/// their parsed form, and parses each as it joins the table (T-5182).
+async fn view_bytes(
+    gateway: &Gateway,
+    slug: &str,
+    view: &str,
+    target: &str,
+    headers: &HeaderMap,
+) -> Result<(Bytes, bool, Option<u64>), Box<Response<Body>>> {
     // An entity array is read here, whatever the caller accepts: asked with its geo+json, the
     // view answers a FeatureCollection that reads as no entity (T-4111, T-4106).
     let mut headers = headers.clone();
@@ -344,7 +362,7 @@ pub(super) async fn view_page(
         .await
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
     if parts.status == StatusCode::NOT_FOUND && names_no_tenant(&bytes) {
-        return Ok((Vec::new(), false, 0, Some(0)));
+        return Ok((Bytes::new(), false, Some(0)));
     }
     if parts.status == StatusCode::FORBIDDEN {
         // The broker's resource ceiling (CIM 009 TooManyResults) is no refusal by a Policy: the
@@ -357,14 +375,21 @@ pub(super) async fn view_page(
     if !parts.status.is_success() {
         return Err(broker_failed(slug, parts.status, Body::from(bytes)).await);
     }
-    let page: Value = serde_json::from_slice(&bytes)
+    Ok((bytes, restricted, total))
+}
+
+/// The entities of a page [`view_bytes`] read: an array, a single entity, or none.
+fn parse_page(bytes: &[u8]) -> Result<Vec<Value>, Box<Response<Body>>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let page: Value = serde_json::from_slice(bytes)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    let page = match page {
+    Ok(match page {
         Value::Array(entities) => entities,
         entity if entity.is_object() => vec![entity],
         _ => Vec::new(),
-    };
-    Ok((page, restricted, bytes.len(), total))
+    })
 }
 
 /// Whether a broker answer is CIM 009's TooManyResults.
