@@ -128,10 +128,15 @@ pub async fn follow(url: String, token: Option<Arc<WorkloadToken>>) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        let counts = take();
-        if !counts.is_empty() && !post(&client, &url, token.as_deref(), &counts).await {
-            restore(counts);
-        }
+        flush(&client, &url, token.as_deref()).await;
+    }
+}
+
+/// Posts everything counted since the last flush; what the Portal did not take is kept.
+async fn flush(client: &reqwest::Client, url: &str, token: Option<&WorkloadToken>) {
+    let counts = take();
+    if !counts.is_empty() && !post(client, url, token, &counts).await {
+        restore(counts);
     }
 }
 
@@ -196,8 +201,8 @@ mod tests {
     }
 
     /// One test drives the process-wide tally, so the steps cannot race each other.
-    #[test]
-    fn answered_calls_are_counted_refused_ones_are_not_and_a_failed_post_is_kept() {
+    #[tokio::test]
+    async fn answered_calls_are_counted_refused_ones_are_not_and_a_failed_post_is_kept() {
         let mine = |counts: Vec<Count>| -> Vec<Count> {
             counts
                 .into_iter()
@@ -238,6 +243,31 @@ mod tests {
                 line("websocket", 1)
             ]
         );
+
+        // A flush the Portal refuses keeps the counts; one it takes empties the tally.
+        let app = axum::Router::new()
+            .route(
+                "/ok",
+                axum::routing::post(|| async { axum::http::StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/down",
+                axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::new();
+        count("usage-test", data, 200);
+        flush(&client, &format!("http://{addr}/down"), None).await;
+        flush(&client, "http://127.0.0.1:1/none", None).await;
+        count("usage-test", data, 200);
+        assert_eq!(mine(take()), vec![line("ngsi-ld", 2)]);
+        count("usage-test", data, 200);
+        flush(&client, &format!("http://{addr}/ok"), None).await;
+        assert_eq!(mine(take()), Vec::new());
     }
 
     #[test]
