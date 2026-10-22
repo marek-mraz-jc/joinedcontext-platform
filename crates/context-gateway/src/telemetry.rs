@@ -140,6 +140,7 @@ pub async fn record(request: Request, next: Next) -> axum::response::Response {
     let response = next.run(request).await;
     let seconds = started.elapsed().as_secs_f64();
 
+    crate::usage::count(&endpoint, &route, response.status().as_u16());
     metrics::counter!(
         REQUESTS,
         "route" => route.clone(),
