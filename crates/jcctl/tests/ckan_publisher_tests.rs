@@ -5,7 +5,7 @@ use jc_core::kinds::ckan::CkanInstanceSpec;
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     missing_linkml, package, publish, withdraw, CkanApi, InMemoryCkan, Outcome, PublishError,
-    Settings, EXAMPLE_TYPE, GENERATOR, SERVED_TYPES,
+    Settings, EXAMPLE_TYPE, GENERATOR, MAX_EXTRA_BYTES, SERVED_TYPES,
 };
 use serde_json::{json, Value};
 
@@ -1119,6 +1119,66 @@ fn each_source_carries_its_title_from_the_catalogue_block() {
         .filter(|e| e["key"] == "source")
         .collect();
     assert_eq!(keys.len(), 1, "one source extra");
+}
+
+/// The sources of a catalogue block as YAML, `n` of them, each with a long description.
+fn many_sources(n: usize) -> String {
+    let mut block = format!("{PUBLISH}  catalog:\n    source:\n");
+    for i in 0..n {
+        block += &format!(
+            "      - url: https://www.obec-{i}.sk/zivot-v-obci/kalendar-podujati/\n        \
+             title: {{ sk: \"Obec {i}, obec-{i}.sk\" }}\n        \
+             description: {{ sk: \"Podujatia zo stránky https://www.obec-{i}.sk/zivot-v-obci/kalendar-podujati/; \
+             licencia neuvedená, preberáme len fakty (názov, čas, miesto, odkaz).\" }}\n"
+        );
+    }
+    block
+}
+
+fn sources_of(n: usize) -> Vec<Value> {
+    let dataset = package(
+        &endpoint("[ngsi-ld, csv]", &many_sources(n)),
+        &instance(),
+        &catalogued_record(),
+        &Settings::new("data.example.org").in_language("sk"),
+    )
+    .expect("the endpoint publishes")
+    .expect("a dataset");
+    let text = extra(&dataset, "source").expect("a source extra");
+    assert!(text.len() <= MAX_EXTRA_BYTES, "{} bytes", text.len());
+    serde_json::from_str(text).expect("JSON")
+}
+
+/// T-5215: CKAN's Solr refuses an extra over 32,766 bytes and with it the whole dataset, so the
+/// 246 sources of slovensko-podujatia (62 KB) never reached the catalogue. A long list drops the
+/// descriptions first, which the catalogue page does not show, then the sources past the cap.
+#[test]
+fn a_long_source_list_stays_under_the_catalogues_term_limit() {
+    let few = sources_of(3);
+    assert_eq!(few.len(), 3);
+    assert!(
+        few.iter().all(|s| s.get("description").is_some()),
+        "{few:?}"
+    );
+
+    let national = sources_of(246);
+    assert_eq!(national.len(), 246, "every source, without descriptions");
+    assert!(national.iter().all(|s| s.get("description").is_none()));
+    assert_eq!(
+        national[245]["url"],
+        "https://www.obec-245.sk/zivot-v-obci/kalendar-podujati/"
+    );
+
+    let huge = sources_of(1000);
+    assert!(
+        huge.len() > 246 && huge.len() < 1000,
+        "{} sources",
+        huge.len()
+    );
+    assert_eq!(
+        huge[0]["title"], "Obec 0, obec-0.sk",
+        "the first sources stay, in order"
+    );
 }
 
 /// EP-63, EP-78: CKAN harvests the catalogue block, field for field, in the space's language.
