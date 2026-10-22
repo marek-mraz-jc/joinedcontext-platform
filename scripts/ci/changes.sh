@@ -8,8 +8,9 @@
 #   git diff --name-only "$base" HEAD | sh scripts/ci/changes.sh -
 #   sh scripts/ci/changes.sh --selftest
 #
-# rust runs for every path except docs/, the top-level *.md and tools/model-tools/, so a new
-# folder is covered by default; the widget's files are compiled into the assistant crate
+# rust runs for every path except docs/ and the top-level *.md, so a new folder is covered by
+# default; tools/model-tools/ runs it too, since jc-core and the gateway compile files from there
+# (include_bytes!/include_str!); the widget's files are compiled into the assistant crate
 # (include_str!), so a widget change runs both. model-tools runs for its own folder, the committed
 # DataModels and the crates its `jcctl model diff` and jc-manifest test build from.
 set -eu
@@ -32,7 +33,7 @@ classify() {
         models=true ;;
     esac
     case $f in
-      docs/* | tools/model-tools/*) ;;
+      docs/*) ;;
       */*) rust=true ;;
       *.md) ;;
       *) rust=true ;;
@@ -56,7 +57,9 @@ selftest() {
   check "rust only" 'crates/context-gateway/src/lib.rs\n' "rust=true model-tools=false pipelines=false widget=false "
   check "jcctl" 'crates/jcctl/src/main.rs\n' "rust=true model-tools=true pipelines=false widget=false "
   check "lock" 'Cargo.lock\n' "rust=true model-tools=true pipelines=false widget=false "
-  check "model tools only" 'tools/model-tools/src/service.py\n' "rust=false model-tools=true pipelines=false widget=false "
+  check "model tools only" 'tools/model-tools/src/service.py\n' "rust=true model-tools=true pipelines=false widget=false "
+  check "a file jc-core includes" 'tools/model-tools/models/unece-rec20.json\n' "rust=true model-tools=true pipelines=false widget=false "
+  check "a file the gateway includes" 'tools/model-tools/src/compile_mapping_ir.py\n' "rust=true model-tools=true pipelines=false widget=false "
   check "a committed model" 'examples/datamodels/x/model.linkml.yaml\n' "rust=true model-tools=true pipelines=false widget=false "
   check "a pipeline example" 'examples/ingestion/gtfs-rt/bento.yaml\n' "rust=true model-tools=false pipelines=true widget=false "
   check "the widget" 'crates/assistant/widget/widget.js\n' "rust=true model-tools=false pipelines=false widget=true "
