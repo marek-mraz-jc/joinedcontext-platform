@@ -88,6 +88,7 @@ fn endpoint(quality: Vec<QualityRule>) -> Endpoint {
             .into(),
         ),
         catalog: None,
+        deprecation: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

@@ -118,6 +118,7 @@ fn endpoint() -> Endpoint {
     Endpoint {
         declared_types: None,
         catalog: None,
+        deprecation: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

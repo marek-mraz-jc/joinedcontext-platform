@@ -627,6 +627,7 @@ mod tests {
             projection: None,
             view_mapping: None,
             catalog: None,
+            deprecation: None,
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),

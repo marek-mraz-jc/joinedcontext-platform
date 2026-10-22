@@ -65,6 +65,7 @@ fn endpoint(slug: &str, space: &str, base_path: String) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         base_path,
         models: vec![Model {
             name: "mesto".to_owned(),

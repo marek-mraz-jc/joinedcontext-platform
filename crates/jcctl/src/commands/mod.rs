@@ -2,6 +2,7 @@
 
 pub mod apply;
 pub mod artifacts;
+pub mod changelog;
 pub mod checkouts;
 pub mod drift;
 pub mod export;

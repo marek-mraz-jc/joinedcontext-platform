@@ -172,6 +172,7 @@ fn endpoint(readable: &[&str]) -> Endpoint {
             .into(),
         ),
         catalog: None,
+        deprecation: None,
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

@@ -16,6 +16,7 @@ pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
 pub mod endpoint;
+pub mod endpoint_deprecation;
 pub mod environment;
 pub mod grid;
 pub mod group;

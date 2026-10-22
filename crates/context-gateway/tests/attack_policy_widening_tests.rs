@@ -136,6 +136,7 @@ fn endpoint() -> Endpoint {
         projection: Some(Arc::new(parsed.spec)),
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

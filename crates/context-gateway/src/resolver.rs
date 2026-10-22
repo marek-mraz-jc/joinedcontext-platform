@@ -157,6 +157,8 @@ pub struct Endpoint {
     /// The manifest's `spec.catalog`, which the DCAT-AP record and the ODRL offer render
     /// (EP-78, EP-79).
     pub catalog: Option<std::sync::Arc<jc_core::kinds::Catalog>>,
+    /// The manifest's `spec.deprecation`, which the answer headers announce (EP-147).
+    pub deprecation: Option<std::sync::Arc<jc_core::kinds::endpoint_deprecation::Deprecation>>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).

@@ -103,6 +103,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         projection: None,
         view_mapping: None,
         catalog: None,
+        deprecation: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
         policy_names: Vec::new(),

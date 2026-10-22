@@ -548,6 +548,10 @@ pub struct EndpointSpec {
     /// The mappings of the domain-standard representations, `ical` first (EP-125, API/02 §8b).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub representations: Option<super::ical_mapping::Representations>,
+    /// A breaking change announced ahead: the gateway answers with `Deprecation` and `Sunset`
+    /// headers until the deprecated part is removed (EP-146, EP-147).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecation: Option<super::endpoint_deprecation::Deprecation>,
 }
 
 /// One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).
@@ -827,6 +831,10 @@ impl EndpointSpec {
 
         if let Some(ref publish) = self.publish {
             publish.validate(&self.served_representations())?;
+        }
+
+        if let Some(ref deprecation) = self.deprecation {
+            deprecation.validate(&self.served_representations())?;
         }
 
         if let Some(ref catalog) = self.catalog {

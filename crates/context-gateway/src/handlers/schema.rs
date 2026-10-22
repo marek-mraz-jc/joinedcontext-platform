@@ -354,6 +354,7 @@ mod visible_tests {
             projection: None,
             view_mapping: None,
             catalog: None,
+            deprecation: None,
             base_path: "/api/endpoint/s".to_owned(),
             models: vec![model(&["AirQualityObserved", "Vehicle"])],
             policy_names: Vec::new(),

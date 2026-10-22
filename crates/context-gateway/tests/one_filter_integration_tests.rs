@@ -143,6 +143,7 @@ impl Shape {
             models: Vec::new(),
             view_mapping: None,
             catalog: None,
+            deprecation: None,
             policy_names: Vec::new(),
             policies: vec![self.policy()],
         }

@@ -590,6 +590,48 @@
         }
       ]
     },
+    "Deprecation": {
+      "additionalProperties": false,
+      "description": "A breaking change of a public Endpoint, announced ahead (EP-146).",
+      "properties": {
+        "attributes": {
+          "description": "Only these attributes are deprecated.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "link": {
+          "description": "A public `https` page about the change and its replacement.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "representations": {
+          "description": "Only these surfaces are deprecated; empty, the whole Endpoint.",
+          "items": {
+            "$ref": "#/definitions/Representation"
+          },
+          "type": "array"
+        },
+        "since": {
+          "description": "The day the deprecation was announced, `YYYY-MM-DD`.",
+          "format": "date",
+          "type": "string"
+        },
+        "sunset": {
+          "description": "The earliest day the deprecated part may stop answering, at least 90 days after `since`.",
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "since",
+        "sunset"
+      ],
+      "type": "object"
+    },
     "Display": {
       "additionalProperties": false,
       "description": "An override of the model's display order for one type: an Endpoint's `spec.display` entry or a visualization's `fields` (EP-135). Either list empty leaves that part to the model.",
@@ -701,6 +743,17 @@
             }
           ],
           "description": "How the Endpoint takes new entities: minted ids and a daily cap (EP-97)."
+        },
+        "deprecation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Deprecation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A breaking change announced ahead: the gateway answers with `Deprecation` and `Sunset` headers until the deprecated part is removed (EP-146, EP-147)."
         },
         "disabledRepresentations": {
           "description": "Representations an Endpoint without `enabledRepresentations` does not serve (EP-104).",

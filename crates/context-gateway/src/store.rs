@@ -713,6 +713,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             projection,
             base_path: format!("/api/endpoint/{}", spec.slug),
             catalog,
+            deprecation: spec.deprecation.clone().map(Arc::new),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
                     view.namespace
@@ -907,6 +908,7 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
                 // decision of a published endpoint (SP-01, EP-54).
                 view_mapping: None,
                 catalog: None,
+                deprecation: None,
                 base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),

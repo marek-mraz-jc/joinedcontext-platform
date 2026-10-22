@@ -143,6 +143,7 @@ fn endpoint(view: Option<ViewMapping>) -> Endpoint {
         projection: None,
         view_mapping: view.map(Arc::new),
         catalog: None,
+        deprecation: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: Vec::new(),
         policy_names: Vec::new(),
