@@ -5,7 +5,7 @@ assistant | 4 | 12
 context-gateway | 16 | 15
 jc-app-sdk | 0 | 1
 jc-core | 16 | 18
-jc-dcat | 0 | 1
+jc-dcat | 0 | 0
 jc-manifest | 5 | 0
 jcctl | 8 | 10
 token-sidecar | 0 | 1
