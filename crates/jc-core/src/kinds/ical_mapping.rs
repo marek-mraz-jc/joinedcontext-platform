@@ -171,14 +171,6 @@ impl IcalOutput {
         }
     }
 
-    #[cfg(test)]
-    fn renamed(self, name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            ..self
-        }
-    }
-
     /// Gaps the output has whatever the model, one sentence each, starting with
     /// `` `ical` output `name` ``.
     pub fn shape_gaps(&self) -> Vec<String> {
@@ -1378,12 +1370,12 @@ mod tests {
 
     #[test]
     fn outputs_are_checked_by_count_name_and_members() {
-        let one = |name: &str| {
-            IcalOutput::legacy(IcalMapping {
+        let one = |name: &str| IcalOutput {
+            name: name.to_owned(),
+            ..IcalOutput::legacy(IcalMapping {
                 entity_type: "CouncilMeeting".into(),
                 ..IcalMapping::default()
             })
-            .renamed(name)
         };
         assert_eq!(outputs_gaps(&[one("a"), one("b")]), Vec::<String>::new());
         assert_eq!(
