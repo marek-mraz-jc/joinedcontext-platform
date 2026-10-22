@@ -228,6 +228,8 @@ pub struct Hub {
     /// The Endpoint's slug, which is its broker view's id.
     pub slug: String,
     state: Mutex<State>,
+    /// Woken by the first filter of a hub whose table is due, so the upstream reads it then.
+    wanted: tokio::sync::Notify,
 }
 
 struct State {
@@ -241,6 +243,9 @@ struct State {
     idle_since: Option<Instant>,
     /// The broker's status and detail while it refuses the upstream subscription.
     refused: Option<(u16, String)>,
+    /// The table is to be read from the view before it judges a change: never read, lost by a
+    /// gap, or dropped with the last filter.
+    due: bool,
 }
 
 impl Hub {
@@ -258,7 +263,9 @@ impl Hub {
                 closed: HashMap::new(),
                 idle_since: Some(Instant::now()),
                 refused: None,
+                due: true,
             }),
+            wanted: tokio::sync::Notify::new(),
         }
     }
 
@@ -302,6 +309,7 @@ impl Hub {
         for sub in conn.subs.values() {
             state.index.remove(sub.filter);
         }
+        state.forget_unwatched();
         let now = Instant::now();
         state
             .closed
@@ -330,6 +338,7 @@ impl Hub {
                 state.index.remove(sub.filter);
             }
         }
+        state.forget_unwatched();
         if state.conns.is_empty() && state.idle_since.is_none() {
             state.idle_since = Some(Instant::now());
         }
@@ -427,6 +436,9 @@ impl Hub {
                     .collect()
             });
         state.index.insert(filter_id, filter);
+        if state.due {
+            self.wanted.notify_one();
+        }
         c.subs.insert(
             n,
             Sub {
@@ -466,6 +478,7 @@ impl Hub {
         if let Some(sub) = c.subs.remove(&n) {
             state.index.remove(sub.filter);
         }
+        state.forget_unwatched();
         Answer {
             status: 204,
             body: None,
@@ -513,6 +526,7 @@ impl Hub {
                 }
             }
         }
+        state.forget_unwatched();
         gone
     }
 
@@ -527,9 +541,26 @@ impl Hub {
             return;
         };
         let mut state = self.state();
-        if !state.table.contains_key(&id) {
+        if !state.index.is_empty() && !state.table.contains_key(&id) {
             state.keep(id, entity);
         }
+    }
+
+    /// Whether the upstream reads the table now: it is due and a filter needs it (T-5182). A hub
+    /// whose clients only connect holds no table: a sweep that opens and closes `/ws` on every
+    /// Endpoint seeded one per Endpoint and took the gateway past 1 GiB.
+    pub fn snapshot_now(&self) -> bool {
+        let mut state = self.state();
+        let now = state.due && !state.index.is_empty();
+        if now {
+            state.due = false;
+        }
+        now
+    }
+
+    /// Resolves when a filter arrives on a hub whose table is due.
+    pub async fn snapshot_wanted(&self) {
+        self.wanted.notified().await;
     }
 
     /// The broker refused the upstream subscription with `status`: every connection ends, and
@@ -549,7 +580,9 @@ impl Hub {
 
     /// The upstream lost its place: every connection is told to read again.
     pub fn gap(&self) {
-        for conn in self.state().conns.values() {
+        let mut state = self.state();
+        state.due = true;
+        for conn in state.conns.values() {
             conn.queue.push(Out::Gap);
         }
     }
@@ -568,6 +601,10 @@ impl Hub {
         };
         let mut state = self.state();
         let state = &mut *state;
+        // No filter, nothing to judge: the table waits for the first one and its snapshot.
+        if state.index.is_empty() {
+            return;
+        }
         let previous = if entity.get("deletedAt").is_some() {
             // An entity that left sends nothing: that message would reveal a hidden change.
             state.table.remove(&id);
@@ -615,6 +652,17 @@ impl Hub {
 }
 
 impl State {
+    /// Drops the table once no filter is left: nothing judges a change against it, and the next
+    /// filter reads it again (T-5182).
+    fn forget_unwatched(&mut self) {
+        if self.index.is_empty() {
+            if !self.table.is_empty() {
+                self.table = HashMap::new();
+            }
+            self.due = true;
+        }
+    }
+
     /// Keeps `entity` as the latest of its id, evicting the least recently changed beyond the
     /// bound; answers the state it replaces.
     fn keep(&mut self, id: String, entity: Value) -> Option<Value> {
@@ -933,6 +981,8 @@ mod tests {
     #[test]
     fn the_table_is_bounded_and_a_deleted_entity_leaves_it() {
         let hub = Hub::new("s", 100);
+        let (conn, _) = open(&hub);
+        subscribe(&hub, conn, json!({}));
         for n in 0..150 {
             hub.seed(bus(&format!("urn:ngsi-ld:Vehicle:{n}"), 1.0, "x"));
         }
@@ -942,6 +992,27 @@ mod tests {
         let before = hub.entities();
         hub.apply(gone, chrono::Utc::now());
         assert_eq!(hub.entities(), before - 1);
+    }
+
+    #[test]
+    fn a_hub_without_a_filter_holds_no_table() {
+        let hub = Hub::new("s", 100);
+        let (conn, _) = open(&hub);
+        hub.apply(bus("urn:ngsi-ld:Vehicle:1", 1.0, "x"), chrono::Utc::now());
+        hub.seed(bus("urn:ngsi-ld:Vehicle:2", 1.0, "x"));
+        assert_eq!(hub.entities(), 0);
+        assert!(!hub.snapshot_now(), "no filter, no snapshot");
+        let id = subscribe(&hub, conn, json!({}));
+        assert!(hub.snapshot_now(), "the first filter reads the table");
+        assert!(!hub.snapshot_now(), "once");
+        hub.seed(bus("urn:ngsi-ld:Vehicle:2", 1.0, "x"));
+        assert_eq!(hub.entities(), 1);
+        assert_eq!(hub.unsubscribe(conn, &id).status, 204);
+        assert_eq!(hub.entities(), 0, "the last filter took the table with it");
+        subscribe(&hub, conn, json!({}));
+        assert!(hub.snapshot_now(), "the next filter reads it again");
+        hub.gap();
+        assert!(hub.snapshot_now(), "a gap reads it again");
     }
 
     #[test]
