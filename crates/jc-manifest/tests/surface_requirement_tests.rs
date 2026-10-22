@@ -141,7 +141,19 @@ fn surface_findings(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-const ICAL: &str = "  enabledRepresentations: [ngsi-ld, ical]\n";
+const ICAL: &str = "  enabledRepresentations: [ngsi-ld, ical]\n  representations:\n    ical:\n      - { name: vsetky, sources: [{ type: Event, preset: sdm-event }] }\n";
+
+#[test]
+fn ical_listed_without_an_output_serves_no_calendar_and_needs_no_model() {
+    // owner 2026-10-22T09:25Z: the output list is empty by default (EP-159)
+    let dir = repo_with(
+        "no-output",
+        None,
+        "  enabledRepresentations: [ngsi-ld, ical]\n",
+    );
+    assert_eq!(surface_findings(&dir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[test]
 fn the_sdm_event_with_its_mandatory_attributes_required_is_accepted() {
@@ -156,7 +168,7 @@ fn a_model_without_event_is_refused_and_the_type_named() {
     let dir = repo_with("no-event", Some(&model), ICAL);
     assert_eq!(
         surface_findings(&dir),
-        ["Endpoint city/calendar, space events: `ical` maps the type Event, which the data model does not have (EP-125)"]
+        ["Endpoint city/calendar, space events: `ical` output `vsetky` maps the type Event, which the data model does not have (EP-125)"]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -170,7 +182,7 @@ fn an_event_whose_start_date_is_not_required_is_refused_and_only_that_attribute_
     let dir = repo_with("optional-start", Some(&model), ICAL);
     assert_eq!(
         surface_findings(&dir),
-        ["Endpoint city/calendar, space events: `ical` maps DTSTART to `startDate`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)"]
+        ["Endpoint city/calendar, space events: `ical` output `vsetky` maps DTSTART to `startDate`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)"]
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -272,12 +284,17 @@ fn a_display_is_checked_against_the_projection_not_the_whole_model() {
 const DOCS_MAPPING: &str = "  enabledRepresentations: [ngsi-ld, ical]
   representations:
     ical:
-      type: Event
-      preset: sdm-event
-      mapping:
-        LOCATION: { join: [address.streetAddress, address.addressLocality], separator: \", \" }
-        SUMMARY: { attribute: name, language: sk, truncate: 200 }
-        DTEND: { attribute: endDate, date: date, endInclusive: true }
+      - name: vsetky
+        title: { sk: Všetky podujatia, en: All events }
+        lang: sk
+        timezone: Europe/Bratislava
+        sources:
+          - type: Event
+            preset: sdm-event
+            mapping:
+              LOCATION: { join: [address.streetAddress, address.addressLocality], separator: \", \" }
+              SUMMARY: { attribute: name, language: sk, truncate: 200 }
+              DTEND: { attribute: endDate, date: date, endInclusive: true }
 ";
 
 #[test]
@@ -298,8 +315,8 @@ fn the_documented_mapping_validates_and_each_gap_is_one_finding() {
     assert_eq!(
         surface_findings(&dir),
         [
-            "Endpoint city/calendar, space events: `ical` maps DTEND to `url`, range uri; DTEND takes date or datetime (EP-125)",
-            "Endpoint city/calendar, space events: `ical` maps SUMMARY to `description`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)",
+            "Endpoint city/calendar, space events: `ical` output `vsetky` maps DTEND to `url`, range uri; DTEND takes date or datetime (EP-125)",
+            "Endpoint city/calendar, space events: `ical` output `vsetky` maps SUMMARY to `description`, which is not a required attribute of Event: mark it required or end a firstOf with a required one (EP-125)",
         ]
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -371,5 +388,30 @@ fn a_published_model_wins_over_a_draft_of_the_next_version() {
          version: 2.0.0\n  lifecycle: draft\n",
     );
     assert_eq!(surface_findings(&dir), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// API/11 EP-157 (T-5217): `jcctl validate` refuses an output filter the broker would not parse,
+/// at the Endpoint's file, naming the format, the output and the member.
+#[test]
+fn an_output_filter_that_does_not_parse_is_refused_at_the_endpoint() {
+    let dir = repo_with(
+        "bad-filter",
+        None,
+        "  enabledRepresentations: [ngsi-ld, ical]\n  representations:\n    ical:\n      - { name: sport, filter: { q: 'eventCategory==\"sport\"))' }, sources: [{ type: Event, preset: sdm-event }] }\n",
+    );
+    let refused: Vec<String> = validate::run(&dir)
+        .findings
+        .into_iter()
+        .filter(|f| f.path == Path::new(ENDPOINT_PATH))
+        .map(|f| f.message)
+        .collect();
+    assert!(
+        refused
+            .iter()
+            .any(|m| m.contains("spec.representations.ical")
+                && m.contains("`ical` output `sport`: `filter.q` is no NGSI-LD query")),
+        "{refused:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -561,6 +561,7 @@ fn endpoint(base_path: String) -> Endpoint {
             "name: news\nsources: [{ type: Device, preset: generic }]\n",
         )
         .expect("the feed output parses")],
+        calendars: Vec::new(),
         policy_names: vec!["readers".to_owned()],
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],
