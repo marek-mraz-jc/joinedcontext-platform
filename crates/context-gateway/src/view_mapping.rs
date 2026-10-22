@@ -45,3 +45,25 @@ impl ViewMapping {
         Ok(Self { version })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::IR_VERSION;
+
+    /// T-5207 (API/11 EP-160): Model Tools writes the IR version this gateway serves; a bump in
+    /// one without the other fails here, not on a live Endpoint.
+    #[test]
+    fn model_tools_writes_the_ir_version_the_gateway_serves() {
+        let source = include_str!("../../../tools/model-tools/src/compile_mapping_ir.py");
+        let written: Vec<u64> = source
+            .lines()
+            .filter_map(|l| l.strip_prefix("IR_VERSION = "))
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        assert_eq!(
+            written,
+            vec![IR_VERSION],
+            "compile_mapping_ir.py IR_VERSION"
+        );
+    }
+}

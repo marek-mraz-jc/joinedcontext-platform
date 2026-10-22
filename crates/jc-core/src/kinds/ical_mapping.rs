@@ -24,6 +24,9 @@ pub struct Representations {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct IcalMapping {
+    /// The contract version (API/11 EP-152); `1` when absent, the one version the broker reads.
+    #[serde(default = "first_version", skip_serializing_if = "is_first_version")]
+    pub version: u64,
     /// The NGSI-LD type the feed maps.
     #[serde(rename = "type", default = "event")]
     pub entity_type: String,
@@ -39,9 +42,21 @@ fn event() -> String {
     "Event".to_owned()
 }
 
+/// The `ical` contract version this platform writes and the broker reads (API/11 EP-152).
+pub const ICAL_MAPPING_VERSION: u64 = 1;
+
+fn first_version() -> u64 {
+    ICAL_MAPPING_VERSION
+}
+
+fn is_first_version(v: &u64) -> bool {
+    *v == ICAL_MAPPING_VERSION
+}
+
 impl Default for IcalMapping {
     fn default() -> Self {
         Self {
+            version: ICAL_MAPPING_VERSION,
             entity_type: event(),
             preset: None,
             mapping: BTreeMap::new(),
@@ -424,6 +439,12 @@ impl IcalMapping {
     /// `` `ical` ``. Empty when the mapping is well formed.
     pub fn shape_gaps(&self) -> Vec<String> {
         let mut gaps = Vec::new();
+        if self.version != ICAL_MAPPING_VERSION {
+            gaps.push(format!(
+                "`ical` is version {}, and this platform writes version {ICAL_MAPPING_VERSION}",
+                self.version
+            ));
+        }
         if !is_name(&self.entity_type) {
             gaps.push(format!(
                 "`ical` names the type `{}`, which is not an NGSI-LD type name",
