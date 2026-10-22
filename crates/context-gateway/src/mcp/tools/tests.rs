@@ -297,6 +297,7 @@ fn a_tool_that_writes_at_all_is_not_read_only() {
 
 /// The broker's read tools (Antares `docs/src/mcp.md` section 2).
 const READS: &[&str] = &[
+    "area_overview",
     "batch_query",
     "batch_query_temporal",
     "get_attribute",
@@ -323,6 +324,17 @@ const READS: &[&str] = &[
 fn every_tool_is_the_broker_s_with_the_broker_s_arguments() {
     let pinned: &[(&str, &[&str])] = &[
         ("append_attributes", &["id", "attributes", "noOverwrite"]),
+        (
+            "area_overview",
+            &[
+                "geometry",
+                "coordinates",
+                "maxDistance",
+                "type",
+                "limit",
+                "lang",
+            ],
+        ),
         ("batch_create", &["entities"]),
         ("batch_delete", &["ids"]),
         ("batch_merge", &["entities"]),
