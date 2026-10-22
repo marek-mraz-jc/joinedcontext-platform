@@ -116,46 +116,51 @@ pub fn restore(counts: Vec<Count>) {
 /// Posts the counts every [`INTERVAL`] with the gateway's own token (PF-46). A post the Portal
 /// did not take is kept for the next one; a count is sent at most once when the Portal answers.
 pub async fn follow(url: String, token: Option<Arc<WorkloadToken>>) {
-    let client = match reqwest::Client::builder()
+    let built = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(%error, "no HTTP client for the usage counts");
-            return;
-        }
+        .build();
+    let Ok(client) =
+        built.inspect_err(|error| tracing::error!(%error, "no HTTP client for the usage counts"))
+    else {
+        return;
     };
-    let mut ticker = tokio::time::interval(INTERVAL);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    ticker.tick().await;
     loop {
         ticker.tick().await;
         let counts = take();
-        if counts.is_empty() {
-            continue;
+        if !counts.is_empty() && !post(&client, &url, token.as_deref(), &counts).await {
+            restore(counts);
         }
-        let mut request = client.post(&url).json(&Post { counts: &counts });
-        if let Some(token) = token.as_ref() {
-            match token.get().await {
-                Ok(bearer) => request = request.bearer_auth(bearer),
-                Err(error) => {
-                    tracing::warn!(%error, "no token for the Portal's usage counts");
-                    restore(counts);
-                    continue;
-                }
-            }
-        }
-        match request.send().await {
-            Ok(response) if response.status().is_success() => {}
-            Ok(response) => {
-                tracing::warn!(status = %response.status(), "the Portal did not take the usage counts");
-                restore(counts);
-            }
+    }
+}
+
+/// One post of `counts`; true when the Portal took them.
+async fn post(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&WorkloadToken>,
+    counts: &[Count],
+) -> bool {
+    let mut request = client.post(url).json(&Post { counts });
+    if let Some(token) = token {
+        match token.get().await {
+            Ok(bearer) => request = request.bearer_auth(bearer),
             Err(error) => {
-                tracing::warn!(%error, "the Portal did not take the usage counts");
-                restore(counts);
+                tracing::warn!(%error, "no token for the Portal's usage counts");
+                return false;
             }
+        }
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "the Portal did not take the usage counts");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the Portal did not take the usage counts");
+            false
         }
     }
 }
@@ -258,5 +263,40 @@ mod tests {
             serde_json::to_value(Post { counts: &counts }).unwrap_or_default(),
             serde_json::json!({"counts": [{"endpoint": "air", "surface": "ogc", "count": 7}]})
         );
+    }
+
+    /// A post the Portal answers 2xx is taken; any other answer or no answer is not.
+    #[tokio::test]
+    async fn a_post_is_taken_only_on_a_success_answer() {
+        use axum::{http::StatusCode, routing::post as route_post, Json, Router};
+        let app = Router::new()
+            .route(
+                "/ok",
+                route_post(|Json(body): Json<serde_json::Value>| async move {
+                    if body["counts"][0]["count"] == 7 {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    }
+                }),
+            )
+            .route(
+                "/down",
+                route_post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::new();
+        let counts = [Count {
+            endpoint: "air".to_owned(),
+            surface: "ogc",
+            count: 7,
+        }];
+        assert!(post(&client, &format!("http://{addr}/ok"), None, &counts).await);
+        assert!(!post(&client, &format!("http://{addr}/down"), None, &counts).await);
+        assert!(!post(&client, "http://127.0.0.1:1/none", None, &counts).await);
     }
 }
