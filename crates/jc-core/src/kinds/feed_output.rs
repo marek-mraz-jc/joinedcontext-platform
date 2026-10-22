@@ -354,8 +354,11 @@ impl FeedOutput {
         gaps
     }
 
-    /// The filter's gaps: each query parsed as the broker parses it, a geo filter whole.
+    /// The filter's gaps, when it has one: each query parsed as the broker parses it, a geo filter whole.
     fn filter_gaps(&self, gaps: &mut Vec<String>) {
+        if self.filter.is_empty() {
+            return;
+        }
         let name = &self.name;
         gaps.extend(
             self.filter
