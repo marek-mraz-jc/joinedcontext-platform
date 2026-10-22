@@ -354,7 +354,7 @@ impl FeedOutput {
         gaps
     }
 
-    /// The filter's gaps, from the one output-filter contract (EP-159), each naming the output.
+    /// The filter's gaps, when it has one: each query parsed as the broker parses it, a geo filter whole.
     fn filter_gaps(&self, gaps: &mut Vec<String>) {
         if self.filter.is_empty() {
             return;
