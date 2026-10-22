@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::accounts_of;
-use context_gateway::mqtt::{brokers_of, decide, internal_router, Brokers, Connect};
+use context_gateway::mqtt::{brokers_of, decide, internal_router, Brokers, Connect, Pods};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use serde_json::{json, Value};
@@ -20,6 +20,8 @@ use tower::ServiceExt;
 
 const CAMERAS: &str = "mqtt-ovzdusie-cameras.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
 const METERS: &str = "mqtt-ovzdusie-meters.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const PROBE: &str = "mqtt-ovzdusie-probe.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const PLAIN: &str = "mqtt-ovzdusie-plain.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
@@ -35,8 +37,9 @@ fn account(dir: &Path, project: &str, name: &str) {
     );
 }
 
-/// Two brokers of `ovzdusie` (cameras, meters), a camera of `espoo` holding a role on the
-/// cameras broker by name, and a DataSource reading the cameras broker.
+/// Two relay brokers of `ovzdusie` (cameras, meters), a capture broker (probe) and an ingest one
+/// (plain), a camera of `espoo` holding a role on the cameras broker by name, and a DataSource
+/// reading the cameras broker.
 fn repository(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("gateway-mqtt-{test}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -48,6 +51,13 @@ fn repository(test: &str) -> PathBuf {
             &dir,
             &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
             &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: relay\n  roles:\n    - name: camera\n      serviceAccounts: {accounts}\n      publish: [\"cameras/${{clientid}}/#\"]\n      subscribe: [\"commands/${{clientid}}/+\"]\n"),
+        );
+    }
+    for (name, mode) in [("probe", "capture"), ("plain", "ingest")] {
+        write(
+            &dir,
+            &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: {mode}\n  roles:\n    - name: sensor\n      serviceAccounts: [cam-north]\n      publish: [\"air/${{clientid}}/pm\", \"air/status\"]\n"),
         );
     }
     write(
@@ -95,7 +105,12 @@ impl Fixture {
             Some(&verifier),
             &self.accounts,
             caller,
-            &RUNNER_PODS.map(|ip| ip.parse().expect("an address")),
+            &Pods {
+                runner: RUNNER_PODS
+                    .map(|ip| ip.parse().expect("an address"))
+                    .to_vec(),
+                portal: vec![PORTAL_POD.parse().expect("an address")],
+            },
             connect,
         );
         serde_json::to_value(answer).expect("serializes")
@@ -119,6 +134,18 @@ fn device(azp: &str, token: String) -> Connect {
 
 /// The addresses the runner's headless Service resolves to in these tests.
 const RUNNER_PODS: [&str; 2] = ["10.42.0.17", "fd00::17"];
+
+/// The address the Portal's headless Service resolves to in these tests.
+const PORTAL_POD: &str = "10.42.0.30";
+
+fn capture(ipaddr: &str) -> Connect {
+    Connect {
+        clientid: "jc-portal-capture-mqtt-ovzdusie-probe".to_owned(),
+        username: "jc-portal-capture".to_owned(),
+        password: String::new(),
+        ipaddr: ipaddr.to_owned(),
+    }
+}
 
 fn runner(ipaddr: &str) -> Connect {
     Connect {
@@ -272,6 +299,47 @@ fn the_runner_subscribes_to_its_data_sources_topics_from_its_own_pods_only() {
     assert_eq!(f.decide(Some(METERS), &runner("10.42.0.17")), deny);
 }
 
+/// ADR-N-048 §2.10: the Portal's capture subscriber connects without a token from a Portal pod,
+/// on a capture broker only, and may subscribe to the publish filters of its roles, each
+/// `${clientid}` level widened; it never publishes and never reads an ingest or relay broker.
+#[test]
+fn the_portal_subscribes_to_a_capture_brokers_publish_filters_only() {
+    let f = Fixture::new("capture");
+    let answer = f.decide(Some(PROBE), &capture(PORTAL_POD));
+    assert_eq!(answer["result"], "allow", "{answer}");
+    assert!(answer.get("expire_at").is_none(), "{answer}");
+    assert_eq!(
+        answer["acl"],
+        json!([
+            {"permission": "allow", "action": "subscribe", "topic": "air/+/pm", "qos": [0, 1]},
+            {"permission": "allow", "action": "subscribe", "topic": "air/status", "qos": [0, 1]}
+        ])
+    );
+    let deny = json!({"result": "deny", "superuser": false});
+    for broker in [PLAIN, CAMERAS, METERS] {
+        assert_eq!(
+            f.decide(Some(broker), &capture(PORTAL_POD)),
+            deny,
+            "{broker}"
+        );
+    }
+    // Only from a Portal pod: a runner pod or any other address is refused under that name,
+    // and the Portal's pods do not pass as the runner.
+    for elsewhere in [
+        RUNNER_PODS[0],
+        "10.42.0.99",
+        "203.0.113.7",
+        "not an address",
+    ] {
+        assert_eq!(
+            f.decide(Some(PROBE), &capture(elsewhere)),
+            deny,
+            "{elsewhere}"
+        );
+    }
+    assert_eq!(f.decide(Some(CAMERAS), &runner(PORTAL_POD)), deny);
+}
+
 /// The route answers on the internal listener's router only, always 200, and never on the
 /// public surface APISIX fronts.
 #[tokio::test]
@@ -302,7 +370,7 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
     };
 
     for (with_identity, result) in [(true, "allow"), (false, "deny")] {
-        let response = internal_router(Arc::clone(&gateway), None)
+        let response = internal_router(Arc::clone(&gateway), None, None)
             .oneshot(request(with_identity))
             .await
             .expect("answers");
@@ -339,7 +407,7 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
     gateway.replace_brokers(f.brokers.clone());
     let gateway = Arc::new(gateway);
     let ask = |host: Option<&str>, ipaddr: &str| {
-        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned));
+        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned), None);
         let body = json!({
             "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner",
             "password": "", "ipaddr": ipaddr
