@@ -90,6 +90,7 @@ fn endpoint(audience: Audience, catalog: Option<Catalog>) -> Endpoint {
         catalog: catalog.map(Arc::new),
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![policy("public"), policy("steward")],

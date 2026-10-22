@@ -35,6 +35,7 @@ fn with_subject<T>(
         classes: &classes,
         assigners: &assigners,
         feeds: &endpoint.feeds,
+        calendars: &endpoint.calendars,
     })
 }
 

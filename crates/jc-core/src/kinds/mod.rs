@@ -96,8 +96,8 @@ pub use feed_output::{
 };
 pub use group::{GroupSpec, Member};
 pub use ical_mapping::{
-    outputs_gaps, Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping, IcalOutput,
-    OutputFilter, Preset, Representations, MAX_OUTPUTS, PRESET_TYPES,
+    ical_links, outputs_gaps, Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping,
+    IcalOutput, OutputFilter, Preset, Representations, MAX_OUTPUTS, PRESET_TYPES,
 };
 pub use mapping::{
     DataModelRef, MappingArtifacts, MappingSpec, MappingTest, NativeBlock, NativeLanguage,

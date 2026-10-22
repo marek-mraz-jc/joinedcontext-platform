@@ -100,6 +100,7 @@ fn endpoint(feeds: Vec<FeedOutput>) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds,
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![grant],

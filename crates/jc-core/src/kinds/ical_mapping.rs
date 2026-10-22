@@ -130,7 +130,24 @@ fn ical_outputs<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_any(Visitor)
 }
 
+/// Each calendar's address under the Endpoint, as a record, a page head and a catalogue list
+/// them: `(output, "ical/v1/{name}.ics")` (API/11 EP-159).
+pub fn ical_links(outputs: &[IcalOutput]) -> Vec<(&IcalOutput, String)> {
+    outputs
+        .iter()
+        .map(|output| (output, format!("ical/v1/{}.ics", output.name)))
+        .collect()
+}
+
 impl IcalOutput {
+    /// The title in `lang`, else the first, else the name: what a menu or a catalogue lists.
+    pub fn label(&self, lang: &str) -> &str {
+        self.title
+            .get(lang)
+            .or_else(|| self.title.values().next())
+            .map_or(self.name.as_str(), String::as_str)
+    }
+
     /// The output the deprecated single mapping object stands for.
     pub fn legacy(mapping: IcalMapping) -> Self {
         Self {

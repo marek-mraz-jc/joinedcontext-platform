@@ -30,6 +30,7 @@ fn with_subject<T>(feeds: &[FeedOutput], write: impl FnOnce(&Subject<'_>) -> T) 
         classes: &["Event"],
         assigners: &[],
         feeds,
+        calendars: &[],
     })
 }
 

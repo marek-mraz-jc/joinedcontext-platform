@@ -21,7 +21,8 @@ pub mod profile;
 use jc_core::classification::classify;
 use jc_core::kinds::catalog::spatial_iri;
 use jc_core::kinds::{
-    feed_links, Audience, Catalog, ContactPoint, Duty, FeedOutput, ProjectCatalog, Representation,
+    feed_links, ical_links, Audience, Catalog, ContactPoint, Duty, FeedOutput, IcalOutput,
+    ProjectCatalog, Representation,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -56,6 +57,9 @@ pub struct Subject<'a> {
     pub assigners: &'a [&'a str],
     /// Its feed outputs, each one distribution per format (EP-150, EP-151).
     pub feeds: &'a [FeedOutput],
+    /// Its iCalendar outputs, each one distribution (API/11 EP-159); empty with `ical` served:
+    /// the one calendar at `ical/v1/events.ics`.
+    pub calendars: &'a [IcalOutput],
 }
 
 /// What one representation is, as a catalogue needs to describe it (EP-05, EP-68).
@@ -143,6 +147,32 @@ fn feed_format(format: &str) -> (&'static str, &'static str) {
         "JSON Feed" => ("https://www.jsonfeed.org/version/1.1/", "JSON"),
         _ => ("https://www.rfc-editor.org/rfc/rfc4287", "ATOM"),
     }
+}
+
+/// One distribution per iCalendar output, titled by the output (API/11 EP-159).
+fn calendar_distributions(endpoint: &Subject<'_>, iri: &str) -> Vec<Value> {
+    let served = served(Representation::Ical);
+    ical_links(endpoint.calendars)
+        .into_iter()
+        .map(|(output, path)| {
+            let url = format!("{iri}/{path}");
+            let mut distribution = json!({
+                "@id": url,
+                "@type": "dcat:Distribution",
+                "dct:title": localized(&output.title, &format!("{} ({})", output.name, served.title)),
+                "dct:format": file_type_iri(Representation::Ical),
+                "dcat:accessURL": url,
+                "dcat:mediaType": media_type_iri(served.media_type),
+                "dcat:accessService": service_iri(iri),
+                "dct:conformsTo": served.conforms_to,
+            });
+            if !output.description.is_empty() {
+                distribution["dct:description"] = json!(language_values(&output.description));
+            }
+            licensed(&mut distribution, endpoint.catalog);
+            distribution
+        })
+        .collect()
 }
 
 /// One distribution per feed output and format (EP-150, EP-151).
@@ -350,6 +380,10 @@ fn representation_distributions(endpoint: &Subject<'_>, iri: &str) -> Vec<Value>
     for representation in endpoint.representations {
         if *representation == Representation::Feed {
             out.extend(feed_distributions(endpoint, iri));
+            continue;
+        }
+        if *representation == Representation::Ical && !endpoint.calendars.is_empty() {
+            out.extend(calendar_distributions(endpoint, iri));
             continue;
         }
         let served = served(*representation);
@@ -1187,7 +1221,16 @@ pub fn dataset_html(endpoint: &Subject<'_>, index: &Value, base: &str) -> String
         }
     }
 
-    // A feed reader finds each feed output from the page itself (EP-150).
+    // A feed reader or a calendar finds each output from the page itself (EP-150, EP-159).
+    let calendars = ical_links(endpoint.calendars)
+        .into_iter()
+        .map(|(output, path)| {
+            format!(
+                "<link rel=\"alternate\" type=\"text/calendar\" title=\"{}\" href=\"{iri}/{}\">",
+                escape(output.label("en")),
+                escape(&path)
+            )
+        });
     let alternates: String = feed_links(endpoint.feeds)
         .into_iter()
         .map(|(output, path, format, media_type)| {
@@ -1197,6 +1240,7 @@ pub fn dataset_html(endpoint: &Subject<'_>, index: &Value, base: &str) -> String
                 escape(&path)
             )
         })
+        .chain(calendars)
         .collect();
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
