@@ -683,10 +683,39 @@ async fn the_widget_reads_the_map_defaults_without_a_hidden_attribute() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
-        json!({"map": {"AirQualityObserved": {"geometry": "location", "popup": ["pm10"], "cluster": false}}})
+        json!({"map": {"AirQualityObserved": {"geometry": "location", "popup": ["pm10"], "cluster": false}}, "table": {}})
     );
     let (_, none) = widget(widget_app(self::endpoint(Audience::Public))).await;
-    assert_eq!(none, json!({"map": {}}));
+    assert_eq!(none, json!({"map": {}, "table": {}}));
+}
+
+/// API/11 EP-164 (T-5197): the table's defaults reach the widget beside the map's, and a column,
+/// an order or a filter naming an attribute the projection hides is left out.
+#[tokio::test]
+async fn the_widget_reads_the_table_defaults_without_a_hidden_attribute() {
+    let mut endpoint = endpoint(Audience::Public);
+    let outputs: Vec<jc_core::kinds::WidgetOutput> = serde_json::from_value(json!([{
+        "name": "tabulka",
+        "sources": [
+            {"type": "AirQualityObserved", "table": {"filter": "pm10>40", "orderBy": "pm10;desc",
+                "pageLength": 50, "columns": ["pm10", "internalNote", "dateObserved"]}},
+            {"type": "WeatherObserved", "table": {"filter": "internalNote==\"x\"", "orderBy": "internalNote"}}
+        ]
+    }]))
+    .expect("the outputs parse");
+    endpoint.map_defaults = jc_core::kinds::map_defaults(&outputs);
+    endpoint.hidden_attributes = ["internalNote".to_owned()].into();
+    let (status, body) = widget(widget_app(endpoint)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["table"],
+        json!({
+            "AirQualityObserved": {"filter": "pm10>40", "orderBy": "pm10;desc", "pageLength": 50,
+                "columns": ["pm10", "dateObserved"]},
+            "WeatherObserved": {}
+        })
+    );
+    assert_eq!(body["map"]["AirQualityObserved"], json!({}));
 }
 
 /// The defaults of an Endpoint a caller may not read are refused as its other routes are.

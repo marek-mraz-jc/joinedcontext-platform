@@ -1,6 +1,7 @@
 //! API/11 EP-163 (T-5239): the catalogue widget's map defaults an Endpoint lists in
 //! `spec.representations.widget` are checked when it is saved, each refusal naming the output,
 //! the class and the member; the gateway hands the first output's defaults per class to the widget.
+//! EP-164 (T-5197): a source's `table` defaults, checked the same way.
 
 use std::path::PathBuf;
 
@@ -132,5 +133,94 @@ fn an_unknown_member_or_a_cluster_that_is_no_boolean_does_not_parse() {
         "    - name: mapa\n      zoom: 3\n      sources: [{ type: Event }]\n",
     ] {
         assert!(endpoint(widget).is_err(), "{widget}");
+    }
+}
+
+const TABLE: &str = r#"    - name: tabulka
+      sources:
+        - type: Event
+          table: { filter: 'startDate>=today;startDate<today+30d', orderBy: startDate;desc, pageLength: 50, columns: [name, startDate, address.addressLocality] }
+"#;
+
+#[test]
+fn a_table_start_passes_and_reaches_the_widget_beside_the_map() {
+    let spec = endpoint(TABLE).expect("valid");
+    assert_eq!(
+        spec.representation_gaps(Some(&model())).unwrap(),
+        Vec::<String>::new()
+    );
+    let defaults = map_defaults(spec.widget_outputs());
+    let table = defaults["Event"].table.as_ref().expect("a table start");
+    assert_eq!(table.order_attribute(), Some("startDate"));
+    assert_eq!(
+        serde_json::to_value(table).unwrap(),
+        serde_json::json!({"filter": "startDate>=today;startDate<today+30d", "orderBy": "startDate;desc",
+            "pageLength": 50, "columns": ["name", "startDate", "address.addressLocality"]})
+    );
+    // The map's own answer never carries it: widget.json lists it under `table`.
+    assert_eq!(
+        serde_json::to_value(&defaults["Event"]).unwrap(),
+        serde_json::json!({})
+    );
+}
+
+#[test]
+fn a_table_start_the_widget_cannot_use_is_refused_at_save_and_named() {
+    for (table, says) in [
+        (
+            "{ filter: 'startDate>=>today' }",
+            "`table.filter` is not an NGSI-LD q",
+        ),
+        (
+            "{ filter: 'todays==1;(' }",
+            "`table.filter` is not an NGSI-LD q",
+        ),
+        (
+            "{ orderBy: 'start date' }",
+            "`table.orderBy: start date` is not an attribute name",
+        ),
+        (
+            "{ pageLength: 25 }",
+            "`table.pageLength: 25` is not one of 10, 20, 50 or 100",
+        ),
+        (
+            "{ columns: [name, name] }",
+            "`table.columns` names `name` twice",
+        ),
+        (
+            "{ columns: ['a b'] }",
+            "`table.columns` names `a b`, which is not an attribute name",
+        ),
+    ] {
+        let err = endpoint(&format!(
+            "    - name: tabulka\n      sources: [{{ type: Event, table: {table} }}]\n"
+        ))
+        .expect_err(table);
+        assert!(
+            err.contains("widget output `tabulka`, Event") && err.contains(says),
+            "{err}"
+        );
+    }
+    let long = format!("name==\"{}\"", "a".repeat(1000));
+    let err = endpoint(&format!(
+        "    - name: tabulka\n      sources: [{{ type: Event, table: {{ filter: '{long}' }} }}]\n"
+    ))
+    .expect_err("a long filter");
+    assert!(err.contains("at most 1000 characters"), "{err}");
+    assert!(endpoint(
+        "    - name: tabulka\n      sources: [{ type: Event, table: { sort: name } }]\n"
+    )
+    .is_err());
+}
+
+#[test]
+fn a_table_column_or_order_the_class_lacks_or_draws_on_the_map_is_refused() {
+    for (table, says) in [
+        ("{ orderBy: nowhere }", "widget output `tabulka`, Event: `table.orderBy` names `nowhere`, which Event does not have"),
+        ("{ columns: [name, nowhere] }", "widget output `tabulka`, Event: `table.columns` names `nowhere`, which Event does not have"),
+        ("{ columns: [location] }", "widget output `tabulka`, Event: `table.columns` names `location`, a GeoProperty; the map draws it, the table shows values"),
+    ] {
+        let gaps = model_gaps(&format!("    - name: tabulka\n      sources: [{{ type: Event, table: {table} }}]\n"));
+        assert_eq!(gaps, [says], "{table}");
     }
 }
