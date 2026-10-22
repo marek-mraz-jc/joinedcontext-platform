@@ -105,6 +105,7 @@ fn endpoint(models: Vec<Model>) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models,
         policy_names: Vec::new(),

@@ -55,6 +55,7 @@ fn unrestricted_endpoint() -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(

@@ -90,6 +90,7 @@ fn endpoint(quality: Vec<QualityRule>) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         roles: Default::default(),
         slug: SLUG.to_owned(),
         title: Default::default(),

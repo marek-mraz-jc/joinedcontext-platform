@@ -470,6 +470,7 @@ mod tests {
             classes: &["AirQualityObserved"],
             assigners: &[],
             feeds: &[],
+            calendars: &[],
         };
         dataset(&subject, &index(), BASE)
     }
@@ -538,6 +539,7 @@ mod tests {
             classes: &["AirQualityObserved"],
             assigners: &[],
             feeds: &[],
+            calendars: &[],
         };
         dataset(&subject, &index(), BASE)
     }
@@ -854,6 +856,7 @@ mod tests {
                 classes: &[],
                 assigners: &[],
                 feeds: &[],
+                calendars: &[],
             };
             render(
                 dataset(&subject, &index(), BASE),
@@ -1034,6 +1037,7 @@ mod tests {
             classes: &[],
             assigners: &[],
             feeds: &[],
+            calendars: &[],
         };
         let turtle = turtle(&dataset(&subject, &index(), BASE));
         assert!(

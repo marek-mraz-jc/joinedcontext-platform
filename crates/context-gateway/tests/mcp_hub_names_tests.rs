@@ -52,6 +52,7 @@ fn endpoint(slug: &str, title: &str, space: &str, audience: Audience, role: &str
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),

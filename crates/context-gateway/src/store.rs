@@ -681,6 +681,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             }
         });
         let representations = spec.served_representations();
+        let calendars = spec.ical_outputs().to_vec();
         let catalog = with_publisher(
             spec.catalog.clone(),
             publishers.get(&project).map(Arc::as_ref),
@@ -715,6 +716,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             base_path: format!("/api/endpoint/{}", spec.slug),
             catalog,
             deprecation: spec.deprecation.clone().map(Arc::new),
+            calendars,
             feeds: spec.representations.map(|r| r.feed).unwrap_or_default(),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
@@ -923,6 +925,7 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
                 catalog: None,
                 deprecation: None,
                 feeds: Vec::new(),
+                calendars: Vec::new(),
                 base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),

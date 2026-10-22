@@ -44,6 +44,7 @@ fn endpoint() -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![policy(

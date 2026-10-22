@@ -78,6 +78,7 @@ fn endpoint(slug: &str, audience: Audience, representations: Vec<Representation>
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: public_grant(),
