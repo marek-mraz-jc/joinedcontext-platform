@@ -80,6 +80,25 @@ function bridges(res) {
   res.end();
 }
 
+// T-5343: the prod bbsk-demo events answer: the Endpoint's title per language, a dated q, a second
+// uncounted read of the same source and a second table of the same rows.
+const EVENTS_TITLES = { sk: "Podujatia — Banská Bystrica", en: "Events — Banská Bystrica" };
+function events(res) {
+  res.writeHead(200, { "Content-Type": "text/event-stream" });
+  const send = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  const rows = (n) => Array.from({ length: n }, (_, i) => [`Koncert ${i + 1}`, "Radnica", `2026-10-${21 + (i % 8)}T18:00:00Z`]);
+  const table = (n) => ({ endpoint: "podujatia", type: "Event", total: 55, columns: ["name", "location", "startDate"], rows: rows(n) });
+  send("conversation", { id: "c2", at: "2026-10-20T09:35:00Z" });
+  send("step", { source: EVENTS_TITLES.en, titles: EVENTS_TITLES, type: "Event", q: 'endDate>="2026-10-20T00:00:00Z"', count: 55, url: BRIDGE_PAGE });
+  send("data", table(20));
+  send("step", { source: EVENTS_TITLES.en, titles: EVENTS_TITLES, type: "Event" });
+  send("data", table(10));
+  send("answer", { text: "V Banskej Bystrici je 55 podujatí, ktoré sa ešte neskončili [1]." });
+  send("citations", [{ n: 1, url: BRIDGE_PAGE, tool: "query_entities", title: "Podujatia" }]);
+  send("done", { totalMs: 3100, stagesMs: { route: 700, answer: 1800 } });
+  res.end();
+}
+
 // The visitor tokens the stand-in has issued (T-4653).
 let TOKENS = 0;
 
@@ -201,7 +220,7 @@ test.beforeAll(async () => {
       req.on("data", (chunk) => { body += chunk; });
       // The question asked now, not the history the request carries beside it.
       const asked = () => { try { return String(JSON.parse(body).message || ""); } catch { return body; } };
-      return req.on("end", () => (asked().includes("mostov") ? bridges(res)
+      return req.on("end", () => (asked().includes("mostov") ? bridges(res) : asked().includes("podujatia") ? events(res)
         : sse(res, asked().includes("mape") ? "map" : asked().includes("ovzdušia"))));
     }
     res.writeHead(404).end();
@@ -455,12 +474,32 @@ for (const [width, height] of [[1366, 768], [390, 844]]) {
     await steps.locator("summary").click();
     const items = steps.locator("li");
     await expect(items).toHaveCount(2);
-    await expect(items.nth(0)).toContainText("Hľadal som v: Registre kraja / Bridge · dotaz: všetky záznamy → 1\u00a0651");
-    await expect(items.nth(1)).toContainText("dotaz: yearBuilt<1900 → 32");
+    await expect(items.nth(0)).toContainText("Hľadal som v: Registre kraja / Mosty · všetky záznamy → 1\u00a0651");
+    await expect(items.nth(1)).toContainText("Year built < 1900 → 32");
     await expect(items.nth(1).getByRole("link", { name: "Otvoriť dataset" })).toHaveAttribute("href", BRIDGE_PAGE);
     const sideways = await page.locator(".jc-log").evaluate((log) => log.scrollWidth > log.clientWidth + 1);
     expect(sideways, "no horizontal scroll").toBe(false);
     if (process.env.JC_SHOTS) await page.screenshot({ path: `${process.env.JC_SHOTS}/steps-${width}.png` });
+  });
+}
+
+// T-5343: the events answer names its source in Slovak, its q as a date, one step and one table.
+for (const [width, height] of [[1440, 900], [400, 844]]) {
+  test(`an events answer has one Slovak step and one table at ${width}x${height}`, async ({ page }) => {
+    await page.setViewportSize({ width, height });
+    await page.goto(`${base}/d/bb?lang=sk`);
+    await page.locator("#jc-question").fill("Aké podujatia sú v Banskej Bystrici?");
+    await page.locator(".jc-form .jc-submit").click();
+    const steps = page.locator(".jc-bot .jc-steps");
+    await expect(steps.locator("summary")).toHaveText("Postup (1)");
+    await steps.locator("summary").click();
+    await expect(steps.locator("li")).toHaveCount(1);
+    await expect(steps.locator("li").first()).toContainText("Hľadal som v: Podujatia — Banská Bystrica · od 20. 10. 2026 → 55");
+    await expect(page.locator(".jc-bot details.jc-data")).toHaveCount(1);
+    await expect(page.locator(".jc-bot details.jc-data > summary")).toHaveText("Podujatia — prvých 20 z 55");
+    const sideways = await page.locator(".jc-log").evaluate((log) => log.scrollWidth > log.clientWidth + 1);
+    expect(sideways, "no horizontal scroll").toBe(false);
+    if (process.env.JC_SHOTS) await page.screenshot({ path: `${process.env.JC_SHOTS}/events-steps-${width}.png` });
   });
 }
 

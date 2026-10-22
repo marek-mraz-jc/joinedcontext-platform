@@ -195,6 +195,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
         snapshot.endpoints.insert(
             ("banskabystrica".into(), name.into()),
             EndpointRef {
+                titles: Default::default(),
                 slug: slug.into(),
                 audience: page.page.audience.clone(),
                 title: None,

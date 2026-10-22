@@ -881,7 +881,7 @@ async fn connected(
         let near = siblings(&snapshot.endpoints, &resolved.project, &endpoint.space);
         reachable.push((
             connector,
-            endpoint.title.clone(),
+            (endpoint.title.clone(), endpoint.titles.clone()),
             endpoint.publisher.clone(),
             near,
             surface,
@@ -900,11 +900,14 @@ async fn connected(
     ))
     .await;
     let mut connected = Vec::new();
-    for ((connector, title, label, near, surface), listed) in reachable.into_iter().zip(listed) {
+    for ((connector, (title, titles), label, near, surface), listed) in
+        reachable.into_iter().zip(listed)
+    {
         match listed {
             Ok(tools) if !tools.is_empty() => connected.push(Connected {
                 endpoint: connector.endpoint.clone(),
                 title,
+                titles,
                 surface,
                 tools,
                 label,
@@ -1024,6 +1027,8 @@ async fn lent(
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
                 title: endpoint.title,
+                // A lent Endpoint's title comes from its server's listing, one language.
+                titles: Default::default(),
                 endpoint: endpoint.slug,
                 surface,
                 tools: offered,
@@ -2179,6 +2184,7 @@ mod tests {
     #[test]
     fn siblings_are_the_projects_endpoints_over_one_space() {
         let at = |slug: &str, space: &str| crate::worker::EndpointRef {
+            titles: Default::default(),
             slug: slug.into(),
             audience: "public".into(),
             space: space.into(),
