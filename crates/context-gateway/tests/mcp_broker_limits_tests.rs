@@ -63,6 +63,7 @@ fn endpoint(slug: &str, space: &str, base_path: String) -> Endpoint {
         deprecation: None,
         feeds: Vec::new(),
         calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path,
         models: vec![Model {
             name: "mesto".to_owned(),
