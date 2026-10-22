@@ -30,7 +30,9 @@
   var LABELS = {
     sk: { open: "Otvoriť asistenta", close: "Zavrieť asistenta", title: "Asistent" },
     cs: { open: "Otevřít asistenta", close: "Zavřít asistenta", title: "Asistent" },
-    en: { open: "Open the assistant", close: "Close the assistant", title: "Assistant" }
+    en: { open: "Open the assistant", close: "Close the assistant", title: "Assistant" },
+    // Southern BBSK's catalogue pages in Hungarian (T-5115); machine draft until a native speaker reviews it.
+    hu: { open: "Az asszisztens megnyitása", close: "Az asszisztens bezárása", title: "Asszisztens" }
   };
   var words = LABELS[pageLang] || LABELS.sk;
 

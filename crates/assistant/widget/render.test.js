@@ -1072,3 +1072,22 @@ test("a source badge is a drawn icon with no text, so copied or read-out text ne
   assert.match(read("widget.js"), /var b = icon\(kind\);/);
   assert.doesNotMatch(read("widget.css"), /attr\(data-letter\)/);
 });
+
+// T-5115: a word one language lacks shows as "undefined" in the chat; every language carries every key.
+test("every language of the widget and of its launcher has every word", () => {
+  const dir = __dirname;
+  const read = (f) => require("node:fs").readFileSync(require("node:path").join(dir, f), "utf8");
+  const table = (source, name) => {
+    const found = source.match(new RegExp("var " + name + " = (\\{[\\s\\S]*?\\n  \\});"));
+    assert.ok(found, name);
+    return Function("return " + found[1])();
+  };
+  for (const [file, name] of [["widget.js", "WORDS"], ["embed.js", "LABELS"]]) {
+    const words = table(read(file), name);
+    const keys = Object.keys(words.en).sort();
+    for (const [lang, entry] of Object.entries(words)) {
+      assert.deepEqual(Object.keys(entry).sort(), keys, file + " " + lang);
+      for (const key of keys) assert.ok(String(entry[key]).trim(), file + " " + lang + "." + key);
+    }
+  }
+});
