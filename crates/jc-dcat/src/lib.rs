@@ -57,8 +57,8 @@ pub struct Subject<'a> {
     pub assigners: &'a [&'a str],
     /// Its feed outputs, each one distribution per format (EP-150, EP-151).
     pub feeds: &'a [FeedOutput],
-    /// Its iCalendar outputs, each one distribution (API/11 EP-159); empty with `ical` served:
-    /// the one calendar at `ical/v1/events.ics`.
+    /// Its iCalendar outputs, each one distribution (API/11 EP-159); none: no calendar, whatever
+    /// `representations` says, since the list is off by default (owner 2026-10-22T09:25Z).
     pub calendars: &'a [IcalOutput],
 }
 
@@ -382,7 +382,7 @@ fn representation_distributions(endpoint: &Subject<'_>, iri: &str) -> Vec<Value>
             out.extend(feed_distributions(endpoint, iri));
             continue;
         }
-        if *representation == Representation::Ical && !endpoint.calendars.is_empty() {
+        if *representation == Representation::Ical {
             out.extend(calendar_distributions(endpoint, iri));
             continue;
         }

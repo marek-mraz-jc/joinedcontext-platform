@@ -1,6 +1,6 @@
 //! API/11 EP-159 (T-5218): each iCalendar output of an Endpoint is one DCAT distribution titled by
 //! the output, and the record's page names each one in a `<link rel="alternate">`; an Endpoint
-//! that serves `ical` with no output list keeps its one `ical/v1/events.ics`.
+//! that lists `ical` with no output serves no calendar, so its record lists none.
 
 use jc_core::kinds::{Audience, IcalOutput, Representation};
 use jc_dcat::{dataset, dataset_html, Subject};
@@ -85,12 +85,9 @@ fn each_calendar_output_is_one_distribution_titled_by_the_output() {
 }
 
 #[test]
-fn an_endpoint_without_an_output_list_keeps_events_ics() {
+fn an_endpoint_without_an_output_lists_no_calendar() {
     let record = with_subject(&[], |s| dataset(s, &json!({}), BASE));
-    assert_eq!(
-        calendar_urls(&record),
-        vec![format!("{BASE}/api/endpoint/podujatia/ical/v1/events.ics")]
-    );
+    assert_eq!(calendar_urls(&record), Vec::<String>::new());
 }
 
 #[test]

@@ -157,13 +157,13 @@ pub fn package(
         .unwrap_or_else(|| settings.endpoint_url(spec.slug.as_str()));
     let language = settings.language.as_deref();
     // The feed outputs are listed one resource per output and format, and the calendar outputs
-    // one resource each, after the surfaces; `ical` with no list keeps its one `events.ics`.
+    // one resource each, after the surfaces; `ical` with no output serves no calendar.
     let calendars = spec.ical_outputs();
     let served: Vec<Representation> = spec
         .served_representations()
         .into_iter()
         .filter(|r| *r != Representation::Feed)
-        .filter(|r| *r != Representation::Ical || calendars.is_empty())
+        .filter(|r| *r != Representation::Ical)
         .collect();
 
     let mut payload = json!({
@@ -1123,6 +1123,7 @@ const fn distribution(
             "OGC SensorThings API",
         ),
         Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
+        // Listed per output by `calendar_resources`; never reached through here.
         Representation::Ical => (
             "/ical/v1/events.ics",
             "ICS",
