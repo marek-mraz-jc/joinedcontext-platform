@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_norway::Value;
 
-use super::ical_mapping::{fits, is_language, is_name, is_path, is_plain, resolve, Accepts, Model};
+use super::ical_mapping::{fits, is_name, is_path, is_plain, resolve, Accepts, Model};
 
 /// The most outputs one Endpoint lists (EP-151).
 pub const MAX_FEED_OUTPUTS: usize = 20;
@@ -373,7 +373,7 @@ impl FeedOutput {
             ("description", &self.description, 1000),
         ] {
             for (lang, text) in texts {
-                if !is_language(lang) || lang == "first" {
+                if !is_two_letter(lang) {
                     gaps.push(format!("feed output `{name}`: {member} key `{lang}` is a two-letter language such as sk"));
                 }
                 if !is_plain(text, max) {
@@ -381,11 +381,7 @@ impl FeedOutput {
                 }
             }
         }
-        if let Some(lang) = self
-            .lang
-            .as_deref()
-            .filter(|l| !is_language(l) || *l == "first")
-        {
+        if let Some(lang) = self.lang.as_deref().filter(|l| !is_two_letter(l)) {
             gaps.push(format!(
                 "feed output `{name}`: lang `{lang}` is a two-letter language such as sk"
             ));
@@ -526,6 +522,11 @@ pub fn feed_gaps(outputs: &[FeedOutput], linkml: Option<&str>) -> Result<Vec<Str
         }
     }
     Ok(gaps)
+}
+
+/// A two-letter language code such as `sk`.
+fn is_two_letter(language: &str) -> bool {
+    language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase())
 }
 
 #[cfg(test)]

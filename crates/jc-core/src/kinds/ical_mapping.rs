@@ -15,15 +15,298 @@ use serde_norway::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Representations {
-    /// The iCalendar feed's mapping; absent means the `sdm-event` preset over `Event`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ical: Option<IcalMapping>,
+    /// The iCalendar outputs (API/11 EP-159); none means no calendar is served. The single
+    /// mapping object of version 1 loads as one output named `events` (deprecated).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "ical_outputs"
+    )]
+    #[schemars(with = "Vec<IcalOutput>")]
+    pub ical: Vec<IcalOutput>,
     /// The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feed: Vec<super::feed_output::FeedOutput>,
 }
 
-/// `spec.representations.ical`.
+/// The most outputs of one format an Endpoint lists (owner 2026-10-22T09:30Z, EP-159).
+pub const MAX_OUTPUTS: usize = 20;
+
+/// The most model classes one output maps.
+pub const MAX_SOURCES: usize = 10;
+
+/// The types a preset serves (owner 2026-10-22T09:25Z); another type maps DTSTART and SUMMARY
+/// itself.
+pub const PRESET_TYPES: [&str; 3] = ["Event", "CouncilMeeting", "OfficeHours"];
+
+/// The output name the deprecated single mapping object loads as, served at `events.ics`.
+pub const LEGACY_OUTPUT: &str = "events";
+
+/// One named calendar of `spec.representations.ical` (API/11 EP-159), served at
+/// `/ical/v1/{name}.ics`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IcalOutput {
+    /// The URL slug: lowercase letters, digits and `-`, 1 to 40, unique on the Endpoint.
+    pub name: String,
+    /// The contract version (API/11 EP-152); `1` when absent.
+    #[serde(default = "first_version", skip_serializing_if = "is_first_version")]
+    pub version: u64,
+    /// The calendar's title per language tag (`NAME`, `X-WR-CALNAME`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub title: BTreeMap<String, String>,
+    /// The calendar's description per language tag.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub description: BTreeMap<String, String>,
+    /// The model classes the calendar maps, each with its preset or mapping; 1 to 10.
+    pub sources: Vec<IcalMapping>,
+    /// A query that narrows the view for this calendar, never widens it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<OutputFilter>,
+    /// The language tag (BCP 47) a LanguageProperty is read in when a field names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// `start` or `-start`: the order the first `limit` Events are kept in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// At most this many Events, 1 to 10000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// The IANA zone a time without offset is read in; default `Europe/Bratislava`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// An output's NGSI-LD query on top of the view (TS 104 175 6.4.3.2): `q` and `scopeQ` are
+/// AND-ed with a caller's, and a geo-query here cannot be replaced by one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OutputFilter {
+    /// `q`, such as `eventCategory=="šport"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+    /// `scopeQ`.
+    #[serde(default, rename = "scopeQ", skip_serializing_if = "Option::is_none")]
+    pub scope_q: Option<String>,
+    /// `georel`; with `geometry` and `coordinates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub georel: Option<String>,
+    /// `geometry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<String>,
+    /// `coordinates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<String>,
+    /// `geoproperty`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geoproperty: Option<String>,
+}
+
+fn ical_outputs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<IcalOutput>, D::Error> {
+    // By hand, so a wrong member is named in the error instead of "did not match any variant".
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<IcalOutput>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of named outputs")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            seq: A,
+        ) -> Result<Vec<IcalOutput>, A::Error> {
+            Vec::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            map: A,
+        ) -> Result<Vec<IcalOutput>, A::Error> {
+            let mapping =
+                IcalMapping::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+            Ok(vec![IcalOutput::legacy(mapping)])
+        }
+    }
+    deserializer.deserialize_any(Visitor)
+}
+
+impl IcalOutput {
+    /// The output the deprecated single mapping object stands for.
+    pub fn legacy(mapping: IcalMapping) -> Self {
+        Self {
+            name: LEGACY_OUTPUT.to_owned(),
+            version: mapping.version,
+            title: BTreeMap::new(),
+            description: BTreeMap::new(),
+            sources: vec![IcalMapping {
+                version: ICAL_MAPPING_VERSION,
+                ..mapping
+            }],
+            filter: None,
+            lang: None,
+            sort: None,
+            limit: None,
+            timezone: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn renamed(self, name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..self
+        }
+    }
+
+    /// Gaps the output has whatever the model, one sentence each, starting with
+    /// `` `ical` output `name` ``.
+    pub fn shape_gaps(&self) -> Vec<String> {
+        let mut gaps = Vec::new();
+        if !is_slug(&self.name) {
+            gaps.push(
+                "its name is not one of lowercase letters, digits and `-`, 1 to 40, starting and \
+                 ending with a letter or digit, other than `preview`"
+                    .to_owned(),
+            );
+        }
+        if self.version != ICAL_MAPPING_VERSION {
+            gaps.push(format!(
+                "it is version {}, and this platform writes version {ICAL_MAPPING_VERSION}",
+                self.version
+            ));
+        }
+        for (member, texts) in [("title", &self.title), ("description", &self.description)] {
+            if texts
+                .iter()
+                .any(|(tag, text)| !is_tag(tag) || !is_plain(text, 1000))
+            {
+                gaps.push(format!(
+                    "`{member}` takes a language tag (`sk`, `en-GB`) to 1 to 1000 characters \
+                     without control characters"
+                ));
+            }
+        }
+        if self.sources.is_empty() || self.sources.len() > MAX_SOURCES {
+            gaps.push(format!("it needs 1 to {MAX_SOURCES} sources"));
+        }
+        if let Some(filter) = &self.filter {
+            gaps.extend(filter.gaps());
+        }
+        if let Some(lang) = self.lang.as_deref().filter(|l| !is_tag(l)) {
+            gaps.push(format!("`lang: {lang}` is not a language tag such as `sk`"));
+        }
+        if let Some(sort) = self
+            .sort
+            .as_deref()
+            .filter(|s| !matches!(*s, "start" | "-start"))
+        {
+            gaps.push(format!("`sort: {sort}` is neither `start` nor `-start`"));
+        }
+        if self.limit.is_some_and(|n| n == 0 || n > 10_000) {
+            gaps.push("`limit` must be 1 to 10000".to_owned());
+        }
+        if let Some(zone) = self.timezone.as_deref().filter(|z| !is_zone(z)) {
+            gaps.push(format!("`timezone: {zone}` is not an IANA zone name"));
+        }
+        let mut gaps = self.named(gaps);
+        for source in &self.sources {
+            gaps.extend(self.named(source.shape_gaps()));
+            if source.base().is_some() && !PRESET_TYPES.contains(&source.entity_type.as_str()) {
+                gaps.push(self.name_one(format!(
+                    "`ical` uses a preset for {}; a preset serves {} alone, so map DTSTART and SUMMARY",
+                    source.entity_type,
+                    PRESET_TYPES.join(", ")
+                )));
+            }
+        }
+        gaps
+    }
+
+    /// Every gap of the output against the space's LinkML model (`None`: the space has none).
+    pub fn model_gaps(&self, linkml: Option<&str>) -> std::result::Result<Vec<String>, String> {
+        let gaps = self.shape_gaps();
+        if !gaps.is_empty() {
+            return Ok(gaps);
+        }
+        let mut gaps = Vec::new();
+        for source in &self.sources {
+            gaps.extend(self.named(source.model_gaps(linkml)?));
+        }
+        Ok(gaps)
+    }
+
+    /// A source's sentence (`` `ical` maps no DTSTART ``) or the output's own, with the name.
+    fn name_one(&self, gap: String) -> String {
+        match gap.strip_prefix("`ical` ") {
+            Some(rest) => format!("`ical` output `{}` {rest}", self.name),
+            None => format!("`ical` output `{}`: {gap}", self.name),
+        }
+    }
+
+    fn named(&self, gaps: Vec<String>) -> Vec<String> {
+        gaps.into_iter().map(|gap| self.name_one(gap)).collect()
+    }
+}
+
+impl OutputFilter {
+    fn gaps(&self) -> Vec<String> {
+        let mut gaps = Vec::new();
+        let members = [
+            ("q", &self.q),
+            ("scopeQ", &self.scope_q),
+            ("georel", &self.georel),
+            ("geometry", &self.geometry),
+            ("coordinates", &self.coordinates),
+            ("geoproperty", &self.geoproperty),
+        ];
+        for (member, _) in members
+            .iter()
+            .filter(|(_, v)| v.as_deref().is_some_and(|v| !is_plain(v, 2000)))
+        {
+            gaps.push(format!(
+                "`filter.{member}` must be 1 to 2000 characters without control characters"
+            ));
+        }
+        let geo = [&self.georel, &self.geometry, &self.coordinates];
+        if geo.iter().any(|v| v.is_some()) && !geo.iter().all(|v| v.is_some()) {
+            gaps.push(
+                "`filter` names a geo-query: it needs georel, geometry and coordinates".to_owned(),
+            );
+        }
+        if self.geoproperty.is_some() && self.georel.is_none() {
+            gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
+        }
+        if members.iter().all(|(_, v)| v.is_none()) {
+            gaps.push("`filter` is empty: name q, scopeQ or a geo-query, or drop it".to_owned());
+        }
+        gaps
+    }
+}
+
+/// Gaps of an Endpoint's iCal output list: the count and the names (EP-159).
+pub fn outputs_gaps(outputs: &[IcalOutput]) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if outputs.len() > MAX_OUTPUTS {
+        gaps.push(format!(
+            "`ical` lists {} outputs, at most {MAX_OUTPUTS}",
+            outputs.len()
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for output in outputs {
+        if !seen.insert(output.name.as_str()) {
+            gaps.push(format!(
+                "`ical` lists the output name `{}` twice; each name is one URL",
+                output.name
+            ));
+        }
+        gaps.extend(output.shape_gaps());
+    }
+    gaps
+}
+
+/// One source of an [`IcalOutput`] (`spec.representations.ical[].sources[]`), and the
+/// deprecated single mapping object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct IcalMapping {
@@ -233,7 +516,7 @@ impl IcalField {
         match key {
             "firstOf" => !matches!(self.accepts(), Accepts::Fixed | Accepts::Constant),
             "join" => text && self != Self::Status,
-            "constant" => matches!(self, Self::Class | Self::Categories),
+            "constant" => matches!(self, Self::Class | Self::Categories | Self::Duration),
             "language" => text,
             "date" => self.accepts() == Accepts::Date,
             "timezone" => matches!(self, Self::Dtstart | Self::Dtend),
@@ -534,7 +817,11 @@ fn field_shape_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
     let texts = match field {
         IcalField::Uid => vec!["UID is fixed to the entity id and cannot be mapped".to_owned()],
         IcalField::Dtstamp => {
-            vec!["DTSTAMP is fixed to the entity's modifiedAt and cannot be mapped".to_owned()]
+            vec![
+                "DTSTAMP is fixed (the mapped LAST-MODIFIED, else the newest modifiedAt of the \
+                 mapped attributes) and cannot be mapped"
+                    .to_owned(),
+            ]
         }
         _ => [
             source_gaps(field, remap),
@@ -615,8 +902,11 @@ fn value_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
     }
     if let Some(language) = remap.language.as_deref().filter(|l| !is_language(l)) {
         gaps.push(format!(
-            "`language: {language}` is neither a two-letter code nor `first`"
+            "`language: {language}` is neither a language tag (`sk`, `en-GB`) nor `first`"
         ));
+    }
+    if field == IcalField::Duration && remap.constant.as_deref().is_some_and(|c| !is_duration(c)) {
+        gaps.push("`constant` must be an RFC 5545 duration such as PT2H or P1D".to_owned());
     }
     if let Some(zone) = remap.timezone.as_deref().filter(|z| !is_zone(z)) {
         gaps.push(format!("`timezone: {zone}` is not an IANA zone name"));
@@ -655,9 +945,65 @@ fn status_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
     )]
 }
 
-/// A two-letter language code or `first`.
-pub(super) fn is_language(language: &str) -> bool {
-    language == "first" || (language.len() == 2 && language.chars().all(|c| c.is_ascii_lowercase()))
+/// A language tag or `first`.
+fn is_language(language: &str) -> bool {
+    language == "first" || is_tag(language)
+}
+
+/// A BCP 47 language tag by its shape: a primary subtag of 2 or 3 letters, then subtags of 1 to
+/// 8 letters or digits.
+fn is_tag(tag: &str) -> bool {
+    let mut subtags = tag.split('-');
+    subtags
+        .next()
+        .is_some_and(|p| (2..=3).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphabetic()))
+        && subtags
+            .all(|s| (1..=8).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphanumeric()))
+        && tag.len() <= 35
+}
+
+/// An output name: `[a-z0-9-]`, 1 to 40, a letter or digit at both ends, never `preview` (the
+/// broker's preview route).
+fn is_slug(name: &str) -> bool {
+    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    name.len() <= 40
+        && edge(name.chars().next())
+        && edge(name.chars().last())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name != "preview"
+}
+
+/// An RFC 5545 §3.3.6 duration: `P` then weeks, or days and a time of hours, minutes, seconds.
+fn is_duration(value: &str) -> bool {
+    fn units(mut text: &str, order: &[char]) -> Option<usize> {
+        let mut found = 0;
+        for unit in order {
+            let digits = text.chars().take_while(char::is_ascii_digit).count();
+            if digits > 0 && text[digits..].starts_with(*unit) {
+                text = &text[digits + 1..];
+                found += 1;
+            }
+        }
+        text.is_empty().then_some(found)
+    }
+    let Some(rest) = value.strip_prefix('P') else {
+        return false;
+    };
+    if units(rest, &['W']) == Some(1) {
+        return true;
+    }
+    let (date, time) = rest
+        .split_once('T')
+        .map_or((rest, None), |(d, t)| (d, Some(t)));
+    let days = units(date, &['D']);
+    let times = time.map(|t| units(t, &['H', 'M', 'S']));
+    match (days, times) {
+        (Some(_), Some(Some(n))) => n > 0,
+        (Some(n), None) => n > 0,
+        _ => false,
+    }
 }
 
 /// `UTC` or an IANA name such as `Europe/Bratislava`, by its shape.
@@ -943,8 +1289,60 @@ mod tests {
             let wire = serde_json::to_value(field).expect("serializes");
             assert_eq!(wire.as_str(), Some(field.as_str()), "{field:?}");
         }
-        assert!(is_language("sk") && is_language("first") && !is_language("SK"));
+        assert!(is_language("sk") && is_language("first") && is_language("en-GB"));
+        assert!(!is_language("s") && !is_language("sk_SK") && !is_language("sk-"));
+        for ok in ["PT2H", "P1D", "P1W", "P1DT2H30M", "PT45M"] {
+            assert!(is_duration(ok), "{ok}");
+        }
+        for bad in [
+            "P",
+            "PT",
+            "2H",
+            "P1H",
+            "PT1D",
+            "P1W2D",
+            "P-1D",
+            "PT2H\r\nX:y",
+        ] {
+            assert!(!is_duration(bad), "{bad}");
+        }
+        assert!(is_slug("sport") && is_slug("okres-zvolen") && is_slug("7"));
+        for bad in ["", "-a", "a-", "Sport", "a_b", "preview", &"a".repeat(41)] {
+            assert!(!is_slug(bad), "{bad}");
+        }
         assert!(is_zone("Europe/Bratislava") && is_zone("UTC") && !is_zone("CET; x"));
+    }
+
+    #[test]
+    fn outputs_are_checked_by_count_name_and_members() {
+        let one = |name: &str| {
+            IcalOutput::legacy(IcalMapping {
+                entity_type: "CouncilMeeting".into(),
+                ..IcalMapping::default()
+            })
+            .renamed(name)
+        };
+        assert_eq!(outputs_gaps(&[one("a"), one("b")]), Vec::<String>::new());
+        assert_eq!(
+            outputs_gaps(&[one("a"), one("a")]),
+            ["`ical` lists the output name `a` twice; each name is one URL"]
+        );
+        let many: Vec<IcalOutput> = (0..=MAX_OUTPUTS).map(|i| one(&format!("o{i}"))).collect();
+        assert_eq!(outputs_gaps(&many).len(), 1);
+        let mut bad = one("a");
+        bad.filter = Some(OutputFilter {
+            geoproperty: Some("location".into()),
+            ..OutputFilter::default()
+        });
+        bad.sources[0].entity_type = "Article".into();
+        assert_eq!(
+            bad.shape_gaps(),
+            [
+                "`ical` output `a`: `filter.geoproperty` belongs to a geo-query",
+                "`ical` output `a` uses a preset for Article; a preset serves Event, \
+                 CouncilMeeting, OfficeHours alone, so map DTSTART and SUMMARY",
+            ]
+        );
     }
 
     #[test]
