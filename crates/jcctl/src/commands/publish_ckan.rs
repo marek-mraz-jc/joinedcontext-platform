@@ -53,8 +53,8 @@ pub struct Target {
     /// The `defaultLocale` of the Endpoint's space: the language its dataset is written in
     /// (EP-63). `None` when the space names none or is not in the repository.
     pub language: Option<String>,
-    /// The instance's `metadata.title` in that language: what an organization this run has
-    /// to create is called, before the installation's branding name.
+    /// The instance's `metadata.title` in that language: what its organization is called,
+    /// created or renamed to, before the installation's branding name (ADR-N-058 2.6).
     pub instance_title: Option<String>,
 }
 
@@ -64,15 +64,15 @@ impl Target {
         self.publication.dataset_name(&self.id.name)
     }
 
-    /// `settings` for this Endpoint: its space's language, and its instance's title for an
-    /// organization CKAN does not have yet.
+    /// `settings` for this Endpoint: its space's language, and its instance's title, which
+    /// the organization is created with or renamed to.
     fn settings(&self, settings: &Settings) -> Settings {
         let mut own = settings.clone();
         if let Some(language) = &self.language {
             own = own.in_language(language.clone());
         }
         if let Some(title) = &self.instance_title {
-            own = own.titled(title.clone());
+            own = own.declared_title(title.clone());
         }
         own
     }

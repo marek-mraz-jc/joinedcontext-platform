@@ -28,6 +28,9 @@ pub struct Settings {
     pub host: String,
     /// Title the CKAN organization is created with; the slug itself when absent.
     pub organization_title: Option<String>,
+    /// Whether `organization_title` is the instance's own `metadata.title`, which an existing
+    /// organization is renamed to; the branding fallback only names a new one (ADR-N-058 2.6).
+    pub title_declared: bool,
     /// The language the dataset's title and notes are taken in, from a record that carries
     /// several: the Endpoint space's `defaultLocale`. English, then the first, when absent or
     /// not in the record (EP-63).
@@ -43,6 +46,7 @@ impl Settings {
         Self {
             host: host.into(),
             organization_title: None,
+            title_declared: false,
             language: None,
             documentation: None,
         }
@@ -63,6 +67,14 @@ impl Settings {
     /// The organization title from the instance branding (Deployment/12).
     pub fn titled(mut self, title: impl Into<String>) -> Self {
         self.organization_title = Some(title.into());
+        self
+    }
+
+    /// The instance's own title: a new organization is created with it and an existing one is
+    /// renamed to it, so the catalogue follows the manifest (ADR-N-058 2.6).
+    pub fn declared_title(mut self, title: impl Into<String>) -> Self {
+        self.organization_title = Some(title.into());
+        self.title_declared = true;
         self
     }
 
@@ -526,15 +538,34 @@ pub fn publish(
         return Ok(Outcome::NotPublished);
     };
     let organization = desired["owner_org"].as_str().unwrap_or_default().to_owned();
-    if api.show("organization_show", &organization)?.is_none() {
-        let title = settings
-            .organization_title
-            .clone()
-            .unwrap_or_else(|| organization.clone());
-        api.action(
-            "organization_create",
-            &json!({ "name": organization, "title": title }),
-        )?;
+    match api.show("organization_show", &organization)? {
+        None => {
+            let title = settings
+                .organization_title
+                .clone()
+                .unwrap_or_else(|| organization.clone());
+            api.action(
+                "organization_create",
+                &json!({ "name": organization, "title": title }),
+            )?;
+        }
+        Some(existing) => {
+            if let Some(title) = settings
+                .organization_title
+                .as_deref()
+                .filter(|_| settings.title_declared)
+                .filter(|title| {
+                    existing["title"]
+                        .as_str()
+                        .is_some_and(|held| held != *title)
+                })
+            {
+                api.action(
+                    "organization_patch",
+                    &json!({ "id": organization, "title": title }),
+                )?;
+            }
+        }
     }
 
     let name = desired["name"].as_str().unwrap_or_default().to_owned();
@@ -1437,7 +1468,8 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
 /// this module builds ever contains it (EP-67).
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryCkan {
-    organizations: BTreeSet<String>,
+    /// Organizations by name, with the title CKAN holds when a test set one.
+    organizations: BTreeMap<String, Option<String>>,
     packages: BTreeMap<String, Value>,
     /// DataStore tables by resource id: the declared fields, and the rows by primary key.
     tables: BTreeMap<String, (Vec<Value>, BTreeMap<String, Value>)>,
@@ -1457,8 +1489,20 @@ impl InMemoryCkan {
 
     /// An organization that already exists.
     pub fn with_organization(mut self, name: &str) -> Self {
-        self.organizations.insert(name.to_owned());
+        self.organizations.insert(name.to_owned(), None);
         self
+    }
+
+    /// An organization that already exists under `title`.
+    pub fn with_titled_organization(mut self, name: &str, title: &str) -> Self {
+        self.organizations
+            .insert(name.to_owned(), Some(title.to_owned()));
+        self
+    }
+
+    /// The title an organization holds, when it has one.
+    pub fn organization_title(&self, name: &str) -> Option<&str> {
+        self.organizations.get(name)?.as_deref()
     }
 
     /// The API token the transport would send, which no payload may contain.
@@ -1531,10 +1575,10 @@ impl CkanApi for InMemoryCkan {
     fn show(&self, action: &str, name: &str) -> Result<Option<Value>, CkanError> {
         match action {
             "package_show" => Ok(self.packages.get(name).cloned()),
-            "organization_show" => Ok(self
-                .organizations
-                .contains(name)
-                .then(|| json!({ "name": name }))),
+            "organization_show" => Ok(self.organizations.get(name).map(|title| match title {
+                Some(title) => json!({ "name": name, "title": title }),
+                None => json!({ "name": name }),
+            })),
             "resource_show" => Ok(self
                 .tables
                 .get(name)
@@ -1594,7 +1638,17 @@ impl CkanApi for InMemoryCkan {
             .to_owned();
         match action {
             "organization_create" => {
-                self.organizations.insert(name);
+                let title = payload["title"].as_str().map(str::to_owned);
+                self.organizations.insert(name, title);
+                Ok(json!({}))
+            }
+            "organization_patch" => {
+                let Some(held) = self.organizations.get_mut(&name) else {
+                    return Err(Self::rejected(action, "unknown organization"));
+                };
+                if let Some(title) = payload["title"].as_str() {
+                    *held = Some(title.to_owned());
+                }
                 Ok(json!({}))
             }
             "package_create" | "package_update" => {
@@ -1602,7 +1656,7 @@ impl CkanApi for InMemoryCkan {
                     .get("owner_org")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if !self.organizations.contains(organization) {
+                if !self.organizations.contains_key(organization) {
                     return Err(Self::rejected(action, "unknown organization"));
                 }
                 let key = self.key_of(payload, &name);

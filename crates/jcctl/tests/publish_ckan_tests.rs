@@ -780,6 +780,79 @@ fn a_created_organization_takes_the_instance_title() {
     assert_eq!(organization["title"], json!("Mesto Banská Bystrica"));
 }
 
+/// An organization CKAN already holds under another title is renamed to the instance's title
+/// once, and the next run writes nothing (ADR-N-058 2.6: Žilina's organisation was created as
+/// "Mesto Žilina a Žilinská univerzita" and its manifest now says "Mesto Žilina").
+#[test]
+fn an_existing_organization_is_renamed_to_the_instance_title() {
+    let dir = slovak_repo(
+        "instance-rename",
+        "{ sk: \"Mesto Banská Bystrica\", en: \"City of Banská Bystrica\" }",
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut api = InMemoryCkan::new()
+        .with_titled_organization("mesto-banska-bystrica", "Mesto Banská Bystrica a okolie");
+
+    publish_one(
+        &mut api,
+        &found[0],
+        &record("air-public"),
+        None,
+        &settings(),
+    )
+    .expect("the run");
+    assert_eq!(api.actions(), vec!["organization_patch", "package_create"]);
+    let (_, patch) = api.calls().next().expect("the organization call");
+    assert_eq!(
+        patch,
+        &json!({ "id": "mesto-banska-bystrica", "title": "Mesto Banská Bystrica" })
+    );
+    assert_eq!(
+        api.organization_title("mesto-banska-bystrica"),
+        Some("Mesto Banská Bystrica")
+    );
+
+    let before = api.actions().len();
+    publish_one(
+        &mut api,
+        &found[0],
+        &record("air-public"),
+        None,
+        &settings(),
+    )
+    .expect("again");
+    assert!(
+        !api.actions()[before..].contains(&"organization_patch"),
+        "a second run renames nothing: {:?}",
+        api.actions()
+    );
+}
+
+/// The branding name only names an organization CKAN does not have: an instance without a
+/// title never renames an existing one to the installation's name.
+#[test]
+fn the_branding_name_never_renames_an_existing_organization() {
+    let dir = repo("no-title-rename");
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    assert!(found[0].instance_title.is_none());
+    let mut api = InMemoryCkan::new()
+        .with_titled_organization("mesto-banska-bystrica", "Mesto Banská Bystrica");
+    let branded = Settings::new("data.example.org").titled("Helsinki Region Context");
+
+    publish_one(&mut api, &found[0], &record("air-public"), None, &branded).expect("the run");
+    assert!(
+        !api.actions().contains(&"organization_patch"),
+        "{:?}",
+        api.actions()
+    );
+    assert_eq!(
+        api.organization_title("mesto-banska-bystrica"),
+        Some("Mesto Banská Bystrica")
+    );
+}
+
 // --- T-2526: the edge cases of `targets` and `token` (EP-62…EP-67, CC-06) --------------------
 
 use age::secrecy::ExposeSecret as _;
