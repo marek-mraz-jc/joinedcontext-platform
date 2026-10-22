@@ -271,6 +271,9 @@ const VIEW_SELECTORS: &[&str] = &[
     "timerel",
     "timeAt",
     "endTimeAt",
+    // The view orders by an attribute it hides as by one the entity lacks (TS 104 176 rule 2),
+    // so the order of a download reads nothing the caller may not (T-5082).
+    "orderBy",
 ];
 
 /// The query string of an entity read through the broker's view (plan 5.7, T-3651): the
@@ -489,6 +492,9 @@ mod tests {
         assert!(own.contains("type=Depot"), "{own}");
         assert!(own.contains("attrs=capacity"), "{own}");
         assert!(!own.contains("A%2CB") && !own.contains("A,B"), "{own}");
+        // The order a person sorted by goes too: a download holds the rows as they were shown.
+        let ordered = read("type=Depot&orderBy=capacity%3Bdesc", &[]);
+        assert!(ordered.contains("orderBy=capacity%3Bdesc"), "{ordered}");
         // No selector: every type the space holds selects, as a download names a dataset.
         let dataset = read("limit=5", &["A", "B"]);
         assert!(dataset.contains("type=A"), "{dataset}");
