@@ -3,7 +3,7 @@
 
 
 file crates/context-gateway/src/translators/mod.rs 3 | T-4478
-file crates/context-gateway/src/translators/tabular.rs 299 | T-4478
+file crates/context-gateway/src/translators/tabular.rs 3 | T-4478
 file crates/context-gateway/src/handlers/files.rs 93 | T-4478
 file crates/context-gateway/src/handlers/reads.rs 391 | T-4478
 file crates/context-gateway/src/query.rs 730 | T-4479
