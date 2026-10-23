@@ -710,20 +710,18 @@ fn federated_refusal(
     )
 }
 
-/// A delete of context data names why in `JC-Reason` (ADR-N-054 2.3, DM-113); without it the
-/// answer is `400 reason-required`. DM-113's other half, every write from the Portal's UI,
-/// turns on with T-4667, which gives the Portal's forms their reason field: enforced before
-/// that, it would refuse every form the Portal sends today.
+/// The longest `JC-Reason` the gateway takes, in characters once decoded (DM-113).
+const MAX_REASON: usize = 500;
+
+/// A delete of context data, and every write of it from the Portal's UI, names why in
+/// `JC-Reason` (ADR-N-054 2.3, DM-113); without it the answer is `400 reason-required`. The UI is
+/// the `portal-ui` client of a verified person's token, never a header the caller types. A
+/// subscription is no write of context data and needs none.
 fn reason_refusal(
     operation: Operation,
     subject: &Subject,
     headers: &axum::http::HeaderMap,
 ) -> Option<Response<Body>> {
-    // The Portal's own delete (ui/src/components/entities/filters.ts) asks no reason yet: a
-    // delete through the UI is held to it with the reason field, as every UI write is (DM-113).
-    if tenancy::provenance(subject).0 == "ui" {
-        return None;
-    }
     let deletes = matches!(
         operation,
         Operation::DeleteAttrs
@@ -733,13 +731,26 @@ fn reason_refusal(
             | Operation::DeleteAttrInstanceTemporal
             | Operation::DeleteTemporal
     );
+    let subscription = matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::DeleteSubscription
+    );
+    let ui_write = operation.is_write() && !subscription && tenancy::provenance(subject).0 == "ui";
+    // The reason travels percent-encoded: `%20%20` is as blank as no reason (DM-113: 1 to 500).
     let given = headers
         .get(tenancy::REASON)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|r| !r.trim().is_empty());
-    (deletes && !given).then(|| {
+        .is_some_and(|r| (1..=MAX_REASON).contains(&query::decode(r).trim().chars().count()));
+    ((deletes || ui_write) && !given).then(|| {
+        let detail = if deletes {
+            "a delete names why in JC-Reason"
+        } else {
+            "a write from the Portal names why in JC-Reason"
+        };
         ProblemDetails::new(400, "reason-required", "Reason Required")
-            .with_detail("a delete names why in JC-Reason")
+            .with_detail(detail)
             .into_response()
     })
 }
