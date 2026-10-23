@@ -2155,7 +2155,49 @@ fn a_pipeline_whose_target_does_not_bind_its_write_is_refused() {
         "{found:?}"
     );
 
+    // T-5040: the Portal builds the repository from its mirror and reads the same sentences, each
+    // with the output's field.
+    let loaded = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
+    let manifests = loaded.iter().map(|(_, r)| r.manifest.clone()).collect();
+    let mirrored = jc_manifest::loader::Repository::from_manifests(manifests, None)
+        .expect("the manifests build a repository");
+    let unmade = validate::unmade_writes(&mirrored);
+    let mut messages: Vec<&str> = unmade.iter().map(|u| u.message.as_str()).collect();
+    messages.sort_unstable();
+    let mut expected = found.clone();
+    expected.sort_unstable();
+    assert_eq!(messages, expected);
+    for u in &unmade {
+        assert_eq!(u.id.kind, "Pipeline");
+        assert!(
+            u.field
+                .as_deref()
+                .is_some_and(|f| f.ends_with("targetEndpoint")),
+            "{u:?}"
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// T-5040: manifests held in memory render `{orgDomain}` with the domain they are handed.
+#[test]
+fn manifests_in_memory_render_the_org_domain() {
+    let manifest: jc_manifest::loader::RawManifest = serde_json::from_value(serde_json::json!({
+        "apiVersion": "joinedcontext.com/v1alpha1",
+        "kind": "Endpoint",
+        "metadata": { "name": "e", "namespace": "p" },
+        "spec": { "policyRef": "urn:ngsi-ld:Policy:{orgDomain}:p-s:w" }
+    }))
+    .expect("a manifest");
+    let repo = jc_manifest::loader::Repository::from_manifests(vec![manifest], Some("city.sk"))
+        .expect("one manifest builds a repository");
+    assert_eq!(repo.org_domain(), Some("city.sk"));
+    let (_, endpoint) = repo.iter().next().expect("the Endpoint");
+    assert_eq!(
+        endpoint.manifest.spec["policyRef"],
+        "urn:ngsi-ld:Policy:city.sk:p-s:w"
+    );
 }
 
 #[test]
