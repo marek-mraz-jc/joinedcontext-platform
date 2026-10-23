@@ -17,7 +17,8 @@ ENV KREUZBERG_PDFIUM_PREBUILT=/opt/pdfium
 # only the final image's jc-assistant reads them.
 COPY scripts/ci/e5-small.sh scripts/ci/onnxruntime.sh /tmp/
 RUN sh /tmp/e5-small.sh /opt/e5-small && sh /tmp/onnxruntime.sh /opt/onnxruntime
-# dependency layer first so source edits do not rebuild the world
+# dependency layer first so source edits do not rebuild the world; every target a Cargo.toml names
+# gets a stub, or cargo refuses the manifest (scripts/ci/check-dockerfile-members.py)
 COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
 COPY crates/jc-dcat/Cargo.toml crates/jc-dcat/Cargo.toml
@@ -54,8 +55,9 @@ RUN mkdir -p crates/jc-core/src crates/jc-dcat/src crates/jc-manifest/src crates
  && echo 'pub fn _dep_cache() {}' > crates/app-sdk/src/lib.rs \
  && echo 'fn main() {}' > crates/camera-sim/src/main.rs \
  && mkdir -p crates/assistant/src/bin && echo 'fn main() {}' > crates/assistant/src/bin/jc-assistant.rs \
+ && mkdir -p crates/context-gateway/benches && echo 'fn main() {}' > crates/context-gateway/benches/pdp_decision.rs \
  && cargo build --release --locked --workspace --exclude assistant --features context-gateway/jemalloc \
- && cargo build --release --locked -p assistant && rm -rf crates/*/src
+ && cargo build --release --locked -p assistant && rm -rf crates/*/src crates/*/benches
 COPY . .
 # Two invocations, so kreuzberg's serde_json `preserve_order` stays in the assistant and never
 # reorders what the gateway and jcctl write (T-3206).
