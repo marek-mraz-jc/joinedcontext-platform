@@ -245,6 +245,8 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let sent_at: Arc<Vec<OnceLock<Instant>>> =
         Arc::new((0..changes).map(|_| OnceLock::new()).collect());
     let mut clients = Vec::new();
+    // When each socket the server ended ended, for the report.
+    let connecting = Instant::now();
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<Result<(), String>>(sockets.max(1));
     for (i, body) in filters.iter().enumerate() {
         // Ten connections per caller (EP-107): each client is its own address.
@@ -336,6 +338,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
                     _ => {}
                 }
             }
+            let ended = ended.map(|reason| (reason, connecting.elapsed().as_secs()));
             (got, latencies, gaps, ended)
         }));
     }
@@ -392,11 +395,17 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let mut coalesced = 0;
     let mut gaps = 0;
     let mut ends: BTreeMap<String, usize> = BTreeMap::new();
+    // The first sockets ended per reason: (index, seconds after the first connection, received).
+    let mut ended_first: BTreeMap<String, Vec<(usize, u64, usize)>> = BTreeMap::new();
     for (i, client) in clients.into_iter().enumerate() {
         let (got, mut seen, gapped, ended) = client.await.expect("the client ran");
         gaps += gapped;
-        if let Some(ended) = ended {
-            *ends.entry(ended).or_default() += 1;
+        if let Some((ended, at)) = ended {
+            *ends.entry(ended.clone()).or_default() += 1;
+            let first = ended_first.entry(ended).or_default();
+            if first.len() < 20 {
+                first.push((i, at, got.len()));
+            }
         }
         delivered += got.len();
         if got != expected[i] {
@@ -436,7 +445,10 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
         .take(5)
         .map(|(i, f, want, got)| (*i, format!("{f} wanted {want} got {got}")))
         .collect();
-    assert!(ends.is_empty(), "the server ended sockets: {ends:?}");
+    assert!(
+        ends.is_empty(),
+        "the server ended sockets: {ends:?}, first (socket, s, received): {ended_first:?}"
+    );
     assert!(
         wrong.is_empty(),
         "{} sockets differ from the ground truth: {shown:?}",
