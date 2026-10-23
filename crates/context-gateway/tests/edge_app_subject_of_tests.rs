@@ -77,6 +77,11 @@ fn endpoint(audience: Audience) -> Endpoint {
             policy("serviceAccount", "asistent", "DelegateOwn"),
             policy("group", "stewards", "GroupView"),
             policy("role", "public", "PublicView"),
+            policy(
+                "user",
+                "service-account-portal-reconciler",
+                "ReconcilerView",
+            ),
         ],
     }
 }
@@ -495,4 +500,31 @@ async fn a_delegated_person_outside_the_endpoints_projects_is_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{document}");
+}
+
+/// T-5358: a grant to a client's own service-account user (the Portal's derived
+/// `service-account-portal-reconciler`) reaches that client's token alone. The same username
+/// from another client, through a delegating account, or with no client at all is refused,
+/// not read as a person of that name.
+#[tokio::test]
+async fn a_service_account_username_from_another_client_is_refused() {
+    let fixture = fixture("reconciler-name", Audience::Public, PROJECT).await;
+    let user = "service-account-portal-reconciler";
+    let (status, document) = access(
+        &fixture,
+        json!({ "azp": "portal-reconciler", "preferred_username": user }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert_eq!(granted(&document), ["PublicView", "ReconcilerView"]);
+
+    for claims in [
+        json!({ "azp": "portal-ui", "preferred_username": user }),
+        json!({ "azp": client_id(PROJECT, "asistent"), "preferred_username": user }),
+        json!({ "preferred_username": user }),
+    ] {
+        let (status, document) = access(&fixture, claims.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{claims}: {document}");
+        assert!(granted(&document).is_empty(), "{claims}: {document}");
+    }
 }

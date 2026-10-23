@@ -275,6 +275,18 @@ pub(crate) fn subject_of(
     let Some(user) = claims.preferred_username.clone() else {
         return Err(Box::new(ProblemDetails::unauthorized()));
     };
+    // A client's own service-account user (a Policy assignee such as the Portal's derived
+    // `service-account-portal-reconciler`) is that client's token or nobody's: the guard sits
+    // here, not in the realm's username rules (T-5358).
+    if !owns_its_name(&user, claims.azp.as_deref()) {
+        tracing::warn!(
+            user = %user,
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "a service-account username from a client it does not name"
+        );
+        return Err(Box::new(ProblemDetails::forbidden()));
+    }
     let project = std::iter::once(&endpoint.project)
         .chain(endpoint.allowed_projects.iter())
         .find(|project| groups.contains(*project))
@@ -305,6 +317,18 @@ pub(crate) fn subject_of(
         client: claims.azp.clone(),
         organization: gateway.organization_of(&project),
     })
+}
+
+/// Whether `user` may be decided under its own name: any person's username, and a
+/// `service-account-<client>` one only on a token that client issued (`azp`).
+fn owns_its_name(user: &str, azp: Option<&str>) -> bool {
+    const MARK: &str = "service-account-";
+    match (user.get(..MARK.len()), user.get(MARK.len()..)) {
+        (Some(mark), Some(client)) if mark.eq_ignore_ascii_case(MARK) => {
+            azp.is_some_and(|azp| !azp.is_empty() && client.eq_ignore_ascii_case(azp))
+        }
+        _ => true,
+    }
 }
 
 /// The roles a caller holds on this endpoint: what the token asserts and, on a public
@@ -452,6 +476,25 @@ mod tests {
             "user:jana via serviceAccount:agent-proxy"
         );
         assert_eq!(principal_of(&workload), "serviceAccount:agent-proxy");
+    }
+
+    /// T-5358: a `service-account-<client>` username names that client, so only its token
+    /// carries it; a person's username carries no such tie.
+    #[test]
+    fn a_service_account_username_holds_only_on_its_own_clients_token() {
+        let user = "service-account-portal-reconciler";
+        assert!(owns_its_name(user, Some("portal-reconciler")));
+        assert!(owns_its_name(
+            "Service-Account-Portal-Reconciler",
+            Some("portal-reconciler")
+        ));
+        assert!(!owns_its_name(user, Some("portal-ui")));
+        assert!(!owns_its_name(user, Some("portal-reconciler-2")));
+        assert!(!owns_its_name(user, None));
+        assert!(!owns_its_name("service-account-", Some("")));
+        assert!(owns_its_name("jana", Some("portal-ui")));
+        assert!(owns_its_name("jana", None));
+        assert!(owns_its_name("service.account@hel.fi", None));
     }
 
     #[test]
