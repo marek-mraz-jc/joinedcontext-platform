@@ -466,6 +466,8 @@ pub enum Accepts {
     Geo,
     /// `uri`.
     Uri,
+    /// `uri`, or an object whose `url` is a `uri` and whose `name` becomes `CN` (an organizer).
+    CalAddress,
     /// A string (an ISO 8601 duration).
     Duration,
     /// Only a constant.
@@ -483,6 +485,7 @@ impl Accepts {
             Self::Place => "a string, an enum, a LanguageProperty or a structured address",
             Self::Geo => "a GeoProperty",
             Self::Uri => "uri",
+            Self::CalAddress => "uri, or an object with a uri `url` and a `name`",
             Self::Duration => "a string",
             Self::Constant => "a constant",
             Self::Fixed => "nothing: the platform sets it",
@@ -559,7 +562,7 @@ impl IcalField {
             Self::Location => Accepts::Place,
             Self::Geo => Accepts::Geo,
             Self::Url => Accepts::Uri,
-            Self::Organizer => Accepts::Uri,
+            Self::Organizer => Accepts::CalAddress,
             Self::Duration => Accepts::Duration,
             Self::Class => Accepts::Constant,
         }
@@ -727,6 +730,7 @@ impl Preset {
             (F::Location, "address"),
             (F::Geo, "location"),
             (F::Url, "url"),
+            (F::Organizer, "organizer"),
         ]
         .into_iter()
         .map(|(field, attribute)| (field, FieldSource::attribute(attribute)))
@@ -1226,9 +1230,19 @@ pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
         Accepts::Text | Accepts::Duration => text,
         Accepts::Place => text || model.class(range).is_some(),
         Accepts::Geo => kind == Some("GeoProperty"),
-        Accepts::Uri => matches!(range, "uri" | "uriorcurie" | "url"),
+        Accepts::Uri => uri(range),
+        Accepts::CalAddress => {
+            uri(range)
+                || model.slot(range, "url").is_some_and(|url| {
+                    url.kind.as_deref() != Some("Relationship") && uri(&url.range)
+                })
+        }
         Accepts::Constant | Accepts::Fixed => false,
     }
+}
+
+fn uri(range: &str) -> bool {
+    matches!(range, "uri" | "uriorcurie" | "url")
 }
 
 pub(super) fn describe(model: &Model, slot: &Slot) -> String {

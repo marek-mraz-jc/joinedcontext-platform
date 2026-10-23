@@ -19,16 +19,19 @@ slots:
   eventStatus: { range: EventStatus }
   category: { range: EventCategory }
   organizer: { range: Organization, annotations: { ngsi_ld_kind: Relationship } }
+  host: { range: Organizer, inlined: true }
 classes:
   Entity:
     abstract: true
   Event:
     is_a: Entity
-    slots: [name, startDate, endDate, lastDay, description, title, address, url, homepage, eventStatus, category, organizer]
+    slots: [name, startDate, endDate, lastDay, description, title, address, url, homepage, eventStatus, category, organizer, host]
   PostalAddress:
     slots: [streetAddress, addressLocality]
   Organization:
     slots: [name]
+  Organizer:
+    slots: [name, url]
 enums:
   EventStatus:
     permissible_values: { EventScheduled: {}, EventCancelled: {}, EventPostponed: {} }
