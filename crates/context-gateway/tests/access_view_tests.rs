@@ -667,3 +667,195 @@ async fn describe_access_names_the_websocket_only_where_it_is_served() {
     let none = live(vec![Representation::Mcp]).await;
     assert!(none.is_null(), "{none}");
 }
+
+/// A broker whose engine grants `queryEntity` and nothing else, recording every hop.
+async fn deciding_broker() -> (String, Hops) {
+    let hops: Hops = Arc::default();
+    let recorder = Arc::clone(&hops);
+    let app = Router::new().fallback(move |request: Request<Body>| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let (parts, sent) = request.into_parts();
+            let sent = axum::body::to_bytes(sent, usize::MAX)
+                .await
+                .expect("the hop's body");
+            let asked: Value = serde_json::from_slice(&sent).expect("a JSON check");
+            recorder.lock().expect("the hop log").push(Hop {
+                method: parts.method,
+                path: parts.uri.path().to_owned(),
+                headers: parts.headers,
+                body: sent.to_vec(),
+            });
+            let granted = asked["action"]["name"] == "queryEntity";
+            axum::Json(json!({ "decision": granted })).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (url, hops)
+}
+
+fn evaluate(path: &str, body: &Value) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(format!("/api/endpoint/{SLUG}/access/v1/{path}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("a request")
+}
+
+/// EP-165, EP-06 (ADR-N-057 decision 3): an AuthZEN evaluation is the view's check, the same hop and
+/// the same answer as `access/check` for allow and deny, sent without the subject the body named.
+#[tokio::test]
+async fn an_evaluation_is_the_views_check_for_allow_and_deny() {
+    for (action, decision) in [("queryEntity", true), ("deleteEntity", false)] {
+        let (upstream, hops) = deciding_broker().await;
+        let asked = json!({
+            "subject": { "type": "role", "id": "public" },
+            "action": { "name": action },
+            "resource": { "type": "AirQualityObserved" }
+        });
+        let (status, _, body) = call(
+            app(upstream.clone(), endpoint()),
+            evaluate("evaluation", &asked),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).expect("JSON"),
+            json!({ "decision": decision })
+        );
+        let plain =
+            json!({ "action": { "name": action }, "resource": { "type": "AirQualityObserved" } });
+        let (status, _, checked) = call(app(upstream, endpoint()), check(&plain.to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(checked, body, "{action}: evaluation and check agree");
+
+        let hops = hops.lock().expect("the hop log");
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].path, format!("/x/views/{SLUG}/access/check"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&hops[0].body).expect("JSON"),
+            plain,
+            "the subject never reaches the engine"
+        );
+        // The anonymous caller is asked as the public role alone.
+        assert_eq!(hops[0].headers["x-jc-roles"], "public");
+        assert!(!hops[0].headers.contains_key("x-jc-subject"));
+    }
+}
+
+/// EP-165: a batch answers each item in the order asked, each item's members over the request's defaults.
+#[tokio::test]
+async fn a_batch_of_mixed_items_answers_each_in_order() {
+    let (upstream, hops) = deciding_broker().await;
+    let asked = json!({
+        "resource": { "type": "AirQualityObserved" },
+        "evaluations": [
+            { "action": { "name": "queryEntity" } },
+            { "action": { "name": "deleteEntity" } },
+            { "action": { "name": "queryEntity" }, "resource": { "type": "Device" } },
+            { "action": { "name": "createEntity" } }
+        ],
+        "options": { "evaluations_semantic": "execute_all" }
+    });
+    let (status, _, body) = call(app(upstream, endpoint()), evaluate("evaluations", &asked)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("JSON"),
+        json!({ "evaluations": [
+            { "decision": true }, { "decision": false }, { "decision": true }, { "decision": false }
+        ] })
+    );
+    let hops = hops.lock().expect("the hop log");
+    let mut types: Vec<Value> = hops
+        .iter()
+        .map(|hop| {
+            serde_json::from_slice::<Value>(&hop.body).expect("JSON")["resource"]["type"].clone()
+        })
+        .collect();
+    types.sort_by_key(Value::to_string);
+    assert_eq!(
+        types,
+        [
+            json!("AirQualityObserved"),
+            json!("AirQualityObserved"),
+            json!("AirQualityObserved"),
+            json!("Device")
+        ]
+    );
+}
+
+/// EP-165: a batch outside 1 to 100 items, an unserved semantic or one malformed item is refused whole,
+/// and the broker is not asked.
+#[tokio::test]
+async fn a_batch_the_gateway_cannot_answer_never_reaches_the_broker() {
+    let item = json!({ "action": { "name": "queryEntity" } });
+    for (asked, detail) in [
+        (
+            json!({ "evaluations": vec![item.clone(); 101] }),
+            "101 items",
+        ),
+        (json!({ "evaluations": [] }), "0 items"),
+        (json!({ "evaluations": [item.clone(), 5] }), "JSON object"),
+        (
+            json!({ "action": { "name": "queryEntity" } }),
+            "evaluations is required",
+        ),
+        (
+            json!({ "evaluations": [item.clone()], "options": { "evaluations_semantic": "deny_on_first_deny" } }),
+            "execute_all",
+        ),
+        (
+            json!({ "evaluations": [item.clone(), { "resource": { "type": "T" } }] }),
+            "action.name",
+        ),
+    ] {
+        let (upstream, hops) = deciding_broker().await;
+        let (status, _, body) =
+            call(app(upstream, endpoint()), evaluate("evaluations", &asked)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{detail}: {body}");
+        assert!(body.contains(detail), "{detail}: {body}");
+        assert!(hops.lock().expect("the hop log").is_empty(), "{detail}");
+    }
+    let (upstream, _) = deciding_broker().await;
+    let (status, _, _) = call(
+        app(upstream, endpoint()),
+        evaluate("evaluations", &json!({ "evaluations": vec![item; 100] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "100 items are answered");
+}
+
+/// EP-165: the subject is the caller's token: a body naming anyone else, on one evaluation, as a batch's
+/// default or on one item, is a 403 and nobody is asked (only `access/simulate` asks for others).
+#[tokio::test]
+async fn a_foreign_subject_is_forbidden() {
+    let jana = json!({ "type": "user", "id": "jana" });
+    let item = json!({ "action": { "name": "queryEntity" } });
+    for (path, asked) in [
+        (
+            "evaluation",
+            json!({ "subject": jana, "action": { "name": "queryEntity" } }),
+        ),
+        (
+            "evaluations",
+            json!({ "subject": jana, "evaluations": [item] }),
+        ),
+        (
+            "evaluations",
+            json!({ "evaluations": [item, { "subject": jana, "action": { "name": "queryEntity" } }] }),
+        ),
+    ] {
+        let (upstream, hops) = deciding_broker().await;
+        let (status, _, body) = call(app(upstream, endpoint()), evaluate(path, &asked)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{asked}: {body}");
+        assert!(!body.contains("jana"), "{body}");
+        assert!(hops.lock().expect("the hop log").is_empty(), "{asked}");
+    }
+}
