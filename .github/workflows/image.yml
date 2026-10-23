@@ -1,10 +1,14 @@
 name: ship
-# builds, smoke-tests and pushes the OCI image(s) on every push to main and on tags; skipped until
-# a Dockerfile exists. The ship lane of T-4721: the file keeps the name image.yml because the
+# builds, smoke-tests and pushes the OCI image(s) once an hour when main moved and on tags; skipped
+# until a Dockerfile exists. The ship lane of T-4721: the file keeps the name image.yml because the
 # signing identity (`.github/workflows/image.yml@refs/heads/main`) is what pin-images verifies.
+# Hourly, not per main push (T-4696): one build per merge billed ~960 minutes a day, and dev
+# applies hourly anyway. pin-images (deployment) pins the newest commit this lane built.
 on:
+  schedule: [{ cron: "37 * * * *" }]
+  # The daily ci-full's commit gets its images too, so promote.yml can attest the tested digest.
+  workflow_run: { workflows: [ci-full], types: [requested], branches: [main] }
   push:
-    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 # Read-only by default: only a job that publishes may hold the permissions that push an image
@@ -22,7 +26,40 @@ concurrency:
   group: "image-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}"
   cancel-in-progress: false
 jobs:
+  # The hour and ci-full's request build when main moved since the newest green run of this lane
+  # on main, model-tools only when its folder changed; a tag, a dispatch or a last build git cannot
+  # diff builds everything (T-4696).
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: { contents: read, actions: read }
+    outputs:
+      build: ${{ steps.pick.outputs.build }}
+      model-tools: ${{ steps.pick.outputs.model-tools }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { fetch-depth: 0 }
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          build=true models=true
+          if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_run ]; then
+            built=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/image.yml/runs?branch=main&status=success&per_page=1" \
+              --jq '.workflow_runs[0].head_sha // empty')
+            if [ "$built" = "$GITHUB_SHA" ]; then
+              build=false models=false
+            elif [ -n "$built" ] && git cat-file -e "${built}^{commit}" 2>/dev/null; then
+              git diff --name-only "$built" "$GITHUB_SHA" | grep -q '^tools/model-tools/' || models=false
+            fi
+          fi
+          echo "built: ${built:-none}; build=$build model-tools=$models"
+          printf 'build=%s\nmodel-tools=%s\n' "$build" "$models" >> "$GITHUB_OUTPUT"
   build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     permissions: { contents: read, packages: write, id-token: write }
     timeout-minutes: 30
@@ -153,6 +190,8 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with: { image-ref: "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
   model-tools:
+    needs: changes
+    if: needs.changes.outputs.model-tools == 'true'
     # The one non-Rust runtime component (Architecture/11 §6.5, DM-18) is its own image: a
     # Python image carrying LinkML has nothing in common with the distroless Rust one, and the
     # Portal reaches it over HTTP, not by running a binary out of the platform image.

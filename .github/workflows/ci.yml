@@ -7,11 +7,54 @@ on:
     branches: [main, "agent/**"]
 permissions: { contents: read }
 # On main a run is never cancelled: merges land minutes apart, and each one used to cancel the
-# run before it, so main went without a finished run. One run finishes, the newest push waits
-# behind it (GitHub keeps one pending run per group). Branches still cancel.
-concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: "${{ github.ref != 'refs/heads/main' }}" }
+# run before it, so main went without a finished run. Main runs are keyed by commit (T-4696, as the
+# Portal's T-5022): with one group GitHub replaced the pending run, and the commit image.yml built
+# that hour could be left without the ci verdict pin-images waits for; the path filter keeps a run
+# per commit cheap. Branches keep one group per ref and cancel the older run.
+concurrency:
+  group: "ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}"
+  cancel-in-progress: "${{ github.ref != 'refs/heads/main' }}"
 jobs:
+  # Which jobs the change needs (T-4696, as the Portal's T-4985): the paths changed since the base,
+  # mapped by scripts/ci/changes.sh. On main the base is the newest commit whose ci run on main
+  # was green, so a range a cancelled or red run left unchecked runs again; on a branch it is the
+  # fork from main (a pull request: from its base). gitleaks runs on every push without asking,
+  # and a skipped job counts as success in the run's conclusion.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: { contents: read, actions: read }
+    outputs:
+      rust: ${{ steps.paths.outputs.rust }}
+      model-tools: ${{ steps.paths.outputs.model-tools }}
+      pipelines: ${{ steps.paths.outputs.pipelines }}
+      widget: ${{ steps.paths.outputs.widget }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: the path filter self-test
+        run: sh scripts/ci/changes.sh --selftest
+      - id: paths
+        name: the jobs this change needs
+        env:
+          BASE_REF: "${{ github.base_ref || 'main' }}"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          base=""
+          # The checkout holds one commit: fetch the base, or deepen to find the fork; no base found
+          # runs everything.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            green=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq '.workflow_runs[0].head_sha // empty' || true)
+            if [ -n "$green" ] && git fetch -q --depth=1 origin "$green"; then base=$green; fi
+          elif git fetch -q --deepen=100 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"; then
+            base=$(git merge-base HEAD "origin/$BASE_REF" || true)
+          fi
+          echo "base: ${base:-none}"
+          sh scripts/ci/changes.sh "$base" | tee -a "$GITHUB_OUTPUT"
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     # A warm cache runs this in 2-3 min. A cold one (the repo's 10 GB cache evicts the job's key)
     # needs ~12; a run cut off at the timeout never saves its cache, so 8 min turned one eviction
@@ -103,6 +146,8 @@ jobs:
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
       - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
   model-tools:
+    needs: changes
+    if: needs.changes.outputs.model-tools == 'true'
     # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
     # than after it, so the fast lane stays as long as its slowest job and no longer.
     runs-on: ubuntu-latest
@@ -155,6 +200,8 @@ jobs:
             "${committed[@]}"
           cargo test -p jc-manifest --test model_datasets_tests --locked
   pipelines:
+    needs: changes
+    if: needs.changes.outputs.pipelines == 'true'
     # PL-21, PL-22: the shipped ingestion examples are linted and run against their golden fixtures.
     # Bento is pinned by version and verified by checksum, the way an image is pinned by digest.
     runs-on: ubuntu-latest
@@ -178,6 +225,8 @@ jobs:
       - run: bento lint ./examples/ingestion/*/bento.yaml ./examples/ingestion/gtfs-rt/tests/decoder.yaml
       - run: bento test ./examples/ingestion/...
   widget:
+    needs: changes
+    if: needs.changes.outputs.widget == 'true'
     # T-3325: the assistant widget's answer renderer, with the runner's own Node: no install,
     # no dependency, the built-in test runner.
     runs-on: ubuntu-latest
@@ -186,6 +235,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: node --test crates/assistant/widget/render.test.js crates/assistant/widget/app/app.test.mjs
   widget-layout:
+    needs: changes
+    if: needs.changes.outputs.widget == 'true'
     # T-4283: the widget in Chromium at 1280, 768 and 375 px against a stand-in server: one
     # scroll area, header and composer whole, the panel fitted to its content, the language asked
     # once. The browser image is pinned by digest; the test runner is the image's version.
