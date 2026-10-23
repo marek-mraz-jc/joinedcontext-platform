@@ -139,7 +139,7 @@ fn read(zip: &[u8], members: &[&str]) -> Vec<Value> {
     let mut processors = rendered["pipeline"]["processors"].clone();
     let encoded = base64::engine::general_purpose::STANDARD.encode(zip);
     // The member request, as a server that honours Range answers it.
-    processors[2]["for_each"][0]["try"][1] = json!({"mapping": format!(
+    processors[4]["for_each"][0]["try"][1] = json!({"mapping": format!(
         "let at = @range.re_find_all_submatch(\"^bytes=([0-9]+)-([0-9]+)$\").index(0)\n\
          let whole = \"{encoded}\".decode(\"base64\")\n\
          let end = [$at.index(2).number() + 1, $whole.length()].min()\n\
@@ -147,8 +147,8 @@ fn read(zip: &[u8], members: &[&str]) -> Vec<Value> {
     )});
     // A refusal is kept, named, instead of dropped.
     let kept = json!({"mapping": "meta refused = error()\nroot = \"\""});
-    processors[1]["catch"][1] = kept.clone();
-    processors[2]["for_each"][1]["catch"][1] = kept;
+    processors[3]["catch"][1] = kept.clone();
+    processors[4]["for_each"][1]["catch"][1] = kept;
     processors.as_array_mut().expect("steps").push(json!({"mapping":
         "root = if @refused.or(\"\") != \"\" { {\"name\": @archive_filename.or(\"\"), \"refused\": @refused} } else { {\"name\": @archive_filename, \"bytes\": content().length()} }"}));
     let config = json!({

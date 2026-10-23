@@ -782,3 +782,29 @@ fn a_broker_ref_names_an_mqtt_broker_of_the_project_and_no_credential() {
         assert!(err.contains(why), "{extra}: {err}");
     }
 }
+
+/// PL-113: every `http` connection bounds the body it reads; the bound ends up in the rendered
+/// mapping, so it is a number in range or the manifest is refused.
+#[test]
+fn an_http_body_bound_is_one_byte_to_256_mib() {
+    let plain = ZIP.split("    archive:").next().unwrap().to_owned();
+    let source = DataSource::from_yaml(&plain).expect("parses");
+    source.validate().expect("no bound named");
+    let http = source.spec.http.as_ref().unwrap();
+    assert_eq!(http.max_bytes(), 32 * 1024 * 1024, "the default bound");
+    for (bound, valid) in [
+        ("0", false),
+        ("1", true),
+        ("268435456", true),
+        ("268435457", false),
+        ("-1", false),
+        ("'16'", false),
+    ] {
+        let yaml = format!("{plain}    maxBytes: {bound}\n");
+        let accepted = DataSource::from_yaml(&yaml).is_ok_and(|s| s.validate().is_ok());
+        assert_eq!(accepted, valid, "maxBytes {bound}");
+    }
+    let zero = DataSource::from_yaml(&format!("{plain}    maxBytes: 0\n")).unwrap();
+    let refused = zero.validate().unwrap_err().to_string();
+    assert!(refused.contains("spec.http.maxBytes"), "{refused}");
+}
