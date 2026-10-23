@@ -17,7 +17,7 @@ use crate::handlers::respond::text_response;
 use crate::handlers::respond::typed_json_response;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
-use crate::{middleware::tenancy, proxy};
+use crate::{middleware::rate_limit, middleware::tenancy, proxy};
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
@@ -361,6 +361,7 @@ pub(crate) async fn access_evaluations(
     Path(slug): Path<String>,
     request: Request,
 ) -> Response<Body> {
+    let caller = rate_limit::caller_of(&gateway, &request);
     let (endpoint, subject, asked) = match evaluation_request(&gateway, &slug, request).await {
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
@@ -369,15 +370,25 @@ pub(crate) async fn access_evaluations(
         Ok(asks) => asks,
         Err(problem) => return *problem,
     };
+    // The rate limit layer spent one request; each further decision is one more (EP-20).
+    let extra = u32::try_from(asks.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let charged = match rate_limit::charge(&gateway, &endpoint, &caller, extra) {
+        Ok(charged) => charged,
+        Err(refused) => return *refused,
+    };
     let decisions: Vec<_> = stream::iter(asks)
         .map(|ask| from_view(&gateway, &endpoint, &subject, ViewCall::Check(ask)))
         .buffered(EVALUATIONS_IN_FLIGHT)
         .collect()
         .await;
-    match decisions.into_iter().collect::<Result<Vec<_>, _>>() {
+    let mut answer = match decisions.into_iter().collect::<Result<Vec<_>, _>>() {
         Ok(decisions) => json_response(&json!({ "evaluations": decisions })),
         Err(answer) => *answer,
+    };
+    if let Some(charged) = charged {
+        rate_limit::set_headers(answer.headers_mut(), &charged);
     }
+    answer
 }
 
 /// The evaluations of a batch request, each as the view's `access/check` reads it, or the `400`
@@ -412,14 +423,27 @@ fn batch(subject: &Subject, asked: &Value) -> Result<Vec<Bytes>, Box<Response<Bo
             "every item of evaluations is a JSON object".to_owned(),
         ));
     }
-    items
+    let asks = items
         .iter()
         .map(|item| evaluation(subject, asked, item))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if asks.iter().map(Bytes::len).sum::<usize>() > MAX_BATCH_BYTES {
+        return Err(refused(
+            "the evaluations with the request's defaults copied into each are over 1 MiB together: send a smaller context or fewer items".to_owned(),
+        ));
+    }
+    Ok(asks)
 }
 
-/// The admitted caller and their request body, read the way `access/check` reads one; a batch
-/// may be longer than one check.
+/// The most bytes an evaluation request may hold: what `access/check` reads. An ask is built
+/// from members of the body, so none is longer.
+const MAX_EVALUATION_BYTES: usize = 64 * 1024;
+
+/// The most bytes a batch's asks send on together, 16 checks' worth: the request's defaults are
+/// copied into every item, and one request never turns into megabytes of broker bodies.
+const MAX_BATCH_BYTES: usize = 16 * MAX_EVALUATION_BYTES;
+
+/// The admitted caller and their request body, read the way `access/check` reads one.
 async fn evaluation_request(
     gateway: &Gateway,
     slug: &str,
@@ -428,8 +452,12 @@ async fn evaluation_request(
     tenancy::strip_client_headers(&mut request);
     let (endpoint, subject) = admit(gateway, slug, None, request.headers())?;
     let (_, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, 256 * 1024).await else {
-        return Err(Box::new(ProblemDetails::bad_request().into_response()));
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_EVALUATION_BYTES).await else {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail("the request body is over 64 KiB")
+                .into_response(),
+        ));
     };
     let Ok(asked @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) else {
         return Err(Box::new(

@@ -859,3 +859,59 @@ async fn a_foreign_subject_is_forbidden() {
         assert!(hops.lock().expect("the hop log").is_empty(), "{asked}");
     }
 }
+
+/// EP-165, EP-20: a batch pays one request of the caller's rate limit per decision it asks; a batch
+/// the bucket cannot pay whole is a 429 that spends nothing and asks nobody.
+#[tokio::test]
+async fn a_batch_pays_the_rate_limit_per_decision() {
+    let (upstream, hops) = deciding_broker().await;
+    let mut limited = endpoint();
+    limited.rate_limit = Some(RateLimits {
+        requests_per_minute: 1,
+        burst: Some(10),
+    });
+    let app = app(upstream, limited);
+    let items = |n: usize| json!({ "evaluations": vec![json!({ "action": { "name": "queryEntity" } }); n] });
+
+    let (status, headers, body) = call(app.clone(), evaluate("evaluations", &items(4))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["ratelimit-remaining"], "6");
+
+    let (status, headers, body) = call(app.clone(), evaluate("evaluations", &items(7))).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert!(headers.contains_key("retry-after"));
+    assert_eq!(
+        hops.lock().expect("the hop log").len(),
+        4,
+        "the refused batch asked nobody"
+    );
+
+    // The refused batch spent only the request itself: five are left for five decisions.
+    let (status, _, body) = call(app, evaluate("evaluations", &items(5))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hops.lock().expect("the hop log").len(), 9);
+}
+
+/// EP-165: an evaluation body over 64 KiB, the cap of `access/check`, is a 400; so is a batch whose
+/// defaults copied into each item come to more than 1 MiB of broker bodies.
+#[tokio::test]
+async fn an_evaluation_over_its_size_caps_never_reaches_the_broker() {
+    let big = "x".repeat(65 * 1024);
+    let over_body = json!({ "action": { "name": "queryEntity" }, "context": { "note": big } });
+    let context = "x".repeat(20 * 1024);
+    let copied = json!({
+        "context": { "note": context },
+        "evaluations": vec![json!({ "action": { "name": "queryEntity" } }); 60]
+    });
+    for (path, asked, detail) in [
+        ("evaluation", &over_body, "64 KiB"),
+        ("evaluations", &over_body, "64 KiB"),
+        ("evaluations", &copied, "1 MiB"),
+    ] {
+        let (upstream, hops) = deciding_broker().await;
+        let (status, _, body) = call(app(upstream, endpoint()), evaluate(path, asked)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+        assert!(body.contains(detail), "{path}: {body}");
+        assert!(hops.lock().expect("the hop log").is_empty(), "{path}");
+    }
+}

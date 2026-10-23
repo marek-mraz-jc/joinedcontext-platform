@@ -123,6 +123,20 @@ impl RateLimiter {
     /// `now` is a parameter so a test can drive the clock instead of sleeping through a
     /// minute of refill.
     pub fn check(&self, slug: &str, caller: &str, limits: &RateLimits, now: Instant) -> Decision {
+        self.spend(slug, caller, limits, 1, now)
+    }
+
+    /// Spends `cost` requests of `caller`'s quota on `slug` at once, or none when fewer are left:
+    /// a batch that asks for many decisions pays for each (ADR-N-057 decision 3).
+    pub fn spend(
+        &self,
+        slug: &str,
+        caller: &str,
+        limits: &RateLimits,
+        cost: u32,
+        now: Instant,
+    ) -> Decision {
+        let cost = f64::from(cost);
         let rate = f64::from(limits.requests_per_minute) / 60.0;
         let capacity = f64::from(limits.burst.unwrap_or(limits.requests_per_minute)).max(1.0);
         self.sweep(now);
@@ -147,8 +161,8 @@ impl RateLimiter {
         bucket.capacity = capacity;
         bucket.tokens = bucket.tokens.min(capacity);
 
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
+        if bucket.tokens >= cost {
+            bucket.tokens -= cost;
             Decision {
                 allowed: true,
                 limit: limits.requests_per_minute,
@@ -158,7 +172,7 @@ impl RateLimiter {
         } else {
             // Seconds until one whole token exists again, rounded up: a client that waits
             // exactly this long is never refused for being a fraction early.
-            let missing = 1.0 - bucket.tokens;
+            let missing = cost.min(capacity) - bucket.tokens;
             let wait = if rate > 0.0 { missing / rate } else { 60.0 };
             Decision {
                 allowed: false,
@@ -252,10 +266,7 @@ pub async fn enforce(
         return next.run(request).await;
     };
 
-    let caller = match request.extensions().get::<CallerKey>() {
-        Some(CallerKey(caller)) => caller.clone(),
-        None => caller_key(&gateway, request.headers()),
-    };
+    let caller = caller_of(&gateway, &request);
     let decision = gateway
         .rate_limiter
         .check(&endpoint.slug, &caller, &limits, Instant::now());
@@ -268,8 +279,49 @@ pub async fn enforce(
     }
 
     let mut response = next.run(request).await;
-    set_headers(response.headers_mut(), &decision);
+    // A handler that spent more of the bucket (an evaluations batch) set the fields it left.
+    if !response.headers().contains_key("ratelimit-remaining") {
+        set_headers(response.headers_mut(), &decision);
+    }
     response
+}
+
+/// Spends `extra` more requests of the caller's quota on `endpoint`, beyond the one [`enforce`]
+/// spent on the request: an `access/v1/evaluations` batch pays for each decision it asks. A
+/// refusal is the 429 of a spent bucket; the decision, whose fields the answer carries, is `None`
+/// when nothing more was spent.
+pub(crate) fn charge(
+    gateway: &Gateway,
+    endpoint: &crate::resolver::Endpoint,
+    caller: &str,
+    extra: u32,
+) -> Result<Option<Decision>, Box<Response<Body>>> {
+    let Some(limits) = &endpoint.rate_limit else {
+        return Ok(None);
+    };
+    if extra == 0 {
+        return Ok(None);
+    }
+    let decision =
+        gateway
+            .rate_limiter
+            .spend(&endpoint.slug, caller, limits, extra, Instant::now());
+    if decision.allowed {
+        return Ok(Some(decision));
+    }
+    tracing::info!(slug = %endpoint.slug, "rate limit reached by a batch");
+    Err(Box::new(too_many(
+        &decision,
+        "the endpoint's rate limit has fewer requests left than the batch asks decisions; ask fewer per batch or retry after the seconds the RateLimit-Reset header names",
+    )))
+}
+
+/// The caller key of `request`: the one the outer `in_flight` layer made, or a fresh one.
+pub(crate) fn caller_of(gateway: &Gateway, request: &Request) -> String {
+    match request.extensions().get::<CallerKey>() {
+        Some(CallerKey(caller)) => caller.clone(),
+        None => caller_key(gateway, request.headers()),
+    }
 }
 
 /// The 429 of a spent bucket, with the `RateLimit` fields and `Retry-After` (EP-20).
