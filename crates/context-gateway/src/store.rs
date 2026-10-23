@@ -1441,8 +1441,11 @@ mod tests {
         types: &[&str],
         grant: &jc_core::kinds::PolicySpec,
     ) -> bool {
+        // The gateway decides a `service-account-<client>` user only on its client's token
+        // (T-5358), so the subject carries that client as a real call's would.
         let subject = Subject {
             user: Some(user.to_owned()),
+            client: user.strip_prefix("service-account-").map(str::to_owned),
             ..Subject::default()
         };
         let request = Request {
@@ -1493,6 +1496,7 @@ mod tests {
         // a query of the space is narrowed to the personal classes: Station is never read
         let portal = Subject {
             user: Some(PORTAL_RECONCILER_USER.to_owned()),
+            client: Some("portal-reconciler".to_owned()),
             ..Subject::default()
         };
         let verdict = evaluate(
