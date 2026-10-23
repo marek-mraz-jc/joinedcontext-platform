@@ -43,7 +43,42 @@ pub type Tables = (
     crate::mqtt::Brokers,
     crate::handlers::mappings::Mappings,
     Publishers,
+    Provenance,
 );
+
+/// What the gateway adds to a write's provenance beside the caller (ADR-N-054 2.3, 2.8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Provenance {
+    /// The Organization each Project names in `spec.organizationRef`, by Project.
+    pub organizations: BTreeMap<String, String>,
+    /// The slugs of the Endpoints with `spec.audit: changes` (DM-136).
+    pub audited: BTreeSet<String>,
+}
+
+/// The [`Provenance`] the repository declares. A manifest whose spec does not parse adds
+/// nothing, as every kind here.
+pub fn provenance_of(repo: &Repository) -> Provenance {
+    let mut out = Provenance::default();
+    for (id, resource) in repo.iter() {
+        match id.kind.as_str() {
+            "Project" => {
+                if let Some(spec) = spec_of::<ProjectSpec>(&resource.manifest) {
+                    out.organizations
+                        .insert(id.name.clone(), spec.organization_ref.name().to_owned());
+                }
+            }
+            "Endpoint" => {
+                if let Some(spec) = spec_of::<EndpointSpec>(&resource.manifest) {
+                    if spec.audit == jc_core::kinds::Audit::Changes {
+                        out.audited.insert(spec.slug.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
 
 /// The body that publishes one Project's data, as its own catalogue names it (EP-127).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +390,7 @@ fn tables(repo: &Repository, root: &Path) -> Tables {
         crate::mqtt::brokers_of(repo),
         mappings,
         publishers_of(repo),
+        provenance_of(repo),
     )
 }
 
@@ -560,6 +596,7 @@ pub fn load_with_previews(
         brokers,
         mappings,
         publishers,
+        provenance,
     ) = load_from(dir, checkouts)?;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
@@ -609,6 +646,9 @@ pub fn load_with_previews(
         mappings,
         // A preview's Project publishes no catalogue: only the merged repository's do.
         publishers,
+        // A preview's Endpoints keep no audit trail and its Projects name no writer's
+        // Organization: only the merged repository's do.
+        provenance,
     ))
 }
 

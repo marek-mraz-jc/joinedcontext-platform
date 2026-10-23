@@ -261,6 +261,7 @@ pub(crate) fn subject_of(
                 agreement: None,
                 via: None,
                 client: None,
+                organization: gateway.organization_of(&account.project),
             });
         }
         if via.is_none() && claims.preferred_username.is_none() {
@@ -302,6 +303,7 @@ pub(crate) fn subject_of(
         agreement: None,
         via,
         client: claims.azp.clone(),
+        organization: gateway.organization_of(&project),
     })
 }
 

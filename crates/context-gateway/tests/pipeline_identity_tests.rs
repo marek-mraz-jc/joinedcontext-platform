@@ -49,6 +49,11 @@ spec:
     mode: upsert
 "#;
 
+/// The project the pipeline and both Endpoints live in, and its Organization (ADR-N-054 2.3).
+const PROJECT: &str =
+    "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: helsinki\n  \
+    namespace: org\nspec:\n  organizationRef: { kind: Organization, name: hel }\n";
+
 struct Repo(PathBuf);
 
 impl Repo {
@@ -64,13 +69,15 @@ impl Repo {
             ("parking.yaml", space("parking")),
             (
                 "events-all.yaml",
-                endpoint("events-all", "events", "eeeeeeeeeeeeeeeeeeeeeeeeee"),
+                endpoint("events-all", "events", "eeeeeeeeeeeeeeeeeeeeeeeeee")
+                    + "  audit: changes\n",
             ),
             (
                 "parking-all.yaml",
                 endpoint("parking-all", "parking", "pppppppppppppppppppppppppp"),
             ),
             ("pipeline.yaml", PIPELINE.to_owned()),
+            ("project.yaml", PROJECT.to_owned()),
         ] {
             std::fs::write(dir.join(file), body).expect("a manifest");
         }
@@ -143,13 +150,15 @@ fn the_written_spaces_endpoint_carries_the_pipelines_write_grant_and_no_other_do
 #[tokio::test]
 async fn a_pipelines_write_reaches_the_broker_as_channel_pipeline_with_its_account() {
     let repo = Repo::new();
-    let (endpoints, _, accounts, ..) = store::load(&repo.0).expect("the repository loads");
+    let tables = store::load(&repo.0).expect("the repository loads");
+    let (endpoints, accounts, provenance) = (tables.0, tables.2, tables.11);
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let slug = "eeeeeeeeeeeeeeeeeeeeeeeeee";
     let gateway = Gateway::new(Broker::new(&broker.url), Box::new(PolicyPdp), "hel.fi")
         .serve(endpoints)
         .authenticate(Arc::new(realm.verifier()), accounts, None);
+    gateway.replace_provenance(provenance);
     let token = realm.workload_token("helsinki-pl-linked-events", json!(slug));
     let entities = json!([{ "id": "urn:ngsi-ld:Event:t5361", "type": "Event" }]).to_string();
     let request = Request::post(format!(
@@ -159,6 +168,8 @@ async fn a_pipelines_write_reaches_the_broker_as_channel_pipeline_with_its_accou
     .header("content-type", "application/json")
     .header("jc-provenance-channel", "ui")
     .header("jc-provenance-actor", "user:someone-else")
+    .header("jc-provenance-organization", "another-city")
+    .header("jc-provenance-actor-kind", "person")
     .body(Body::from(entities))
     .expect("a request");
     let status = router(Arc::new(gateway))
@@ -190,5 +201,28 @@ async fn a_pipelines_write_reaches_the_broker_as_channel_pipeline_with_its_accou
             .collect::<Vec<_>>(),
         [36],
         "{headers:?}"
+    );
+    // DM-111, DM-136: the Organization of its Project, its kind, and the audited Endpoint's mark.
+    assert_eq!(values("jc-provenance-organization"), ["hel"], "{headers:?}");
+    assert_eq!(
+        values("jc-provenance-actor-kind"),
+        ["pipeline"],
+        "{headers:?}"
+    );
+    assert_eq!(values("jc-provenance-audit"), ["changes"], "{headers:?}");
+}
+
+/// DM-136: only an Endpoint with `spec.audit: changes` is audited; the default is off.
+#[test]
+fn only_an_endpoint_that_says_so_is_audited() {
+    let repo = Repo::new();
+    let provenance = store::load(&repo.0).expect("the repository loads").11;
+    assert_eq!(
+        provenance.audited.iter().collect::<Vec<_>>(),
+        ["eeeeeeeeeeeeeeeeeeeeeeeeee"]
+    );
+    assert_eq!(
+        provenance.organizations.get("helsinki").map(String::as_str),
+        Some("hel")
     );
 }

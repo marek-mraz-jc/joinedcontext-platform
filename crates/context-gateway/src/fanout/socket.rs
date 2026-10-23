@@ -246,6 +246,8 @@ fn upstream_headers(space: &str, subject: &Subject) -> Option<HeaderMap> {
     // shared by identity.
     headers.remove(tenancy::PROVENANCE_CHANNEL);
     headers.remove(tenancy::PROVENANCE_ACTOR);
+    headers.remove(tenancy::PROVENANCE_ORGANIZATION);
+    headers.remove(tenancy::PROVENANCE_ACTOR_KIND);
     headers.remove(tenancy::REQUEST_ID);
     Some(headers)
 }

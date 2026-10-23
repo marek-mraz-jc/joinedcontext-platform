@@ -558,6 +558,29 @@ pub struct EndpointSpec {
     /// headers until the deprecated part is removed (EP-146, EP-147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecation: Option<super::endpoint_deprecation::Deprecation>,
+    /// `changes`: every write through this Endpoint that changes a value is kept as a version
+    /// with its provenance, whatever the type's history rule (ADR-N-054 2.8, DM-136).
+    #[serde(default, skip_serializing_if = "Audit::is_off")]
+    pub audit: Audit,
+}
+
+/// Whether an Endpoint keeps an audit trail of the writes through it (ADR-N-054 2.8, DM-136).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum Audit {
+    /// The type's history rule alone decides which rows exist (the owner's default).
+    #[default]
+    Off,
+    /// A write that changes a value is kept as a version row, even where the type records no
+    /// history; an exact repeat stores nothing.
+    Changes,
+}
+
+impl Audit {
+    /// Whether this is the default, `off`.
+    pub fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
 }
 
 /// One role an Endpoint gives the callers it admits who match a subject (AP-96, AP-97).

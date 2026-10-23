@@ -163,6 +163,8 @@ pub fn subject(
         agreement: Some(id.to_owned()),
         via: None,
         client: None,
+        // A participant is its DID alone (ADR-N-054 2.3).
+        organization: None,
     })
 }
 

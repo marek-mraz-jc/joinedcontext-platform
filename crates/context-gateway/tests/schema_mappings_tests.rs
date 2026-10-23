@@ -184,7 +184,7 @@ async fn broker() -> String {
 }
 
 async fn gateway(test: &str) -> Router {
-    let (endpoints, spaces, .., mappings, _) =
+    let (endpoints, spaces, .., mappings, _, _) =
         store::load(&repo(test)).expect("the repository loads");
     let gateway = Gateway::new(
         Broker::new(broker().await),

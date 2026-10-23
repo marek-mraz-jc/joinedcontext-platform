@@ -63,6 +63,7 @@ fn jana() -> Subject {
         agreement: None,
         via: None,
         client: None,
+        organization: None,
     }
 }
 
@@ -95,6 +96,7 @@ fn a_principal_kind_matches_only_its_own_field() {
         // The account a delegated call came through is never a principal of it (AG-95).
         via: Some("shared-name".to_owned()),
         client: Some("shared-name".to_owned()),
+        organization: None,
     };
 
     assert_eq!(
