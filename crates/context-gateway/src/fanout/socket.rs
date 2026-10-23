@@ -676,11 +676,8 @@ pub async fn session(
                 }
             }
             _ = ping.tick() => {
-                if last_pong.elapsed() > PING * 2 {
-                    ended = Some(Ended::NoPong);
-                } else if hub.subscriptions(conn) == 0 && last_message.elapsed() > IDLE {
-                    ended = Some(Ended::Closing("idle"));
-                } else {
+                ended = tick(last_pong, last_message, || hub.subscriptions(conn));
+                if ended.is_none() {
                     ended = deliver(&mut to_client, ws::Message::Ping(Vec::new().into())).await;
                 }
             }
@@ -698,6 +695,25 @@ pub async fn session(
     let _ = tokio::time::timeout(STALL, finish(&mut to_client, &ended)).await;
     hub.close(conn, &name, &token, sent);
     ended
+}
+
+/// What a ping tick decides: a client that answered no ping for [`PING`] twice ends, and one
+/// silent past [`IDLE`] with no subscription. `subscriptions` takes the hub's lock, which
+/// `Hub::apply` holds through a change's whole fan-out: it is asked only of a silent client, since
+/// every connection asking on each tick parked the runtime's threads behind a large hub and no
+/// Pong was read in time (T-5351).
+fn tick(
+    last_pong: Instant,
+    last_message: Instant,
+    subscriptions: impl FnOnce() -> usize,
+) -> Option<Ended> {
+    if last_pong.elapsed() > PING * 2 {
+        Some(Ended::NoPong)
+    } else if last_message.elapsed() > IDLE && subscriptions() == 0 {
+        Some(Ended::Closing("idle"))
+    } else {
+        None
+    }
 }
 
 /// Sends one frame within [`STALL`]: how the session ends when it cannot.
@@ -1071,6 +1087,18 @@ mod tests {
             echoed[0].contains("\"x-id\":\"s1\"") && echoed[0].contains("\"x-status\":201"),
             "{echoed:?}"
         );
+    }
+
+    /// A ping tick asks the hub only about a silent client (T-5351).
+    #[test]
+    fn a_tick_asks_the_hub_only_about_a_silent_client() {
+        let now = Instant::now();
+        let long_ago = now.checked_sub(PING * 3).expect("an instant");
+        let unasked = || -> usize { panic!("the hub's lock was taken for a live client") };
+        assert_eq!(tick(now, now, unasked), None);
+        assert_eq!(tick(long_ago, now, unasked), Some(Ended::NoPong));
+        assert_eq!(tick(now, long_ago, || 0), Some(Ended::Closing("idle")));
+        assert_eq!(tick(now, long_ago, || 1), None);
     }
 
     /// A session behind a real upgrade, for the RFC 6455 tests.
