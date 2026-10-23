@@ -267,3 +267,19 @@ async fn describe_schema_refuses_a_formalism_nobody_renders() {
         Value::Null
     );
 }
+
+/// T-5279: `area_overview` is a read of the Endpoint like `query_entities`: without a session a
+/// private Endpoint answers 401 with the challenge, before any broker is asked.
+#[tokio::test]
+async fn area_overview_on_a_private_endpoint_needs_a_session() {
+    let realm = common::Realm::new();
+    let broker = common::mcp_broker(json!([{ "name": "area_overview" }])).await;
+    let area = call(
+        "area_overview",
+        json!({ "geometry": "Point", "coordinates": [19.15, 48.74], "maxDistance": 500 }),
+    );
+    let path = format!("/api/endpoint/{PRIVATE}/mcp");
+    let (status, _, headers) = send(app(&broker, &realm), message(&path, None, area)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.get("www-authenticate").is_some());
+}

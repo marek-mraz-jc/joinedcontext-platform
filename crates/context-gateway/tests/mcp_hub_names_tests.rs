@@ -178,7 +178,10 @@ async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     // query_entities' limit default and maximum (T-4804), in its schema and one note sentence
     // that no longer repeats the cursor's nextCursor, add 57: 14,599 (T-4812).
     // describe_access does not repeat `liveUpdates` (T-5045): initialize says it (T-5148).
-    assert!(sizes[0] < 14_600, "{sizes:?}");
+    // The broker's `area_overview` (T-5279, the eighth read tool), one call for every type in an
+    // area where the model made one per type (18 on Helsinki's whole space), adds 1,487: 16,086
+    // so the ceiling is 16,100, and it only comes down.
+    assert!(sizes[0] < 16_100, "{sizes:?}");
 }
 
 #[tokio::test]

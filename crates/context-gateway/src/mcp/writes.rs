@@ -279,6 +279,7 @@ pub(crate) fn is_read_tool(tool: &str) -> bool {
 
 /// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
 const MCP_READ_TOOLS: &[&str] = &[
+    "area_overview",
     "batch_query",
     "batch_query_temporal",
     "get_attribute",

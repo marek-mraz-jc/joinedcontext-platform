@@ -258,6 +258,29 @@ async fn an_endpoint_the_token_may_not_read_is_never_listed_and_answers_like_an_
     );
 }
 
+/// T-5279: `area_overview` naming an Endpoint the token may not read answers the bytes an
+/// unknown slug gets, as every read does, and reaches no broker.
+#[tokio::test]
+async fn an_area_overview_of_an_endpoint_the_token_may_not_read_answers_like_an_unknown_one() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let app = app(&broker.url, &realm);
+    let token = edge(&realm);
+    let area = |endpoint: &str| {
+        call(
+            "area_overview",
+            json!({ "endpoint": endpoint, "geometry": "Point", "coordinates": [19.15, 48.74] }),
+        )
+    };
+    let unknown = raw(app.clone(), hub(Some(&token), area(UNKNOWN))).await;
+    for outside in [CLOSED, FOREIGN, QUIET] {
+        let answer = raw(app.clone(), hub(Some(&token), area(outside))).await;
+        assert_eq!(answer.2, unknown.2, "{outside}");
+        assert!(!answer.2.contains(outside), "{}", answer.2);
+    }
+    assert!(broker.hops().is_empty(), "nothing reached the broker");
+}
+
 /// Section 3, row 2: `endpoint` is one string. A list is invalid input, and no other argument
 /// can carry a second slug or a space (AG-05, SP-14). A read that names none asks the catalogue
 /// (T-4501), which reads no broker.
