@@ -1,8 +1,9 @@
 //! The decision point's budget (T-5042, ADR-N-057 section 4): one space with 50 Policies of five
 //! rules each, a caller that ten of them name, one `queryEntity` with types, attributes and a `q`.
-//! The decision's p99 stays under 1 ms, and ci-full fails a p50 more than 20 % above the last
-//! main run's (the p99 of a shared runner swings 20 % between two runs of the same commit; the
-//! p50 moves by 3 %):
+//! The decision's p99 stays under 1 ms, and ci-full fails a p50 more than 20 % above the lowest
+//! p50 a main run measured (the p99 of a shared runner swings 20 % between two runs of the same
+//! commit; the p50 moves by 3 %). `PDP_BENCH_OUT` keeps the lower of the two, so steps under 20 %
+//! each never add up to an unnoticed regression:
 //!
 //! ```text
 //! cargo bench -p context-gateway --bench pdp_decision
@@ -24,7 +25,7 @@ const RULES: usize = 5;
 const SAMPLES: usize = 20_000;
 /// ADR-N-057 section 4: a decision's p99.
 const BUDGET_US: f64 = 1000.0;
-/// ci-full's regression threshold against the last main run.
+/// ci-full's regression threshold against the lowest main run's p50.
 const REGRESSION: f64 = 1.2;
 
 /// Policy `n`: four grants and one prohibition, each with the residual constraints a real space
@@ -175,14 +176,17 @@ fn main() {
     );
     println!("{line}");
     if let Ok(path) = std::env::var("PDP_BENCH_OUT") {
-        std::fs::write(path, format!("{line}\n")).expect("the result is written");
+        let lowest = baseline.map_or(p50, |b| b.min(p50));
+        std::fs::write(path, format!("p50_us={lowest:.1}\n")).expect("the baseline is written");
     }
     if p99 > BUDGET_US {
         eprintln!("pdp_decision: p99 {p99:.1} us over the {BUDGET_US} us budget");
         std::process::exit(1);
     }
     if let Some(ceiling) = ceiling.filter(|ceiling| p50 > *ceiling) {
-        eprintln!("pdp_decision: p50 {p50:.1} us over {ceiling:.1} us, the last main run's + 20 %");
+        eprintln!(
+            "pdp_decision: p50 {p50:.1} us over {ceiling:.1} us, the lowest main run's + 20 %"
+        );
         std::process::exit(1);
     }
 }

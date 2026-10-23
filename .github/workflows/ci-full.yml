@@ -60,7 +60,8 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env: { RUSTDOCFLAGS: "-D warnings" }
   # The decision point's budget (T-5042, ADR-N-057 section 4): p99 under 1 ms for 50 Policies of
-  # 5 rules, and a p50 at most 20 % above the last main run's, which the cache carries over.
+  # 5 rules, and a p50 at most 20 % above the lowest main run's, which the cache carries over.
+  # shell: bash sets pipefail, so the tee keeps the bench's exit status.
   pdp-bench:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -70,10 +71,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with: { path: pdp-bench-baseline.txt, key: "pdp-bench-${{ github.run_id }}", restore-keys: pdp-bench- }
-      - run: >-
-          PDP_BENCH_BASELINE=pdp-bench-baseline.txt PDP_BENCH_OUT=pdp-bench.txt
-          cargo bench -p context-gateway --bench pdp_decision
-          && cat pdp-bench.txt >> "$GITHUB_STEP_SUMMARY" && mv pdp-bench.txt pdp-bench-baseline.txt
+      - shell: bash
+        run: >-
+          PDP_BENCH_BASELINE=pdp-bench-baseline.txt PDP_BENCH_OUT=pdp-bench-baseline.txt
+          cargo bench --locked -p context-gateway --bench pdp_decision | tee -a "$GITHUB_STEP_SUMMARY"
       - if: github.ref == 'refs/heads/main'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with: { path: pdp-bench-baseline.txt, key: "pdp-bench-${{ github.run_id }}" }
