@@ -8,8 +8,8 @@
 //! context is accepted, which is the broker's default and remaps nothing; every other context
 //! is refused before the broker is asked.
 
-use axum::http::header::LINK;
-use axum::http::HeaderMap;
+use http::header::LINK;
+use http::HeaderMap;
 use serde_json::Value;
 
 /// The `rel` of a `Link` that names a JSON-LD context (CIM 009 clause 6.3.5).
@@ -122,7 +122,7 @@ fn embeds_context(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::HeaderValue;
+    use http::HeaderValue;
     use serde_json::json;
 
     const CORE: &str = "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context-v1.8.jsonld";

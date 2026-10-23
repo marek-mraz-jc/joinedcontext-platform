@@ -1,0 +1,12 @@
+[package]
+name = "jc-ngsi-input"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What an NGSI-LD write must carry before it reaches the broker: the model's unit codes (DM-06) and only the core JSON-LD context (T-3287)"
+
+[dependencies]
+http = "1"
+jc-core = { path = "../jc-core", version = "0.1.0" }
+serde_json = "1"

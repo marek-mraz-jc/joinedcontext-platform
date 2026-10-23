@@ -23,6 +23,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
 COPY crates/jc-dcat/Cargo.toml crates/jc-dcat/Cargo.toml
 COPY crates/jc-manifest/Cargo.toml crates/jc-manifest/Cargo.toml
+COPY crates/jc-ngsi-input/Cargo.toml crates/jc-ngsi-input/Cargo.toml
 COPY crates/jc-relationships/Cargo.toml crates/jc-relationships/Cargo.toml
 COPY crates/jc-tabular/Cargo.toml crates/jc-tabular/Cargo.toml
 COPY crates/context-gateway/Cargo.toml crates/context-gateway/Cargo.toml
@@ -34,10 +35,11 @@ COPY crates/token-sidecar/Cargo.toml crates/token-sidecar/Cargo.toml
 COPY crates/wasm-host/Cargo.toml crates/wasm-host/Cargo.toml
 COPY crates/app-sdk/Cargo.toml crates/app-sdk/Cargo.toml
 COPY crates/camera-sim/Cargo.toml crates/camera-sim/Cargo.toml
-RUN mkdir -p crates/jc-core/src crates/jc-dcat/src crates/jc-manifest/src crates/jc-relationships/src crates/jc-tabular/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src crates/camera-sim/src \
+RUN mkdir -p crates/jc-core/src crates/jc-dcat/src crates/jc-manifest/src crates/jc-ngsi-input/src crates/jc-relationships/src crates/jc-tabular/src crates/context-gateway/src crates/jcctl/src crates/agent-proxy/src crates/functions/src crates/assistant/src crates/token-sidecar/src crates/wasm-host/src crates/app-sdk/src crates/camera-sim/src \
  && echo 'pub fn _dep_cache() {}' > crates/jc-core/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/jc-dcat/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/jc-manifest/src/lib.rs \
+ && echo 'pub fn _dep_cache() {}' > crates/jc-ngsi-input/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/jc-relationships/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/jc-tabular/src/lib.rs \
  && echo 'pub fn _dep_cache() {}' > crates/context-gateway/src/lib.rs \
