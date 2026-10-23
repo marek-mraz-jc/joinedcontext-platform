@@ -1,10 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "Cargo, npm/pnpm, Dockerfile and GitHub Actions updates as pull requests into main, proved by ci.yml like any change (T-3860). Minor and patch bumps come as one weekly pull request, because each one costs a ci run; a major comes alone. Digests stay pinned; nothing merges by itself.",
+  "description": "Cargo, npm/pnpm, Dockerfile and GitHub Actions updates as pull requests into main, proved by ci.yml like any change (T-3860). Minor and patch bumps come as one weekly pull request, because each one costs a ci run; a major comes alone. Nothing is proposed before it is 7 days old (the owner's dependency cooldown, as in the deployment config); digests stay pinned; nothing merges by itself.",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
   "baseBranchPatterns": ["main"],
   "pinDigests": true,
   "automerge": false,
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
   "labels": ["renovate"],
   "prConcurrentLimit": 5,
   "osvVulnerabilityAlerts": true,
