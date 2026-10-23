@@ -2,12 +2,17 @@ name: ship
 # builds, smoke-tests and pushes the OCI image(s) once an hour when main moved and on tags; skipped
 # until a Dockerfile exists. The ship lane of T-4721: the file keeps the name image.yml because the
 # signing identity (`.github/workflows/image.yml@refs/heads/main`) is what pin-images verifies.
-# Hourly, not per main push (T-4696): one build per merge billed ~960 minutes a day, and dev
-# applies hourly anyway. pin-images (deployment) pins the newest commit this lane built.
+# At most hourly, not per main push (T-4696): one build per merge billed ~960 minutes a day, and
+# dev applies hourly anyway. pin-images (deployment) pins the newest commit this lane built.
+# A green ci on main starts a run (T-5449): GitHub's cron fired none of the 05:37-08:37Z slots on
+# 2026-10-23, so the cron stays only as a fallback. The run waits in `changes` until the newest
+# image is an hour old, so a merge gets its image within the hour without a later merge.
 on:
   schedule: [{ cron: "37 * * * *" }]
-  # The daily ci-full's commit gets its images too, so promote.yml can attest the tested digest.
-  workflow_run: { workflows: [ci-full], types: [requested], branches: [main] }
+  # ci completed: the green main commit. ci-full requested: the daily ci-full's commit gets its
+  # images too, so promote.yml can attest the tested digest. The other two pairs (ci requested,
+  # ci-full completed) end as skipped runs at `changes`' if.
+  workflow_run: { workflows: [ci, ci-full], types: [requested, completed], branches: [main] }
   push:
     tags: ["v*"]
   workflow_dispatch:
@@ -26,12 +31,29 @@ concurrency:
   group: "image-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}"
   cancel-in-progress: false
 jobs:
-  # The hour and ci-full's request build when main moved since the newest green run of this lane
-  # on main, model-tools only when its folder changed; a tag, a dispatch or a last build git cannot
+  # The hour, a green ci and ci-full's request build when main moved since the newest green run of
+  # this lane on main, model-tools only when its folder changed; a tag, a dispatch or a last build git cannot
   # diff builds everything (T-4696).
   changes:
+    # workflow_run runs main's workflow with its secrets whatever triggered it: only a green ci of
+    # a push to main in this repository, on the commit main still points at (a newer commit's ci
+    # comes after), and ci-full's request start a build; github.sha is always main's head.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.name == 'ci-full' && github.event.action == 'requested') ||
+      (github.event.workflow_run.name == 'ci' && github.event.action == 'completed' &&
+       github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_sha == github.sha &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # The hourly gate waits up to an hour (scripts/ci/image-gate.py).
+    timeout-minutes: 70
+    # One run waits at the gate, the newest commit pends behind it and replaces an older pending
+    # one; the replaced run ends cancelled, its commit is in the newer one. ci-full's request, a
+    # tag and a dispatch never wait.
+    concurrency:
+      group: "${{ (github.event_name == 'schedule' || github.event.workflow_run.name == 'ci') && 'image-gate' || format('image-gate-{0}', github.run_id) }}"
+      cancel-in-progress: false
     permissions: { contents: read, actions: read }
     outputs:
       build: ${{ steps.pick.outputs.build }}
@@ -42,13 +64,15 @@ jobs:
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
+          TRIGGER: ${{ github.event.workflow_run.name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           build=true models=true
           if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_run ]; then
-            built=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/image.yml/runs?branch=main&status=success&per_page=1" \
-              --jq '.workflow_runs[0].head_sha // empty')
+            gap=3600
+            [ "$TRIGGER" = ci-full ] && gap=0
+            built=$(python3 scripts/ci/image-gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$gap")
             if [ "$built" = "$GITHUB_SHA" ]; then
               build=false models=false
             elif [ -n "$built" ] && git cat-file -e "${built}^{commit}" 2>/dev/null; then
