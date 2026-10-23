@@ -4,3 +4,5 @@ eca854de1779b6244cb6f54359621c9873dfc96d:crates/agent-proxy/src/routes/diagnosti
 30547a948788426d939a22b6d18c5dba21c138a7:crates/context-gateway/tests/edge_endpoint_surface_dataset_turtle_tests.rs:generic-api-key:316
 # RFC 6455 sample Sec-WebSocket-Key in the raw deflate upgrade of the WS abuse rig (T-4902), a public nonce.
 3ddb718b6065aef709a78458f79036eb1fbeb9ec:crates/context-gateway/tests/ws_abuse_rig.rs:generic-api-key:340
+5dae1b9baf8375c76e2fbc5554da022519c1858f:crates/jc-core/tests/space_tests.rs:gitlab-pat:681
+5dae1b9baf8375c76e2fbc5554da022519c1858f:crates/jc-core/tests/space_tests.rs:generic-api-key:675

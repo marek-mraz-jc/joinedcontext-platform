@@ -157,6 +157,17 @@
           ],
           "description": "What a write through an Endpoint does with a quantity Property of the model that carries no `unitCode`: `fill` writes the model's code and says so, `refuse` answers `400` (DM-06). A `unitCode` other than the model's is refused either way."
         },
+        "personalData": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SpacePersonalData"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The space's personal-data settings: the key a `keyedHash` slot of its model is hashed under (DM-121, ADR-N-054 2.6)."
+        },
         "quality": {
           "description": "The space's own quality rules beside its model's constraints, at most 64 (DM-87, ADR-N-046).",
           "items": {
@@ -544,6 +555,52 @@
       },
       "required": [
         "entityType"
+      ],
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "Reference to a credential stored in SOPS or OpenBao (PF-36).\n\n`deny_unknown_fields` is a security control: it rejects inline `value:` or `password:` fields at parse time, enforcing that secrets never appear in Git or manifest files.",
+      "properties": {
+        "envVar": {
+          "description": "Optional environment variable name for injection into runners.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Optional key within secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Secret name in secret store.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "SpacePersonalData": {
+      "additionalProperties": false,
+      "description": "A space's personal-data settings (DM-121).",
+      "properties": {
+        "keyRef": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            }
+          ],
+          "description": "The secret whose value is the HMAC-SHA-256 key of the space's `keyedHash` slots, at least 32 bytes; the reconciler hands it to the gateway, and a model never holds a key."
+        }
+      },
+      "required": [
+        "keyRef"
       ],
       "type": "object"
     },

@@ -310,6 +310,19 @@ pub struct ContextSpaceSpec {
     /// (PF-111, ADR-N-047). Changing it on a space that holds entities is a move job (PF-115).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_ref: Option<String>,
+    /// The space's personal-data settings: the key a `keyedHash` slot of its model is hashed
+    /// under (DM-121, ADR-N-054 2.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_data: Option<SpacePersonalData>,
+}
+
+/// A space's personal-data settings (DM-121).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SpacePersonalData {
+    /// The secret whose value is the HMAC-SHA-256 key of the space's `keyedHash` slots, at least
+    /// 32 bytes; the reconciler hands it to the gateway, and a model never holds a key.
+    pub key_ref: crate::envelope::SecretRef,
 }
 
 /// The most quality rules a space declares (DM-92).
@@ -824,6 +837,10 @@ impl ContextSpaceSpec {
 
         if let Some(broker) = &self.broker_ref {
             names::validate_dns1123_label(broker)?;
+        }
+
+        if let Some(personal) = &self.personal_data {
+            personal.key_ref.validate("spec.personalData.keyRef")?;
         }
 
         if let Some(ttl) = self.ttl_days {

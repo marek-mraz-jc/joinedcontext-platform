@@ -137,7 +137,7 @@ pub use service_account::{
 pub use space::{
     duration_seconds, retention_seconds, urn_segment, AttributeRecording, ContextSpaceSpec,
     MissingUnitCode, ProjectApps, ProjectSpec, QualityKind, QualityOutcome, QualityRule, Quotas,
-    RetentionRule, MAX_QUALITY_RULES, RECORD_EVERY, RECORD_ON_CHANGE,
+    RetentionRule, SpacePersonalData, MAX_QUALITY_RULES, RECORD_EVERY, RECORD_ON_CHANGE,
 };
 pub use subscription::{
     KeyValue, Notification, NotificationEndpoint, SubscriptionSpec, WatchedEntity,
