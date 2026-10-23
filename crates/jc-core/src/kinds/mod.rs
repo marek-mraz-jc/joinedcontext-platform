@@ -35,6 +35,7 @@ pub mod pipeline_identity;
 pub mod pipeline_lifetime;
 pub mod pipeline_source_deletes;
 pub mod policy;
+pub mod policy_odrl;
 pub mod role;
 pub mod service_account;
 pub mod space;
