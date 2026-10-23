@@ -648,7 +648,8 @@ pub async fn session(
     };
     let mut ping = tokio::time::interval(PING);
     ping.tick().await;
-    let mut last_pong = Instant::now();
+    // When the oldest ping the client has not answered yet went out.
+    let mut unanswered: Option<Instant> = None;
     let mut last_message = Instant::now();
     let mut first = true;
     let mut rate = Rate::new(Instant::now());
@@ -656,7 +657,11 @@ pub async fn session(
     tokio::pin!(expired);
     while ended.is_none() {
         let mut outgoing: Vec<String> = Vec::new();
+        // In this order: a Pong already read is counted before a late tick judges it, and the
+        // queue, ready on every turn under a backlog, cannot hold back the ping or the lifetime.
+        // The client's frames cannot hold back the rest: they are rate limited.
         tokio::select! {
+            biased;
             read = from_client.next() => {
                 last_message = Instant::now();
                 if matches!(read, Some(Ok(_))) && !rate.take(last_message) {
@@ -670,13 +675,21 @@ pub async fn session(
                         outgoing.extend(replies);
                     }
                     Some(Ok(ws::Message::Binary(_))) => ended = Some(Ended::Binary),
-                    Some(Ok(ws::Message::Pong(_))) => last_pong = Instant::now(),
+                    Some(Ok(ws::Message::Pong(_))) => unanswered = None,
                     Some(Ok(ws::Message::Ping(_))) => {}
                     Some(Ok(ws::Message::Close(_))) | None => ended = Some(Ended::Closed),
                     Some(Err(error)) => ended = Some(read_error(&error)),
                 }
                 }
             }
+            _ = ping.tick() => {
+                ended = tick(unanswered, last_message, || hub.subscriptions(conn));
+                if ended.is_none() {
+                    ended = deliver(&mut to_client, ws::Message::Ping(Vec::new().into())).await;
+                    unanswered.get_or_insert_with(Instant::now);
+                }
+            }
+            () = &mut expired => ended = Some(Ended::Closing("lifetime")),
             () = queue.ready() => {
                 let (items, overflowed) = queue.take();
                 for item in items {
@@ -710,16 +723,6 @@ pub async fn session(
                     ended = Some(Ended::Closing("overflow"));
                 }
             }
-            _ = ping.tick() => {
-                if last_pong.elapsed() > PING * 2 {
-                    ended = Some(Ended::NoPong);
-                } else if hub.subscriptions(conn) == 0 && last_message.elapsed() > IDLE {
-                    ended = Some(Ended::Closing("idle"));
-                } else {
-                    ended = deliver(&mut to_client, ws::Message::Ping(Vec::new().into())).await;
-                }
-            }
-            () = &mut expired => ended = Some(Ended::Closing("lifetime")),
         }
         for text in outgoing {
             if let Some(end) = deliver(&mut to_client, ws::Message::text(text)).await {
@@ -733,6 +736,27 @@ pub async fn session(
     let _ = tokio::time::timeout(STALL, finish(&mut to_client, &ended)).await;
     hub.close(conn, &name, &token, sent);
     ended
+}
+
+/// What a ping tick decides: a client that left a ping unanswered for longer than [`PING`] ends,
+/// so the next tick after that one (60 s after the ping, API/07 §3), and one silent past [`IDLE`]
+/// with no subscription. The deadline runs from a ping sent: a tick the gateway ran late sent
+/// none, and a client is never ended for a ping it was not sent (T-5351). `subscriptions` takes the hub's lock, which
+/// `Hub::apply` holds through a change's whole fan-out: it is asked only of a silent client, since
+/// every connection asking on each tick parked the runtime's threads behind a large hub and no
+/// Pong was read in time (T-5351).
+fn tick(
+    unanswered: Option<Instant>,
+    last_message: Instant,
+    subscriptions: impl FnOnce() -> usize,
+) -> Option<Ended> {
+    if unanswered.is_some_and(|sent| sent.elapsed() > PING) {
+        Some(Ended::NoPong)
+    } else if last_message.elapsed() > IDLE && subscriptions() == 0 {
+        Some(Ended::Closing("idle"))
+    } else {
+        None
+    }
 }
 
 /// Sends one frame within [`STALL`]: how the session ends when it cannot.
@@ -1106,6 +1130,20 @@ mod tests {
             echoed[0].contains("\"x-id\":\"s1\"") && echoed[0].contains("\"x-status\":201"),
             "{echoed:?}"
         );
+    }
+
+    /// A ping tick asks the hub only about a silent client, and ends one only for a ping it was
+    /// sent: the gateway's own late tick sent none (T-5351).
+    #[test]
+    fn a_tick_asks_the_hub_only_about_a_silent_client() {
+        let now = Instant::now();
+        let long_ago = now.checked_sub(PING * 3).expect("an instant");
+        let unasked = || -> usize { panic!("the hub's lock was taken for a live client") };
+        assert_eq!(tick(None, now, unasked), None);
+        assert_eq!(tick(Some(now), now, unasked), None);
+        assert_eq!(tick(Some(long_ago), now, unasked), Some(Ended::NoPong));
+        assert_eq!(tick(None, long_ago, || 0), Some(Ended::Closing("idle")));
+        assert_eq!(tick(None, long_ago, || 1), None);
     }
 
     /// A session behind a real upgrade, for the RFC 6455 tests.
