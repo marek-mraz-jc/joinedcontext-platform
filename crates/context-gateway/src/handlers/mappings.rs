@@ -8,10 +8,10 @@
 
 use crate::app::Gateway;
 use crate::auth::subject::admit;
+use crate::auth::subject::Subject;
 use crate::handlers::respond::sha256_hex;
 use crate::handlers::schema_routes::{revalidated, revalidated_text, view_document};
 use crate::middleware::tenancy;
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};

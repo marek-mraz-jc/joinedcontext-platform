@@ -233,7 +233,7 @@ fn a_hop_on_the_gateways_own_account_says_so_and_nothing_else() {
 fn a_caller_is_never_forwarded_as_the_gateway() {
     // T-3767: a token of the gateway's own client, admitted on a data path, does not make the
     // caller the principal the gateway's own hops are granted as.
-    let mut subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    let mut subject = context_gateway::auth::subject::Subject::anonymous();
     subject.service_account = Some(GATEWAY_CLIENT.to_owned());
     let mut request = with(&[]);
     context_gateway::middleware::tenancy::pin_caller(&mut request, "city", &subject)
@@ -251,7 +251,7 @@ fn a_participant_is_forwarded_as_its_did_alone() {
     // T-3800, DS-02: a transfer token establishes the participant and nothing else. The hop
     // carries its DID and no role, account or opt-in, so a broker that does not read `x-jc-did`
     // takes it as the cluster's own and refuses it, never as the public caller.
-    let mut subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    let mut subject = context_gateway::auth::subject::Subject::anonymous();
     subject.service_account = Some("dataspace-connector".to_owned());
     subject.roles.insert("public".to_owned());
     subject.did = Some("did:web:helsinki.fi".to_owned());
@@ -330,7 +330,7 @@ fn a_hop_carries_only_the_x_jc_headers_the_gateway_set() {
     assert_eq!(jc, ["x-jc-client", "x-jc-roles"]);
 
     let mut request = with(&NEW_IDENTITY);
-    let subject = context_gateway::pdp::evaluator::Subject::anonymous();
+    let subject = context_gateway::auth::subject::Subject::anonymous();
     context_gateway::middleware::tenancy::pin_caller(&mut request, "city", &subject)
         .expect("a legal space");
     let jc: Vec<(&str, &str)> = request

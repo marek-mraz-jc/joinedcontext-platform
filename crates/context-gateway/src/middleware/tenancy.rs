@@ -8,7 +8,7 @@
 //! The stripping is unconditional and happens first, before routing, authentication or
 //! policy evaluation, so no later stage can accidentally read a client-supplied value.
 
-use crate::pdp::evaluator::Subject;
+use crate::auth::subject::Subject;
 use axum::extract::Request;
 use axum::http::header::{InvalidHeaderValue, AUTHORIZATION, COOKIE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};

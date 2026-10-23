@@ -11,8 +11,9 @@
 //! a parameter that is quietly dropped (AG-21).
 
 use crate::app::Gateway;
+use crate::auth::subject::Subject;
 use crate::mcp::jsonrpc::refused;
-use crate::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
+use crate::pdp::evaluator::{Request as PolicyRequest, Verdict};
 use crate::resolver::Endpoint;
 use jc_core::kinds::Operation;
 use serde_json::{json, Map, Value};

@@ -3,7 +3,8 @@
 //! prohibition rule of another bound Policy still wins (GW4).
 
 use chrono::{DateTime, Utc};
-use context_gateway::pdp::evaluator::{evaluate, Request, Subject, Verdict};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{evaluate, Request, Verdict};
 use context_gateway::resolver::Endpoint;
 use context_gateway::store;
 use jc_core::kinds::Operation;

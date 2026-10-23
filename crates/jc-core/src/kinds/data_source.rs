@@ -428,7 +428,12 @@ impl Kind for DataSourceSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
-        self.validate()
+        // One runner may carry every project's streams: a file reader keeps to its own
+        // project's folder of the files volume (PL-50, T-5337).
+        match &meta.namespace {
+            Some(project) => self.validate_reading_files(&format!("/data/{project}/")),
+            None => self.validate(),
+        }
     }
 }
 
@@ -451,8 +456,15 @@ impl DataSourceSpec {
         }
     }
 
-    /// Validates that exactly the declared connection is present and reachable as written.
+    /// Validates that exactly the declared connection is present and reachable as written. A
+    /// file reader may name any path of the runner's files volume, `/data/`; the manifest's own
+    /// check holds it to its project's folder.
     pub fn validate(&self) -> Result<()> {
+        self.validate_reading_files("/data/")
+    }
+
+    /// [`Self::validate`] with every file a runner input reads held under `files`.
+    fn validate_reading_files(&self, files: &str) -> Result<()> {
         let present: Vec<&'static str> = [
             self.mqtt.is_some().then_some("mqtt"),
             self.http.is_some().then_some("http"),
@@ -585,7 +597,7 @@ impl DataSourceSpec {
                     "spec.gtfsRt.url",
                 )
             }
-            DataSourceType::Runner(name) => self.validate_runner(name),
+            DataSourceType::Runner(name) => self.validate_runner(name, files),
         }
     }
 
@@ -638,7 +650,7 @@ impl DataSourceSpec {
         Ok(())
     }
 
-    fn validate_runner(&self, runner_name: &str) -> Result<()> {
+    fn validate_runner(&self, runner_name: &str, files: &str) -> Result<()> {
         let input_obj = match &self.input {
             Some(serde_json::Value::Object(map)) if !map.is_empty() => map,
             _ => {
@@ -747,7 +759,7 @@ impl DataSourceSpec {
         }
 
         let own: Vec<&str> = known_vars.into_iter().collect();
-        validate_input_tree(runner_name, input_obj, &own)
+        validate_input_tree(runner_name, input_obj, &own, files)
     }
 
     fn validate_mqtt(&self) -> Result<()> {
@@ -929,20 +941,22 @@ fn refused_input(field: &'static str, name: &str) -> Result<()> {
 }
 
 /// One runner input and every input nested in it (T-3833): no refused input, a file reader (and
-/// `fsevent`, which watches paths) under `/data/`, and its `processors` held to the rules of a
+/// `fsevent`, which watches paths) under `files`, and its `processors` held to the rules of a
 /// pipeline step. `own` is the source's declared `envVar`s.
 fn validate_input_tree(
     name: &str,
     config: &serde_json::Map<String, serde_json::Value>,
     own: &[&str],
+    files: &str,
 ) -> Result<()> {
     if bento_inputs::FILE_READERS.contains(&name) || name == "fsevent" {
         let check_file_path = |field: &'static str, val: &str| -> Result<()> {
-            if !val.starts_with("/data/") || val.split('/').any(|seg| seg == "..") {
+            if !val.starts_with(files) || val.split('/').any(|seg| seg == "..") {
                 return Err(Error::Name {
                     field,
                     value: val.to_string(),
-                    reason: "a file-reading input reads the runner's files volume under /data/",
+                    reason: "a file-reading input reads its own project's folder of the runner's \
+                             files volume, /data/<project>/ (PL-50)",
                 });
             }
             Ok(())
@@ -991,7 +1005,12 @@ fn validate_input_tree(
             }
             refused_input("spec.input", child_name)?;
             let empty = serde_json::Map::new();
-            validate_input_tree(child_name, child_config.as_object().unwrap_or(&empty), own)?;
+            validate_input_tree(
+                child_name,
+                child_config.as_object().unwrap_or(&empty),
+                own,
+                files,
+            )?;
         }
     }
     Ok(())

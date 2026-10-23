@@ -2,7 +2,8 @@
 //! the Endpoint's guards, and its deletes followed to what they reach (GW11, GW17).
 
 use crate::app::{Gateway, MAX_BODY, WRITE_RETRY_SECONDS};
-use crate::pdp::evaluator::{self, Constraints, Subject, Verdict};
+use crate::auth::subject::Subject;
+use crate::pdp::evaluator::{self, Constraints, Verdict};
 use crate::pdp::{conditional, write_guard};
 use crate::proxy::Broker;
 use crate::resolver::Endpoint;

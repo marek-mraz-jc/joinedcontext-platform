@@ -7,8 +7,8 @@
 
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::principal_of;
+use crate::auth::subject::Subject;
 use crate::handlers::ngsi_ld::{reserve_create, view_payload};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use crate::{mcp, operations, query};
 use axum::http::header::CONTENT_TYPE;

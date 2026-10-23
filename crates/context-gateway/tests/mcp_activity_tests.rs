@@ -226,7 +226,7 @@ async fn a_tool_call_reaches_the_collector_as_one_record_without_its_arguments()
     // An anonymous caller's calls wait for the minute's post, then go as one row; a collector
     // that is away drops them without holding anything.
     // (An anonymous caller reaches no Endpoint of this audience: recorded here directly.)
-    let anonymous = context_gateway::pdp::evaluator::Subject::default();
+    let anonymous = context_gateway::auth::subject::Subject::default();
     for _ in 0..2 {
         activity::record(
             &endpoint(),

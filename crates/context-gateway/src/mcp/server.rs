@@ -13,13 +13,13 @@
 //! ten of them.
 
 use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::Subject;
 use crate::auth::subject::{authenticate, subject_from, EDGE_AUDIENCE, HUB_PATH};
 use crate::auth::token::{self, Claims};
 use crate::mcp::hub::{misrouted, Answer, Hub};
 use crate::mcp::jsonrpc::{self, error, refused, result};
 use crate::mcp::tools::{self, HubTool};
 use crate::middleware::{rate_limit, tenancy};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};

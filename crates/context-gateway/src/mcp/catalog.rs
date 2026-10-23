@@ -19,8 +19,8 @@
 
 use super::jsonrpc::{answered, error, refused, result};
 use crate::app::Gateway;
+use crate::auth::subject::Subject;
 use crate::handlers::{endpoint_surface, schema};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use antares_jsonld::{expand_entity, expand_types, Context, ExpandOpts};
 use jc_core::kinds::{Audience, QualityKind};

@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{json, Value};
 
 use crate::auth::subject::principal_of;
-use crate::pdp::evaluator::Subject;
+use crate::auth::subject::Subject;
 use crate::resolver::Endpoint;
 
 /// How often the signed-in callers' calls are posted.
