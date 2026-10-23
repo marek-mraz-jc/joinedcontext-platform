@@ -96,6 +96,7 @@ impl Tool {
 pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "list_endpoints",
     "get_endpoint",
+    "area_overview",
     "search",
     "search_documents",
     "list_types",
@@ -504,6 +505,16 @@ const SUMMARIZE: &[Arg] = &[
     opt("geoproperty", Kind::Attr),
     opt("lang", Kind::Text(64)),
 ];
+const AREAS: &[&str] = &["Point", "LineString", "Polygon", "MultiPolygon"];
+/// The broker's `area_overview` (Antares T-5279): one area, every type of the view or `type`.
+const AREA: &[Arg] = &[
+    req("geometry", Kind::Word(AREAS)),
+    req("coordinates", Kind::Coordinates),
+    opt("maxDistance", Kind::Int(1, 5000)),
+    opt("type", Kind::Types),
+    opt("limit", Kind::Int(1, 20)),
+    opt("lang", Kind::Text(64)),
+];
 const BATCH_QUERY: &[Arg] = &[
     req("type", Kind::Types),
     opt("id", Kind::Ids),
@@ -699,6 +710,13 @@ pub(crate) const TOOLS: &[Tool] = &[
         "Append Attributes to one Entity (TS 104 175 10.2.4); noOverwrite keeps those it has. The tool asks the person to confirm before it writes.",
         APPEND,
         "result",
+    ),
+    broker(
+        "area_overview",
+        &[Operation::QueryEntity],
+        "Everything in one area, every Entity type at once: per type its count and the limit nearest (id, name, distance in metres, key Attributes). A Point or a LineString with maxDistance in metres, or a Polygon; at most 5000 m, 1000 positions, 100 km². Use it for \"what is here\".",
+        AREA,
+        "overview",
     ),
     broker(
         "batch_create",
