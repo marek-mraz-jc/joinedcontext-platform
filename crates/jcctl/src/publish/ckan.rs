@@ -792,7 +792,12 @@ impl History {
             .map(|g| g.seconds.unwrap_or(u64::MAX))
             .max()?;
         let kept = self.kept(kind)?;
-        Some(iso_duration(granted.min(kept).min(SERIES_SECONDS)))
+        let seconds = granted.min(kept);
+        Some(if seconds >= SERIES_SECONDS {
+            SERIES_WINDOW.to_owned()
+        } else {
+            iso_duration(seconds)
+        })
     }
 
     /// Seconds of history the space keeps of `kind`: its own rule's, else the `*` rule's;
