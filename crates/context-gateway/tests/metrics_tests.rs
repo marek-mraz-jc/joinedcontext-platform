@@ -175,3 +175,70 @@ async fn a_duration_is_exported_as_buckets_a_dashboard_can_sum() {
         "a summary quantile is exported and cannot be aggregated:\n{body}"
     );
 }
+
+/// The milliseconds `Server-Timing` names for `metric`.
+fn duration(timing: &str, metric: &str) -> f64 {
+    timing
+        .split(", ")
+        .find_map(|entry| entry.strip_prefix(&format!("{metric};dur=")))
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or_else(|| panic!("no {metric} in {timing:?}"))
+}
+
+/// T-5042, ADR-N-057 section 4: an answer says how much of its time the gateway's decision point
+/// and the broker took, so a load test reads the gateway's share without a scrape.
+#[tokio::test]
+async fn an_answer_splits_its_time_between_the_decision_and_the_broker() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let timing = response
+        .headers()
+        .get("server-timing")
+        .and_then(|value| value.to_str().ok())
+        .expect("a Server-Timing header")
+        .to_owned();
+
+    let (pdp, broker, total) = (
+        duration(&timing, "pdp"),
+        duration(&timing, "broker"),
+        duration(&timing, "total"),
+    );
+    // The broker's view decides a read (T-3643): the gateway's own decision point is not asked.
+    assert_eq!(pdp, 0.0, "{timing}");
+    assert!(
+        broker > 0.0,
+        "the broker was asked, unreachable as it is: {timing}"
+    );
+    assert!(total >= pdp + broker, "{timing}");
+}
+
+/// A request that never reaches a decision says so with a zero, not with a missing header.
+#[tokio::test]
+async fn an_undecided_answer_names_no_decision_time() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/nowhere")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let timing = response
+        .headers()
+        .get("server-timing")
+        .and_then(|value| value.to_str().ok())
+        .expect("a Server-Timing header")
+        .to_owned();
+    assert_eq!(duration(&timing, "pdp"), 0.0, "{timing}");
+    assert_eq!(duration(&timing, "broker"), 0.0, "{timing}");
+}
