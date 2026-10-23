@@ -632,6 +632,81 @@
         }
       ]
     },
+    "PolicyRule": {
+      "additionalProperties": false,
+      "description": "One rule of a Policy's `rules[]` (ADR-N-057 decision 1): the single-rule members of [`PolicySpec`], while `assigner`, `contextSpaceRef` and `validity` stay on the Policy.",
+      "properties": {
+        "actions": {
+          "description": "Granted platform actions (ADR-N-054).",
+          "items": {
+            "$ref": "#/definitions/PlatformAction"
+          },
+          "type": "array"
+        },
+        "assignee": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Principal"
+            }
+          ],
+          "description": "Grantee principal of this rule."
+        },
+        "effect": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/PolicyEffect"
+            }
+          ],
+          "description": "Whether this rule grants or takes away (GW4, GW8)."
+        },
+        "geoQ": {
+          "description": "Residual geographic query filter string (R7, GW11, EP-56).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "information": {
+          "description": "Target entity types and attribute whitelist (R6, R9).",
+          "items": {
+            "$ref": "#/definitions/RegistrationInfo"
+          },
+          "type": "array"
+        },
+        "operations": {
+          "description": "Granted CIM 009 operations or operation groups (R8).",
+          "items": {
+            "$ref": "#/definitions/OperationRef"
+          },
+          "type": "array"
+        },
+        "q": {
+          "description": "Residual NGSI-LD query filter string (R7, EP-56).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopeQ": {
+          "description": "Residual scope query filter string (R7, R13, EP-56).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temporalQ": {
+          "description": "Residual temporal query filter string (R7, GW11, EP-56).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assignee"
+      ],
+      "type": "object"
+    },
     "PolicySpec": {
       "additionalProperties": false,
       "description": "Desired specification of a [`Policy`][crate::kinds::Policy] resource (ADR 002, R1..R9).",
@@ -649,7 +724,7 @@
               "$ref": "#/definitions/Principal"
             }
           ],
-          "description": "Grantee principal receiving permissions."
+          "description": "Grantee principal receiving permissions; unset when the Policy lists `rules`."
         },
         "assigner": {
           "description": "Granting data owner (e.g. `did:web:banskabystrica.sk`).",
@@ -669,7 +744,6 @@
               "$ref": "#/definitions/PolicyEffect"
             }
           ],
-          "default": "permission",
           "description": "Whether this policy grants or takes away (GW4, GW8)."
         },
         "geoQ": {
@@ -687,7 +761,6 @@
           "type": "array"
         },
         "operations": {
-          "default": [],
           "description": "Granted CIM 009 operations or operation groups (R8); empty when the Policy grants `actions` alone.",
           "items": {
             "$ref": "#/definitions/OperationRef"
@@ -698,6 +771,16 @@
           "description": "Residual NGSI-LD query filter string (R7, EP-56).",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "rules": {
+          "description": "Several grants and prohibitions in one Policy (ADR-N-057 decision 1), instead of the single rule above; [`PolicySpec::expand`] turns either shape into one grant per rule.",
+          "items": {
+            "$ref": "#/definitions/PolicyRule"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -728,7 +811,6 @@
         }
       },
       "required": [
-        "assignee",
         "assigner",
         "contextSpaceRef"
       ],

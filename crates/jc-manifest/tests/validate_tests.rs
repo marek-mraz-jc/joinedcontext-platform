@@ -2082,6 +2082,40 @@ fn a_write_policy_named_by_the_policy_ref_passes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// T-5036: each rule of a `rules[]` Policy is its own grant; the lint names the write rule
+/// `{policy}#{n}`, and a `policyRef` naming the Policy binds every rule of it.
+#[test]
+fn a_write_rule_no_endpoint_binds_is_refused_by_its_rule_name() {
+    let dir = valid_repo("adr57-rules-write");
+    narrow_public_air(&dir);
+    write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/policies/kiosks.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: kiosks\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: { kind: ContextSpace, name: ovzdusie }\n  assigner: did:web:banskabystrica.sk\n  rules:\n    - assignee: { kind: role, id: public }\n      operations: [retrieveOps]\n    - assignee: { kind: serviceAccount, id: kiosk-editor }\n      operations: [updateAttrs]\n",
+    );
+
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(
+        found[0].contains("Policy kiosks#2 grants a write"),
+        "{}",
+        found[0]
+    );
+
+    write(
+        &dir,
+        ENDPOINT_PATH,
+        &format!(
+            "{ENDPOINT}  policyRef: urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie-ovzdusie:kiosks\n"
+        ),
+    );
+    let report = validate::run(&dir);
+    assert_eq!(citing(&report, "ADR-N-057"), Vec::<&str>::new());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// PL-111, T-5035: a Pipeline writes as `pl-{pipeline}` under a Policy derived for it (PL-20), which an
 /// Endpoint with a `policyRef` never binds, so every upsert of the pipeline answered 404.
 #[test]

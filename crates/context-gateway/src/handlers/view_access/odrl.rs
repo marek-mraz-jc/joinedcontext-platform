@@ -36,6 +36,8 @@ pub fn published(
             rule.insert("duty".to_owned(), Value::Array(duties.clone()));
         }
     }
+    // A prohibition wins over any permission (GW4, ADR-N-057): ODRL's default is `invalid`.
+    document.insert("conflict".to_owned(), json!("prohibit"));
     let rules = |name: &str| document.get(name).cloned().unwrap_or_else(|| json!([]));
     let body =
         serde_json::to_vec(&json!([rules("permission"), rules("prohibition")])).unwrap_or_default();
@@ -66,6 +68,9 @@ pub fn turtle(document: &Value) -> String {
         if let Some(id) = document.get(party).and_then(Value::as_str) {
             out.push_str(&format!(" ;\n  odrl:{party} {}", party_term(id)));
         }
+    }
+    if let Some(conflict) = document.get("conflict").and_then(Value::as_str) {
+        out.push_str(&format!(" ;\n  odrl:conflict odrl:{conflict}"));
     }
     for (key, predicate) in [
         ("permission", "odrl:permission"),
