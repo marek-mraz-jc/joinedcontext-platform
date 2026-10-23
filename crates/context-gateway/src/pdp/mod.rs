@@ -45,6 +45,7 @@ impl Pdp for PolicyPdp {
         request: &Request,
         endpoint: &Endpoint,
     ) -> Verdict {
+        let started = std::time::Instant::now();
         let verdict = evaluator::evaluate(
             subject,
             operation,
@@ -92,7 +93,7 @@ impl Pdp for PolicyPdp {
 
         // T-3473: an answer's type is judged as an IRI, so the granted names are read the way
         // the space's own models define them, once, beside the core context's reading.
-        match verdict {
+        let verdict = match verdict {
             Verdict::Rewrite(mut constraints) => {
                 let contexts = || {
                     endpoint
@@ -109,7 +110,9 @@ impl Pdp for PolicyPdp {
                 Verdict::Rewrite(constraints)
             }
             verdict => verdict,
-        }
+        };
+        crate::telemetry::decision_time(started.elapsed().as_secs_f64());
+        verdict
     }
 }
 

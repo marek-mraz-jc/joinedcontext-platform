@@ -59,6 +59,24 @@ jobs:
           JC_ASSISTANT_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/postgres
       - run: cargo doc --workspace --no-deps
         env: { RUSTDOCFLAGS: "-D warnings" }
+  # The decision point's budget (T-5042, ADR-N-057 section 4): p99 under 1 ms for 50 Policies of
+  # 5 rules, and a p50 at most 20 % above the last main run's, which the cache carries over.
+  pdp-bench:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with: { path: pdp-bench-baseline.txt, key: "pdp-bench-${{ github.run_id }}", restore-keys: pdp-bench- }
+      - run: >-
+          PDP_BENCH_BASELINE=pdp-bench-baseline.txt PDP_BENCH_OUT=pdp-bench.txt
+          cargo bench -p context-gateway --bench pdp_decision
+          && cat pdp-bench.txt >> "$GITHUB_STEP_SUMMARY" && mv pdp-bench.txt pdp-bench-baseline.txt
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with: { path: pdp-bench-baseline.txt, key: "pdp-bench-${{ github.run_id }}" }
   wasm-host-fuzz:
     # The sandbox of server WASM Apps under cargo-fuzz (T-4777): arbitrary bytes as a component
     # through the production engine, and arbitrary input to the checks behind every host function.

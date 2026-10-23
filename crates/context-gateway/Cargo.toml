@@ -92,3 +92,8 @@ hyper = { version = "1", features = ["http1", "server"] }
 # The hub's audit line is read back as it is written (ADR-N-025 section 3); already in the
 # graph through jc-core's `logs` feature.
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# The decision point's p99 budget (T-5042, ADR-N-057 section 4); ci-full runs it with `--bench`.
+[[bench]]
+name = "pdp_decision"
+harness = false
