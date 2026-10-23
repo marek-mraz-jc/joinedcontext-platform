@@ -13,7 +13,8 @@
 use jc_core::kinds::data_source::{check_class, env_var_of};
 use jc_core::kinds::mqtt_broker;
 use jc_core::kinds::{
-    DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, IdMint, Mint, PipelineSpec, TemplatePart,
+    DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, HttpBodyFormat, IdMint, Mint,
+    PipelineSpec, TemplatePart,
 };
 use serde_norway::{Mapping, Value};
 
@@ -269,12 +270,18 @@ pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
 ///
 /// GTFS-realtime prepends its protobuf decoder: the feed arrives as protobuf and every pipeline
 /// reading it would otherwise decode it again in its own mapping. An `http` connection with an
-/// `archive` prepends the ranged read of its named members (`archive_processors`).
+/// `archive` prepends the ranged read of its named members (`archive_processors`), and one with
+/// `format: csv` the split into one message per row after it (PL-113).
 pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Vec<Value> {
-    if let Some(archive) = spec.http.as_ref().and_then(|http| http.archive.as_ref()) {
-        if spec.source_type == DataSourceType::Http {
-            return archive_processors(spec, archive, context);
+    if let (DataSourceType::Http, Some(http)) = (&spec.source_type, &spec.http) {
+        let mut processors = match &http.archive {
+            Some(archive) => archive_processors(spec, archive, context),
+            None => Vec::new(),
+        };
+        if http.format == Some(HttpBodyFormat::Csv) {
+            processors.push(csv_rows());
         }
+        return processors;
     }
     if spec.source_type != DataSourceType::GtfsRt {
         return Vec::new();
@@ -289,6 +296,15 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
     let mut processor = Mapping::new();
     processor.insert(key("protobuf"), Value::Mapping(protobuf));
     vec![Value::Mapping(processor)]
+}
+
+/// One message per CSV row, keyed by the header, as the `csv` input sends them (PL-113).
+fn csv_rows() -> Value {
+    let mut unarchive = Mapping::new();
+    unarchive.insert(key("format"), text("csv"));
+    let mut processor = Mapping::new();
+    processor.insert(key("unarchive"), Value::Mapping(unarchive));
+    Value::Mapping(processor)
 }
 
 /// The ranged read of an archive's named members (PL-72, Architecture/08 §6).
