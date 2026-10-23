@@ -7,8 +7,8 @@
 //! read or forwarded: a busy gateway sheds load instead of growing until it is killed and every
 //! request in flight fails with it.
 //!
-//! The caller is the rate limiter's (`rate_limit::caller_key`): the presented credential's
-//! digest, else the client address, so one client cannot take every slot from the others.
+//! The caller is the rate limiter's (`rate_limit::caller_key`): the principal a genuine token
+//! names, else the client address, so one client cannot take every slot from the others.
 //!
 //! The defaults come from `tests/in_flight_tests.rs` (T-4782): a read of a 1 MiB page costs the
 //! gateway well under 1 MiB of peak memory, so 128 reads stay inside the about 300 MiB prod's
@@ -305,10 +305,13 @@ impl Default for InFlight {
 /// there is none.
 pub async fn enforce(
     State(gateway): State<Arc<Gateway>>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response<Body> {
-    let caller = rate_limit::caller_key(request.headers());
+    let caller = rate_limit::caller_key(&gateway, request.headers());
+    request
+        .extensions_mut()
+        .insert(rate_limit::CallerKey(caller.clone()));
     let ticket = match gateway.in_flight.admit(caller, Class::of(&request)) {
         Ok(ticket) => ticket,
         Err(Refused::AnonymousShare) => {
