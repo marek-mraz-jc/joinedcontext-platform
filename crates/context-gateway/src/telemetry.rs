@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{MatchedPath, Request};
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use axum::http::Response;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
@@ -34,6 +34,8 @@ const DECISIONS: &str = "jc_gateway_pdp_decisions_total";
 /// The broker round trip inside one answer, which is most of a slow request.
 const BROKER_SECONDS: &str = "jc_gateway_broker_request_duration_seconds";
 const SPACE_HELD: &str = "jc_gateway_space_held";
+/// The W3C Server Timing header; the http crate names no constant for it.
+const SERVER_TIMING: HeaderName = HeaderName::from_static("server-timing");
 
 /// The paths that describe the process rather than the traffic. Counting a scrape as a
 /// request would make the rate a function of the scrape interval.
@@ -119,6 +121,25 @@ pub fn decided(operation: Operation, denied: bool) {
 pub fn broker_round_trip(seconds: f64, reached: bool) {
     metrics::histogram!(BROKER_SECONDS, "reached" => if reached { "yes" } else { "no" })
         .record(seconds);
+    let _ = SPLIT.try_with(|split| split.broker.set(split.broker.get() + seconds));
+}
+
+/// The time one decision took, for the answer's `Server-Timing` (T-5042).
+pub fn decision_time(seconds: f64) {
+    let _ = SPLIT.try_with(|split| split.pdp.set(split.pdp.get() + seconds));
+}
+
+/// Where one answer's time went: the decision point and the broker, each summed over the request
+/// (ADR-N-057 section 4). Read back into `Server-Timing`, so a client or a load test sees the
+/// gateway's share without a scrape.
+#[derive(Default)]
+struct Split {
+    pdp: std::cell::Cell<f64>,
+    broker: std::cell::Cell<f64>,
+}
+
+tokio::task_local! {
+    static SPLIT: Split;
 }
 
 /// Counts and times every request the surface answers.
@@ -137,8 +158,23 @@ pub async fn record(request: Request, next: Next) -> axum::response::Response {
     let method = request.method().as_str().to_owned();
     let endpoint = named(request.uri().path()).unwrap_or("-").to_owned();
     let started = Instant::now();
-    let response = next.run(request).await;
+    let (mut response, pdp, broker) = SPLIT
+        .scope(Split::default(), async {
+            let response = next.run(request).await;
+            let (pdp, broker) = SPLIT.with(|split| (split.pdp.get(), split.broker.get()));
+            (response, pdp, broker)
+        })
+        .await;
     let seconds = started.elapsed().as_secs_f64();
+    let timing = format!(
+        "pdp;dur={:.3}, broker;dur={:.3}, total;dur={:.3}",
+        pdp * 1000.0,
+        broker * 1000.0,
+        seconds * 1000.0
+    );
+    if let Ok(value) = HeaderValue::from_str(&timing) {
+        response.headers_mut().append(SERVER_TIMING, value);
+    }
 
     crate::usage::count(&endpoint, &route, response.status().as_u16());
     metrics::counter!(
@@ -179,6 +215,21 @@ fn named(path: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_request_sums_its_decisions_and_broker_trips() {
+        let (pdp, broker) = SPLIT
+            .scope(Split::default(), async {
+                decision_time(0.001);
+                decision_time(0.002);
+                broker_round_trip(0.010, true);
+                SPLIT.with(|split| (split.pdp.get(), split.broker.get()))
+            })
+            .await;
+        assert_eq!((pdp, broker), (0.003, 0.010));
+        // Outside a request (a background follower) nothing is kept and nothing fails.
+        decision_time(1.0);
+    }
 
     #[test]
     fn a_series_is_named_after_the_endpoint_or_the_space_it_belongs_to() {
