@@ -177,14 +177,22 @@ async fn search(
         (None, Ok(snapshot)) => routed(&scope, query, &snapshot.titles),
         _ => None,
     };
+    if scope.is_empty() {
+        return Json(json!({"hits": []})).into_response();
+    }
+    // One embedding serves the routed read and the fallback over every source.
+    let vector = match state.embedder.query(query).await {
+        Ok(vector) => vector,
+        Err(err) => return failed(err),
+    };
     if let Some(routed) = routed {
-        match ranked(&state, &routed, query, lang, limit, true).await {
+        match ranked(&state, &routed, query, &vector, lang, limit, true).await {
             Ok(hits) if !hits.is_empty() => return Json(json!({"hits": hits})).into_response(),
             Ok(_) => {}
             Err(err) => return failed(err),
         }
     }
-    match ranked(&state, &scope, query, lang, limit, true).await {
+    match ranked(&state, &scope, query, &vector, lang, limit, true).await {
         Ok(hits) => Json(json!({"hits": hits})).into_response(),
         Err(err) => failed(err),
     }
@@ -290,12 +298,14 @@ fn routed(
     (!kept.is_empty() && kept.len() < scope.len()).then_some(kept)
 }
 
-/// The best `limit` passages of `scope` for `query` as hits of API/05 §4, each with what its page
-/// or document states of itself; the `public` passages alone when `public_only`.
+/// The best `limit` passages of `scope` for `query` (embedded as `vector`) as hits of API/05 §4,
+/// each with what its page or document states of itself; the `public` passages alone when
+/// `public_only`.
 pub(super) async fn ranked(
     state: &ChatState,
     scope: &[(String, Vec<String>)],
     query: &str,
+    vector: &[f32],
     lang: Option<&str>,
     limit: u8,
     public_only: bool,
@@ -303,13 +313,12 @@ pub(super) async fn ranked(
     if scope.is_empty() {
         return Ok(Vec::new());
     }
-    let vector = state.embedder.query(query).await?;
     let found = crate::search_projects(
         &state.pool,
         scope,
         &Search {
             text: query,
-            embedding: &vector,
+            embedding: vector,
             sources: &[],
             public_only,
             limit: i64::from(limit.saturating_mul(CANDIDATES_PER_HIT)),

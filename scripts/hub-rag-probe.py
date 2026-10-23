@@ -46,17 +46,26 @@ def ask(query):
                        "params": {"name": "search_documents", "arguments": {"query": query, "limit": 5}}})
     request = urllib.request.Request(HUB, data=body.encode(), headers={
         "content-type": "application/json", "accept": "application/json, text/event-stream"})
+    started = time.monotonic()
     with urllib.request.urlopen(request, timeout=30) as answer:
         result = json.load(answer)["result"]
-    return (result.get("structuredContent") or {}).get("hits", [])
+    took = (time.monotonic() - started) * 1000
+    return (result.get("structuredContent") or {}).get("hits", []), took
+
+
+def quantile(values, q):
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(q * len(ordered)))]
 
 
 def main():
     probes = json.loads(PROBES.read_text())
     totals = {"publisher": 0, "relevant": 0, "chrome": 0, "repeated": 0}
-    print("ok-pub | top3 | chrome | dup | query | first publisher | first url")
+    print("ok-pub | top3 | chrome | dup | ms | query | first publisher | first url")
+    took = []
     for probe in probes:
-        hits = ask(probe["query"])
+        hits, ms = ask(probe["query"])
+        took.append(ms)
         time.sleep(1)
         first = hits[0] if hits else {}
         right = first.get("publisher") == probe["publisher"]
@@ -72,12 +81,13 @@ def main():
         totals["relevant"] += relevant
         totals["chrome"] += chrome > 0
         totals["repeated"] += repeated > 0
-        print(f"{'yes' if right else 'NO'} | {'yes' if relevant else 'NO'} | {chrome} | {repeated} | "
+        print(f"{'yes' if right else 'NO'} | {'yes' if relevant else 'NO'} | {chrome} | {repeated} | {ms:.0f} | "
               f"{probe['query']} | {first.get('publisher')} | {first.get('url')}")
     n = len(probes)
     print(f"\nright publisher first {totals['publisher']}/{n} (need 27), relevant in top 3 "
           f"{totals['relevant']}/{n} (need 24), with a chrome-only passage {totals['chrome']} (need 0), "
-          f"with a repeated URL {totals['repeated']} (need 0)")
+          f"with a repeated URL {totals['repeated']} (need 0); "
+          f"latency p50 {quantile(took, 0.5):.0f} ms, p95 {quantile(took, 0.95):.0f} ms")
 
 
 if __name__ == "__main__":
