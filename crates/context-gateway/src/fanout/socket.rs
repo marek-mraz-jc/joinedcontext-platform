@@ -62,8 +62,9 @@ pub fn hubs_per_space() -> usize {
 const MESSAGE_BURST: f64 = 100.0;
 const MESSAGES_PER_SEC: f64 = 20.0;
 
-/// How long a hub keeps its upstream after its last client left (ADR-N-049 §2.1).
-const LINGER: Duration = Duration::from_secs(60);
+/// How long a hub keeps its upstream after its last client left (ADR-N-049 §2.1); the default of
+/// [`Gateway::ws_linger`].
+pub const LINGER: Duration = Duration::from_secs(60);
 /// The upstream's reconnect delay grows to this.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// How often a hub checks its Endpoint and reports its table.
@@ -154,18 +155,28 @@ impl Hubs {
         }
     }
 
-    /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did, or
+    /// Drops `hub` when it has been without a connection for `linger`; `true` when it did, or
     /// when [`make_room`] dropped it already.
-    fn leave_if_idle(&self, hub: &Arc<Hub>) -> bool {
+    fn leave_if_idle(&self, hub: &Arc<Hub>, linger: Duration) -> bool {
+        self.leave(hub, |hub| lingered(hub, linger))
+    }
+
+    /// Drops `hub` when the registry no longer holds it or `done` says so; `true` when it is gone.
+    fn leave(&self, hub: &Arc<Hub>, done: impl Fn(&Hub) -> bool) -> bool {
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let held = hubs.values().any(|(_, held)| Arc::ptr_eq(held, hub));
-        if held && !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
+        if held && !done(hub) {
             return false;
         }
         hubs.retain(|_, (_, held)| !Arc::ptr_eq(held, hub));
         metrics::gauge!("jc_gateway_ws_hubs").set(hubs.len() as f64);
         true
     }
+}
+
+/// Whether `hub` has been without a connection for `linger`.
+fn lingered(hub: &Hub, linger: Duration) -> bool {
+    hub.idle_for().is_some_and(|idle| idle >= linger)
 }
 
 /// Makes room for one more hub in `space`: at a cap, drops the hub idle longest (no connection, in
@@ -304,14 +315,14 @@ fn upstream_subscription() -> Value {
 
 /// A hub's upstream: connect, subscribe once (or resume where the last connection ended), read
 /// the snapshot, then apply every notification; reconnect with backoff; stop once the hub has
-/// been idle for [`LINGER`].
+/// been idle for [`Gateway::ws_linger`].
 async fn upstream(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
     let mut backoff = Duration::from_secs(1);
     // The broker's connection name, resume token and last x-seq, after a clean lifetime end.
     let mut resume: Option<(String, String, u64)> = None;
     let mut started = false;
     loop {
-        if gateway.hubs.leave_if_idle(&hub) {
+        if gateway.hubs.leave_if_idle(&hub, gateway.ws_linger) {
             tracing::info!(slug = %hub.slug, "the fan-out stopped: no client left");
             return;
         }
@@ -335,6 +346,38 @@ async fn upstream(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
         )
         .await;
         resume = ended;
+        match hub.refused() {
+            Some(status) if lasting(status) => hold(&gateway, &hub).await,
+            Some(_) => tokio::time::sleep(MAX_BACKOFF).await,
+            None => {}
+        }
+    }
+}
+
+/// Whether the broker answers `status` to the hub's subscription until the Endpoint changes:
+/// 403 (no Policy lists the gateway), 404 (no such view) or 405 (the view does not serve
+/// subscriptions). Any other refusal is retried after [`MAX_BACKOFF`].
+fn lasting(status: u16) -> bool {
+    matches!(status, 403..=405)
+}
+
+/// After a [`lasting`] refusal the upstream stays closed while the Endpoint resolves to the same
+/// record (T-5321): a reconnect would only be refused again. The hub keeps the refusal, so a
+/// client's `x-subscribe` is answered at once without a broker round. A changed record (the
+/// next reconcile) opens the upstream again; a removed one, the hub idle for
+/// [`Gateway::ws_linger`], or [`make_room`] taking the idle hub, stops it.
+async fn hold(gateway: &Gateway, hub: &Arc<Hub>) {
+    let refused_on = gateway.resolver.resolve(&hub.slug);
+    tracing::info!(slug = %hub.slug, "the fan-out upstream waits for the Endpoint to change");
+    let mut tick = tokio::time::interval(TICK);
+    loop {
+        tick.tick().await;
+        recheck(gateway, hub);
+        let now = gateway.resolver.resolve(&hub.slug);
+        let gone = |hub: &Hub| now.is_none() || lingered(hub, gateway.ws_linger);
+        if gateway.hubs.leave(hub, gone) || now != refused_on {
+            return;
+        }
     }
 }
 
@@ -378,7 +421,7 @@ async fn run(
                 // table; a sum over the registry when a dashboard needs the Endpoint's total.
                 metrics::gauge!("jc_gateway_ws_entities", "endpoint" => hub.slug.clone())
                     .set(hub.entities() as f64);
-                if gateway.hubs.leave_if_idle(hub) {
+                if gateway.hubs.leave_if_idle(hub, gateway.ws_linger) {
                     let _ = to_broker.close().await;
                     return None;
                 }
@@ -446,7 +489,6 @@ async fn run(
                             .unwrap_or("no detail");
                         hub.refuse(u16::try_from(status).unwrap_or(0), detail.to_owned());
                         *started = false;
-                        tokio::time::sleep(MAX_BACKOFF).await;
                         return None;
                     }
                 }

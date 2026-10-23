@@ -109,6 +109,8 @@ pub struct Gateway {
     /// How long a WebSocket opened with a token lasts (API/07 §3, T-4132); an anonymous one is
     /// bounded only by the broker's own lifetime.
     pub ws_token_lifetime: std::time::Duration,
+    /// How long a fan-out hub keeps its upstream after its last client left (ADR-N-049 §2.1).
+    pub ws_linger: std::time::Duration,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// Where a person's own connectors are read, `/api/mcp/me/{name}` (EP-123); `None` serves
@@ -202,6 +204,7 @@ impl Gateway {
             hubs: Default::default(),
             reaches: Default::default(),
             ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
+            ws_linger: crate::fanout::socket::LINGER,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
