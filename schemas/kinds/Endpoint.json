@@ -833,7 +833,17 @@
               "type": "null"
             }
           ],
-          "description": "Optional NGSI-LD Policy URN attached to this endpoint."
+          "description": "Optional NGSI-LD Policy URN attached to this endpoint; means `policyRefs: [it]`."
+        },
+        "policyRefs": {
+          "description": "The Policies this Endpoint evaluates, each a Policy URN of its space (ADR-N-057 decision 2). Never set beside `policyRef` and never empty; read both through [`EndpointSpec::policy_refs`].",
+          "items": {
+            "$ref": "#/definitions/Urn"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "projection": {
           "anyOf": [

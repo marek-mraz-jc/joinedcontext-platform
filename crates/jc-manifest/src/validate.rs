@@ -1164,8 +1164,8 @@ fn replacing_shared_writes(repo: &Repository) -> Vec<(Location, String)> {
 /// Every write nobody can make (PL-111, ADR-N-057 decision 5, T-5035): a Policy granting a write that no
 /// Endpoint of its project binds, and a Pipeline output whose `targetEndpoint` is not declared in
 /// the Pipeline's project or does not bind that output's derived write Policy (PL-20). Binding is
-/// the gateway's rule (`context-gateway` store.rs `bound_policy`): the Endpoint serves the
-/// Policy's space, names it in `policyRef` or names none, and an App's generated Endpoint takes
+/// the gateway's rule (`context-gateway` store.rs `bound_policies`): the Endpoint serves the
+/// Policy's space, names it in `policyRefs` (or `policyRef`) or names none, and an App's generated Endpoint takes
 /// its own grants alone (AP-139). The bbsk podujatia pipelines wrote through a read Endpoint's
 /// `policyRef` this way and every upsert answered 404 (T-5033).
 fn writes_nobody_can_make(repo: &Repository) -> Located {
@@ -1266,19 +1266,23 @@ impl<'a> WriteBindings<'a> {
         if space != policy.context_space_ref.name() {
             return Some(format!("serves the space {space}"));
         }
-        if let Some(reference) = &spec.policy_ref {
+        if let Some(refs) = spec.policy_refs() {
             let segment = self.repo.space_segment(project, space);
-            let ours = self
-                .org_domain
-                .is_none_or(|domain| reference.org_domain() == Some(domain))
-                && reference.space() == Some(segment.as_str());
-            if reference.local_id() != name {
-                return Some(format!("binds only its policyRef {reference}"));
+            let ours = |reference: &jc_core::Urn| {
+                self.org_domain
+                    .is_none_or(|domain| reference.org_domain() == Some(domain))
+                    && reference.space() == Some(segment.as_str())
+            };
+            let named: Vec<_> = refs.iter().filter(|r| r.local_id() == name).collect();
+            if named.is_empty() {
+                let listed: Vec<String> = refs.iter().map(ToString::to_string).collect();
+                return Some(format!("binds only its policyRefs {}", listed.join(", ")));
             }
-            if !ours {
+            if !named.iter().any(|reference| ours(reference)) {
                 return Some(format!(
-                    "names it as {reference}, which binds nothing: write \
+                    "names it as {}, which binds nothing: write \
                      urn:ngsi-ld:Policy:{}:{segment}:{name}",
+                    named[0],
                     self.org_domain.unwrap_or("{orgDomain}")
                 ));
             }

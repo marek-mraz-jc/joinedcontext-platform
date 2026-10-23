@@ -219,3 +219,60 @@ fn a_policy_ref_of_another_domain_binds_nothing() {
         assert_eq!(bikes.policies.len(), bound, "{domain}");
     }
 }
+
+/// ADR-N-057 decision 2: `policyRefs` binds exactly the Policies it lists; a reference into
+/// another space among them binds nothing and widens nothing.
+#[test]
+fn an_endpoint_with_policy_refs_evaluates_exactly_the_listed_policies() {
+    let dir = repo("refs");
+    write(
+        &dir,
+        "bikes.yaml",
+        &BIKES.replace(
+            "  policyRef: urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n",
+            "  policyRefs:\n    - urn:ngsi-ld:Policy:hel.fi:helsinki:public-events\n    \
+             - urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n    \
+             - urn:ngsi-ld:Policy:hel.fi:elsewhere:pipelines-write\n",
+        ),
+    );
+    let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+    let bikes = endpoints
+        .iter()
+        .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .expect("the bound endpoint");
+    assert_eq!(
+        types_of(&bikes.policies),
+        ["BikeHireDockingStation", "Event"]
+    );
+    let mut names = bikes.policy_names.clone();
+    names.sort();
+    assert_eq!(names, ["public-bikes", "public-events"]);
+}
+
+/// A `policyRefs` list whose every entry is foreign or unknown binds nothing, never the space.
+#[test]
+fn policy_refs_with_only_foreign_or_unknown_entries_bind_nothing() {
+    let dir = repo("refs-dead");
+    write(
+        &dir,
+        "org.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: helsinki\n  \
+         namespace: org\nspec:\n  domain: hel.fi\n  locales: [\"fi\"]\n  defaultLocale: fi\n",
+    );
+    write(
+        &dir,
+        "bikes.yaml",
+        &BIKES.replace(
+            "  policyRef: urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n",
+            "  policyRefs:\n    - urn:ngsi-ld:Policy:hel.fi:elsewhere:public-bikes\n    \
+             - urn:ngsi-ld:Policy:vantaa.fi:helsinki:public-events\n    \
+             - urn:ngsi-ld:Policy:hel.fi:helsinki:no-such-policy\n",
+        ),
+    );
+    let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+    let bikes = endpoints
+        .iter()
+        .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .expect("the endpoint is still in the table");
+    assert_eq!(bikes.policies.len(), 0, "{:?}", bikes.policy_names);
+}
