@@ -885,6 +885,26 @@ impl PolicySpec {
             }
         }
 
+        self.validate_information()?;
+
+        if let Some(ref val) = self.validity {
+            if let (Some(from), Some(to)) = (val.from, val.to) {
+                if from > to {
+                    return Err(Error::Name {
+                        field: "spec.validity",
+                        value: format!("{from} > {to}"),
+                        reason: "validity `from` must be less than or equal to `to`",
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates each `information` entry: its entity selectors and the property and
+    /// relationship name lists (non-empty, no duplicates).
+    fn validate_information(&self) -> Result<()> {
         for info in &self.information {
             for entity in &info.entities {
                 entity.validate()?;
@@ -926,19 +946,6 @@ impl PolicySpec {
                 }
             }
         }
-
-        if let Some(ref val) = self.validity {
-            if let (Some(from), Some(to)) = (val.from, val.to) {
-                if from > to {
-                    return Err(Error::Name {
-                        field: "spec.validity",
-                        value: format!("{from} > {to}"),
-                        reason: "validity `from` must be less than or equal to `to`",
-                    });
-                }
-            }
-        }
-
         Ok(())
     }
 
