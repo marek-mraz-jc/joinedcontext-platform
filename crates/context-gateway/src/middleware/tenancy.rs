@@ -44,6 +44,10 @@ pub const PROVENANCE_ACTOR: HeaderName = HeaderName::from_static("jc-provenance-
 pub const READ_VERSIONS: &str = "jc-read-versions";
 /// Why a write was made, in the caller's words (DM-113): the one provenance header a caller sets.
 pub const REASON: HeaderName = HeaderName::from_static("jc-reason");
+/// The id of the request, which the broker stores in each row's provenance (ADR-N-054 2.3).
+pub const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+/// The longest request id the broker stores (Antares `provenance.rs`).
+const MAX_REQUEST_ID: usize = 128;
 /// The Keycloak client of the Portal's UI: a person's write through it is channel `ui`.
 pub const PORTAL_UI_CLIENT: &str = "portal-ui";
 
@@ -132,6 +136,7 @@ pub fn pin_caller(
     let (channel, actor) = provenance(subject);
     headers.insert(PROVENANCE_CHANNEL, HeaderValue::from_static(channel));
     one(headers, PROVENANCE_ACTOR, Some(&actor));
+    request_id(headers);
     if subject.agreement.is_some() {
         one(headers, DID, subject.did.as_deref());
         return Ok(());
@@ -160,6 +165,32 @@ pub fn provenance(subject: &Subject) -> (&'static str, String) {
         _ => "api",
     };
     (channel, crate::auth::subject::principal_of(subject))
+}
+
+/// Keeps the edge's `X-Request-Id` when the broker would store it, else sets a fresh one, so each
+/// written row names the request that wrote it; a correlation id, never a grant.
+fn request_id(headers: &mut HeaderMap) {
+    let mut ids = headers.get_all(REQUEST_ID).iter();
+    let kept = match (ids.next(), ids.next()) {
+        (Some(id), None) => {
+            let id = id.as_bytes();
+            (1..=MAX_REQUEST_ID).contains(&id.len())
+                && id
+                    .iter()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        }
+        _ => false,
+    };
+    if kept {
+        return;
+    }
+    while headers.remove(REQUEST_ID).is_some() {}
+    if let Some(id) = crate::creates::uuid_v4()
+        .ok()
+        .and_then(|id| HeaderValue::from_str(&id).ok())
+    {
+        headers.insert(REQUEST_ID, id);
+    }
 }
 
 fn one(headers: &mut HeaderMap, name: HeaderName, value: Option<&str>) {
@@ -250,6 +281,37 @@ mod tests {
             provenance(&Subject::default()),
             ("api", "anonymous".to_owned())
         );
+    }
+
+    #[test]
+    fn every_hop_names_one_well_formed_request_id() {
+        let id = |sent: &[&str]| {
+            let mut headers = HeaderMap::new();
+            for value in sent {
+                if let Ok(value) = HeaderValue::from_str(value) {
+                    headers.append(REQUEST_ID, value);
+                }
+            }
+            request_id(&mut headers);
+            headers
+                .get_all(REQUEST_ID)
+                .iter()
+                .map(|v| v.to_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(id(&["4f1c-9a07"]), ["4f1c-9a07"]);
+        let long = "a".repeat(MAX_REQUEST_ID + 1);
+        for sent in [
+            &[][..],
+            &["a b"],
+            &["x;y"],
+            &["one", "two"],
+            &[long.as_str()],
+        ] {
+            let fresh = id(sent);
+            assert_eq!(fresh.len(), 1, "{sent:?} -> {fresh:?}");
+            assert_eq!(fresh.first().map(String::len), Some(36), "{fresh:?}");
+        }
     }
 
     #[test]
