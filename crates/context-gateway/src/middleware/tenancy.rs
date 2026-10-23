@@ -46,7 +46,7 @@ pub const PROVENANCE_ORGANIZATION: HeaderName =
 /// What kind of principal wrote: `person`, `serviceAccount`, `pipeline` or `agent` (ADR-N-054 2.3).
 pub const PROVENANCE_ACTOR_KIND: HeaderName = HeaderName::from_static("jc-provenance-actor-kind");
 /// `changes` on a write through an Endpoint with `spec.audit: changes` (ADR-N-054 2.8, DM-136):
-/// only the gateway may set it, so it shares the provenance prefix the edge and [`drop_identity`]
+/// only the gateway may set it, so it shares the provenance prefix the edge and `drop_identity`
 /// remove.
 pub const AUDIT: HeaderName = HeaderName::from_static("jc-provenance-audit");
 /// The grant of `versions=all` (ADR-N-054 2.4): only the gateway may set it.
