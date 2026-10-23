@@ -10,7 +10,7 @@
 use crate::app::Gateway;
 use crate::auth::subject::{admit, principal_of};
 use crate::handlers::space_surface::escape;
-use crate::middleware::rate_limit::caller_key;
+use crate::middleware::rate_limit::address_key;
 use crate::middleware::tenancy;
 use crate::resolver::Endpoint;
 use axum::body::Body;
@@ -134,7 +134,7 @@ pub(crate) async fn endpoint_ws(
         token_lifetime(&gateway, &endpoint, request.headers())
     };
     let caller = match principal {
-        anonymous if anonymous == "anonymous" => caller_key(request.headers()),
+        anonymous if anonymous == "anonymous" => address_key(request.headers()),
         principal => principal,
     };
     if !gateway.ws_open.take(&caller) {
