@@ -47,6 +47,9 @@ pub struct Subject {
     /// The Keycloak client a person's token was issued to (`azp`): `portal-ui` makes a write's
     /// channel `ui` (ADR-N-054 2.3). Grants nothing.
     pub client: Option<String>,
+    /// The Organization of the Project the caller was admitted under, for a write's provenance
+    /// (ADR-N-054 2.3). Grants nothing.
+    pub organization: Option<String>,
 }
 
 impl Subject {

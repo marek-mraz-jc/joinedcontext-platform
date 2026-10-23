@@ -89,6 +89,25 @@
         }
       ]
     },
+    "Audit": {
+      "description": "Whether an Endpoint keeps an audit trail of the writes through it (ADR-N-054 2.8, DM-136).",
+      "oneOf": [
+        {
+          "description": "The type's history rule alone decides which rows exist (the owner's default).",
+          "enum": [
+            "off"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A write that changes a value is kept as a version row, even where the type records no history; an exact repeat stores nothing.",
+          "enum": [
+            "changes"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -698,6 +717,14 @@
             }
           ],
           "description": "Audience access scope (EP-14)."
+        },
+        "audit": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Audit"
+            }
+          ],
+          "description": "`changes`: every write through this Endpoint that changes a value is kept as a version with its provenance, whatever the type's history rule (ADR-N-054 2.8, DM-136)."
         },
         "caching": {
           "anyOf": [

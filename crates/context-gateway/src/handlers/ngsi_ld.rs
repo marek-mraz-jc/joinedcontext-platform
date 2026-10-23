@@ -784,6 +784,13 @@ pub(crate) async fn view_request(
     if let Some(federated) = federated {
         request.headers_mut().insert(AUTHORIZATION, federated);
     }
+    // ADR-N-054 2.8: the broker keeps every change through an audited Endpoint (DM-136)
+    if operation.is_write() && gateway.audited(&endpoint.slug) {
+        request.headers_mut().insert(
+            tenancy::AUDIT,
+            axum::http::HeaderValue::from_static("changes"),
+        );
+    }
     // ADR-N-054 2.4: the broker answers `versions=all` only on this grant (DM-114)
     if crate::pdp::evaluator::grants_action(
         subject,

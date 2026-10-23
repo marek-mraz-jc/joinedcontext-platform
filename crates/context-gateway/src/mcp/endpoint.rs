@@ -145,6 +145,8 @@ pub(crate) async fn mcp_answer(
     {
         return *answer;
     }
+    // A tool call is an AI agent's, acting for the caller its token names (ADR-N-054 2.3).
+    tenancy::as_agent(request.headers_mut());
     let federates = member_names(&gateway, &endpoint);
     let (mut parts, _) = request.into_parts();
     let mut reserved = None;
@@ -407,6 +409,7 @@ pub(crate) async fn member_call(
             .unwrap_or_default();
         return member_refusal(id, mcp::writes::problem_text(&held));
     }
+    tenancy::as_agent(request.headers_mut());
     let (mut parts, _) = request.into_parts();
     capped_arguments(&mut message);
     // A caller without a token lists and calls reads alone here (T-4168), so a write's create

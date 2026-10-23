@@ -82,6 +82,8 @@ pub struct Gateway {
     servers: ArcSwap<crate::mcp::server::McpServers>,
     /// The Projects that name their publisher, for their own catalogues (EP-127).
     publishers: ArcSwap<crate::store::Publishers>,
+    /// Each Project's Organization and the audited Endpoints (ADR-N-054 2.3, 2.8).
+    provenance: ArcSwap<crate::store::Provenance>,
     /// The Mappings each Endpoint publishes beside its model, by slug (EP-53).
     mappings: ArcSwap<crate::handlers::mappings::Mappings>,
     /// The MQTT edge brokers, swapped whole with the rest (ADR-N-048, PL-75).
@@ -188,6 +190,7 @@ impl Gateway {
             agreements: ArcSwap::from_pointee(Agreements::new()),
             servers: ArcSwap::from_pointee(Vec::new()),
             publishers: ArcSwap::from_pointee(Default::default()),
+            provenance: ArcSwap::from_pointee(Default::default()),
             mappings: ArcSwap::from_pointee(Default::default()),
             brokers: ArcSwap::from_pointee(crate::mqtt::Brokers::new()),
             public_url: None,
@@ -389,6 +392,21 @@ impl Gateway {
     /// Replaces the Projects that name their publisher (EP-127): from the next request on.
     pub fn replace_publishers(&self, publishers: crate::store::Publishers) {
         self.publishers.store(Arc::new(publishers));
+    }
+
+    /// Replaces each Project's Organization and the audited Endpoints: from the next request on.
+    pub fn replace_provenance(&self, provenance: crate::store::Provenance) {
+        self.provenance.store(Arc::new(provenance));
+    }
+
+    /// The Organization `project` belongs to (ADR-N-054 2.3).
+    pub(crate) fn organization_of(&self, project: &str) -> Option<String> {
+        self.provenance.load().organizations.get(project).cloned()
+    }
+
+    /// Whether the Endpoint `slug` keeps an audit trail of its writes (DM-136).
+    pub(crate) fn audited(&self, slug: &str) -> bool {
+        self.provenance.load().audited.contains(slug)
     }
 
     /// The publisher of `project`'s catalogue, when the project names one (EP-127).

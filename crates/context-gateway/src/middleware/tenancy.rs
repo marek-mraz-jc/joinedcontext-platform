@@ -40,6 +40,15 @@ pub const PROVENANCE_PREFIX: &str = "jc-provenance-";
 pub const PROVENANCE_CHANNEL: HeaderName = HeaderName::from_static("jc-provenance-channel");
 /// Who wrote, as the audit log names them (`user:…`, `serviceAccount:…`, a DID), percent-encoded.
 pub const PROVENANCE_ACTOR: HeaderName = HeaderName::from_static("jc-provenance-actor");
+/// The Organization of the Project the caller was admitted under (ADR-N-054 2.3), percent-encoded.
+pub const PROVENANCE_ORGANIZATION: HeaderName =
+    HeaderName::from_static("jc-provenance-organization");
+/// What kind of principal wrote: `person`, `serviceAccount`, `pipeline` or `agent` (ADR-N-054 2.3).
+pub const PROVENANCE_ACTOR_KIND: HeaderName = HeaderName::from_static("jc-provenance-actor-kind");
+/// `changes` on a write through an Endpoint with `spec.audit: changes` (ADR-N-054 2.8, DM-136):
+/// only the gateway may set it, so it shares the provenance prefix the edge and [`drop_identity`]
+/// remove.
+pub const AUDIT: HeaderName = HeaderName::from_static("jc-provenance-audit");
 /// The grant of `versions=all` (ADR-N-054 2.4): only the gateway may set it.
 pub const READ_VERSIONS: &str = "jc-read-versions";
 /// Why a write was made, in the caller's words (DM-113): the one provenance header a caller sets.
@@ -136,6 +145,14 @@ pub fn pin_caller(
     let (channel, actor) = provenance(subject);
     headers.insert(PROVENANCE_CHANNEL, HeaderValue::from_static(channel));
     one(headers, PROVENANCE_ACTOR, Some(&actor));
+    one(
+        headers,
+        PROVENANCE_ORGANIZATION,
+        subject.organization.as_deref(),
+    );
+    if let Some(kind) = actor_kind(subject) {
+        headers.insert(PROVENANCE_ACTOR_KIND, HeaderValue::from_static(kind));
+    }
     request_id(headers);
     if subject.agreement.is_some() {
         one(headers, DID, subject.did.as_deref());
@@ -190,6 +207,30 @@ fn request_id(headers: &mut HeaderMap) {
         .and_then(|id| HeaderValue::from_str(&id).ok())
     {
         headers.insert(REQUEST_ID, id);
+    }
+}
+
+/// The kind of principal `subject` is (ADR-N-054 2.3): a Pipeline's derived account is
+/// `pipeline`, another account `serviceAccount`, a person's token another client exchanged (an
+/// assistant) `agent`, a person `person`. An anonymous caller and a data-space participant name
+/// none; an MCP call is made `agent` by [`as_agent`].
+pub fn actor_kind(subject: &Subject) -> Option<&'static str> {
+    match (&subject.user, &subject.service_account, &subject.via) {
+        (Some(_), _, Some(_)) => Some("agent"),
+        (Some(_), _, None) => Some("person"),
+        (None, Some(account), _) if jc_core::kinds::pipeline_identity::is_derived(account) => {
+            Some("pipeline")
+        }
+        (None, Some(_), _) => Some("serviceAccount"),
+        (None, None, _) => None,
+    }
+}
+
+/// Marks a hop [`pin_caller`] pinned as an AI agent's: an MCP tool call acts for the person or
+/// client its token names, who stays the actor (ADR-N-054 2.3).
+pub fn as_agent(headers: &mut HeaderMap) {
+    if headers.contains_key(PROVENANCE_ACTOR_KIND) {
+        headers.insert(PROVENANCE_ACTOR_KIND, HeaderValue::from_static("agent"));
     }
 }
 
@@ -315,9 +356,73 @@ mod tests {
     }
 
     #[test]
+    fn the_actor_kind_comes_from_the_verified_subject() {
+        let account = |name: &str| Subject {
+            service_account: Some(name.to_owned()),
+            ..Subject::default()
+        };
+        let person = Subject {
+            user: Some("jana".to_owned()),
+            ..Subject::default()
+        };
+        let assistant = Subject {
+            via: Some("assistant".to_owned()),
+            ..person.clone()
+        };
+        assert_eq!(actor_kind(&account("pl-parking")), Some("pipeline"));
+        assert_eq!(actor_kind(&account("reporting")), Some("serviceAccount"));
+        assert_eq!(actor_kind(&person), Some("person"));
+        assert_eq!(actor_kind(&assistant), Some("agent"));
+        assert_eq!(actor_kind(&Subject::anonymous()), None);
+        let participant = Subject {
+            did: Some("did:web:example.org".to_owned()),
+            ..Subject::default()
+        };
+        assert_eq!(actor_kind(&participant), None);
+    }
+
+    #[test]
+    fn a_hop_names_the_organization_and_kind_and_an_mcp_call_is_an_agents() {
+        let mut request = Request::new(axum::body::Body::empty());
+        request
+            .headers_mut()
+            .insert(PROVENANCE_ORGANIZATION, HeaderValue::from_static("forged"));
+        let person = Subject {
+            user: Some("jana".to_owned()),
+            organization: Some("Banská Bystrica".to_owned()),
+            ..Subject::default()
+        };
+        pin_caller(&mut request, "air", &person).expect("a usable space");
+        let headers = request.headers_mut();
+        assert_eq!(
+            headers
+                .get_all(PROVENANCE_ORGANIZATION)
+                .iter()
+                .collect::<Vec<_>>(),
+            ["Bansk%C3%A1%20Bystrica"]
+        );
+        assert_eq!(headers[PROVENANCE_ACTOR_KIND], "person");
+        as_agent(headers);
+        assert_eq!(headers[PROVENANCE_ACTOR_KIND], "agent");
+        // An anonymous hop names no kind, and an MCP call does not invent one.
+        let mut anonymous = Request::new(axum::body::Body::empty());
+        pin_caller(&mut anonymous, "air", &Subject::anonymous()).expect("a usable space");
+        as_agent(anonymous.headers_mut());
+        assert!(!anonymous.headers().contains_key(PROVENANCE_ACTOR_KIND));
+        assert!(!anonymous.headers().contains_key(PROVENANCE_ORGANIZATION));
+    }
+
+    #[test]
     fn a_clients_provenance_headers_never_survive() {
         let mut headers = HeaderMap::new();
-        for name in ["jc-provenance-actor", "jc-provenance-x", "jc-read-versions"] {
+        for name in [
+            "jc-provenance-actor",
+            "jc-provenance-organization",
+            "jc-provenance-actor-kind",
+            "jc-provenance-audit",
+            "jc-provenance-x",
+            "jc-read-versions",
+        ] {
             headers.append(name, HeaderValue::from_static("forged"));
             headers.append(name, HeaderValue::from_static("twice"));
         }
