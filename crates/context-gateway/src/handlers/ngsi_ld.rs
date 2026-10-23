@@ -347,7 +347,7 @@ pub(crate) fn reserve_create(
 pub(crate) fn create_key(subject: &Subject, headers: &HeaderMap) -> String {
     match principal_of(subject) {
         principal if principal != "anonymous" => format!("principal:{principal}"),
-        _ => crate::middleware::rate_limit::caller_key(headers),
+        _ => crate::middleware::rate_limit::address_key(headers),
     }
 }
 
