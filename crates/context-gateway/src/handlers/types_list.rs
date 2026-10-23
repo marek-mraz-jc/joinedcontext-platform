@@ -2,7 +2,7 @@
 
 use super::reads::{dataset_types, view_hop, view_page, PARALLEL_PAGES};
 use crate::app::Gateway;
-use crate::pdp::evaluator::Subject;
+use crate::auth::subject::Subject;
 use crate::query;
 use crate::resolver::Endpoint;
 use axum::body::Body;

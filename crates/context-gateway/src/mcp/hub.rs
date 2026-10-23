@@ -10,6 +10,7 @@
 
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::accounts::ServiceAccounts;
+use crate::auth::subject::Subject;
 use crate::auth::subject::{anonymous_on, principal_of, subject_from, HUB_PATH};
 use crate::auth::token::{self, Claims};
 use crate::handlers::{endpoint_surface, schema};
@@ -18,7 +19,6 @@ use crate::mcp::server::{self, McpServer};
 use crate::mcp::tools::{self, HubTool};
 use crate::mcp::{catalog, describe};
 use crate::middleware::{rate_limit, tenancy};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::{Request, State};

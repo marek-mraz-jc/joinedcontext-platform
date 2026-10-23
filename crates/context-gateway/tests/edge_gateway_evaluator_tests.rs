@@ -11,7 +11,8 @@
 //! handed back constraints would be a grant nobody wrote.
 
 use chrono::{DateTime, Duration, Utc};
-use context_gateway::pdp::evaluator::{evaluate, Request, Subject, Verdict};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{evaluate, Request, Verdict};
 use jc_core::kinds::{Operation, PolicySpec};
 use std::collections::BTreeSet;
 
