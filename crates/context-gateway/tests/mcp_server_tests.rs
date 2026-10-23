@@ -852,6 +852,66 @@ async fn a_public_server_selects_public_endpoints_only() {
     }
 }
 
+/// T-5367: a publisher's connector selects its project's public Endpoints, whoever calls; another
+/// publisher's public Endpoint named as `endpoint` is a miss that never reaches the broker, and an
+/// Endpoint that leaves the catalogue leaves the connector without a manifest edit.
+#[tokio::test]
+async fn a_publisher_connector_serves_its_own_public_endpoints_only() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let mut elsewhere = endpoint(OUTSIDE, vec![grant("public", "queryEntity")]);
+    elsewhere.audience = Audience::Public;
+    elsewhere.project = "doprava".to_owned();
+    let mut endpoints = five();
+    endpoints.retain(|e| e.slug != OUTSIDE);
+    endpoints.push(elsewhere);
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new(&broker.url),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve(endpoints.clone())
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some(HOST.to_owned()),
+        ),
+    );
+    gateway.replace_servers(vec![selecting(
+        "otvorene-data",
+        json!({ "projects": ["ovzdusie"] }),
+        Audience::Public,
+    )]);
+    let app = router(gateway.clone());
+    let path = "/api/mcp/ovzdusie/otvorene-data";
+    let edge = token(&realm, json!("context-gateway"));
+    for caller in [None, Some(edge.as_str())] {
+        let (names, body) = listed(&app, path, caller).await;
+        assert_eq!(names, [OPEN], "{body}");
+        let (_, answer) = send(
+            app.clone(),
+            post(
+                path,
+                caller,
+                call(
+                    "query_entities",
+                    json!({ "endpoint": OUTSIDE, "type": ["AirQualityObserved"] }),
+                ),
+            ),
+        )
+        .await;
+        assert!(answer["error"].is_object(), "{answer}");
+    }
+    assert!(broker.hops().is_empty(), "{:?}", broker.hops());
+
+    gateway
+        .resolver
+        .replace(endpoints.into_iter().filter(|e| e.slug != OPEN));
+    let (names, _) = listed(&app, path, None).await;
+    assert!(names.is_empty(), "{names:?}");
+}
+
 /// EP-121, EP-122: `org/all` is served without a manifest to an organization member and to
 /// nobody without a token; a read without `endpoint` over more than ten Endpoints is refused,
 /// pointing to list_endpoints and the catalogue, and one naming its Endpoint still answers.
