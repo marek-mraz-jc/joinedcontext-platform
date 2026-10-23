@@ -7,6 +7,7 @@
 //! and `http://2130706433/` are the loopback address they dial, not a name that passes. A name is
 //! resolved where the notification leaves.
 
+use jc_core::outbound::is_public;
 use jc_core::ProblemDetails;
 use reqwest::Url;
 use std::net::IpAddr;
@@ -28,7 +29,7 @@ pub(crate) fn refusal(uri: &str, private_hosts: &[String]) -> Option<ProblemDeta
     }
     let internal = host == "localhost"
         || host.ends_with(".localhost")
-        || host.parse::<IpAddr>().is_ok_and(is_internal);
+        || host.parse::<IpAddr>().is_ok_and(|ip| !is_public(ip));
     match internal {
         true => refused("a notification endpoint may not point inside the platform's own networks"),
         false => None,
@@ -47,34 +48,6 @@ pub(crate) fn host_of(url: &Url) -> Option<(String, u16)> {
         .to_ascii_lowercase();
     let port = url.port_or_known_default()?;
     (!host.is_empty()).then_some((host, port))
-}
-
-/// Whether an address is inside the platform's own networks (T-1302): loopback, private
-/// (RFC 1918, IPv6 unique local), link-local (the cloud metadata address), unspecified,
-/// broadcast, `0.0.0.0/8` and shared address space (RFC 6598), an IPv4 one mapped into IPv6 too.
-pub(crate) fn is_internal(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let [first, second, ..] = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || first == 0
-                || (first == 100 && (second & 0xc0) == 64)
-        }
-        IpAddr::V6(v6) => {
-            let first = v6.segments()[0];
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (first & 0xfe00) == 0xfc00
-                || (first & 0xffc0) == 0xfe80
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|v4| is_internal(IpAddr::V4(v4)))
-        }
-    }
 }
 
 #[cfg(test)]
@@ -104,12 +77,30 @@ mod tests {
         }
     }
 
+    /// T-5335: the platform's one guard ([`jc_core::outbound::is_public`]) judges the address, so
+    /// the ranges the gateway's own list missed are refused here too.
+    #[test]
+    fn what_the_platform_guard_refuses_is_refused_here() {
+        for uri in [
+            "http://[64:ff9b::7f00:1]/",
+            "http://[::127.0.0.1]/",
+            "http://192.0.0.8/",
+            "http://198.18.0.1/",
+            "http://240.0.0.1/",
+            "http://224.0.0.1/",
+            "http://203.0.113.9:8080/in",
+            "https://[2001:db8::1]/in",
+        ] {
+            assert!(refusal(uri, &[]).is_some(), "{uri} passed");
+        }
+    }
+
     #[test]
     fn a_public_address_or_a_named_private_host_passes() {
         for uri in [
             "https://hooks.example.com/notify",
-            "http://203.0.113.9:8080/in",
-            "https://[2001:db8::1]/in",
+            "http://93.184.216.34:8080/in",
+            "https://[2606:4700:4700::1111]/in",
         ] {
             assert!(refusal(uri, &[]).is_none(), "{uri} refused");
         }
