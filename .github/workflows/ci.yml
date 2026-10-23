@@ -147,6 +147,11 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
       - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
+      # The ngsi-ld: ODRL profile's SHACL shapes and `jcctl policy import` refuse the same
+      # documents (T-5039, ADR-N-057 decision 4): the test writes them, pyshacl reads them.
+      - run: cargo test -p jc-core --test policy_odrl_tests --locked
+        env: { ODRL_RECORDS_DIR: "${{ runner.temp }}/odrl-records" }
+      - run: python3 scripts/ci/validate-odrl-profile.py "${{ runner.temp }}/odrl-records"
   model-tools:
     needs: changes
     if: needs.changes.outputs.model-tools == 'true'
