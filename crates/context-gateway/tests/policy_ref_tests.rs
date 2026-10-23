@@ -248,3 +248,31 @@ fn an_endpoint_with_policy_refs_evaluates_exactly_the_listed_policies() {
     names.sort();
     assert_eq!(names, ["public-bikes", "public-events"]);
 }
+
+/// A `policyRefs` list whose every entry is foreign or unknown binds nothing, never the space.
+#[test]
+fn policy_refs_with_only_foreign_or_unknown_entries_bind_nothing() {
+    let dir = repo("refs-dead");
+    write(
+        &dir,
+        "org.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: helsinki\n  \
+         namespace: org\nspec:\n  domain: hel.fi\n  locales: [\"fi\"]\n  defaultLocale: fi\n",
+    );
+    write(
+        &dir,
+        "bikes.yaml",
+        &BIKES.replace(
+            "  policyRef: urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n",
+            "  policyRefs:\n    - urn:ngsi-ld:Policy:hel.fi:elsewhere:public-bikes\n    \
+             - urn:ngsi-ld:Policy:vantaa.fi:helsinki:public-events\n    \
+             - urn:ngsi-ld:Policy:hel.fi:helsinki:no-such-policy\n",
+        ),
+    );
+    let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+    let bikes = endpoints
+        .iter()
+        .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .expect("the endpoint is still in the table");
+    assert_eq!(bikes.policies.len(), 0, "{:?}", bikes.policy_names);
+}
