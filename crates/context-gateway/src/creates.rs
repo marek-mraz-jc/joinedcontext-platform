@@ -34,7 +34,7 @@ pub fn minted(sent: &[u8]) -> Result<Vec<u8>, Box<ProblemDetails>> {
 }
 
 /// A random RFC 9562 version 4 UUID from the system's generator.
-fn uuid_v4() -> Result<String, Box<ProblemDetails>> {
+pub(crate) fn uuid_v4() -> Result<String, Box<ProblemDetails>> {
     use ring::rand::SecureRandom;
     let mut bytes = [0u8; 16];
     ring::rand::SystemRandom::new()
