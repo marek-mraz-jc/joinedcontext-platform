@@ -800,8 +800,15 @@ impl Hub {
         if describe::DESCRIBE_TOOLS.contains(&name) {
             let mut asked = params.as_object().cloned().unwrap_or_default();
             asked.insert("arguments".to_owned(), Value::Object(arguments));
-            return describe::call(&self.gateway, endpoint, subject, id, &Value::Object(asked))
-                .await;
+            let answer =
+                describe::call(&self.gateway, endpoint, subject, id, &Value::Object(asked)).await;
+            crate::activity::record(
+                endpoint,
+                subject,
+                name,
+                crate::activity::Outcome::of(&answer),
+            );
+            return answer;
         }
         let mut forwarded = params.as_object().cloned().unwrap_or_default();
         // The hub's tools are the broker's by name and arguments (EP-112): the call goes on as sent.
@@ -813,7 +820,15 @@ impl Hub {
             "method": "tools/call",
             "params": forwarded,
         });
-        crate::mcp::endpoint::member_call(&self.gateway, endpoint, subject, message).await
+        let answer =
+            crate::mcp::endpoint::member_call(&self.gateway, endpoint, subject, message).await;
+        crate::activity::record(
+            endpoint,
+            subject,
+            name,
+            crate::activity::Outcome::of(&answer),
+        );
+        answer
     }
 
     /// The caller's Endpoints, a page at a time (ADR-N-025 2.1).

@@ -164,6 +164,9 @@ pub struct SpaceBrokers {
     /// The spaces a move job holds read-only, by tenant segment, with the views that reach
     /// them (PF-115, ADR-N-047 §2.6).
     pub moving: BTreeSet<String>,
+    /// Each space's own name, by its tenant segment: the Activity names a space as the Portal
+    /// does (T-5322).
+    pub names: BTreeMap<String, String>,
 }
 
 /// [`SpaceBrokers`] of a repository, through the one lookup every component shares
@@ -203,6 +206,7 @@ pub fn brokers_of(repo: &Repository, endpoints: &[Endpoint]) -> SpaceBrokers {
         table
             .by_view
             .insert(format!("cs-{segment}"), broker.clone());
+        table.names.insert(segment.clone(), id.name.clone());
         table.by_space.insert(segment, broker);
     }
     for endpoint in endpoints {

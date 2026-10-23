@@ -178,6 +178,7 @@ impl Broker {
                 .collect(),
         };
         crate::telemetry::held(&self.routes.load().held, &routes.held);
+        crate::activity::name_spaces(&brokers.names);
         self.routes.store(std::sync::Arc::new(routes));
     }
 

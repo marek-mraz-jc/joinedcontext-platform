@@ -1,6 +1,7 @@
 //! MCP on one Endpoint and on one Context Space: JSON-RPC in, the broker's MCP surface out, a
 //! federated Endpoint's members called under the caller (EP-87).
 
+use crate::activity::Outcome;
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::{admit, admit_space, principal_of};
 use crate::auth::token;
@@ -95,9 +96,21 @@ pub(crate) async fn mcp_answer(
     let tool = message["params"]["name"].as_str().map(str::to_owned);
     let calls = message["method"] == "tools/call";
     let id = message["id"].clone();
+    // Each tool call, on the project's Activity (T-5322): never its arguments or its answer.
+    let note = |outcome| {
+        if calls {
+            crate::activity::record(
+                &endpoint,
+                &subject,
+                tool.as_deref().unwrap_or_default(),
+                outcome,
+            );
+        }
+    };
     if reads_only && calls {
         let name = tool.as_deref().unwrap_or_default();
         if !mcp::tools::anonymous_may(name) {
+            note(Outcome::Refused);
             let refusal = mcp::tools::anonymous_refusal(id, name);
             return mcp::jsonrpc::json_response(StatusCode::OK, &refusal);
         }
@@ -109,6 +122,7 @@ pub(crate) async fn mcp_answer(
     {
         let answer =
             mcp::describe::call(&gateway, &endpoint, &subject, id, &message["params"]).await;
+        note(Outcome::of(&answer));
         return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
     }
     if message["method"] == "resources/read"
@@ -143,6 +157,7 @@ pub(crate) async fn mcp_answer(
     if let Err(answer) =
         view_request(&gateway, &endpoint, &subject, "", operation, &mut request).await
     {
+        note(Outcome::Refused);
         return *answer;
     }
     // A tool call is an AI agent's, acting for the caller its token names (ADR-N-054 2.3).
@@ -154,7 +169,10 @@ pub(crate) async fn mcp_answer(
         capped_arguments(&mut message);
         match mcp::writes::guarded(&gateway, &endpoint, &subject, &caller, &mut message).await {
             Ok(held) => reserved = held,
-            Err(refusal) => return mcp::jsonrpc::json_response(StatusCode::OK, &refusal),
+            Err(refusal) => {
+                note(Outcome::Refused);
+                return mcp::jsonrpc::json_response(StatusCode::OK, &refusal);
+            }
         }
     }
     // The broker's Streamable HTTP refuses a request that does not accept both (406); the
@@ -184,12 +202,19 @@ pub(crate) async fn mcp_answer(
     {
         Ok(answer) => answer,
         Err(error) => {
+            note(Outcome::Failed);
             if let Some(reserved) = reserved {
                 reserved.release(&gateway, &endpoint);
             }
             return ProblemDetails::from(error).into_response();
         }
     };
+    // ponytail: a streamed result is not read to tell a tool error from an answer.
+    note(match answer.status() {
+        status if status.is_success() => Outcome::Answered,
+        status if status.is_server_error() => Outcome::Failed,
+        _ => Outcome::Refused,
+    });
     // ponytail: a tool error inside a 200 keeps its create spent; reading every answer to
     // find one would hold streamed results, so only a refused request gives it back.
     if let Some(reserved) = reserved.filter(|_| !answer.status().is_success()) {

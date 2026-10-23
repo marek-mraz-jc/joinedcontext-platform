@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod activity;
 pub mod app;
 pub mod auth;
 pub mod config;

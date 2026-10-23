@@ -229,6 +229,10 @@ async fn main() -> ExitCode {
     if let Some(url) = config.usage_url.clone() {
         tokio::spawn(context_gateway::usage::follow(url, token.clone()));
     }
+    // Who called which MCP tool, on each project's Activity (T-5322).
+    if let Some(url) = config.activity_url.clone() {
+        tokio::spawn(context_gateway::activity::follow(url));
+    }
     // A person's own connectors are the Portal's to keep and the gateway's to serve (EP-123).
     let gateway = Arc::new(match config.connectors_url.clone() {
         Some(url) => {
