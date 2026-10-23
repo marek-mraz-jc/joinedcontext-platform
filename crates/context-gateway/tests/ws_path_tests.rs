@@ -227,6 +227,18 @@ async fn upstreams(stub: &Stub, n: usize) {
     panic!("the gateway opened no upstream");
 }
 
+/// Waits until the stub broker was asked for `n` upstreams, an upstream it may since have closed.
+async fn asked(stub: &Stub, n: usize) {
+    for _ in 0..600 {
+        if stub.upgrades().len() >= n {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the gateway asked for no upstream");
+}
+
 fn dock(id: &str, bikes: u32) -> serde_json::Value {
     json!({"id": id, "type": "BikeHireDockingStation",
            "availableBikeNumber": {"type": "Property", "value": bikes}})
@@ -773,7 +785,7 @@ async fn a_refused_upstream_is_an_error_for_every_client() {
         .send(Message::text(subscribe.to_string()))
         .await
         .expect("sent");
-    upstreams(&stub, 1).await;
+    asked(&stub, 1).await;
     let closed = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(Ok(frame)) = first.next().await {
             if let Message::Close(frame) = frame {
@@ -796,6 +808,57 @@ async fn a_refused_upstream_is_an_error_for_every_client() {
     assert_eq!(refused["metadata"]["x-status"], 503, "{refused}");
     let detail = refused["body"]["detail"].as_str().unwrap_or_default();
     assert!(detail.contains("403"), "{detail}");
+}
+
+/// T-5321: a refusal the broker repeats until the Endpoint changes (405: the view serves no
+/// subscription) keeps the upstream closed. A client that stays connected past the 30 s retry
+/// is answered 503 from the stored refusal and the broker is not asked again; the next
+/// reconcile that changes the Endpoint opens the upstream once more.
+#[tokio::test]
+async fn a_lasting_refusal_is_not_retried_until_the_endpoint_changes() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker_answering(405).await;
+    let dir = repo("lasting");
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
+    let (mut first, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    first
+        .send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    asked(&stub, 1).await;
+
+    let (mut staying, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    // Past the old retry after MAX_BACKOFF (30 s), with a client on the hub the whole time.
+    for _ in 0..7 {
+        staying
+            .send(Message::text(subscribe.to_string()))
+            .await
+            .expect("sent");
+        let refused = next_op(&mut staying, "x-result").await.expect("answered");
+        assert_eq!(refused["metadata"]["x-status"], 503, "{refused}");
+        let detail = refused["body"]["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("405"), "{detail}");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    assert_eq!(stub.upgrades().len(), 1, "the broker was asked again");
+
+    std::fs::write(
+        dir.join("public.yaml"),
+        endpoint(
+            "helsinki-bikes",
+            PUBLIC,
+            "public",
+            "  projection:\n    hiddenAttributes:\n      - secret\n",
+        ),
+    )
+    .expect("change the Endpoint");
+    reload(&gateway, &dir);
+    // The hub looks at its Endpoint every 5 s (TICK).
+    asked(&stub, 2).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(stub.upgrades().len(), 2);
 }
 
 /// Reloads the gateway's endpoint table from `dir`, as the reaper does after a reconcile.

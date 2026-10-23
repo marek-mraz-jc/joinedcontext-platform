@@ -573,6 +573,11 @@ impl Hub {
         }
     }
 
+    /// The broker's status while it refuses the upstream subscription.
+    pub fn refused(&self) -> Option<u16> {
+        self.state().refused.as_ref().map(|(status, _)| *status)
+    }
+
     /// The broker accepted the upstream subscription.
     pub fn live(&self) {
         self.state().refused = None;

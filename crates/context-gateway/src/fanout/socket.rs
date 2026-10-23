@@ -157,9 +157,14 @@ impl Hubs {
     /// Drops `hub` when it has been without a connection for [`LINGER`]; `true` when it did, or
     /// when [`make_room`] dropped it already.
     fn leave_if_idle(&self, hub: &Arc<Hub>) -> bool {
+        self.leave(hub, |hub| hub.idle_for().is_some_and(|idle| idle >= LINGER))
+    }
+
+    /// Drops `hub` when the registry no longer holds it or `done` says so; `true` when it is gone.
+    fn leave(&self, hub: &Arc<Hub>, done: impl Fn(&Hub) -> bool) -> bool {
         let mut hubs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         let held = hubs.values().any(|(_, held)| Arc::ptr_eq(held, hub));
-        if held && !hub.idle_for().is_some_and(|idle| idle >= LINGER) {
+        if held && !done(hub) {
             return false;
         }
         hubs.retain(|_, (_, held)| !Arc::ptr_eq(held, hub));
@@ -335,6 +340,37 @@ async fn upstream(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
         )
         .await;
         resume = ended;
+        match hub.refused() {
+            Some(status) if lasting(status) => hold(&gateway, &hub).await,
+            Some(_) => tokio::time::sleep(MAX_BACKOFF).await,
+            None => {}
+        }
+    }
+}
+
+/// Whether the broker answers `status` to the hub's subscription until the Endpoint changes:
+/// 403 (no Policy lists the gateway), 404 (no such view) or 405 (the view does not serve
+/// subscriptions). Any other refusal is retried after [`MAX_BACKOFF`].
+fn lasting(status: u16) -> bool {
+    matches!(status, 403..=405)
+}
+
+/// After a [`lasting`] refusal the upstream stays closed while the Endpoint resolves to the same
+/// record (T-5321): a reconnect would only be refused again. The hub keeps the refusal, so a
+/// client's `x-subscribe` is answered at once without a broker round. A changed record (the
+/// next reconcile) opens the upstream again; a removed one, or [`make_room`] taking the idle
+/// hub, stops it.
+async fn hold(gateway: &Gateway, hub: &Arc<Hub>) {
+    let refused_on = gateway.resolver.resolve(&hub.slug);
+    tracing::info!(slug = %hub.slug, "the fan-out upstream waits for the Endpoint to change");
+    let mut tick = tokio::time::interval(TICK);
+    loop {
+        tick.tick().await;
+        recheck(gateway, hub);
+        let now = gateway.resolver.resolve(&hub.slug);
+        if gateway.hubs.leave(hub, |_| now.is_none()) || now != refused_on {
+            return;
+        }
     }
 }
 
@@ -446,7 +482,6 @@ async fn run(
                             .unwrap_or("no detail");
                         hub.refuse(u16::try_from(status).unwrap_or(0), detail.to_owned());
                         *started = false;
-                        tokio::time::sleep(MAX_BACKOFF).await;
                         return None;
                     }
                 }
