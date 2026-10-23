@@ -14,7 +14,8 @@ pub mod activity;
 pub mod app;
 pub mod auth;
 pub mod config;
-pub mod context_guard;
+/// The JSON-LD context guard and the unit rules, in the crate jc-ngsi-input since T-5323.
+pub use jc_ngsi_input::context_guard;
 pub mod creates;
 pub mod domain_gate;
 pub mod fanout;
@@ -38,6 +39,6 @@ pub mod resolver;
 pub mod store;
 pub mod telemetry;
 pub mod translators;
-pub mod units;
+pub use jc_ngsi_input::units;
 pub mod usage;
 pub mod view_mapping;
