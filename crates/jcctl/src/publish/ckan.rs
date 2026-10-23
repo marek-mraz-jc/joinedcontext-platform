@@ -11,8 +11,10 @@
 //! in a payload, a manifest or a log line (EP-67, CC-06).
 
 use crate::loader::RawManifest;
+use jc_core::display_order::{display_order, Field};
 use jc_core::kinds::catalog::Texts;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
+use jc_core::kinds::space::{duration_seconds, RetentionRule, HISTORY_FOREVER, HISTORY_OFF};
 use jc_core::kinds::visualization::{Visualization, VisualizationData, MAX_VISUALIZATIONS};
 use jc_core::kinds::{Audience, EndpointSpec, Licence, Representation};
 use serde_json::{json, Value};
@@ -631,9 +633,8 @@ pub struct Views {
 }
 
 /// Publishes each of the Endpoint's `spec.catalog.visualizations` as a `jc_visualization` view
-/// of its dataset, after [`publish`] (EP-132). An Endpoint that declares none gets a line chart
-/// of each value its types observe over time, read from `schema`, its `model.schema.json`
-/// ([`series_charts`], T-4742).
+/// of its dataset, after [`publish`] (EP-132). An Endpoint that declares none gets `automatic`,
+/// the line charts of each value its types observe over time ([`series_charts`], T-4742).
 ///
 /// The views hang off the dataset's first resource; each holds the visualization's `jc_name`,
 /// its title and description in the publisher's language, its `spec` and `source` as JSON text
@@ -645,7 +646,7 @@ pub fn publish_views(
     api: &mut impl CkanApi,
     endpoint: &RawManifest,
     settings: &Settings,
-    schema: Option<&Value>,
+    automatic: &[Visualization],
 ) -> Result<Views, PublishError> {
     let spec: EndpointSpec = serde_json::from_value(endpoint.spec.clone())
         .map_err(|e| PublishError::Spec(e.to_string()))?;
@@ -672,11 +673,9 @@ pub fn publish_views(
         .as_ref()
         .map(|c| c.visualizations.as_slice())
         .unwrap_or_default();
-    let automatic;
     // Every Endpoint serves NGSI-LD, which a `temporal` source reads (EP-10).
     let items = if declared.is_empty() {
-        automatic = schema.map(series_charts).unwrap_or_default();
-        automatic.as_slice()
+        automatic
     } else {
         declared
     };
@@ -754,14 +753,85 @@ const VIEW_PAYLOAD: [&str; 9] = [
     "endpoint",
 ];
 
-/// How far back an automatic chart reads a value's history.
+/// How far back an automatic chart reads a value's history at most.
 pub const SERIES_WINDOW: &str = "P7D";
+/// [`SERIES_WINDOW`] in seconds.
+const SERIES_SECONDS: u64 = 7 * 86_400;
+
+/// What the public may read of an Endpoint's history, which decides its automatic charts
+/// (T-5421): a chart the Policy or the space's retention does not allow answers 404 on the page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct History {
+    /// The `queryTemporal` grants to the public role among the Policies the Endpoint binds.
+    pub grants: Vec<TemporalGrant>,
+    /// The retention rules of the Endpoint's space (DM-82).
+    pub retention: Vec<RetentionRule>,
+}
+
+/// One `queryTemporal` grant to the public role: one `information` entry of a Policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TemporalGrant {
+    /// The entity types it names; empty names every type.
+    pub types: Vec<String>,
+    /// The attributes it lets through; empty lets every one.
+    pub attrs: Vec<String>,
+    /// How many seconds back its `temporalQ` reaches; `None` when it has none.
+    pub seconds: Option<u64>,
+}
+
+impl History {
+    /// The `last` of a chart of `kind`'s `attr`: the shortest of [`SERIES_WINDOW`], the type's
+    /// history and the widest grant naming both; `None` when no grant names them or the space
+    /// keeps no history of the type.
+    pub fn window(&self, kind: &str, attr: &str) -> Option<String> {
+        let names = |list: &[String], name: &str| list.is_empty() || list.iter().any(|n| n == name);
+        let granted = self
+            .grants
+            .iter()
+            .filter(|g| names(&g.types, kind) && names(&g.attrs, attr))
+            .map(|g| g.seconds.unwrap_or(u64::MAX))
+            .max()?;
+        let kept = self.kept(kind)?;
+        Some(iso_duration(granted.min(kept).min(SERIES_SECONDS)))
+    }
+
+    /// Seconds of history the space keeps of `kind`: its own rule's, else the `*` rule's;
+    /// unbounded when neither says, `None` when it is `off` or unreadable.
+    fn kept(&self, kind: &str) -> Option<u64> {
+        let history = [kind, "*"].into_iter().find_map(|name| {
+            self.retention
+                .iter()
+                .find(|rule| rule.entity_type == name)
+                .and_then(|rule| rule.history.as_deref())
+        });
+        match history {
+            Some(HISTORY_OFF) => None,
+            Some(HISTORY_FOREVER) | None => Some(u64::MAX),
+            Some(duration) => duration_seconds(duration),
+        }
+    }
+}
+
+/// `seconds` as the shortest ISO 8601 duration in one unit: `P7D`, `PT1H`, `PT90M`.
+fn iso_duration(seconds: u64) -> String {
+    match seconds {
+        s if s % 86_400 == 0 => format!("P{}D", s / 86_400),
+        s if s % 3600 == 0 => format!("PT{}H", s / 3600),
+        s if s % 60 == 0 => format!("PT{}M", s / 60),
+        s => format!("PT{s}S"),
+    }
+}
 
 /// A line chart of each value observed over time, for an Endpoint that declares no chart of its
 /// own (T-4742): per type of `schema` (a `model.schema.json`) whose `dateObserved` is a
-/// date-time, one chart per numeric Property, its history over [`SERIES_WINDOW`] per entity. At
+/// date-time, one chart per numeric Property the public may read the history of, over
+/// [`History::window`] per entity (T-5421), titled with the attribute's label in `linkml`. At
 /// most [`MAX_VISUALIZATIONS`], in type and attribute order, so the views are stable.
-pub fn series_charts(schema: &Value) -> Vec<Visualization> {
+pub fn series_charts(
+    schema: &Value,
+    linkml: Option<&str>,
+    history: &History,
+) -> Vec<Visualization> {
     let mut out = Vec::new();
     let definitions = schema.get("definitions").and_then(Value::as_object);
     for (kind, definition) in definitions.into_iter().flatten() {
@@ -783,34 +853,67 @@ pub fn series_charts(schema: &Value) -> Vec<Visualization> {
             );
             let measured =
                 property.get("x-ngsi-ld-kind").and_then(Value::as_str) == Some("Property");
-            let name = format!("auto-{kind}-{attr}").to_ascii_lowercase();
-            if !numeric || !measured || !is_view_name(&name) || out.len() == MAX_VISUALIZATIONS {
+            if !numeric || !measured || out.len() == MAX_VISUALIZATIONS {
                 continue;
             }
-            let columns = BTreeMap::from([
-                ("x".to_owned(), "observedAt".to_owned()),
-                ("y".to_owned(), attr.clone()),
-                ("color".to_owned(), "name".to_owned()),
-            ]);
-            let Some(spec) = jc_core::kinds::visualization::template("line", &columns) else {
+            let Some(last) = history.window(kind, attr) else {
                 continue;
             };
-            out.push(Visualization {
-                name,
-                title: Texts::from([("en".to_owned(), format!("{attr}, {kind}"))]),
-                description: Texts::default(),
-                data: VisualizationData::Temporal {
-                    entity_type: kind.clone(),
-                    attrs: vec![attr.clone()],
-                    last: SERIES_WINDOW.to_owned(),
-                    aggr_method: None,
-                    aggr_period: None,
-                },
-                spec,
-            });
+            out.extend(series_chart(
+                kind,
+                attr,
+                last,
+                chart_title(linkml, kind, attr),
+            ));
         }
     }
     out
+}
+
+/// The line chart of `kind`'s `attr` over `last`, when its name is a view name.
+fn series_chart(kind: &str, attr: &str, last: String, title: Texts) -> Option<Visualization> {
+    let name = format!("auto-{kind}-{attr}").to_ascii_lowercase();
+    let columns = BTreeMap::from([
+        ("x".to_owned(), "observedAt".to_owned()),
+        ("y".to_owned(), attr.to_owned()),
+        ("color".to_owned(), "name".to_owned()),
+    ]);
+    let spec = jc_core::kinds::visualization::template("line", &columns)?;
+    is_view_name(&name).then(|| Visualization {
+        name,
+        title,
+        description: Texts::default(),
+        data: VisualizationData::Temporal {
+            entity_type: kind.to_owned(),
+            attrs: vec![attr.to_owned()],
+            last,
+            aggr_method: None,
+            aggr_period: None,
+        },
+        spec,
+    })
+}
+
+/// What a reader calls `kind`'s `attr`: the model's labels, and Slovak and English always, from
+/// the model's other languages or the name spelt as words when it has none (DM-100).
+fn chart_title(linkml: Option<&str>, kind: &str, attr: &str) -> Texts {
+    let field = display_order(linkml, kind, &[(attr, true)], None)
+        .ok()
+        .and_then(|fields| fields.into_iter().next())
+        .unwrap_or_else(|| Field {
+            slot: attr.to_owned(),
+            summary: false,
+            labels: BTreeMap::new(),
+            title: None,
+            language: None,
+        });
+    let mut title = field.labels.clone();
+    for language in ["sk", "en"] {
+        title
+            .entry(language.to_owned())
+            .or_insert_with(|| field.label(language));
+    }
+    title
 }
 
 /// A view name the manifest rule accepts: a DNS label of at most 63 characters.

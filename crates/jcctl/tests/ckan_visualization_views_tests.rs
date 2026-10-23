@@ -4,10 +4,12 @@
 //! unchanged list writes nothing.
 
 use jc_core::kinds::ckan::CkanInstanceSpec;
+use jc_core::kinds::space::RetentionRule;
+use jc_core::kinds::visualization::{Visualization, VisualizationData};
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
-    publish, publish_views, series_charts, CkanApi, InMemoryCkan, Settings, Views, SERIES_WINDOW,
-    VISUALIZATION_VIEW,
+    publish, publish_views, series_charts, CkanApi, History, InMemoryCkan, Settings, TemporalGrant,
+    Views, SERIES_WINDOW, VISUALIZATION_VIEW,
 };
 use serde_json::{json, Value};
 
@@ -107,7 +109,7 @@ fn each_visualization_becomes_a_view_holding_its_spec_source_and_slug() {
         chart("no2-day", "NO2 za deň"),
     ]);
     let (mut ckan, first) = published(&endpoint);
-    let done = publish_views(&mut ckan, &endpoint, &settings(), None).expect("views");
+    let done = publish_views(&mut ckan, &endpoint, &settings(), &[]).expect("views");
     assert_eq!(
         done,
         Views {
@@ -147,9 +149,9 @@ fn each_visualization_becomes_a_view_holding_its_spec_source_and_slug() {
 fn an_unchanged_list_writes_nothing() {
     let endpoint = endpoint(&[chart("no2-now", "NO2 teraz")]);
     let (mut ckan, _) = published(&endpoint);
-    publish_views(&mut ckan, &endpoint, &settings(), None).expect("first run");
+    publish_views(&mut ckan, &endpoint, &settings(), &[]).expect("first run");
     let before = writes(&ckan).len();
-    let again = publish_views(&mut ckan, &endpoint, &settings(), None).expect("second run");
+    let again = publish_views(&mut ckan, &endpoint, &settings(), &[]).expect("second run");
     assert_eq!(again, Views::default());
     assert_eq!(writes(&ckan).len(), before, "no second write");
 }
@@ -161,7 +163,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
         chart("no2-day", "NO2 za deň"),
     ]);
     let (mut ckan, first) = published(&first_list);
-    publish_views(&mut ckan, &first_list, &settings(), None).expect("first run");
+    publish_views(&mut ckan, &first_list, &settings(), &[]).expect("first run");
     let id = ours(&ckan, &first)
         .iter()
         .find(|v| v["jc_name"] == "no2-now")
@@ -169,7 +171,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
         .expect("an id");
 
     let renamed = endpoint(&[chart("no2-now", "NO2 práve teraz")]);
-    let done = publish_views(&mut ckan, &renamed, &settings(), None).expect("second run");
+    let done = publish_views(&mut ckan, &renamed, &settings(), &[]).expect("second run");
     assert_eq!(
         done,
         Views {
@@ -186,7 +188,7 @@ fn a_changed_visualization_is_updated_in_place_and_a_removed_one_deleted() {
     );
     assert_eq!(views[0]["title"], "NO2 práve teraz");
 
-    let done = publish_views(&mut ckan, &endpoint(&[]), &settings(), None).expect("emptied");
+    let done = publish_views(&mut ckan, &endpoint(&[]), &settings(), &[]).expect("emptied");
     assert_eq!(
         done,
         Views {
@@ -219,7 +221,7 @@ fn other_view_types_are_never_touched_and_a_forged_or_duplicate_view_goes() {
             .expect("a view made through the API");
     }
 
-    let done = publish_views(&mut ckan, &endpoint, &settings(), None).expect("views");
+    let done = publish_views(&mut ckan, &endpoint, &settings(), &[]).expect("views");
     assert_eq!(
         done,
         Views {
@@ -251,7 +253,7 @@ fn no_dataset_or_no_publication_does_nothing() {
     let endpoint = endpoint(&[chart("no2-now", "NO2 teraz")]);
     let mut empty = InMemoryCkan::new().with_organization("mesto-banska-bystrica");
     assert_eq!(
-        publish_views(&mut empty, &endpoint, &settings(), None).expect("no dataset"),
+        publish_views(&mut empty, &endpoint, &settings(), &[]).expect("no dataset"),
         Views::default()
     );
     assert!(writes(&empty).is_empty());
@@ -261,7 +263,7 @@ fn no_dataset_or_no_publication_does_nothing() {
     )
     .expect("parses");
     assert_eq!(
-        publish_views(&mut empty, &unpublished, &settings(), None).expect("none"),
+        publish_views(&mut empty, &unpublished, &settings(), &[]).expect("none"),
         Views::default()
     );
 }
@@ -288,7 +290,7 @@ fn a_value_observed_over_time_gets_a_chart_of_its_history_and_a_register_none() 
     // T-4742: helsinki-beach-water's temperature had a table and a map, and no chart.
     let endpoint = endpoint(&[]);
     let (mut ckan, first) = published(&endpoint);
-    let done = publish_views(&mut ckan, &endpoint, &settings(), Some(&schema())).expect("views");
+    let done = publish_views(&mut ckan, &endpoint, &settings(), &automatic()).expect("views");
     assert_eq!(
         done.created, 1,
         "one numeric value over time; School has no dateObserved"
@@ -309,7 +311,7 @@ fn a_value_observed_over_time_gets_a_chart_of_its_history_and_a_register_none() 
 
     // Stable: a second run writes nothing.
     let before = writes(&ckan).len();
-    publish_views(&mut ckan, &endpoint, &settings(), Some(&schema())).expect("again");
+    publish_views(&mut ckan, &endpoint, &settings(), &automatic()).expect("again");
     assert_eq!(writes(&ckan).len(), before);
 }
 
@@ -317,7 +319,7 @@ fn a_value_observed_over_time_gets_a_chart_of_its_history_and_a_register_none() 
 fn a_declared_list_replaces_the_automatic_charts_and_no_schema_gives_none() {
     let declared = endpoint(&[chart("no2-now", "NO2 teraz")]);
     let (mut ckan, first) = published(&declared);
-    publish_views(&mut ckan, &declared, &settings(), Some(&schema())).expect("views");
+    publish_views(&mut ckan, &declared, &settings(), &automatic()).expect("views");
     let names: Vec<Value> = ours(&ckan, &first)
         .iter()
         .map(|v| v["jc_name"].clone())
@@ -327,7 +329,7 @@ fn a_declared_list_replaces_the_automatic_charts_and_no_schema_gives_none() {
     let bare = endpoint(&[]);
     let (mut ckan, first) = published(&bare);
     assert_eq!(
-        publish_views(&mut ckan, &bare, &settings(), None).expect("views"),
+        publish_views(&mut ckan, &bare, &settings(), &[]).expect("views"),
         Views::default()
     );
     assert!(ours(&ckan, &first).is_empty());
@@ -347,19 +349,156 @@ fn the_automatic_charts_stop_at_the_visualization_limit() {
         );
     }
     let wide = json!({ "definitions": { "AirQualityObserved": { "properties": properties } } });
-    let charts = series_charts(&wide);
+    let charts = series_charts(&wide, None, &open());
     assert_eq!(
         charts.len(),
         jc_core::kinds::visualization::MAX_VISUALIZATIONS
     );
     assert_eq!(charts[0].name, "auto-airqualityobserved-value00");
     assert!(
-        series_charts(&json!({})).is_empty(),
+        series_charts(&json!({}), None, &open()).is_empty(),
         "a schema without definitions"
     );
     assert!(series_charts(&json!({ "definitions": { "T": {
         "properties": { "dateObserved": { "type": "string" }, "v": { "type": "number", "x-ngsi-ld-kind": "Property" } }
-    }}})).is_empty(), "a dateObserved that is not a date-time");
+    }}}), None, &open()).is_empty(), "a dateObserved that is not a date-time");
+}
+
+/// The public may read every type's whole history: the charts T-4742 drew for every Endpoint.
+fn open() -> History {
+    History {
+        grants: vec![TemporalGrant::default()],
+        retention: Vec::new(),
+    }
+}
+
+/// The automatic charts of [`schema`] under [`open`].
+fn automatic() -> Vec<Visualization> {
+    series_charts(&schema(), None, &open())
+}
+
+/// A space keeping `history` of WaterQualityObserved.
+fn kept(history: &str) -> Vec<RetentionRule> {
+    vec![RetentionRule {
+        entity_type: "WaterQualityObserved".into(),
+        history: Some(history.into()),
+        ..Default::default()
+    }]
+}
+
+fn window(charts: &[Visualization]) -> Vec<String> {
+    charts
+        .iter()
+        .map(|chart| match &chart.data {
+            VisualizationData::Temporal { last, .. } => last.clone(),
+            other => panic!("a temporal source, got {other:?}"),
+        })
+        .collect()
+}
+
+/// T-5421: zilina-mhd's read Policy grants no queryTemporal and its space keeps an hour of
+/// Vehicle history, and the catalogue drew seven-day charts that answered 404.
+#[test]
+fn a_chart_is_drawn_only_where_the_public_may_read_the_history() {
+    let closed = History {
+        grants: Vec::new(),
+        retention: kept("P30D"),
+    };
+    assert!(
+        series_charts(&schema(), None, &closed).is_empty(),
+        "no grant of queryTemporal"
+    );
+    let off = History {
+        retention: kept("off"),
+        ..open()
+    };
+    assert!(
+        series_charts(&schema(), None, &off).is_empty(),
+        "history off"
+    );
+    let other = History {
+        grants: vec![TemporalGrant {
+            types: vec!["School".into()],
+            ..Default::default()
+        }],
+        retention: Vec::new(),
+    };
+    assert!(
+        series_charts(&schema(), None, &other).is_empty(),
+        "a grant of another type"
+    );
+    let hidden = History {
+        grants: vec![TemporalGrant {
+            attrs: vec!["name".into()],
+            ..Default::default()
+        }],
+        retention: Vec::new(),
+    };
+    assert!(
+        series_charts(&schema(), None, &hidden).is_empty(),
+        "a grant of other attributes"
+    );
+}
+
+#[test]
+fn the_window_is_the_shortest_of_a_week_the_history_and_the_grant() {
+    let hour = History {
+        retention: kept("PT1H"),
+        ..open()
+    };
+    assert_eq!(window(&series_charts(&schema(), None, &hour)), ["PT1H"]);
+    let day = History {
+        grants: vec![TemporalGrant {
+            seconds: Some(86_400),
+            ..Default::default()
+        }],
+        retention: kept("P30D"),
+    };
+    assert_eq!(window(&series_charts(&schema(), None, &day)), ["P1D"]);
+    let star = History {
+        retention: vec![RetentionRule {
+            entity_type: "*".into(),
+            history: Some("forever".into()),
+            reason: Some("archive".into()),
+            ..Default::default()
+        }],
+        ..open()
+    };
+    assert_eq!(
+        window(&series_charts(&schema(), None, &star)),
+        [SERIES_WINDOW]
+    );
+}
+
+#[test]
+fn a_chart_is_titled_with_the_models_label_in_slovak_and_english() {
+    let linkml = r#"
+id: https://example.org/water
+name: water
+default_language: sk
+slots:
+  temperature:
+    range: float
+    annotations:
+      label:
+        tag: label
+        value: { sk: Teplota vody, en: Water temperature }
+classes:
+  WaterQualityObserved:
+    slots: [temperature, dateObserved]
+"#;
+    let [chart] = series_charts(&schema(), Some(linkml), &open())
+        .try_into()
+        .expect("one chart");
+    assert_eq!(chart.title["sk"], "Teplota vody");
+    assert_eq!(chart.title["en"], "Water temperature");
+    let [bare] = automatic().try_into().expect("one chart");
+    assert!(
+        !bare.title["en"].contains("WaterQualityObserved"),
+        "no raw type name: {:?}",
+        bare.title
+    );
+    assert!(bare.title.contains_key("sk"));
 }
 
 /// EP-144, T-4846: CKAN answers `409 __extras` to a view field neither its core nor the view
@@ -383,14 +522,14 @@ fn a_view_create_or_update_sends_only_the_fields_the_view_schema_declares() {
         &mut ckan,
         &endpoint(&[chart("no2-now", "NO2 teraz")]),
         &settings(),
-        None,
+        &[],
     )
     .expect("created");
     publish_views(
         &mut ckan,
         &endpoint(&[chart("no2-now", "NO2 now")]),
         &settings(),
-        None,
+        &[],
     )
     .expect("updated");
     let sent: Vec<&Value> = ckan
