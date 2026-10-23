@@ -1241,6 +1241,7 @@ dependencies = [
  "jc-core",
  "jc-dcat",
  "jc-manifest",
+ "jc-ngsi-input",
  "jc-relationships",
  "jc-tabular",
  "jcctl",
@@ -3594,6 +3595,15 @@ dependencies = [
  "tracing",
  "utoipa",
  "walkdir",
+]
+
+[[package]]
+name = "jc-ngsi-input"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "jc-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -22,6 +22,7 @@ LAYER = {
     "jc-core": "core-base",
     "jc-manifest": "core",
     "jc-dcat": "core",
+    "jc-ngsi-input": "core",
     "jc-relationships": "core",
     "jc-tabular": "core",
     "wasm-host": "runtime",
