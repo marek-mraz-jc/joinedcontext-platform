@@ -482,6 +482,9 @@ var JCRender = (function () {
     var plain = function (column) { return /year|code$/i.test(String(column)) || /Id$|^id$/.test(String(column)); };
     var cell = function (v, column, i) {
       if (v === null || v === undefined || v === "") return "";
+      // A row's own name per language (T-5330) and an enum's words come before the URN tail.
+      var words = enums[i] && typeof enums[i] === "object" && (typeof v === "string" || typeof v === "number") && Object.prototype.hasOwnProperty.call(enums[i], v) ? enums[i][v] : null;
+      if (words && typeof words === "object") return entry(words, lang) || entry(words, "en") || entry(words, Object.keys(words)[0]) || String(v);
       if (column === "id" && urn(v)) return String(v).split(":").pop();
       if (typeof v === "number") {
         if (!isFinite(v)) return "";
@@ -492,8 +495,6 @@ var JCRender = (function () {
       }
       if (typeof v === "boolean") return YES_NO[lang][v ? 0 : 1];
       if (typeof v === "object") return JSON.stringify(v);
-      var words = enums[i] && typeof enums[i] === "object" && Object.prototype.hasOwnProperty.call(enums[i], v) ? enums[i][v] : null;
-      if (words && typeof words === "object") return entry(words, lang) || entry(words, "en") || String(v);
       if (safeUrl(v)) return { text: LINK[lang], href: v };
       if (column === "observedAt" || (TIME.test(v) && v.length > 10)) return when(v, lang, now);
       return String(v);

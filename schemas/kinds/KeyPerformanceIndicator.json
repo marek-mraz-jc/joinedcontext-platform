@@ -51,6 +51,44 @@
       ],
       "description": "The value of an indicator: a number, or a text for an indicator that is a grade or a state."
     },
+    "LanguageProperty": {
+      "additionalProperties": false,
+      "description": "A LanguageProperty in normalized NGSI-LD form: one text per language.",
+      "properties": {
+        "languageMap": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The text per BCP 47 language tag, such as `{\"sk\": \"Index starnutia\", \"en\": \"Ageing index\"}`.",
+          "type": "object"
+        },
+        "type": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LanguagePropertyKind"
+            }
+          ],
+          "description": "Always `LanguageProperty`."
+        }
+      },
+      "required": [
+        "languageMap",
+        "type"
+      ],
+      "type": "object"
+    },
+    "LanguagePropertyKind": {
+      "description": "The one value `type` takes on a LanguageProperty.",
+      "oneOf": [
+        {
+          "description": "`\"LanguageProperty\"`.",
+          "enum": [
+            "LanguageProperty"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "Objects": {
       "anyOf": [
         {
@@ -356,6 +394,17 @@
         }
       ],
       "description": "The short name, the `{localId}` of the id."
+    },
+    "title": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LanguageProperty"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The human name per language, which a table labels the row with in place of `name`."
     },
     "type": {
       "description": "Always `KeyPerformanceIndicator`.",

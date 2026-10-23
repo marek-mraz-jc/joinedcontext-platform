@@ -816,6 +816,29 @@ test("the visitor proof finds a nonce whose hash starts with the bits asked (T-4
   assert.ok(zeroBits(createHash("sha256").update(`${challenge}:${nonce}`).digest()) >= 10);
 });
 
+test("a row reads its own name in the visitor's language, never the slug or the URN (T-5330)", () => {
+  const data = {
+    type: "KeyPerformanceIndicator",
+    columns: ["name", "currentValue"],
+    units: [null, null],
+    enums: [{ "index-starnutia-mesto": { sk: "Index starnutia", en: "Ageing index" } }, null],
+    rows: [["index-starnutia-mesto", 131.5], ["old-mesto", 1]],
+  };
+  assert.equal(table(data, "sk").rows[0][0], "Index starnutia");
+  assert.equal(table(data, "en").rows[0][0], "Ageing index");
+  assert.equal(table(data, "sk").rows[1][0], "old-mesto", "a row without a title keeps its name");
+  const stations = {
+    type: "AirQualityObserved",
+    columns: ["id", "pm10"],
+    units: [null, "µg/m³"],
+    enums: [{ "urn:ngsi-ld:AirQualityObserved:1": { sk: "Námestie SNP" } }, null],
+    rows: [["urn:ngsi-ld:AirQualityObserved:1", 21.5], ["urn:ngsi-ld:AirQualityObserved:2", 9]],
+  };
+  const en = table(stations, "en");
+  assert.equal(en.rows[0][0], "Námestie SNP", "a name in one language is shown in it");
+  assert.equal(en.rows[1][0], "2");
+});
+
 test("a grid reads by meaning: no URN column, years and codes ungrouped, enums in words, short links (T-4682)", () => {
   const data = {
     type: "Bridge", total: 1651,
