@@ -1257,6 +1257,7 @@ pub fn validate_processor_reading(
             refused_reason(nested)
         )));
     }
+    validate_cache_names(field, processor)?;
     // A `mapping` body and a `${! … }` interpolation are Bloblang too, and a step that reads
     // the runner is the same escape wherever it is written.
     let mut texts = Vec::new();
@@ -1276,6 +1277,52 @@ pub fn validate_processor_reading(
         ));
     }
     Ok(())
+}
+
+/// The processors that name a runner cache, and the field that holds its label.
+const CACHE_FIELDS: &[(&str, &str)] = &[
+    ("cache", "resource"),
+    ("cached", "cache"),
+    ("dedupe", "cache"),
+];
+
+/// Refuses a cache a step names, however deeply nested, unless it is a short name: lowercase
+/// letters and digits joined by single `_` (PL-50, T-5337). One runner may carry every project's
+/// streams; the Portal renders each name as `<project>__<name>`, so a name holding `__` (or one
+/// a prefix could end in) would reach another project's cache.
+fn validate_cache_names(field: &'static str, value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|item| validate_cache_names(field, item)),
+        serde_json::Value::Object(fields) => fields.iter().try_for_each(|(key, inner)| {
+            let label = CACHE_FIELDS
+                .iter()
+                .find(|(processor, _)| processor == key)
+                .and_then(|(_, at)| inner.get(*at));
+            if let Some(label) = label {
+                let short = label.as_str().is_some_and(|l| {
+                    l.split('_').all(|part| {
+                        !part.is_empty()
+                            && part
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    })
+                });
+                if !short {
+                    return Err(Error::Name {
+                        field,
+                        value: label.to_string(),
+                        reason: "a step names a cache by its short name, lowercase letters and \
+                                 digits joined by single `_` such as `gtfs`: the platform keeps \
+                                 it to the project's own caches (PL-50)",
+                    });
+                }
+            }
+            validate_cache_names(field, inner)
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Why a processor of [`REFUSED_PROCESSORS`] is refused, in words the author can act on.
@@ -1413,7 +1460,13 @@ fn is_injected_env(name: &str) -> bool {
 }
 
 /// The Bloblang functions that read the runner's host rather than the message (PL-16, PL-50).
+/// The `cache_*` ones name a runner cache by any label, past the per-project names the `cache`
+/// processor is rendered with (T-5337).
 const HOST_FUNCTIONS: &[&str] = &[
+    "cache_add",
+    "cache_delete",
+    "cache_get",
+    "cache_set",
     "file",
     "file_json",
     "file_rel",
@@ -1464,6 +1517,14 @@ pub(crate) fn validate_author_bloblang(field: &'static str, mapping: &str) -> Re
                     });
                 }
             }
+        }
+        if function.starts_with("cache_") {
+            return Err(Error::Name {
+                field,
+                value: format!("{function}(…)"),
+                reason: "a mapping reaches a cache only through a `cache` processor step, which \
+                         the platform keeps to the project's own caches (PL-50)",
+            });
         }
         return Err(Error::Name {
             field,

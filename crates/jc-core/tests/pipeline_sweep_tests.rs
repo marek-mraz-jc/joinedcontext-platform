@@ -135,3 +135,74 @@ fn a_mapping_cannot_read_a_file_with_file_rel_json() {
     .to_string();
     assert!(err.contains("file_rel_json"), "{err}");
 }
+
+/// One runner carries every project's streams, and its caches are declared once for all of
+/// them: a step names a cache by its short name, which the Portal renders as
+/// `<project>__<name>`, so a name already carrying a prefix would reach another project's cache
+/// (T-5337).
+#[test]
+fn a_cache_label_with_a_project_prefix_is_refused() {
+    use jc_core::kinds::pipeline::validate_processor;
+    for processor in [
+        serde_json::json!({ "cache": { "resource": "helsinki__gtfs", "operator": "get", "key": "k" } }),
+        serde_json::json!({ "cached": { "cache": "praha__x", "key": "k", "processors": [] } }),
+        serde_json::json!({ "dedupe": { "cache": "_gtfs", "key": "k" } }),
+        serde_json::json!({ "branch": { "processors": [{ "cache": { "resource": "Gtfs-2" } }] } }),
+        serde_json::json!({ "cache": { "resource": ["gtfs"] } }),
+    ] {
+        let err = validate_processor("spec.steps.processor", &processor)
+            .expect_err(&processor.to_string())
+            .to_string();
+        assert!(err.contains("short name"), "{processor}: {err}");
+    }
+    for processor in [
+        serde_json::json!({ "cache": { "resource": "gtfs", "operator": "set", "key": "k" } }),
+        serde_json::json!({ "dedupe": { "cache": "trip_updates_2", "key": "k" } }),
+    ] {
+        if let Err(err) = validate_processor("spec.steps.processor", &processor) {
+            panic!("{processor}: {err}");
+        }
+    }
+}
+
+/// Bloblang's `cache_*` functions name any runner cache by any label, past the per-project
+/// names: a mapping reaches a cache only through a `cache` step (T-5337).
+#[test]
+fn a_mapping_cannot_reach_a_cache_by_function() {
+    use jc_core::kinds::pipeline::validate_processor;
+    for function in ["cache_get", "cache_set", "cache_add", "cache_delete"] {
+        let err = validate_processor(
+            "spec.steps.processor",
+            &serde_json::json!({ "mapping": format!("root = {function}(\"helsinki__gtfs\", \"k\")") }),
+        )
+        .expect_err(function)
+        .to_string();
+        assert!(err.contains(function) && err.contains("cache"), "{err}");
+    }
+}
+
+/// A file reader keeps to its own project's folder of the shared files volume (T-5337).
+#[test]
+fn a_file_reader_keeps_to_its_projects_folder() {
+    use jc_core::Kind;
+    let meta = jc_core::ObjectMeta {
+        name: "stations".to_owned(),
+        namespace: Some("helsinki".to_owned()),
+        ..Default::default()
+    };
+    for other in [
+        "type: csv\ninput:\n  paths: [/data/praha/stations.csv]\n",
+        "type: file\ninput:\n  paths: [/data/stations.csv]\n",
+        "type: broker\ninput:\n  inputs:\n    - parquet:\n        paths: [/data/helsinkix/a.parquet]\n",
+        "type: fsevent\ninput:\n  paths: [/data/helsinki/../praha]\n",
+    ] {
+        let err = source(other)
+            .validate_spec(&meta)
+            .expect_err(other)
+            .to_string();
+        assert!(err.contains("/data/<project>/"), "{other}: {err}");
+    }
+    source("type: csv\ninput:\n  paths: [/data/helsinki/stations.csv]\n")
+        .validate_spec(&meta)
+        .expect("the project's own folder is accepted");
+}
