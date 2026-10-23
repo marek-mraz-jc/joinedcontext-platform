@@ -8,13 +8,33 @@
 //!
 //! The algorithm comes from the key, never from the token header: a header is attacker
 //! input, and honouring it is how `alg: none` and HMAC-with-the-public-key happen.
+//!
+//! A signature is checked once per token: the claims of a token that verified are remembered
+//! until the key table changes, so the rate limiter's count and the handler's admission of one
+//! request cost one signature check, and a client reusing its token for minutes costs one in
+//! all (T-5290). Expiry and audience are checked on every call.
 
 use arc_swap::ArcSwap;
 use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet};
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Clock skew between Keycloak and this pod, and nothing more: a token is short lived, so a
+/// generous window here is a generous window for a stolen one.
+const LEEWAY: i64 = 60;
+
+/// The most verified tokens a verifier remembers, a few MiB of claims. Past it the memo starts
+/// over, which costs one signature check per token again and nothing else (T-5290).
+const REMEMBERED: usize = 4_096;
+
+/// The most refused tokens a verifier remembers, apart from the verified ones so a flood of
+/// forgeries cannot push a genuine token out. A forged token is checked by the rate limiter
+/// and then by the handler of the same request; this makes that one signature check, not two.
+const REFUSED: usize = 1_024;
 
 /// The claims the gateway acts on. A token carries many more; none of them decide.
 #[derive(Debug, Clone, Deserialize)]
@@ -154,10 +174,23 @@ impl From<Rejected> for crate::ProblemDetails {
 /// The key table of one realm, by key id.
 type VerifierKeys = HashMap<String, (DecodingKey, Algorithm)>;
 
+/// The claims of tokens whose signature and issuer verified, by the token's SHA-256.
+type Remembered = HashMap<[u8; 32], Claims>;
+
+/// One key table and the tokens verified against it. A refresh replaces both at once, so a
+/// token of a key the realm withdrew is checked again, and refused.
+#[derive(Default)]
+struct Table {
+    keys: VerifierKeys,
+    remembered: Mutex<Remembered>,
+    /// Tokens whose signature or issuer was refused: neither changes until the keys do.
+    refused: Mutex<HashMap<[u8; 32], Rejected>>,
+}
+
 /// The realm's signing keys, replaced whole when the JWKS is refreshed.
 pub struct Verifier {
     issuer: String,
-    keys: ArcSwap<VerifierKeys>,
+    keys: ArcSwap<Table>,
 }
 
 impl std::fmt::Debug for Verifier {
@@ -175,7 +208,7 @@ impl Verifier {
     pub fn new(issuer: impl Into<String>) -> Self {
         Self {
             issuer: issuer.into(),
-            keys: ArcSwap::new(Arc::new(HashMap::new())),
+            keys: ArcSwap::new(Arc::new(Table::default())),
         }
     }
 
@@ -212,13 +245,16 @@ impl Verifier {
             }
         }
         let count = table.len();
-        self.keys.store(Arc::new(table));
+        self.keys.store(Arc::new(Table {
+            keys: table,
+            ..Table::default()
+        }));
         count
     }
 
     /// How many keys the verifier currently holds.
     pub fn key_count(&self) -> usize {
-        self.keys.load().len()
+        self.keys.load().keys.len()
     }
 
     /// Verifies a token and returns its claims (PF-46).
@@ -242,23 +278,51 @@ impl Verifier {
         self.decode(token, None)
     }
 
+    /// How many verified tokens are remembered, which is what a memo test looks at.
+    pub fn remembered(&self) -> usize {
+        remember(&self.keys.load().remembered).len()
+    }
+
     fn decode(&self, token: &str, audiences: Option<&[String]>) -> Result<Claims, Rejected> {
+        let table = self.keys.load();
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let known = remember(&table.remembered).get(&digest).cloned();
+        let claims = match known {
+            Some(claims) => claims,
+            None => self.check_once(&table, digest, token)?,
+        };
+        admit(claims, audiences, now())
+    }
+
+    /// The signature and issuer of a token this table has not verified yet, remembered either
+    /// way. Only a refusal that cost a signature check is remembered: the cheap ones would only
+    /// push the expensive ones out, and an expiry is the clock's, not the token's.
+    fn check_once(&self, table: &Table, digest: [u8; 32], token: &str) -> Result<Claims, Rejected> {
+        if let Some(rejected) = remember(&table.refused).get(&digest).cloned() {
+            return Err(rejected);
+        }
+        match self.check_signature(&table.keys, token) {
+            Ok(claims) => Ok(keep(&table.remembered, REMEMBERED, digest, claims)),
+            Err(rejected @ (Rejected::BadSignature | Rejected::WrongIssuer)) => {
+                Err(keep(&table.refused, REFUSED, digest, rejected))
+            }
+            Err(rejected) => Err(rejected),
+        }
+    }
+
+    /// The signature under the key the token names, by that key's algorithm, and the issuer;
+    /// the lifetime as of now. The audience is [`admit`]'s.
+    fn check_signature(&self, keys: &VerifierKeys, token: &str) -> Result<Claims, Rejected> {
         let header = decode_header(token).map_err(|_| Rejected::Malformed)?;
         let kid = header.kid.ok_or(Rejected::Malformed)?;
-        let keys = self.keys.load();
         let (key, algorithm) = keys.get(&kid).ok_or(Rejected::UnknownKey)?;
 
         let mut validation = Validation::new(*algorithm);
         validation.set_issuer(&[&self.issuer]);
-        match audiences {
-            Some(audiences) => validation.set_audience(audiences),
-            None => validation.validate_aud = false,
-        }
+        validation.validate_aud = false;
         validation.validate_exp = true;
         validation.validate_nbf = true;
-        // Clock skew between Keycloak and this pod, and nothing more: a token is short
-        // lived, so a generous window here is a generous window for a stolen one.
-        validation.leeway = 60;
+        validation.leeway = LEEWAY.unsigned_abs();
 
         decode::<Claims>(token, key, &validation)
             .map(|data| data.claims)
@@ -266,11 +330,50 @@ impl Verifier {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature
                 | jsonwebtoken::errors::ErrorKind::ImmatureSignature => Rejected::Expired,
                 jsonwebtoken::errors::ErrorKind::InvalidIssuer => Rejected::WrongIssuer,
-                jsonwebtoken::errors::ErrorKind::InvalidAudience => Rejected::WrongAudience,
                 jsonwebtoken::errors::ErrorKind::InvalidSignature => Rejected::BadSignature,
                 _ => Rejected::Malformed,
             })
     }
+}
+
+/// Claims whose signature verified, admitted at `now` (seconds since the epoch): still inside
+/// their lifetime and, when `audiences` is given, naming one of them. A token without an `aud`
+/// names nothing, so it is refused wherever an audience is asked for (RFC 8707); jsonwebtoken's
+/// own check let it through.
+fn admit(claims: Claims, audiences: Option<&[String]>, now: i64) -> Result<Claims, Rejected> {
+    if claims.exp < now.saturating_sub(LEEWAY) {
+        return Err(Rejected::Expired);
+    }
+    match audiences {
+        Some(audiences) if !claims.names_audience(audiences) => Err(Rejected::WrongAudience),
+        _ => Ok(claims),
+    }
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Remembers `value` under `digest`, starting the memo over when it holds `cap` entries.
+fn keep<V: Clone>(memo: &Mutex<HashMap<[u8; 32], V>>, cap: usize, digest: [u8; 32], value: V) -> V {
+    let mut memo = remember(memo);
+    if memo.len() >= cap {
+        memo.clear();
+    }
+    memo.insert(digest, value.clone());
+    value
+}
+
+fn remember<T>(remembered: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // A panicking holder poisoned the lock; the memo only saves work, so going on with it is
+    // safe: every entry in it verified.
+    remembered
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Whether the request presents a bearer token: what makes a caller not anonymous on every
@@ -294,4 +397,51 @@ pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or(Rejected::NoToken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{admit, Claims, Rejected, LEEWAY};
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn claims(aud: serde_json::Value, exp: i64) -> Claims {
+        let mut claims = serde_json::json!({"sub": "f:1:a", "iss": "realm", "exp": exp});
+        if !aud.is_null() {
+            claims["aud"] = aud;
+        }
+        serde_json::from_value(claims).expect("claims")
+    }
+
+    fn slug() -> Vec<String> {
+        vec!["slug".to_owned()]
+    }
+
+    #[test]
+    fn a_remembered_token_expires_at_the_leeway_bound_and_not_before() {
+        let at_bound = admit(claims("slug".into(), NOW - LEEWAY), Some(&slug()), NOW);
+        assert_eq!(at_bound.map(|c| c.sub), Ok("f:1:a".to_owned()));
+        let past = admit(claims("slug".into(), NOW - LEEWAY - 1), Some(&slug()), NOW);
+        assert_eq!(past.map(|c| c.sub), Err(Rejected::Expired));
+    }
+
+    #[test]
+    fn the_audience_is_one_of_those_asked_for_and_a_missing_one_is_none() {
+        let other = admit(claims("other".into(), NOW), Some(&slug()), NOW);
+        assert_eq!(other.map(|c| c.sub), Err(Rejected::WrongAudience));
+        let missing = admit(claims(serde_json::Value::Null, NOW), Some(&slug()), NOW);
+        assert_eq!(missing.map(|c| c.sub), Err(Rejected::WrongAudience));
+        let many = admit(
+            claims(serde_json::json!(["x", "slug"]), NOW),
+            Some(&slug()),
+            NOW,
+        );
+        assert_eq!(many.map(|c| c.sub), Ok("f:1:a".to_owned()));
+    }
+
+    #[test]
+    fn identifying_asks_for_no_audience() {
+        let missing = admit(claims(serde_json::Value::Null, NOW), None, NOW);
+        assert_eq!(missing.map(|c| c.sub), Ok("f:1:a".to_owned()));
+    }
 }
