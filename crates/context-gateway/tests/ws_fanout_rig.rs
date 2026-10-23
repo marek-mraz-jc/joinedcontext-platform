@@ -19,15 +19,55 @@ use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::store;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 const VEHICLES: u64 = 50;
+
+/// What a client reads of every frame. The clients share the runner's cores with the gateway, so
+/// each frame is read into these few fields instead of a whole `Value` (T-5351).
+#[derive(Deserialize)]
+struct Head<'a> {
+    #[serde(borrow)]
+    metadata: Meta<'a>,
+}
+
+#[derive(Deserialize)]
+struct Meta<'a> {
+    #[serde(rename = "x-op", borrow)]
+    op: Option<&'a str>,
+    #[serde(rename = "x-status")]
+    status: Option<u16>,
+    #[serde(rename = "x-reason", borrow)]
+    reason: Option<&'a str>,
+}
+
+/// An `x-notification`: the change's number each rig entity carries.
+#[derive(Deserialize)]
+struct Note {
+    body: NoteBody,
+}
+
+#[derive(Deserialize)]
+struct NoteBody {
+    data: Vec<Datum>,
+}
+
+#[derive(Deserialize)]
+struct Datum {
+    rig: Number,
+}
+
+#[derive(Deserialize)]
+struct Number {
+    value: usize,
+}
 const MODES: [&str; 3] = ["bus", "tram", "metro"];
 
 fn env(name: &str, default: usize) -> usize {
@@ -200,8 +240,10 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     let (before_rss, before_cpu) = rig::usage();
     let received = Arc::new(AtomicUsize::new(0));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
-    let sent_at: Arc<std::sync::Mutex<Vec<Option<Instant>>>> =
-        Arc::new(std::sync::Mutex::new(vec![None; changes]));
+    // Each change's push time, written once and read by every client without a lock: one mutex
+    // over 5 000 clients parked the runner's threads and cut the clients' throughput (T-5351).
+    let sent_at: Arc<Vec<OnceLock<Instant>>> =
+        Arc::new((0..changes).map(|_| OnceLock::new()).collect());
     let mut clients = Vec::new();
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<Result<(), String>>(sockets.max(1));
     for (i, body) in filters.iter().enumerate() {
@@ -260,29 +302,36 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
                     continue;
                 };
                 received.fetch_add(1, Ordering::Relaxed);
-                let message: Value = serde_json::from_str(text.as_str()).expect("JSON");
-                match message["metadata"]["x-op"].as_str() {
+                let head: Head = serde_json::from_str(text.as_str()).expect("JSON");
+                match head.metadata.op {
                     Some("x-result") => {
-                        let answer = if message["metadata"]["x-status"] == 201 {
+                        let answer = if head.metadata.status == Some(201) {
                             Ok(())
                         } else {
-                            Err(message.to_string())
+                            Err(text.to_string())
                         };
                         let _ = ready.send(answer).await;
                     }
                     Some("x-notification") => {
-                        let n = message["body"]["data"][0]["rig"]["value"]
-                            .as_u64()
-                            .and_then(|n| usize::try_from(n).ok())
-                            .expect("the change's number");
-                        if let Some(at) = sent_at.lock().expect("stamps")[n] {
+                        let note: Note = serde_json::from_str(text.as_str()).expect("a rig entity");
+                        let n = note
+                            .body
+                            .data
+                            .first()
+                            .expect("the change's number")
+                            .rig
+                            .value;
+                        if let Some(at) = sent_at[n].get() {
                             latencies.push(at.elapsed());
                         }
                         got.push(n);
                     }
                     Some("x-gap") => gaps += 1,
                     Some("x-closing") => {
-                        ended = Some(format!("x-closing {}", message["metadata"]["x-reason"]));
+                        ended = Some(format!(
+                            "x-closing {}",
+                            head.metadata.reason.unwrap_or_default()
+                        ));
                     }
                     _ => {}
                 }
@@ -312,7 +361,7 @@ async fn every_socket_receives_exactly_what_its_filter_admits() {
     #[allow(clippy::cast_precision_loss)]
     let every = Duration::from_secs_f64(1.0 / rate as f64);
     for (n, entity) in stream.iter().enumerate() {
-        sent_at.lock().expect("stamps")[n] = Some(Instant::now());
+        let _ = sent_at[n].set(Instant::now());
         let line = json!({"metadata": {"x-op": "x-notification", "x-seq": n + 1},
             "body": {"type": "Notification", "data": [entity]}});
         push.send(Arc::new(line.to_string())).expect("an upstream");
