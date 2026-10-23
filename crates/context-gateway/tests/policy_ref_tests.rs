@@ -219,3 +219,32 @@ fn a_policy_ref_of_another_domain_binds_nothing() {
         assert_eq!(bikes.policies.len(), bound, "{domain}");
     }
 }
+
+/// ADR-N-057 decision 2: `policyRefs` binds exactly the Policies it lists; a reference into
+/// another space among them binds nothing and widens nothing.
+#[test]
+fn an_endpoint_with_policy_refs_evaluates_exactly_the_listed_policies() {
+    let dir = repo("refs");
+    write(
+        &dir,
+        "bikes.yaml",
+        &BIKES.replace(
+            "  policyRef: urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n",
+            "  policyRefs:\n    - urn:ngsi-ld:Policy:hel.fi:helsinki:public-events\n    \
+             - urn:ngsi-ld:Policy:hel.fi:helsinki:public-bikes\n    \
+             - urn:ngsi-ld:Policy:hel.fi:elsewhere:pipelines-write\n",
+        ),
+    );
+    let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+    let bikes = endpoints
+        .iter()
+        .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+        .expect("the bound endpoint");
+    assert_eq!(
+        types_of(&bikes.policies),
+        ["BikeHireDockingStation", "Event"]
+    );
+    let mut names = bikes.policy_names.clone();
+    names.sort();
+    assert_eq!(names, ["public-bikes", "public-events"]);
+}

@@ -2175,3 +2175,51 @@ fn a_pipeline_aimed_at_an_endpoint_without_policy_ref_passes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR-N-057 decision 2 (T-5037): the unbound-write rule reads `policyRefs` as the gateway does,
+/// so a write Policy listed beside a read one is bound, and one left off the list is not.
+#[test]
+fn a_write_policy_listed_in_policy_refs_passes() {
+    let dir = valid_repo("adr57-policy-refs");
+    let listed = |names: &[&str]| {
+        let refs: String = names
+            .iter()
+            .map(|name| {
+                format!("\n    - urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie-ovzdusie:{name}")
+            })
+            .collect();
+        format!("{ENDPOINT}  policyRefs:{refs}\n")
+    };
+    space_policy(
+        &dir,
+        "public-read",
+        "{ kind: role, id: public }",
+        "[retrieveOps]",
+    );
+    space_policy(
+        &dir,
+        "sensors-write",
+        "{ kind: serviceAccount, id: sensors }",
+        "[upsertBatch]",
+    );
+    write(
+        &dir,
+        ENDPOINT_PATH,
+        &listed(&["public-read", "sensors-write"]),
+    );
+    let report = validate::run(&dir);
+    assert_eq!(citing(&report, "ADR-N-057"), Vec::<&str>::new());
+
+    write(&dir, ENDPOINT_PATH, &listed(&["public-read"]));
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert_eq!(found.len(), 1, "{:?}", report.findings);
+    assert!(
+        found[0].contains("Policy sensors-write")
+            && found[0].contains("public-air binds only its policyRefs"),
+        "{}",
+        found[0]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

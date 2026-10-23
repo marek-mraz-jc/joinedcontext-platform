@@ -486,9 +486,14 @@ pub struct EndpointSpec {
     /// Whitelist of project slugs permitted when audience is `project-list` (EP-14, EP-15).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_projects: Vec<String>,
-    /// Optional NGSI-LD Policy URN attached to this endpoint.
+    /// Optional NGSI-LD Policy URN attached to this endpoint; means `policyRefs: [it]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_ref: Option<Urn>,
+    /// The Policies this Endpoint evaluates, each a Policy URN of its space (ADR-N-057 decision 2).
+    /// Never set beside `policyRef` and never empty; read both through
+    /// [`EndpointSpec::policy_refs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_refs: Option<Vec<Urn>>,
     /// The representations this Endpoint serves, listed (EP-05). Omitted: every one but `sta`,
     /// less `disabledRepresentations` (EP-104); see [`EndpointSpec::served_representations`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -601,6 +606,16 @@ impl Kind for EndpointSpec {
 }
 
 impl EndpointSpec {
+    /// The Policies this Endpoint names, `policyRef` read as a list of one (ADR-N-057); `None`
+    /// when it names none and so evaluates every Policy of its space. The gateway, the Portal
+    /// and `jcctl validate` all bind through this, never through either field alone.
+    pub fn policy_refs(&self) -> Option<&[Urn]> {
+        self.policy_ref
+            .as_ref()
+            .map(std::slice::from_ref)
+            .or(self.policy_refs.as_deref())
+    }
+
     /// The representations this Endpoint serves: the ones it lists, or, when it lists none,
     /// every one but `sta` less the disabled ones (EP-104); then `ngsi-ld` and `geojson`, which
     /// every Endpoint serves (EP-10, T-2939), and `mcp` unless `mcp: false` (EP-24, T-2901).
@@ -920,7 +935,26 @@ impl EndpointSpec {
             )?;
         }
 
-        if let Some(ref policy) = self.policy_ref {
+        // ADR-N-057: an empty list reads as "nothing" or "everything", two fields as either one.
+        match (&self.policy_ref, &self.policy_refs) {
+            (Some(_), Some(_)) => {
+                return Err(Error::Invalid {
+                    field: "spec.policyRefs".to_owned(),
+                    reason: "name the Policies in policyRefs alone: drop policyRef (ADR-N-057)"
+                        .to_owned(),
+                });
+            }
+            (None, Some(refs)) if refs.is_empty() => {
+                return Err(Error::Invalid {
+                    field: "spec.policyRefs".to_owned(),
+                    reason: "list at least one Policy, or drop policyRefs to bind every Policy of \
+                             the space (ADR-N-057)"
+                        .to_owned(),
+                });
+            }
+            _ => {}
+        }
+        for policy in self.policy_refs().unwrap_or_default() {
             if policy.entity_type() != "Policy" {
                 return Err(Error::Kind {
                     expected: "Policy",
