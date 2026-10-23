@@ -749,13 +749,59 @@ fn rank_of(key: &str, attribute: &Value, plain: &Value, has_unit: bool, asked: &
 /// type without a model class (T-4672).
 pub type ModelColumns = Vec<Option<jc_core::display_order::Field>>;
 
-/// A table's columns, its rows, each column's unit and how the model shows it.
+/// A table's columns, its rows, each column's unit, how the model shows it and the words of the
+/// label column's cells per language (`label_words`).
 pub type Columns = (
     Vec<String>,
     Vec<Vec<Value>>,
     Vec<Option<String>>,
     ModelColumns,
+    Option<super::agent::Words>,
 );
+
+/// An attribute's text per language: a LanguageProperty's `languageMap`, or the one text a read
+/// with `lang` answers (`value` beside `lang`); `None` for any other attribute.
+fn language_texts(attribute: &Value) -> Option<BTreeMap<String, String>> {
+    let texts: BTreeMap<String, String> = match attribute.get("languageMap") {
+        Some(map) => map
+            .as_object()?
+            .iter()
+            .filter_map(|(lang, text)| Some((lang.clone(), text.as_str()?.to_owned())))
+            .collect(),
+        None => {
+            let lang = attribute.get("lang")?.as_str()?;
+            let text = attribute.get("value")?.as_str()?;
+            BTreeMap::from([(lang.to_owned(), text.to_owned())])
+        }
+    };
+    (!texts.is_empty()).then_some(texts)
+}
+
+/// Whether an attribute is no column: the label and the entity's own members, and a `title` in
+/// languages, which the label's words carry instead (T-5330).
+fn skipped(key: &str, attribute: &Value) -> bool {
+    matches!(key, "id" | "type" | "@context" | "name" | "location")
+        || (key == "title" && language_texts(attribute).is_some())
+}
+
+/// The human name of each row per language, keyed by its label cell (T-5330): the entity's
+/// `title`, else its `name`, when either is a LanguageProperty. A `KeyPerformanceIndicator`'s
+/// `name` is its slug by contract, so its `title` is what the row reads as; the client shows the
+/// words like an enum's. `None` when no row has any.
+fn label_words(shown: &[Value], rows: &[Vec<Value>]) -> Option<super::agent::Words> {
+    let words: super::agent::Words = shown
+        .iter()
+        .zip(rows)
+        .filter_map(|(entity, row)| {
+            let key = row.first()?.as_str()?.to_owned();
+            let texts = ["title", "name"]
+                .iter()
+                .find_map(|k| entity.get(*k).and_then(language_texts))?;
+            Some((key, texts))
+        })
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
 
 /// The entities of a `query_entities` answer as a table, by importance (T-4650): `name` (else
 /// `id`), the attributes `asked` names, measured values (a number with a `unitCode` or an
@@ -767,6 +813,8 @@ pub type Columns = (
 /// With `model`, the Endpoint's LinkML as the caller is served it, a type the model has a class
 /// for reads in the model's display order instead, after the attributes `asked` names; a slot
 /// it hides is left out, and each column carries the model's labels (DM-98…DM-101, T-4672).
+/// A row whose `title` (else `name`) is a LanguageProperty also carries its words per language,
+/// keyed by the label cell, and that `title` is no column of its own (T-5330).
 pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) -> Option<Columns> {
     let value: Value = serde_json::from_str(text).ok()?;
     let entities = value.get("entities").unwrap_or(&value).as_array()?;
@@ -775,11 +823,7 @@ pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) 
     let mut found: Vec<(String, usize, Rank, Option<String>)> = Vec::new();
     for entity in shown {
         for (key, attribute) in entity.as_object().into_iter().flatten() {
-            let skip = matches!(
-                key.as_str(),
-                "id" | "type" | "@context" | "name" | "location"
-            );
-            let Some(plain) = cell(attribute).filter(|_| !skip) else {
+            let Some(plain) = cell(attribute).filter(|_| !skipped(key, attribute)) else {
                 continue;
             };
             let unit = unit_of(attribute);
@@ -847,8 +891,9 @@ pub fn table_of(text: &str, most: usize, asked: &[String], model: Option<&str>) 
                 })
                 .collect()
         })
-        .collect();
-    Some((columns, rows, units, fields))
+        .collect::<Vec<Vec<Value>>>();
+    let words = label_words(shown, &rows);
+    Some((columns, rows, units, fields, words))
 }
 
 /// The display order of the entities' type when the model has a class for it, over the attributes
@@ -2229,8 +2274,14 @@ pub(super) async fn table(
         Some(kind),
         found(model.is_some()),
     );
-    let (columns, rows, units, fields) = table_of(text, READ_ROWS, asked, model.as_deref())?;
-    let enums = enums_of(model.as_deref(), kind, &columns);
+    let (columns, rows, units, fields, words) = table_of(text, READ_ROWS, asked, model.as_deref())?;
+    let mut enums = enums_of(model.as_deref(), kind, &columns);
+    if words.is_some() {
+        enums.resize(columns.len(), None);
+        if let Some(label) = enums.first_mut() {
+            *label = words;
+        }
+    }
     let slug = connector.surface.slug.as_str();
     let began = Instant::now();
     let dataset = dataset_of(ask, connector, kind, text).await;
@@ -6027,6 +6078,70 @@ mod tests {
         assert_eq!(part_of("not json"), None);
     }
 
+    /// T-5330: a KPI's `name` is its slug by contract, so its `title` LanguageProperty is what the
+    /// row reads as, in each language, and no column of its own; a `name` that is itself a
+    /// LanguageProperty labels the id the same way; a row without either carries no words.
+    #[test]
+    fn table_of_picks_the_title_as_the_rows_label() {
+        let kpis = json!([
+            {"id": "urn:ngsi-ld:KeyPerformanceIndicator:zilina.sk:zilina-kpi:index-starnutia-mesto",
+             "type": "KeyPerformanceIndicator",
+             "name": {"type": "Property", "value": "index-starnutia-mesto"},
+             "title": {"type": "LanguageProperty", "languageMap": {"sk": "Index starnutia", "en": "Ageing index"}},
+             "currentValue": {"type": "Property", "value": 131.5, "unitCode": "P1"}},
+            {"id": "urn:ngsi-ld:KeyPerformanceIndicator:zilina.sk:zilina-kpi:uchadzaci-mesto",
+             "type": "KeyPerformanceIndicator",
+             "name": {"type": "Property", "value": "uchadzaci-mesto"},
+             "title": {"type": "Property", "value": "Registered jobseekers", "lang": "en"},
+             "currentValue": {"type": "Property", "value": 1890, "unitCode": "C62"}},
+            {"id": "urn:ngsi-ld:KeyPerformanceIndicator:zilina.sk:zilina-kpi:old-mesto",
+             "type": "KeyPerformanceIndicator",
+             "name": {"type": "Property", "value": "old-mesto"},
+             "currentValue": {"type": "Property", "value": 1, "unitCode": "C62"}}
+        ]);
+        let (columns, rows, .., words) =
+            table_of(&kpis.to_string(), 50, &[], None).unwrap_or_default();
+        assert_eq!(columns, ["name", "currentValue"]);
+        assert_eq!(rows[0][0], json!("index-starnutia-mesto"));
+        let words = words.unwrap_or_default();
+        assert_eq!(
+            words.get("index-starnutia-mesto"),
+            Some(&BTreeMap::from([
+                ("en".to_owned(), "Ageing index".to_owned()),
+                ("sk".to_owned(), "Index starnutia".to_owned())
+            ]))
+        );
+        assert_eq!(
+            words.get("uchadzaci-mesto"),
+            Some(&BTreeMap::from([(
+                "en".to_owned(),
+                "Registered jobseekers".to_owned()
+            )]))
+        );
+        assert_eq!(words.get("old-mesto"), None);
+
+        let stations = json!([{"id": "urn:ngsi-ld:AirQualityObserved:1", "type": "AirQualityObserved",
+            "name": {"type": "LanguageProperty", "languageMap": {"sk": "Námestie SNP"}},
+            "pm10": {"type": "Property", "value": 21.5}}]);
+        let (columns, rows, .., words) =
+            table_of(&stations.to_string(), 50, &[], None).unwrap_or_default();
+        assert_eq!(columns, ["id", "pm10"]);
+        assert_eq!(
+            words
+                .unwrap_or_default()
+                .get("urn:ngsi-ld:AirQualityObserved:1"),
+            Some(&BTreeMap::from([(
+                "sk".to_owned(),
+                "Námestie SNP".to_owned()
+            )]))
+        );
+        assert_eq!(rows[0][0], json!("urn:ngsi-ld:AirQualityObserved:1"));
+
+        let plain = json!([{"id": "urn:ngsi-ld:Parking:1", "type": "Parking", "free": 12}]);
+        let (.., words) = table_of(&plain.to_string(), 50, &[], None).unwrap_or_default();
+        assert_eq!(words, None);
+    }
+
     #[test]
     fn entities_become_a_table_of_plain_values() {
         let normalized = json!({"entities": [
@@ -6153,7 +6268,7 @@ classes:
       source:
         annotations: { hidden: { tag: hidden, value: "true" } }
 "#;
-        let (columns, rows, units, fields) =
+        let (columns, rows, units, fields, _) =
             table_of(&air().to_string(), 50, &[], Some(model)).unwrap_or_default();
         let labels = labels_of(&fields);
         assert_eq!(
@@ -6183,7 +6298,7 @@ classes:
         );
 
         let other = model.replace("AirQualityObserved:", "WeatherObserved:");
-        let (columns, _, _, fields) =
+        let (columns, _, _, fields, _) =
             table_of(&air().to_string(), 50, &[], Some(&other)).unwrap_or_default();
         assert_eq!(
             columns[1..3],
@@ -6195,7 +6310,7 @@ classes:
 
     #[test]
     fn measured_values_follow_the_name_and_the_time_is_last() {
-        let (columns, rows, units, _) =
+        let (columns, rows, units, ..) =
             table_of(&air().to_string(), 50, &[], None).unwrap_or_default();
         assert_eq!(
             columns,
@@ -6278,7 +6393,7 @@ classes:
     #[test]
     fn the_oldest_bridges_leave_the_registers_placeholders_apart() {
         let text = include_str!("../../tests/fixtures/bbsk_bridges_oldest.json");
-        let (columns, rows, units, _) =
+        let (columns, rows, units, ..) =
             table_of(text, READ_ROWS, &["yearBuilt".to_owned()], None).expect("a table");
         let mut table = Table {
             entity_type: "Bridge".into(),

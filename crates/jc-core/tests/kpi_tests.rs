@@ -143,6 +143,7 @@ fn the_context_maps_every_term() {
     for term in [
         "KeyPerformanceIndicator",
         "name",
+        "title",
         "calculationFormula",
         "currentValue",
         "calculationPeriod",
@@ -159,6 +160,36 @@ fn the_context_maps_every_term() {
     let kpi = indicator();
     let urn: Urn = kpi.id.parse().expect("a urn");
     assert_eq!(urn.space(), Some("helsinki-kpi"));
+}
+
+/// T-5330: `name` is the slug by contract, so the human name per language is an optional
+/// `title` LanguageProperty; a title with no text, a blank text or a broken tag is refused.
+#[test]
+fn a_title_per_language_round_trips_and_a_blank_one_is_refused() {
+    let mut json = indicator().to_json();
+    assert!(
+        json.get("title").is_none(),
+        "no title is written when none is given"
+    );
+    json["title"] = json!({ "type": "LanguageProperty", "languageMap": { "sk": "Index starnutia", "en": "Ageing index" } });
+    let read = KeyPerformanceIndicator::from_json(json.clone()).expect("a titled indicator");
+    assert_eq!(read.to_json()["title"], json["title"]);
+    let title = read.title.expect("the title");
+    assert_eq!(title.language_map["sk"], "Index starnutia");
+
+    for bad in [
+        json!({ "type": "LanguageProperty", "languageMap": {} }),
+        json!({ "type": "LanguageProperty", "languageMap": { "sk": "  " } }),
+        json!({ "type": "LanguageProperty", "languageMap": { "s k": "Index" } }),
+        json!({ "type": "Property", "value": "Index starnutia" }),
+    ] {
+        let mut wrong = json.clone();
+        wrong["title"] = bad.clone();
+        assert!(
+            KeyPerformanceIndicator::from_json(wrong).is_err(),
+            "{bad} is refused"
+        );
+    }
 }
 
 /// The committed `schemas/kinds/KeyPerformanceIndicator.json` is what the generator renders,
