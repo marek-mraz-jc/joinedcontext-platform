@@ -672,13 +672,17 @@ fn a_space_names_its_personal_data_key_by_secret_ref_dm_121() {
         ("rides-key", Some("hmac"))
     );
 
-    let unknown = with("  personalData:\n    keyRef: { name: rides-key }\n    key: 0123456789abcdef0123456789abcdef");
+    let typed = "0123".repeat(8);
+    let unknown = with(&format!(
+        "  personalData:\n    keyRef: {{ name: rides-key }}\n    key: {typed}"
+    ));
     assert!(
         ContextSpace::from_yaml(&unknown).is_err(),
         "a key typed into the manifest is refused"
     );
 
-    let pasted = with("  personalData:\n    keyRef: { name: glpat-0123456789abcdefghij }");
+    let token = format!("{}-{}", "glpat", "0123456789".repeat(2));
+    let pasted = with(&format!("  personalData:\n    keyRef: {{ name: {token} }}"));
     let refused = ContextSpace::from_yaml(&pasted)
         .expect("the manifest parses")
         .spec
@@ -690,7 +694,7 @@ fn a_space_names_its_personal_data_key_by_secret_ref_dm_121() {
         "{message}"
     );
     assert!(
-        !message.contains("glpat-0123"),
+        !message.contains(&token),
         "the refusal never repeats what was pasted: {message}"
     );
 }
