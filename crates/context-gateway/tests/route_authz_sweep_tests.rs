@@ -117,6 +117,7 @@ fn rows() -> Vec<Row> {
         json!({"endpoint": SLUG, "type": "Device"}),
     );
     let check = json!({"operation": "queryEntity", "type": "Device"});
+    let evaluation = json!({"action": {"name": "queryEntity"}, "resource": {"type": "Device"}});
     use Guard::*;
     let row = |method, route, send, guard| Row {
         method,
@@ -127,6 +128,12 @@ fn rows() -> Vec<Row> {
     vec![
         row("GET", "/api/endpoint/{slug}", get(ep("")), Member),
         row("GET", "/api/endpoint/{slug}/", get(ep("/")), Member),
+        row(
+            "GET",
+            "/api/endpoint/{slug}/widget.json",
+            get(ep("/widget.json")),
+            Member,
+        ),
         row(
             "GET",
             "/api/endpoint/{slug}/ngsi-ld/v1",
@@ -245,6 +252,21 @@ fn rows() -> Vec<Row> {
             "POST",
             "/api/endpoint/{slug}/access/check",
             post(ep("/access/check"), check.clone()),
+            Member,
+        ),
+        row(
+            "POST",
+            "/api/endpoint/{slug}/access/v1/evaluation",
+            post(ep("/access/v1/evaluation"), evaluation.clone()),
+            Member,
+        ),
+        row(
+            "POST",
+            "/api/endpoint/{slug}/access/v1/evaluations",
+            post(
+                ep("/access/v1/evaluations"),
+                json!({ "evaluations": [evaluation.clone()] }),
+            ),
             Member,
         ),
         row(
@@ -561,6 +583,8 @@ fn endpoint(base_path: String) -> Endpoint {
             "name: news\nsources: [{ type: Device, preset: generic }]\n",
         )
         .expect("the feed output parses")],
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: vec!["readers".to_owned()],
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(GRANT).expect("the policy parses")],

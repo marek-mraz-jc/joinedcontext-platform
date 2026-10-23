@@ -69,6 +69,8 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{slug}"),
         models: vec![Model {
             name: "air-quality".to_owned(),

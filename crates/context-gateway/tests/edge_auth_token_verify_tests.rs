@@ -363,3 +363,84 @@ fn the_claims_that_come_back_are_the_ones_the_realm_signed() {
     );
     assert_eq!(verified.azp.as_deref(), Some("portal"));
 }
+
+/// A genuine token without an `aud` claim is bound to no resource, so no resource admits it
+/// (RFC 8707). jsonwebtoken's own audience check lets a missing `aud` through.
+#[test]
+fn a_token_without_an_aud_claim_is_refused() {
+    let realm = Realm::new();
+    let mut unbound = claims(json!(SLUG), 300);
+    unbound.as_object_mut().expect("an object").remove("aud");
+    let token = realm.mint(&unbound);
+
+    assert_eq!(
+        refusal(realm.verifier().verify(&token, &audiences())),
+        Err(Rejected::WrongAudience)
+    );
+}
+
+/// A signature is checked once per token (T-5290); what a remembered token is still checked
+/// for on every call is the audience asked for.
+#[test]
+fn a_remembered_token_is_still_refused_on_another_resource() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+    let token = realm.mint(&claims(json!(SLUG), 300));
+
+    assert!(verifier.identify(&token).is_ok());
+    assert_eq!(verifier.remembered(), 1, "the genuine token is remembered");
+    assert_eq!(
+        refusal(verifier.verify(&token, &["another-endpoint".to_owned()])),
+        Err(Rejected::WrongAudience)
+    );
+    assert!(verifier.verify(&token, &audiences()).is_ok());
+    assert_eq!(verifier.remembered(), 1, "one token, one entry");
+}
+
+#[test]
+fn a_key_the_realm_withdrew_takes_its_remembered_tokens_with_it() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+    let token = realm.mint(&claims(json!(SLUG), 300));
+    assert!(verifier.verify(&token, &audiences()).is_ok());
+
+    verifier.replace_keys(&jsonwebtoken::jwk::JwkSet { keys: Vec::new() });
+
+    assert_eq!(verifier.remembered(), 0);
+    assert_eq!(
+        refusal(verifier.verify(&token, &audiences())),
+        Err(Rejected::UnknownKey)
+    );
+}
+
+#[test]
+fn a_forgery_is_never_remembered_as_genuine() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+    let genuine = realm.mint(&claims(json!(SLUG), 300));
+    let (signed, _) = genuine.rsplit_once('.').expect("a JWT");
+    for n in 0..100 {
+        let forged = format!("{signed}.{}", common::b64(&format!("{n:064}")));
+        // Twice, as the rate limiter and then the handler check it: the remembered refusal
+        // is the same refusal.
+        for _ in 0..2 {
+            assert_eq!(
+                refusal(verifier.verify(&forged, &audiences())),
+                Err(Rejected::BadSignature)
+            );
+        }
+    }
+    assert_eq!(verifier.remembered(), 0);
+}
+
+#[test]
+fn the_memo_stays_under_its_cap_however_many_genuine_tokens_arrive() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+    for n in 0..5_000 {
+        let mut fresh = claims(json!(SLUG), 300);
+        fresh["jti"] = json!(n);
+        assert!(verifier.verify(&realm.mint(&fresh), &audiences()).is_ok());
+        assert!(verifier.remembered() <= 4_096);
+    }
+}

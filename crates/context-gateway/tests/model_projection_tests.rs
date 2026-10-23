@@ -78,6 +78,8 @@ fn endpoint(policy: PolicySpec, projection: Option<Arc<ModelProjectionSpec>>) ->
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![Model {
             name: "fleet".to_owned(),

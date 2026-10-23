@@ -6,9 +6,19 @@
 //! carry its write grant over the type it declares, while the space it does not touch carries
 //! nothing of it.
 
+mod common;
+
+use axum::body::Body;
+use axum::http::Request;
+use context_gateway::app::{router, Gateway};
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
 use context_gateway::store;
 use jc_core::kinds::{OperationRef, PrincipalKind};
+use serde_json::json;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tower::ServiceExt;
 
 fn space(name: &str) -> String {
     format!(
@@ -125,5 +135,60 @@ fn the_written_spaces_endpoint_carries_the_pipelines_write_grant_and_no_other_do
     assert!(
         grants("pppp").is_empty(),
         "nothing on a space the pipeline does not write"
+    );
+}
+
+/// ADR-N-054 2.3 (T-5361): the pipeline's write reaches the broker as channel `pipeline` with its
+/// own account as the actor and one request id, whatever provenance the client typed.
+#[tokio::test]
+async fn a_pipelines_write_reaches_the_broker_as_channel_pipeline_with_its_account() {
+    let repo = Repo::new();
+    let (endpoints, _, accounts, ..) = store::load(&repo.0).expect("the repository loads");
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let slug = "eeeeeeeeeeeeeeeeeeeeeeeeee";
+    let gateway = Gateway::new(Broker::new(&broker.url), Box::new(PolicyPdp), "hel.fi")
+        .serve(endpoints)
+        .authenticate(Arc::new(realm.verifier()), accounts, None);
+    let token = realm.workload_token("helsinki-pl-linked-events", json!(slug));
+    let entities = json!([{ "id": "urn:ngsi-ld:Event:t5361", "type": "Event" }]).to_string();
+    let request = Request::post(format!(
+        "/api/endpoint/{slug}/ngsi-ld/v1/entityOperations/upsert"
+    ))
+    .header("authorization", format!("Bearer {token}"))
+    .header("content-type", "application/json")
+    .header("jc-provenance-channel", "ui")
+    .header("jc-provenance-actor", "user:someone-else")
+    .body(Body::from(entities))
+    .expect("a request");
+    let status = router(Arc::new(gateway))
+        .oneshot(request)
+        .await
+        .expect("an answer")
+        .status();
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{status}: {hops:?}");
+    let headers = &hops[0].headers;
+    let values = |name: &str| {
+        headers
+            .get_all(name)
+            .iter()
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(values("jc-provenance-channel"), ["pipeline"], "{headers:?}");
+    assert_eq!(
+        values("jc-provenance-actor"),
+        ["serviceAccount%3Apl-linked-events"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values("x-request-id")
+            .iter()
+            .map(String::len)
+            .collect::<Vec<_>>(),
+        [36],
+        "{headers:?}"
     );
 }

@@ -168,11 +168,14 @@ pub fn package(
     let url = public_base(record, spec.slug.as_str())
         .unwrap_or_else(|| settings.endpoint_url(spec.slug.as_str()));
     let language = settings.language.as_deref();
-    // The feed outputs are listed one resource per output and format, after the surfaces.
+    // The feed outputs are listed one resource per output and format, and the calendar outputs
+    // one resource each, after the surfaces; `ical` with no output serves no calendar.
+    let calendars = spec.ical_outputs();
     let served: Vec<Representation> = spec
         .served_representations()
         .into_iter()
         .filter(|r| *r != Representation::Feed)
+        .filter(|r| *r != Representation::Ical)
         .collect();
 
     let mut payload = json!({
@@ -278,7 +281,8 @@ pub fn package(
             spec.audience == Audience::Public,
         );
         let at = served.len().min(list.len());
-        list.splice(at..at, feeds);
+        let calendars = calendar_resources(calendars, &url, language);
+        list.splice(at..at, calendars.into_iter().chain(feeds));
     }
     Ok(Some(payload))
 }
@@ -1090,6 +1094,39 @@ fn feed_resources(
         .collect()
 }
 
+/// One resource per iCalendar output, titled by the output in the catalogue's language
+/// (API/11 EP-159).
+fn calendar_resources(
+    calendars: &[jc_core::kinds::IcalOutput],
+    url: &str,
+    language: Option<&str>,
+) -> Vec<Value> {
+    jc_core::kinds::ical_links(calendars)
+        .into_iter()
+        .map(|(output, path)| {
+            let address = format!("{url}/{path}");
+            let mut said = format!(
+                "An iCalendar (RFC 5545) feed a calendar app subscribes to: in Google Calendar, \
+                 Other calendars, From URL; in Outlook, Add calendar, Subscribe from web, with the \
+                 URL {address}. Always live: the catalogue holds this link, never a copy."
+            );
+            if let Some(about) = language
+                .and_then(|l| output.description.get(l))
+                .or_else(|| output.description.values().next())
+            {
+                said = format!("{about}\n\n{said}");
+            }
+            json!({
+                "name": output.label(language.unwrap_or("en")),
+                "url": address,
+                "format": "ICS",
+                "mimetype": "text/calendar",
+                "description": said,
+            })
+        })
+        .collect()
+}
+
 /// Path under the Endpoint, CKAN format, media type and resource title (API/02).
 const fn distribution(
     representation: Representation,
@@ -1117,6 +1154,7 @@ const fn distribution(
             "OGC SensorThings API",
         ),
         Representation::Odata => ("/odata/v4/", "OData", "application/json", "OData v4"),
+        // Listed per output by `calendar_resources`; never reached through here.
         Representation::Ical => (
             "/ical/v1/events.ics",
             "ICS",
@@ -1900,6 +1938,29 @@ impl InMemoryCkan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// API/11 EP-159: one resource per calendar output, titled in the catalogue's language.
+    #[test]
+    fn each_calendar_output_is_one_resource() {
+        let calendars: Vec<jc_core::kinds::IcalOutput> = serde_json::from_value(json!([
+            {"name": "kalendar", "title": {"sk": "Kalendár", "en": "Calendar"},
+             "description": {"sk": "Všetky podujatia"},
+             "sources": [{"type": "Event", "preset": "sdm-event"}]},
+            {"name": "zasadnutia", "sources": [{"type": "Event", "preset": "sdm-event"}]}
+        ]))
+        .expect("the outputs parse");
+        let url = "https://data.example.sk/api/endpoint/podujatia";
+        let resources = calendar_resources(&calendars, url, Some("sk"));
+        let names: Vec<&str> = resources
+            .iter()
+            .filter_map(|r| r["name"].as_str())
+            .collect();
+        assert_eq!(names, ["Kalendár", "zasadnutia"]);
+        assert_eq!(resources[1]["url"], format!("{url}/ical/v1/zasadnutia.ics"));
+        assert_eq!(resources[0]["format"], "ICS");
+        let said = resources[0]["description"].as_str().unwrap_or_default();
+        assert!(said.starts_with("Všetky podujatia\n\n"), "{said}");
+    }
 
     /// EP-150, EP-151: one resource per feed output and format, titled in the catalogue's
     /// language, the address to paste in its text.

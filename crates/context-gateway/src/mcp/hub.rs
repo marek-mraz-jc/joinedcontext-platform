@@ -120,7 +120,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         }
     }
 
-    let caller = rate_limit::caller_key(request.headers());
+    let caller = rate_limit::caller_key(&gateway, request.headers());
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_BODY).await else {
         return jsonrpc::parse_error();
@@ -212,7 +212,7 @@ pub(crate) fn reached(
     // client address, the key a public Endpoint's own URL spends.
     let bucket = match &claims {
         Some(claims) => format!("subject:{}", claims.sub),
-        None => rate_limit::caller_key(headers),
+        None => rate_limit::caller_key(gateway, headers),
     };
     let decision =
         gateway

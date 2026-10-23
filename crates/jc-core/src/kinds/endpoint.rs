@@ -648,6 +648,13 @@ impl EndpointSpec {
         }
     }
 
+    /// The catalogue widget's outputs, in the order the Endpoint lists them (EP-163).
+    pub fn widget_outputs(&self) -> &[super::widget_output::WidgetOutput] {
+        self.representations
+            .as_ref()
+            .map_or(&[], |r| r.widget.as_slice())
+    }
+
     /// The feed outputs this Endpoint serves, in the order it lists them (EP-150).
     pub fn feed_outputs(&self) -> &[super::feed_output::FeedOutput] {
         self.representations
@@ -667,6 +674,10 @@ impl EndpointSpec {
             gaps.extend(output.model_gaps(linkml)?);
         }
         gaps.extend(super::feed_output::feed_gaps(self.feed_outputs(), linkml)?);
+        gaps.extend(super::widget_output::widget_gaps(
+            self.widget_outputs(),
+            linkml,
+        )?);
         for representation in self.served_representations() {
             let gap = match linkml {
                 None => representation.missing_model_gap(),
@@ -763,6 +774,15 @@ impl EndpointSpec {
             return Err(Error::Invalid {
                 field: "spec.representations.feed".to_owned(),
                 reason: feed_gaps.join("; "),
+            });
+        }
+
+        let widget_gaps = super::widget_output::widget_gaps(self.widget_outputs(), None)
+            .unwrap_or_else(|never| vec![never]);
+        if !widget_gaps.is_empty() {
+            return Err(Error::Invalid {
+                field: "spec.representations.widget".to_owned(),
+                reason: widget_gaps.join("; "),
             });
         }
 

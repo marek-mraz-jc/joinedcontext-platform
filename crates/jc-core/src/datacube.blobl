@@ -1,0 +1,36 @@
+# The cubes of this topic and the role of their dimensions, read from DATAcube's collection.
+let cubes = {cubes}
+# The cube a message is, from the address the answer names itself by.
+let cube = this.href.or("").re_find_object("/(?P<code>[a-z]{2}[0-9]{4}[a-z]{2})/").code.catch(null)
+let roles = $cubes.get($cube.or("")).catch(null)
+root = if $roles == null { throw("no cube of this topic answered: %v".format(this.href.or("no href"))) } else if this.value.or([]).length() == 0 { throw("cube %v answered no cell".format($cube)) } else { this }
+let ds = this
+let ids = this.id
+let sizes = this.size
+let n = $sizes.length()
+# JSON-stat 2.0 is decoded by the index and never by the order: the period comes newest first.
+let codes = $ids.map_each(d -> $ds.dimension.get(d).category.index.key_values().sort_by(kv -> kv.value).map_each(kv -> kv.key))
+let labels = $ids.map_each(d -> $ds.dimension.get(d).category.label.or({}))
+let strides = range(0, $n, 1).map_each(k -> if k + 1 >= $n { 1 } else { $sizes.slice(k + 1, $n).fold(1, t -> t.tally * t.value) })
+let at_index = range(0, $n, 1).map_each(k -> { $ids.index(k): k }).squash()
+# A dimension DATAcube adds to the answer only (`*_data`, one value) names nothing.
+let named = [$roles.period, $roles.area, $roles.indicator, $roles.unit].concat($roles.keys)
+let keys = $roles.keys.concat($ids.filter(d -> !$named.contains(d) && $sizes.index($at_index.get(d)) > 1))
+let updated = ($ds.update.or($roles.update)).ts_parse("2006-01-02").ts_format("2006-01-02T15:04:05Z07:00", "UTC").catch(null)
+let cells = if $ds.value.type() == "object" { $ds.value.key_values().map_each(kv -> { "p": kv.key.number().int64(), "v": kv.value }) } else { range(0, $ds.value.length(), 1).map_each(p -> { "p": p, "v": $ds.value.index(p) }) }
+# One entity per cell that carries a number; a cell the publisher left empty is not a zero.
+root = $cells.filter(c -> c.v != null && c.v.type() == "number").map_each(c -> range(0, $n, 1).map_each(k -> { $ids.index(k): $codes.index(k).index(((c.p / $strides.index(k)).floor().int64()) % $sizes.index(k)) }).squash().merge({ "_v": c.v })).map_each(at -> {
+  "id": "urn:ngsi-ld:%v:%v:%v:%v".format("KeyPerformanceIndicator", env("JC_ORG_DOMAIN"), env("JC_SPACE"), [$cube, if $roles.area == null { {whole_area} } else { at.get($roles.area) }, at.get($roles.period), if $roles.indicator == null { $cube } else { at.get($roles.indicator) }].concat($keys.map_each(d -> at.get(d))).concat(if $roles.unit == null { [] } else { [at.get($roles.unit)] }).join("-").re_replace_all("[^A-Za-z0-9._~-]", "_")),
+  "type": "KeyPerformanceIndicator",
+  "dataSet": { "type": "Property", "value": $cube },
+  "indicator": { "type": "Property", "value": if $roles.indicator == null { $cube } else { at.get($roles.indicator) } },
+  "name": (if $roles.indicator == null { null } else { $labels.index($at_index.get($roles.indicator)).get(at.get($roles.indicator)) }).or($ds.label).(n -> if n == null { null } else { { "type": "Property", "value": n } }),
+  "refArea": { "type": "Property", "value": if $roles.area == null { {whole_area} } else { at.get($roles.area) } },
+  "refPeriod": { "type": "Property", "value": at.get($roles.period) },
+  "dimensionKey": if $keys.length() == 0 { null } else { { "type": "Property", "value": $keys.map_each(d -> at.get(d)).join("-") } },
+  "kpiValue": { "type": "Property", "value": at._v, "observedAt": $updated }.filter(e -> e.value != null),
+  "unitText": if $roles.unit == null { null } else { { "type": "Property", "value": $labels.index($at_index.get($roles.unit)).get(at.get($roles.unit)).or(at.get($roles.unit)) } },
+  "source": { "type": "Property", "value": $roles.source },
+  "isPartOf": { "type": "Property", "value": {dataset_page}.format($cube) },
+  "dateObserved": if $updated == null { null } else { { "type": "Property", "value": $updated } }
+}.filter(e -> e.value != null))

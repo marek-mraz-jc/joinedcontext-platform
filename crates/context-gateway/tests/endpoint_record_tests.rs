@@ -85,6 +85,8 @@ fn endpoint(audience: Audience) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![air_quality()],
         policy_names: Vec::new(),
@@ -629,4 +631,97 @@ async fn the_ngsi_ld_distribution_lists_what_a_plain_get_of_it_answers() {
         ngsi["dcat:mediaType"],
         format!("https://www.iana.org/assignments/media-types/{answered}")
     );
+}
+
+fn widget_app(endpoint: Endpoint) -> axum::Router {
+    router(Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1"),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([endpoint]),
+    ))
+}
+
+async fn widget(app: axum::Router) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/endpoint/{SLUG}/widget.json"))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("a body");
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+
+fn with_map_defaults(audience: Audience) -> Endpoint {
+    let mut endpoint = endpoint(audience);
+    let outputs: Vec<jc_core::kinds::WidgetOutput> = serde_json::from_value(json!([{
+        "name": "mapa",
+        "sources": [{"type": "AirQualityObserved", "cluster": false,
+            "mapping": {"geometry": "location", "colour": "internalNote", "popup": ["pm10", "internalNote"]}}]
+    }]))
+    .expect("the outputs parse");
+    endpoint.map_defaults = jc_core::kinds::map_defaults(&outputs);
+    endpoint
+}
+
+/// API/11 EP-163 (T-5239): the widget reads the publisher's map defaults per class, and never
+/// the name of an attribute the Endpoint's projection hides.
+#[tokio::test]
+async fn the_widget_reads_the_map_defaults_without_a_hidden_attribute() {
+    let mut endpoint = with_map_defaults(Audience::Public);
+    endpoint.hidden_attributes = ["internalNote".to_owned()].into();
+    let (status, body) = widget(widget_app(endpoint)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"map": {"AirQualityObserved": {"geometry": "location", "popup": ["pm10"], "cluster": false}}, "table": {}})
+    );
+    let (_, none) = widget(widget_app(self::endpoint(Audience::Public))).await;
+    assert_eq!(none, json!({"map": {}, "table": {}}));
+}
+
+/// API/11 EP-164 (T-5197): the table's defaults reach the widget beside the map's, and a column,
+/// an order or a filter naming an attribute the projection hides is left out.
+#[tokio::test]
+async fn the_widget_reads_the_table_defaults_without_a_hidden_attribute() {
+    let mut endpoint = endpoint(Audience::Public);
+    let outputs: Vec<jc_core::kinds::WidgetOutput> = serde_json::from_value(json!([{
+        "name": "tabulka",
+        "sources": [
+            {"type": "AirQualityObserved", "table": {"filter": "pm10>40", "orderBy": "pm10;desc",
+                "pageLength": 50, "columns": ["pm10", "internalNote", "dateObserved"]}},
+            {"type": "WeatherObserved", "table": {"filter": "internalNote==\"x\"", "orderBy": "internalNote"}}
+        ]
+    }]))
+    .expect("the outputs parse");
+    endpoint.map_defaults = jc_core::kinds::map_defaults(&outputs);
+    endpoint.hidden_attributes = ["internalNote".to_owned()].into();
+    let (status, body) = widget(widget_app(endpoint)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["table"],
+        json!({
+            "AirQualityObserved": {"filter": "pm10>40", "orderBy": "pm10;desc", "pageLength": 50,
+                "columns": ["pm10", "dateObserved"]},
+            "WeatherObserved": {}
+        })
+    );
+    assert_eq!(body["map"]["AirQualityObserved"], json!({}));
+}
+
+/// The defaults of an Endpoint a caller may not read are refused as its other routes are.
+#[tokio::test]
+async fn an_anonymous_caller_reads_no_map_defaults_of_a_restricted_endpoint() {
+    let (status, body) = widget(widget_app(with_map_defaults(Audience::Organization))).await;
+    assert_ne!(status, StatusCode::OK);
+    assert!(body.get("map").is_none(), "{body}");
 }

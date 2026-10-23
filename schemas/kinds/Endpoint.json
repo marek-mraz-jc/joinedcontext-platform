@@ -897,55 +897,6 @@
       ],
       "type": "object"
     },
-    "FeedFilter": {
-      "additionalProperties": false,
-      "description": "The NGSI-LD query an output adds to the view's.",
-      "properties": {
-        "coordinates": {
-          "description": "`coordinates` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "geometry": {
-          "description": "`geometry` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "geoproperty": {
-          "description": "`geoproperty` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "georel": {
-          "description": "`georel` of a geo query.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "q": {
-          "description": "An NGSI-LD `q`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scopeQ": {
-          "description": "An NGSI-LD `scopeQ`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "FeedOutput": {
       "additionalProperties": false,
       "description": "One output of `spec.representations.feed`.",
@@ -960,7 +911,7 @@
         "filter": {
           "allOf": [
             {
-              "$ref": "#/definitions/FeedFilter"
+              "$ref": "#/definitions/OutputFilter"
             }
           ],
           "description": "What narrows the view for this output; it never widens it."
@@ -1871,6 +1822,13 @@
             "$ref": "#/definitions/IcalOutput"
           },
           "type": "array"
+        },
+        "widget": {
+          "description": "The catalogue widget's defaults per class: the map's geometry, colour, popup and clustering (API/11 EP-163). Never read by the broker.",
+          "items": {
+            "$ref": "#/definitions/WidgetOutput"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -2278,6 +2236,148 @@
           "type": "object"
         }
       ]
+    },
+    "WidgetOutput": {
+      "additionalProperties": false,
+      "description": "One named output of `spec.representations.widget`.",
+      "properties": {
+        "description": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The output's description per language tag.",
+          "type": "object"
+        },
+        "name": {
+          "description": "A slug: lowercase letters, digits and `-`, 1 to 40, unique on the Endpoint.",
+          "type": "string"
+        },
+        "sources": {
+          "description": "The model classes it sets defaults for; 1 to 10, each class once.",
+          "items": {
+            "$ref": "#/definitions/WidgetSource"
+          },
+          "type": "array"
+        },
+        "title": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "The output's title per language tag.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "WidgetRoles": {
+      "additionalProperties": false,
+      "description": "The map roles of a class; an absent role keeps the widget's default (EP-161).",
+      "properties": {
+        "colour": {
+          "description": "The enum or boolean attribute the markers are coloured and the legend is drawn by.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "geometry": {
+          "description": "The GeoProperty drawn (`location`, `operationSpace` or a model GeoProperty).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "popup": {
+          "description": "The attributes the popup shows, in order; 1 to 10.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "WidgetSource": {
+      "additionalProperties": false,
+      "description": "One class of a [`WidgetOutput`] and its map defaults.",
+      "properties": {
+        "cluster": {
+          "description": "Whether markers cluster; absent: the widget's own rule (above 200 in view, EP-161).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "mapping": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/WidgetRoles"
+            }
+          ],
+          "default": {},
+          "description": "The roles: which attribute the map reads for each."
+        },
+        "table": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WidgetTable"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the table starts; absent: the model's `view_*` annotations (EP-164)."
+        },
+        "type": {
+          "description": "The model class, by its local name (`Event`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "WidgetTable": {
+      "additionalProperties": false,
+      "description": "The table defaults of a class (EP-164): what the reader sees first and can remove.",
+      "properties": {
+        "columns": {
+          "description": "The columns shown, in order; 1 to 30, each once.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "filter": {
+          "description": "The default filter, an NGSI-LD `q` whose dates may be `today`, `today+7d`, `today-1d`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "orderBy": {
+          "description": "The default order: one attribute, `;desc` for descending (`startDate`, `name;desc`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pageLength": {
+          "description": "Rows per page: 10, 20, 50 or 100.",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",

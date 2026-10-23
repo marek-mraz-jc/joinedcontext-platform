@@ -187,6 +187,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         ..Snapshot::default()
     };
     let public = |slug: &str| EndpointRef {
+        titles: Default::default(),
         slug: slug.into(),
         audience: "public".into(),
         publisher: None,
@@ -198,6 +199,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         (
             ("bbsk".into(), "spisy".into()),
             EndpointRef {
+                titles: Default::default(),
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,
@@ -209,6 +211,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         (
             ("hronov".into(), "ovzdusie".into()),
             EndpointRef {
+                titles: Default::default(),
                 slug: SLUG.into(),
                 audience: "public".into(),
                 publisher: None,
@@ -220,6 +223,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         (
             ("hronov".into(), "interne".into()),
             EndpointRef {
+                titles: Default::default(),
                 slug: HIDDEN_SLUG.into(),
                 audience: "organization".into(),
                 publisher: None,

@@ -27,6 +27,10 @@ pub struct Representations {
     /// The feed outputs (Atom, RSS 2.0, JSON Feed); none means no feed (EP-150, EP-151).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feed: Vec<super::feed_output::FeedOutput>,
+    /// The catalogue widget's defaults per class: the map's geometry, colour, popup and
+    /// clustering (API/11 EP-163). Never read by the broker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widget: Vec<super::widget_output::WidgetOutput>,
 }
 
 /// The most outputs of one format an Endpoint lists (owner 2026-10-22T09:30Z, EP-159).
@@ -130,7 +134,24 @@ fn ical_outputs<'de, D: serde::Deserializer<'de>>(
     deserializer.deserialize_any(Visitor)
 }
 
+/// Each calendar's address under the Endpoint, as a record, a page head and a catalogue list
+/// them: `(output, "ical/v1/{name}.ics")` (API/11 EP-159).
+pub fn ical_links(outputs: &[IcalOutput]) -> Vec<(&IcalOutput, String)> {
+    outputs
+        .iter()
+        .map(|output| (output, format!("ical/v1/{}.ics", output.name)))
+        .collect()
+}
+
 impl IcalOutput {
+    /// The title in `lang`, else the first, else the name: what a menu or a catalogue lists.
+    pub fn label(&self, lang: &str) -> &str {
+        self.title
+            .get(lang)
+            .or_else(|| self.title.values().next())
+            .map_or(self.name.as_str(), String::as_str)
+    }
+
     /// The output the deprecated single mapping object stands for.
     pub fn legacy(mapping: IcalMapping) -> Self {
         Self {
@@ -147,14 +168,6 @@ impl IcalOutput {
             sort: None,
             limit: None,
             timezone: None,
-        }
-    }
-
-    #[cfg(test)]
-    fn renamed(self, name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            ..self
         }
     }
 
@@ -249,34 +262,76 @@ impl IcalOutput {
 }
 
 impl OutputFilter {
-    fn gaps(&self) -> Vec<String> {
+    /// Whether no member is set.
+    pub fn is_empty(&self) -> bool {
+        self.entries().iter().all(|(_, v)| v.is_none())
+    }
+
+    fn entries(&self) -> [(&'static str, Option<&str>); 6] {
+        [
+            ("q", self.q.as_deref()),
+            ("scopeQ", self.scope_q.as_deref()),
+            ("georel", self.georel.as_deref()),
+            ("geometry", self.geometry.as_deref()),
+            ("coordinates", self.coordinates.as_deref()),
+            ("geoproperty", self.geoproperty.as_deref()),
+        ]
+    }
+
+    /// What the filter fails, one sentence each naming `filter.<member>` (API/11 EP-159). Each
+    /// member goes through the broker's own parser (`ngsild-ql`), so a filter the broker would
+    /// refuse at serve, and an output that would then serve unfiltered, is refused at save.
+    pub fn gaps(&self) -> Vec<String> {
         let mut gaps = Vec::new();
-        let members = [
-            ("q", &self.q),
-            ("scopeQ", &self.scope_q),
-            ("georel", &self.georel),
-            ("geometry", &self.geometry),
-            ("coordinates", &self.coordinates),
-            ("geoproperty", &self.geoproperty),
-        ];
-        for (member, _) in members
+        let entries = self.entries();
+        for (member, _) in entries
             .iter()
-            .filter(|(_, v)| v.as_deref().is_some_and(|v| !is_plain(v, 2000)))
+            .filter(|(_, v)| v.is_some_and(|v| !is_plain(v, 2000)))
         {
             gaps.push(format!(
                 "`filter.{member}` must be 1 to 2000 characters without control characters"
             ));
+        }
+        if !gaps.is_empty() {
+            return gaps;
+        }
+        if let Some(Err(why)) = self.q.as_deref().map(antares_ql::parse_q) {
+            gaps.push(format!("`filter.q` is no NGSI-LD query: {why}"));
+        }
+        if let Some(Err(why)) = self
+            .scope_q
+            .as_deref()
+            .map(antares_ql::scope::check_scope_q)
+        {
+            gaps.push(format!("`filter.scopeQ` is no NGSI-LD scope query: {why}"));
         }
         let geo = [&self.georel, &self.geometry, &self.coordinates];
         if geo.iter().any(|v| v.is_some()) && !geo.iter().all(|v| v.is_some()) {
             gaps.push(
                 "`filter` names a geo-query: it needs georel, geometry and coordinates".to_owned(),
             );
+        } else if self.georel.is_some() {
+            let params = entries
+                .iter()
+                .filter(|(member, _)| !matches!(*member, "q" | "scopeQ"))
+                .filter_map(|(member, v)| v.map(|v| ((*member).to_owned(), v.to_owned())))
+                .collect();
+            if let Err(why) = antares_ql::geo::GeoQuery::from_params(&params) {
+                gaps.push(format!("`filter.georel` is no NGSI-LD geo-query: {why}"));
+            }
         }
-        if self.geoproperty.is_some() && self.georel.is_none() {
-            gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
+        match self.geoproperty.as_deref() {
+            Some(_) if self.georel.is_none() => {
+                gaps.push("`filter.geoproperty` belongs to a geo-query".to_owned());
+            }
+            Some(name) if !is_name(name) => {
+                gaps.push(format!(
+                    "`filter.geoproperty: {name}` is not an attribute name"
+                ));
+            }
+            _ => {}
         }
-        if members.iter().all(|(_, v)| v.is_none()) {
+        if self.is_empty() {
             gaps.push("`filter` is empty: name q, scopeQ or a geo-query, or drop it".to_owned());
         }
         gaps
@@ -946,13 +1001,13 @@ fn status_gaps(field: IcalField, remap: &FieldRemap) -> Vec<String> {
 }
 
 /// A language tag or `first`.
-fn is_language(language: &str) -> bool {
+pub(super) fn is_language(language: &str) -> bool {
     language == "first" || is_tag(language)
 }
 
 /// A BCP 47 language tag by its shape: a primary subtag of 2 or 3 letters, then subtags of 1 to
 /// 8 letters or digits.
-fn is_tag(tag: &str) -> bool {
+pub(super) fn is_tag(tag: &str) -> bool {
     let mut subtags = tag.split('-');
     subtags
         .next()
@@ -964,7 +1019,7 @@ fn is_tag(tag: &str) -> bool {
 
 /// An output name: `[a-z0-9-]`, 1 to 40, a letter or digit at both ends, never `preview` (the
 /// broker's preview route).
-fn is_slug(name: &str) -> bool {
+pub(super) fn is_slug(name: &str) -> bool {
     let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     name.len() <= 40
         && edge(name.chars().next())
@@ -1018,8 +1073,8 @@ fn is_zone(zone: &str) -> bool {
 
 /// What the model says of one attribute.
 pub(super) struct Slot {
-    range: String,
-    kind: Option<String>,
+    pub(super) range: String,
+    pub(super) kind: Option<String>,
     required: bool,
 }
 
@@ -1056,7 +1111,7 @@ impl Model<'_> {
         self.schema.get("classes")?.get(name)
     }
 
-    fn enum_values(&self, name: &str) -> Option<Vec<String>> {
+    pub(super) fn enum_values(&self, name: &str) -> Option<Vec<String>> {
         let values = self
             .schema
             .get("enums")?
@@ -1176,7 +1231,7 @@ pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
     }
 }
 
-fn describe(model: &Model, slot: &Slot) -> String {
+pub(super) fn describe(model: &Model, slot: &Slot) -> String {
     match slot.kind.as_deref() {
         Some(kind @ ("LanguageProperty" | "GeoProperty" | "Relationship")) => {
             format!("a {kind}")
@@ -1315,12 +1370,12 @@ mod tests {
 
     #[test]
     fn outputs_are_checked_by_count_name_and_members() {
-        let one = |name: &str| {
-            IcalOutput::legacy(IcalMapping {
+        let one = |name: &str| IcalOutput {
+            name: name.to_owned(),
+            ..IcalOutput::legacy(IcalMapping {
                 entity_type: "CouncilMeeting".into(),
                 ..IcalMapping::default()
             })
-            .renamed(name)
         };
         assert_eq!(outputs_gaps(&[one("a"), one("b")]), Vec::<String>::new());
         assert_eq!(

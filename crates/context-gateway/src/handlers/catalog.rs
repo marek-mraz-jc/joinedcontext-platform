@@ -206,6 +206,59 @@ pub(crate) async fn publisher_catalog(
     }
 }
 
+/// The catalogue widget's defaults per class (API/11 EP-163, EP-164): the geometry, colour field,
+/// popup fields and clustering its map starts from, and where its table starts. Admitted as the
+/// Endpoint's other routes are, and an attribute the Endpoint's projection hides is never named.
+pub(crate) async fn widget_defaults(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, _) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let hidden = |path: &str| {
+        let first = path.split('.').next().unwrap_or_default();
+        endpoint.hidden_attributes.contains(first)
+    };
+    let mut table = std::collections::BTreeMap::new();
+    let map: std::collections::BTreeMap<_, _> = endpoint
+        .map_defaults
+        .iter()
+        .map(|(class, defaults)| {
+            let mut shown = defaults.clone();
+            shown.geometry = shown.geometry.filter(|p| !hidden(p));
+            shown.colour = shown.colour.filter(|p| !hidden(p));
+            shown.popup.retain(|p| !hidden(p));
+            // EP-164: a hidden column or order is left out; a filter naming one, whole.
+            if let Some(mut start) = shown.table.take() {
+                start.columns.retain(|p| !hidden(p));
+                if start.order_attribute().is_some_and(hidden) {
+                    start.order_by = None;
+                }
+                if start
+                    .filter
+                    .as_deref()
+                    .is_some_and(|q| names_hidden(q, &hidden))
+                {
+                    start.filter = None;
+                }
+                table.insert(class.clone(), start);
+            }
+            (class.clone(), shown)
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "map": map, "table": table })).into_response()
+}
+
+/// Whether a default filter names an attribute the projection hides: its terms' first segments.
+fn names_hidden(q: &str, hidden: &impl Fn(&str) -> bool) -> bool {
+    q.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .any(|word| !word.is_empty() && hidden(word))
+}
+
 /// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
@@ -213,6 +266,7 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         // every client that stores a base URL drops it.
         .route("/api/endpoint/{slug}", get(endpoint_record))
         .route("/api/endpoint/{slug}/", get(endpoint_record))
+        .route("/api/endpoint/{slug}/widget.json", get(widget_defaults))
         // The organization's catalogue for harvesters: every public Endpoint's record (EP-84).
         .route("/catalog.jsonld", get(catalog_feed_jsonld))
         .route("/catalog.ttl", get(catalog_feed_turtle))

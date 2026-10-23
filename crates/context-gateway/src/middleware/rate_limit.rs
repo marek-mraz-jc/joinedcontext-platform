@@ -1,9 +1,11 @@
 //! Token-bucket rate limiting per endpoint and caller (T-0154, EP-20, MIM0-R7, OPS-35).
 //!
-//! One bucket per `(slug, caller)`: the presented credential when there is one, the client
-//! address when there is not. Keying an anonymous caller by address is the only thing a
-//! public endpoint can key on, and keying a credentialed one by its digest is what stops
-//! two clients behind one NAT from spending each other's quota.
+//! One bucket per `(slug, caller)`: the principal a genuine token names when there is one, the
+//! client address when there is not. Keying an anonymous caller by address is the only thing a
+//! public endpoint can key on, and keying a signed-in one by its principal is what stops two
+//! clients behind one NAT from spending each other's quota. A token the realm did not sign is
+//! no principal: it spends its address's bucket, so a fresh made-up token per request buys no
+//! fresh bucket (T-5290).
 //!
 //! `spec.rateLimits.requestsPerMinute` is the steady rate and `burst` the bucket size, so
 //! a caller may spend a burst at once and then goes at the steady rate. An endpoint that
@@ -11,7 +13,7 @@
 //!
 //! The counter is in this process. Two replicas therefore allow up to twice the configured
 //! rate, which is the honest trade for a limiter that costs a mutex and no round trip.
-// ponytail: in-process buckets, one lock. A shared counter (Redis, the mesh) is a
+// ponytail: in-process buckets behind a few locks. A shared counter (Redis, the mesh) is a
 // different component, and worth it only when a measurement says the per-replica bound
 // is too loose.
 
@@ -23,7 +25,9 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use jc_core::kinds::RateLimits;
 use jc_core::ProblemDetails;
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,11 +36,24 @@ use std::time::{Duration, Instant};
 /// address that ever appeared.
 const IDLE_EVICTION: Duration = Duration::from_secs(300);
 
+/// The buckets are split over this many locks by key, so a sweep holds one shard at a time
+/// while requests of the other shards go on (T-5290).
+const SHARDS: usize = 16;
+
 /// The map has to be at least this large before a sweep is worth its scan.
 const SWEEP_SIZE: usize = 1_024;
 
-/// And a sweep runs at most this often. Without it, a gateway with more live callers than
-/// `SWEEP_SIZE` pays a full scan under the lock on every single request, which is the busiest
+/// The most callers a shard holds, 65,536 over all shards, a few MiB. A caller who arrives at a
+/// full shard spends that shard's overflow bucket of the slug, shared with every other such
+/// caller, so a flood of new addresses is throttled together instead of growing the map
+/// (T-5290).
+const SHARD_CAP: usize = 4_096;
+
+/// The caller of the overflow bucket; no key [`caller_key`] makes has this form.
+const OVERFLOW: &str = "overflow";
+
+/// And the map is measured, and swept, at most this often. Without it, a gateway with more live
+/// callers than `SWEEP_SIZE` pays a full scan on every single request, which is the busiest
 /// case there is (T-2356).
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -81,18 +98,18 @@ impl Bucket {
     }
 }
 
-/// The buckets of every caller of every endpoint, and when they were last swept (EP-20).
-#[derive(Debug, Default)]
-struct Buckets {
-    by_caller: HashMap<(String, String), Bucket>,
-    /// `None` until the first sweep.
-    swept: Option<Instant>,
-}
+/// One shard's buckets, by slug and caller (EP-20).
+type Buckets = HashMap<(String, String), Bucket>;
 
 /// The buckets of every caller of every endpoint (EP-20).
 #[derive(Debug, Default)]
 pub struct RateLimiter {
-    buckets: Mutex<Buckets>,
+    shards: [Mutex<Buckets>; SHARDS],
+    /// Random per process, so no client can aim its keys at one shard.
+    hasher: RandomState,
+    /// When the map was last measured for a sweep; `None` until the first request. Held by the
+    /// one request that sweeps, never by the others.
+    swept: Mutex<Option<Instant>>,
 }
 
 impl RateLimiter {
@@ -106,25 +123,36 @@ impl RateLimiter {
     /// `now` is a parameter so a test can drive the clock instead of sleeping through a
     /// minute of refill.
     pub fn check(&self, slug: &str, caller: &str, limits: &RateLimits, now: Instant) -> Decision {
+        self.spend(slug, caller, limits, 1, now)
+    }
+
+    /// Spends `cost` requests of `caller`'s quota on `slug` at once, or none when fewer are left:
+    /// a batch that asks for many decisions pays for each (ADR-N-057 decision 3).
+    pub fn spend(
+        &self,
+        slug: &str,
+        caller: &str,
+        limits: &RateLimits,
+        cost: u32,
+        now: Instant,
+    ) -> Decision {
+        let cost = f64::from(cost);
         let rate = f64::from(limits.requests_per_minute) / 60.0;
         let capacity = f64::from(limits.burst.unwrap_or(limits.requests_per_minute)).max(1.0);
-        let mut buckets = match self.buckets.lock() {
-            Ok(guard) => guard,
-            // A panicking holder poisoned the lock; the counters are just numbers and
-            // refusing every request afterwards would be a worse failure than continuing.
-            Err(poisoned) => poisoned.into_inner(),
+        self.sweep(now);
+        let key = (slug.to_owned(), caller.to_owned());
+        let mut buckets = lock(&self.shards[shard_of(&self.hasher, &key)]);
+        let key = if buckets.len() >= SHARD_CAP && !buckets.contains_key(&key) {
+            (key.0, OVERFLOW.to_owned())
+        } else {
+            key
         };
-        evict_idle(&mut buckets, now);
-
-        let bucket = buckets
-            .by_caller
-            .entry((slug.to_owned(), caller.to_owned()))
-            .or_insert(Bucket {
-                tokens: capacity,
-                last: now,
-                rate,
-                capacity,
-            });
+        let bucket = buckets.entry(key).or_insert(Bucket {
+            tokens: capacity,
+            last: now,
+            rate,
+            capacity,
+        });
         bucket.tokens = bucket.tokens_at(now);
         bucket.last = now;
         // The manifest may have changed its limits since this bucket was made; the bucket
@@ -133,8 +161,8 @@ impl RateLimiter {
         bucket.capacity = capacity;
         bucket.tokens = bucket.tokens.min(capacity);
 
-        if bucket.tokens >= 1.0 {
-            bucket.tokens -= 1.0;
+        if bucket.tokens >= cost {
+            bucket.tokens -= cost;
             Decision {
                 allowed: true,
                 limit: limits.requests_per_minute,
@@ -144,7 +172,7 @@ impl RateLimiter {
         } else {
             // Seconds until one whole token exists again, rounded up: a client that waits
             // exactly this long is never refused for being a fraction early.
-            let missing = 1.0 - bucket.tokens;
+            let missing = cost.min(capacity) - bucket.tokens;
             let wait = if rate > 0.0 { missing / rate } else { 60.0 };
             Decision {
                 allowed: false,
@@ -157,10 +185,7 @@ impl RateLimiter {
 
     /// How many buckets are held, which is what an eviction test looks at.
     pub fn len(&self) -> usize {
-        match self.buckets.lock() {
-            Ok(guard) => guard.by_caller.len(),
-            Err(poisoned) => poisoned.into_inner().by_caller.len(),
-        }
+        self.shards.iter().map(|shard| lock(shard).len()).sum()
     }
 
     /// Whether no caller has been seen yet.
@@ -169,32 +194,56 @@ impl RateLimiter {
     }
 }
 
-/// Drops buckets that have been idle long enough to be full again: they would hand out a
-/// full burst anyway, so remembering them changes nothing but the memory.
-///
-/// Fullness is the refilled value, not the stored one (T-2356). `tokens` is what was left at the
-/// last touch and every allowed call subtracts one before storing, so a stored value is below the
-/// capacity for every bucket that has ever been checked — which is why the earlier `tokens <
-/// capacity` clause kept all of them and the map grew with every address that ever appeared.
-///
-/// A bucket that has not refilled is kept however idle it is: dropping it would give its caller a
-/// fresh burst, and a caller must never buy one by waiting for somebody else's traffic to trigger
-/// a sweep.
-fn evict_idle(buckets: &mut Buckets, now: Instant) {
-    if buckets.by_caller.len() < SWEEP_SIZE {
-        return;
+/// The shard `key` lives in.
+fn shard_of(hasher: &RandomState, key: &(String, String)) -> usize {
+    // Truncating the hash on a 32-bit target still spreads the keys.
+    hasher.hash_one(key) as usize % SHARDS
+}
+
+/// Locks a shard. A panicking holder poisoned the lock; the counters are just numbers and refusing
+/// every request afterwards would be a worse failure than continuing.
+fn lock(shard: &Mutex<Buckets>) -> std::sync::MutexGuard<'_, Buckets> {
+    shard
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl RateLimiter {
+    /// Drops buckets that have been idle long enough to be full again: they would hand out a full
+    /// burst anyway, so remembering them changes nothing but the memory.
+    ///
+    /// Fullness is the refilled value, not the stored one (T-2356). `tokens` is what was left at
+    /// the last touch and every allowed call subtracts one before storing, so a stored value is
+    /// below the capacity for every bucket that has ever been checked — which is why the earlier
+    /// `tokens < capacity` clause kept all of them and the map grew with every address that ever
+    /// appeared.
+    ///
+    /// A bucket that has not refilled is kept however idle it is: dropping it would give its caller
+    /// a fresh burst, and a caller must never buy one by waiting for somebody else's traffic to
+    /// trigger a sweep.
+    ///
+    /// One request at a time sweeps, the others skip it; the sweep holds one shard's lock at a
+    /// time, so it never stops the whole gateway for a scan of the whole map (T-5290).
+    fn sweep(&self, now: Instant) {
+        let mut swept = match self.swept.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        if swept.is_some_and(|swept| now.saturating_duration_since(swept) < SWEEP_INTERVAL) {
+            return;
+        }
+        *swept = Some(now);
+        if self.len() < SWEEP_SIZE {
+            return;
+        }
+        for shard in &self.shards {
+            lock(shard).retain(|_, bucket| {
+                now.saturating_duration_since(bucket.last) < IDLE_EVICTION
+                    || bucket.tokens_at(now) < bucket.capacity
+            });
+        }
     }
-    if buckets
-        .swept
-        .is_some_and(|swept| now.saturating_duration_since(swept) < SWEEP_INTERVAL)
-    {
-        return;
-    }
-    buckets.swept = Some(now);
-    buckets.by_caller.retain(|_, bucket| {
-        now.saturating_duration_since(bucket.last) < IDLE_EVICTION
-            || bucket.tokens_at(now) < bucket.capacity
-    });
 }
 
 /// The layer every endpoint surface passes: one bucket spent, the headers of the standard
@@ -217,7 +266,7 @@ pub async fn enforce(
         return next.run(request).await;
     };
 
-    let caller = caller_key(request.headers());
+    let caller = caller_of(&gateway, &request);
     let decision = gateway
         .rate_limiter
         .check(&endpoint.slug, &caller, &limits, Instant::now());
@@ -230,8 +279,49 @@ pub async fn enforce(
     }
 
     let mut response = next.run(request).await;
-    set_headers(response.headers_mut(), &decision);
+    // A handler that spent more of the bucket (an evaluations batch) set the fields it left.
+    if !response.headers().contains_key("ratelimit-remaining") {
+        set_headers(response.headers_mut(), &decision);
+    }
     response
+}
+
+/// Spends `extra` more requests of the caller's quota on `endpoint`, beyond the one [`enforce`]
+/// spent on the request: an `access/v1/evaluations` batch pays for each decision it asks. A
+/// refusal is the 429 of a spent bucket; the decision, whose fields the answer carries, is `None`
+/// when nothing more was spent.
+pub(crate) fn charge(
+    gateway: &Gateway,
+    endpoint: &crate::resolver::Endpoint,
+    caller: &str,
+    extra: u32,
+) -> Result<Option<Decision>, Box<Response<Body>>> {
+    let Some(limits) = &endpoint.rate_limit else {
+        return Ok(None);
+    };
+    if extra == 0 {
+        return Ok(None);
+    }
+    let decision =
+        gateway
+            .rate_limiter
+            .spend(&endpoint.slug, caller, limits, extra, Instant::now());
+    if decision.allowed {
+        return Ok(Some(decision));
+    }
+    tracing::info!(slug = %endpoint.slug, "rate limit reached by a batch");
+    Err(Box::new(too_many(
+        &decision,
+        "the endpoint's rate limit has fewer requests left than the batch asks decisions; ask fewer per batch or retry after the seconds the RateLimit-Reset header names",
+    )))
+}
+
+/// The caller key of `request`: the one the outer `in_flight` layer made, or a fresh one.
+pub(crate) fn caller_of(gateway: &Gateway, request: &Request) -> String {
+    match request.extensions().get::<CallerKey>() {
+        Some(CallerKey(caller)) => caller.clone(),
+        None => caller_key(gateway, request.headers()),
+    }
 }
 
 /// The 429 of a spent bucket, with the `RateLimit` fields and `Retry-After` (EP-20).
@@ -254,36 +344,39 @@ fn slug_of(path: &str) -> Option<&str> {
         .filter(|slug| !slug.is_empty())
 }
 
-/// Who is spending the quota: the presented bearer token when there is one, the client
-/// address otherwise (EP-20).
+/// The caller the outer `in_flight` layer already keyed, so the limiter checks the token's
+/// signature once per request and not twice (T-5290).
+#[derive(Debug, Clone)]
+pub(crate) struct CallerKey(pub(crate) String);
+
+/// Who is spending the quota: the principal a genuine bearer token names when there is one,
+/// the client address otherwise (EP-20).
 ///
-/// The token is keyed by digest, never stored or logged, and it is not verified here — this
-/// is a counter, not a decision, and the handler still rejects a forged token with 401.
-/// Keying it means two callers behind one NAT do not spend each other's quota, which keying
-/// by address alone cannot give them. Any other `Authorization` value is no token (T-4590):
-/// a fresh `Basic` per request would otherwise be a fresh bucket per request.
+/// The token's signature, issuer and lifetime are checked against the realm, its audience is
+/// not: this is a counter, not a decision, and the handler still answers 401 to a token bound
+/// to another resource. Keying the principal means two callers behind one NAT do not spend
+/// each other's quota, which keying by address alone cannot give them, and one principal's
+/// many tokens are one bucket. A token the realm did not sign, an expired one, any other
+/// `Authorization` scheme (T-4590) or a gateway without a realm is no principal: the address
+/// decides, so a fresh made-up credential per request is never a fresh bucket (T-5290).
 ///
 /// The address comes from the LAST `X-Forwarded-For` entry, which is the peer the gateway's
 /// own proxy saw. A client that sends the header itself only prepends to its own value,
 /// so a spoofed entry is never the one read.
-pub(crate) fn caller_key(headers: &axum::http::HeaderMap) -> String {
-    if let Some(credential) = headers
+pub(crate) fn caller_key(gateway: &Gateway, headers: &axum::http::HeaderMap) -> String {
+    let presented = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .filter(|_| crate::auth::token::presents(headers))
-    {
-        let digest = ring::digest::digest(&ring::digest::SHA256, credential.as_bytes());
-        let hex: String = digest.as_ref()[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        return format!("credential:{hex}");
+        .and_then(|value| value.to_str().ok());
+    if let (Ok(raw), Some(verifier)) = (crate::auth::token::bearer(presented), &gateway.verifier) {
+        if let Ok(claims) = verifier.identify(raw) {
+            return format!("subject:{}", claims.sub);
+        }
     }
     address_key(headers)
 }
 
 /// The client address alone, whatever credential the request presents (see [`caller_key`]).
-fn address_key(headers: &axum::http::HeaderMap) -> String {
+pub(crate) fn address_key(headers: &axum::http::HeaderMap) -> String {
     let address = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
@@ -349,7 +442,7 @@ pub(crate) fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decisi
 
 #[cfg(test)]
 mod tests {
-    use super::{caller_key, Decision, RateLimiter};
+    use super::{address_key, Decision, RateLimiter, SHARDS, SHARD_CAP};
     use axum::body::Body;
     use axum::extract::Request;
     use jc_core::kinds::RateLimits;
@@ -426,30 +519,35 @@ mod tests {
             .clone()
     }
 
-    /// T-0965: a caller who presents a credential is keyed by it, so no `X-Forwarded-For` a
-    /// client writes can spend or evade another caller's quota. Two spoofed chains under one
-    /// credential are the same bucket; the same chain under two credentials is two.
+    /// T-5290: the map holds at most `SHARDS * SHARD_CAP` buckets whatever number of callers
+    /// arrive, and a caller past the cap spends its shard's overflow bucket, shared with every
+    /// other such caller, instead of a fresh burst of its own.
     #[test]
-    fn a_credential_decides_the_bucket_and_no_header_moves_it() {
-        let one = caller_key(&asking(&[
-            ("authorization", "Bearer token-aaa"),
-            ("x-forwarded-for", "10.42.0.9"),
-        ]));
-        let spoofed = caller_key(&asking(&[
-            ("authorization", "Bearer token-aaa"),
-            ("x-forwarded-for", "203.0.113.7, 10.42.0.1"),
-        ]));
-        assert_eq!(
-            one, spoofed,
-            "the header does not move a credential's bucket"
+    fn a_flood_of_new_callers_stops_at_the_cap_and_shares_the_overflow() {
+        let limiter = RateLimiter::new();
+        let now = Instant::now();
+        let quota = limits(60, Some(1));
+        let callers = SHARDS * SHARD_CAP + 10_000;
+        let allowed = (0..callers)
+            .filter(|n| {
+                limiter
+                    .check("slug", &format!("address:{n}"), &quota, now)
+                    .allowed
+            })
+            .count();
+        // Each shard holds its callers and one overflow bucket.
+        assert!(
+            limiter.len() <= SHARDS * (SHARD_CAP + 1),
+            "{}",
+            limiter.len()
         );
-        assert!(one.starts_with("credential:"), "{one}");
-
-        let other = caller_key(&asking(&[
-            ("authorization", "Bearer token-bbb"),
-            ("x-forwarded-for", "10.42.0.9"),
-        ]));
-        assert_ne!(one, other, "two credentials are two buckets");
+        // Each full shard's overflow bucket handed out its one token and refused the rest.
+        assert!(
+            allowed <= SHARDS * SHARD_CAP + SHARDS,
+            "{allowed} of {callers}"
+        );
+        // A caller the map already holds keeps its own bucket at the cap.
+        assert!(!limiter.check("slug", "address:0", &quota, now).allowed);
     }
 
     /// Without a credential the address decides, and it is the LAST entry of the chain: the peer
@@ -459,18 +557,18 @@ mod tests {
     #[test]
     fn an_anonymous_caller_is_keyed_by_the_peer_the_proxy_saw() {
         assert_eq!(
-            caller_key(&asking(&[("x-forwarded-for", "203.0.113.7, 10.42.0.1")])),
+            address_key(&asking(&[("x-forwarded-for", "203.0.113.7, 10.42.0.1")])),
             "address:10.42.0.1",
             "the last entry is the proxy's own observation"
         );
         assert_eq!(
-            caller_key(&asking(&[("x-forwarded-for", "  10.42.0.1  ")])),
+            address_key(&asking(&[("x-forwarded-for", "  10.42.0.1  ")])),
             "address:10.42.0.1",
             "a single entry is trimmed"
         );
-        assert_eq!(caller_key(&asking(&[])), "address:unknown");
+        assert_eq!(address_key(&asking(&[])), "address:unknown");
         assert_eq!(
-            caller_key(&asking(&[("x-forwarded-for", "")])),
+            address_key(&asking(&[("x-forwarded-for", "")])),
             "address:unknown",
             "an empty header names no peer"
         );

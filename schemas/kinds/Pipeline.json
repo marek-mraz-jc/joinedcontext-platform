@@ -142,6 +142,17 @@
             "null"
           ]
         },
+        "datacube": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DatacubeStep"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The cubes of a `datacube` step (PL-112)."
+        },
         "function": {
           "description": "Entry point function name (for wasm).",
           "type": [
@@ -229,6 +240,13 @@
             "kpi"
           ],
           "type": "string"
+        },
+        {
+          "description": "JSON-stat 2.0 statistical cubes (PL-112), rendered to a mapping by jc-core.",
+          "enum": [
+            "datacube"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -270,6 +288,95 @@
       "required": [
         "status",
         "type"
+      ],
+      "type": "object"
+    },
+    "Cube": {
+      "additionalProperties": false,
+      "description": "One cube of a `datacube` step: which dimension plays which role.",
+      "properties": {
+        "area": {
+          "default": null,
+          "description": "The territory dimension; absent, every cell is `wholeArea`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "indicator": {
+          "default": null,
+          "description": "The indicator dimension; absent, the cube's code is the indicator.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "keys": {
+          "default": [],
+          "description": "Further dimensions, in order, that tell cells apart (`dimensionKey`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "period": {
+          "default": null,
+          "description": "The period dimension, `vh3001rr_rok`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "The address the cube is read from, as its DataSource reads it.",
+          "type": "string"
+        },
+        "unit": {
+          "default": null,
+          "description": "The unit dimension, whose label is the cell's `unitText`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "update": {
+          "default": null,
+          "description": "The release date the publisher gives, `2025-10-31`; the answer's own `update` wins.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "type": "object"
+    },
+    "DatacubeStep": {
+      "additionalProperties": false,
+      "description": "A `datacube` step (PL-112).",
+      "properties": {
+        "cubes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Cube"
+          },
+          "description": "The cubes by their code, `vh3001rr`.",
+          "type": "object"
+        },
+        "datasetPage": {
+          "description": "The catalogue page of a cube, `{cube}` standing for its code: `https://opendata.example.org/dataset/susr-{cube}`.",
+          "type": "string"
+        },
+        "wholeArea": {
+          "description": "The territory code of a cube without an area dimension, `SK0` for Slovakia.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cubes",
+        "datasetPage",
+        "wholeArea"
       ],
       "type": "object"
     },

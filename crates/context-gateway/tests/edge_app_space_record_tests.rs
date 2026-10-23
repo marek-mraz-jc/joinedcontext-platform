@@ -72,6 +72,8 @@ fn endpoint_of(space: &str, policies: Vec<PolicySpec>) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies,

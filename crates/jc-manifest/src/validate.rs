@@ -7,7 +7,7 @@
 //! must sit at the path its kind prescribes (MF-06).
 
 use crate::assemble::{assemble, AssembleError, Assembly, Directories, Resolver};
-use crate::loader::{LoadError, Repository};
+use crate::loader::{LoadError, Repository, ResourceId};
 use jc_core::kinds::{
     ContextSpaceSpec, DataModelLifecycle, DataModelSpec, EndpointSpec, ModelProjectionSpec,
 };
@@ -1169,10 +1169,56 @@ fn replacing_shared_writes(repo: &Repository) -> Vec<(Location, String)> {
 /// its own grants alone (AP-139). The bbsk podujatia pipelines wrote through a read Endpoint's
 /// `policyRef` this way and every upsert answered 404 (T-5033).
 fn writes_nobody_can_make(repo: &Repository) -> Located {
+    unmade_writes(repo)
+        .into_iter()
+        .filter_map(|unmade| {
+            let resource = repo.get(&unmade.id)?;
+            Some((
+                (resource.path.clone(), resource.document, resource.line),
+                unmade.message,
+            ))
+        })
+        .collect()
+}
+
+/// A write nobody can make (PL-111): the manifest it is found on, the member to change when one
+/// names it (a Pipeline output's `targetEndpoint`), and the sentence `jcctl validate` prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmadeWrite {
+    /// The Policy or Pipeline the finding is on.
+    pub id: ResourceId,
+    /// The member's path in the manifest, `spec.outputs.0.targetEndpoint`; `None` for a Policy.
+    pub field: Option<String>,
+    /// What is wrong and what to change.
+    pub message: String,
+}
+
+/// The findings of `jcctl validate`'s PL-111 check by resource: the Portal's change review shows the
+/// same sentences on a proposal (ADR-N-057 decision 5, T-5040).
+pub fn unmade_writes(repo: &Repository) -> Vec<UnmadeWrite> {
     let bindings = WriteBindings::new(repo);
     let mut found = bindings.unbound_write_policies();
     found.extend(bindings.unreachable_pipeline_targets());
     found
+}
+
+/// The path of output `index` of [`jc_core::kinds::PipelineSpec::outputs`] in the manifest.
+fn output_field(spec: &jc_core::kinds::PipelineSpec, index: usize) -> String {
+    let lane = spec.lane_outputs().len();
+    if index < lane {
+        return match spec.is_second_shape() {
+            true => format!("spec.outputs.{index}.targetEndpoint"),
+            false => "spec.targetEndpoint".to_owned(),
+        };
+    }
+    let mut rest = index - lane;
+    for (route, outputs) in spec.routes.iter().map(|r| r.outputs.len()).enumerate() {
+        if rest < outputs {
+            return format!("spec.routes.{route}.outputs.{rest}.targetEndpoint");
+        }
+        rest -= outputs;
+    }
+    "spec.outputs".to_owned()
 }
 
 /// The Endpoints of a repository keyed by (project, name), with the gateway's binding rule.
@@ -1247,54 +1293,57 @@ impl<'a> WriteBindings<'a> {
     }
 
     /// A Policy granting a write that no Endpoint of its project binds.
-    fn unbound_write_policies(&self) -> Located {
+    fn unbound_write_policies(&self) -> Vec<UnmadeWrite> {
         use jc_core::kinds::PolicySpec;
         let mut found = Vec::new();
         for (id, resource) in self.repo.iter().filter(|(id, _)| id.kind == "Policy") {
-            let Ok(policy) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
+            let Ok(spec) = serde_json::from_value::<PolicySpec>(resource.manifest.spec.clone())
             else {
                 continue;
             };
-            if policy.effect.is_prohibition() || !writes_entities(&policy) {
-                continue;
-            }
-            let project = id.namespace.clone().unwrap_or_default();
-            let space = policy.context_space_ref.name();
-            let mut reasons = Vec::new();
-            let mut bound = false;
-            for (key, spec) in self.endpoints.iter().filter(|((p, _), _)| *p == project) {
-                match self.refusal(key, spec, &id.name, &policy) {
-                    None => bound = true,
-                    Some(why) if spec.context_space_ref.name() == space => {
-                        reasons.push(format!("{} {why}", key.1))
-                    }
-                    Some(_) => {}
+            // An invalid shape is the shape check's finding; each rule is its own grant.
+            for (rule, policy) in spec.expand(&id.name).unwrap_or_default() {
+                if policy.effect.is_prohibition() || !writes_entities(&policy) {
+                    continue;
                 }
+                let project = id.namespace.clone().unwrap_or_default();
+                let space = policy.context_space_ref.name();
+                let mut reasons = Vec::new();
+                let mut bound = false;
+                for (key, spec) in self.endpoints.iter().filter(|((p, _), _)| *p == project) {
+                    match self.refusal(key, spec, &id.name, &policy) {
+                        None => bound = true,
+                        Some(why) if spec.context_space_ref.name() == space => {
+                            reasons.push(format!("{} {why}", key.1))
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if bound {
+                    continue;
+                }
+                let why = if reasons.is_empty() {
+                    format!("the space {space} has no Endpoint in project {project}")
+                } else {
+                    reasons.join("; ")
+                };
+                found.push(UnmadeWrite {
+                    id: id.clone(),
+                    field: None,
+                    message: format!(
+                        "Policy {rule} grants a write on the space {space}, but no Endpoint binds \
+                         it ({why}): name it in an Endpoint's policyRef or add an Endpoint of the \
+                         space without one (EP-14, ADR-N-057)"
+                    ),
+                });
             }
-            if bound {
-                continue;
-            }
-            let why = if reasons.is_empty() {
-                format!("the space {space} has no Endpoint in project {project}")
-            } else {
-                reasons.join("; ")
-            };
-            found.push((
-                (resource.path.clone(), resource.document, resource.line),
-                format!(
-                    "Policy {} grants a write on the space {space}, but no Endpoint binds it ({why}): \
-                     name it in an Endpoint's policyRef or add an Endpoint of the space without one \
-                     (EP-14, ADR-N-057)",
-                    id.name
-                ),
-            ));
         }
         found
     }
 
     /// A Pipeline output whose `targetEndpoint` is not declared in the Pipeline's project or does
     /// not bind that output's derived write Policy (PL-20).
-    fn unreachable_pipeline_targets(&self) -> Located {
+    fn unreachable_pipeline_targets(&self) -> Vec<UnmadeWrite> {
         use jc_core::kinds::pipeline_identity::{account_name, bounded, derive};
         use jc_core::kinds::PipelineSpec;
         let mut found = Vec::new();
@@ -1334,16 +1383,17 @@ impl<'a> WriteBindings<'a> {
                     }
                 };
                 if let Some(why) = why {
-                    found.push((
-                        (resource.path.clone(), resource.document, resource.line),
-                        format!(
+                    found.push(UnmadeWrite {
+                        id: id.clone(),
+                        field: Some(output_field(&spec, index)),
+                        message: format!(
                             "Pipeline {} output {} writes as {account}, but its targetEndpoint grants \
                              that account no write ({why}), so every write answers 404: aim it at an \
                              Endpoint of the space without policyRef (PL-20, ADR-N-057)",
                             id.name,
                             index + 1
                         ),
-                    ));
+                    });
                 }
             }
         }

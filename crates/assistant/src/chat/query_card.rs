@@ -132,6 +132,7 @@ mod tests {
 
     fn connector(tools: &[&str]) -> Connected {
         Connected {
+            titles: Default::default(),
             endpoint: "praha/ovzdusi".into(),
             title: Some("Air in Prague".into()),
             surface: Surface {
@@ -277,6 +278,7 @@ mod edges {
 
     fn connector(endpoint: &str) -> Connected {
         Connected {
+            titles: Default::default(),
             endpoint: endpoint.into(),
             title: None,
             surface: Surface {
@@ -367,6 +369,7 @@ mod sizes {
             input_schema: serde_json::json!({"type": "object"}),
         };
         Connected {
+            titles: Default::default(),
             endpoint: format!("project/{slug}"),
             title: Some("A public dataset".into()),
             surface: Surface {

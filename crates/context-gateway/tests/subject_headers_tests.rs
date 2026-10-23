@@ -71,6 +71,8 @@ fn endpoint(slug: &str, audience: Audience, role: &str) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         base_path: format!("/api/endpoint/{slug}"),
         models: Vec::new(),
         policy_names: Vec::new(),
@@ -451,6 +453,13 @@ async fn a_write_names_the_verified_writer_and_drops_the_one_the_client_typed() 
         values(headers, "jc-read-versions").is_empty(),
         "{headers:?}"
     );
+    // A write that came with no request id gets one, which the broker stores (T-5361).
+    let ids = values(headers, "x-request-id");
+    assert_eq!(
+        ids.iter().map(|id| id.len()).collect::<Vec<_>>(),
+        [36],
+        "{headers:?}"
+    );
 }
 
 /// A person's write through the Portal's UI is channel `ui`, and the reason they gave reaches
@@ -467,7 +476,7 @@ async fn a_write_from_the_portal_ui_is_channel_ui_and_carries_its_reason() {
             Method::POST,
             &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
             Some(&token_of(&realm, "portal-ui")),
-            &[("jc-reason", "Sensor%20stuck")],
+            &[("jc-reason", "Sensor%20stuck"), ("x-request-id", "9a07")],
             Some(entity),
         ),
     )
@@ -490,6 +499,8 @@ async fn a_write_from_the_portal_ui_is_channel_ui_and_carries_its_reason() {
         ["Sensor%20stuck"],
         "{headers:?}"
     );
+    // The edge's request id travels on, so the row and the edge log name the same request.
+    assert_eq!(values(headers, "x-request-id"), ["9a07"], "{headers:?}");
 }
 
 #[tokio::test]

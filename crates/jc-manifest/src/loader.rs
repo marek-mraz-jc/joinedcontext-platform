@@ -939,6 +939,34 @@ impl Repository {
         })
     }
 
+    /// The repository made of manifests held in memory, rendered with `org_domain` when no
+    /// Organization or overlay among them sets one: the Portal judges a proposal against its
+    /// mirror this way without writing files (T-5040). A manifest's path is `<kind>/<name>.yaml`.
+    pub fn from_manifests(
+        manifests: Vec<RawManifest>,
+        org_domain: Option<&str>,
+    ) -> Result<Self, LoadError> {
+        let documents = manifests
+            .into_iter()
+            .map(|manifest| LoadedResource {
+                path: PathBuf::from(format!("{}/{}.yaml", manifest.kind, manifest.metadata.name)),
+                document: 1,
+                line: 1,
+                manifest,
+            })
+            .collect();
+        let mut repo = Self::from_documents(Path::new(""), documents, None)?;
+        if let (None, Some(domain)) = (&repo.org_domain, org_domain) {
+            for (id, loaded) in repo.resources.iter_mut() {
+                if id.kind != "Environment" {
+                    render_in_place(&mut loaded.manifest.spec, domain);
+                }
+            }
+            repo.org_domain = Some(domain.to_owned());
+        }
+        Ok(repo)
+    }
+
     /// The strings that wrote the organization's domain out where `{orgDomain}` belongs
     /// (CC-74), as `(resource, path, the string)`.
     pub fn literal_domains(&self) -> &[(ResourceId, PathBuf, String)] {

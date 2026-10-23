@@ -8,14 +8,18 @@
 //! `X-Forwarded-For`. These are the layer's other branches: the paths that are deliberately not
 //! counted, the canonical space surface with the gateway's own default, and the keying.
 
+mod common;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::middleware::rate_limit::RateLimiter;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, RateLimits, Representation};
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
@@ -53,6 +57,8 @@ fn endpoint(rate_limit: Option<RateLimits>) -> Endpoint {
         catalog: None,
         deprecation: None,
         feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: Vec::new(),
@@ -163,18 +169,41 @@ async fn a_percent_encoded_slug_is_not_the_slug_it_encodes() {
     assert_eq!(real.headers()["ratelimit-remaining"], "0");
 }
 
+/// A gateway that trusts one throwaway realm, so a test can present a genuine token, and the
+/// gateway itself, so a test can look at the limiter.
+fn signed_app(rate_limit: Option<RateLimits>) -> (axum::Router, Arc<Gateway>, common::Realm) {
+    let realm = common::Realm::new();
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new("http://127.0.0.1:1".to_owned()),
+            Box::new(PolicyPdp),
+            "banskabystrica.sk",
+        )
+        .serve([endpoint(rate_limit)])
+        .authenticate(Arc::new(realm.verifier()), ServiceAccounts::default(), None),
+    );
+    (router(Arc::clone(&gateway)), gateway, realm)
+}
+
+/// A random-looking token nobody signed, different every call.
+fn made_up(n: usize) -> String {
+    format!("Bearer eyJhbGciOiJFUzI1NiIsImtpZCI6InJlYWxtLWtleS0xIn0.{n:x}.c2ln")
+}
+
 #[tokio::test]
-async fn two_credentials_from_one_address_do_not_spend_each_others_quota() {
-    // EP-20: keying by the credential's digest is what stops two clients behind one NAT from
-    // refusing each other.
-    let app = app(Some(limits(60, Some(1))));
+async fn two_service_accounts_from_one_address_do_not_spend_each_others_quota() {
+    // EP-20: keying by the principal a genuine token names is what stops two clients behind one
+    // NAT from refusing each other.
+    let (app, _, realm) = signed_app(Some(limits(60, Some(1))));
+    let one = format!("Bearer {}", realm.workload_token("sensor-a", json!(SLUG)));
+    let two = format!("Bearer {}", realm.workload_token("sensor-b", json!(SLUG)));
     let one = &[
         ("x-forwarded-for", "203.0.113.7"),
-        ("authorization", "Bearer one"),
+        ("authorization", one.as_str()),
     ];
     let two = &[
         ("x-forwarded-for", "203.0.113.7"),
-        ("authorization", "Bearer two"),
+        ("authorization", two.as_str()),
     ];
 
     assert_ne!(
@@ -188,30 +217,99 @@ async fn two_credentials_from_one_address_do_not_spend_each_others_quota() {
     assert_ne!(
         call(&app, &schema(SLUG), two).await.status(),
         StatusCode::TOO_MANY_REQUESTS,
-        "the second credential has a bucket of its own"
-    );
-}
-
-#[tokio::test]
-async fn a_credentialed_caller_and_an_anonymous_one_are_not_the_same_bucket() {
-    let app = app(Some(limits(60, Some(1))));
-    let credentialed = &[
-        ("x-forwarded-for", "203.0.113.7"),
-        ("authorization", "Bearer one"),
-    ];
-
-    assert_ne!(
-        call(&app, &schema(SLUG), credentialed).await.status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
-    assert_eq!(
-        call(&app, &schema(SLUG), credentialed).await.status(),
-        StatusCode::TOO_MANY_REQUESTS
+        "the second service account has a bucket of its own"
     );
     assert_ne!(
         call(&app, &schema(SLUG), FROM).await.status(),
         StatusCode::TOO_MANY_REQUESTS,
-        "spending a credential's bucket does not spend the address's"
+        "spending a principal's bucket does not spend the address's"
+    );
+}
+
+#[tokio::test]
+async fn one_principal_with_a_fresh_token_per_call_is_still_one_bucket() {
+    let (app, _, realm) = signed_app(Some(limits(60, Some(1))));
+    let first = format!("Bearer {}", realm.workload_token("sensor-a", json!(SLUG)));
+    let second = format!(
+        "Bearer {}",
+        realm.workload_token("sensor-a", json!([SLUG, "other"]))
+    );
+    assert_ne!(first, second, "two distinct tokens");
+
+    assert_ne!(
+        call(&app, &schema(SLUG), &[("authorization", first.as_str())])
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        call(&app, &schema(SLUG), &[("authorization", second.as_str())])
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a new token of the same service account buys no new burst"
+    );
+}
+
+#[tokio::test]
+async fn a_new_made_up_bearer_per_request_spends_the_address_bucket() {
+    // T-5290: the exploit. Before the fix every unsigned token was a bucket of its own, so a
+    // hundred requests with a hundred random tokens passed a limit of ten unthrottled.
+    let (app, _, _) = signed_app(Some(limits(10, Some(10))));
+    let mut refused = 0;
+    for n in 0..100 {
+        let token = made_up(n);
+        let headers = &[
+            ("x-forwarded-for", "203.0.113.7"),
+            ("authorization", token.as_str()),
+        ];
+        if call(&app, &schema(SLUG), headers).await.status() == StatusCode::TOO_MANY_REQUESTS {
+            refused += 1;
+        }
+    }
+    assert_eq!(
+        refused, 90,
+        "ten pass, the address's burst; the other ninety are refused"
+    );
+    assert_eq!(
+        call(&app, &schema(SLUG), FROM).await.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "the made-up tokens spent the address's own bucket"
+    );
+}
+
+#[tokio::test]
+async fn ten_thousand_made_up_bearers_leave_one_bucket() {
+    // T-5290: the bucket map does not grow with tokens nobody signed.
+    let (app, gateway, _) = signed_app(Some(limits(60, Some(1))));
+    for n in 0..10_000 {
+        let token = made_up(n);
+        let headers = &[
+            ("x-forwarded-for", "203.0.113.7"),
+            ("authorization", token.as_str()),
+        ];
+        call(&app, &schema(SLUG), headers).await;
+    }
+    assert_eq!(gateway.rate_limiter.len(), 1);
+}
+
+#[tokio::test]
+async fn without_a_realm_no_token_is_a_principal() {
+    // A gateway with no realm to check a token against believes none, so even a well-formed
+    // token spends the address's bucket.
+    let app = app(Some(limits(60, Some(1))));
+    let token = made_up(1);
+    let headers = &[
+        ("x-forwarded-for", "203.0.113.7"),
+        ("authorization", token.as_str()),
+    ];
+    assert_ne!(
+        call(&app, &schema(SLUG), headers).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        call(&app, &schema(SLUG), FROM).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
     );
 }
 
