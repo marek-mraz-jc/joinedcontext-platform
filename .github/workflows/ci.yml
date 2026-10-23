@@ -74,10 +74,11 @@ jobs:
           cargo test --manifest-path tools/bento-inflate/Cargo.toml --locked
       # The rustdoc of a jc-core field is the JSON Schema `description` the Portal ships, the
       # OpenAPI document publishes and every MCP tool list hands a model, so a broken
-      # intra-doc link is a broken sentence in four places (T-2145, UI-02). One crate, no
-      # dependencies: seconds, which is why it belongs in the fast lane and the workspace-wide
-      # doc build stays in ci-full.
-      - run: cargo doc -p jc-core --no-deps --locked
+      # intra-doc link is a broken sentence in four places (T-2145, UI-02). The whole workspace,
+      # not jc-core alone: a link to a private item fails only here, and clippy does not run
+      # rustdoc lints (T-4758, T-4780 and tenancy.rs's AUDIT each held main red until the next
+      # ci-full; T-5312). --no-deps after clippy and the tests: ~20 s warm.
+      - run: cargo doc --workspace --no-deps --locked
         env: { RUSTDOCFLAGS: "-D warnings" }
       # And the contract those descriptions make: every field has one, and none of them is a
       # credential. `--lib --bins` above does not run an integration test (T-2145).
