@@ -268,13 +268,16 @@ pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
 /// The processors the connection contributes before the author's own (PL-39).
 ///
 /// GTFS-realtime prepends its protobuf decoder: the feed arrives as protobuf and every pipeline
-/// reading it would otherwise decode it again in its own mapping. An `http` connection with an
-/// `archive` prepends the ranged read of its named members (`archive_processors`).
+/// reading it would otherwise decode it again in its own mapping. An `http` connection refuses a
+/// body over its `maxBytes` (`body_bound`) and, with an `archive`, then reads its named members
+/// (`archive_processors`).
 pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Vec<Value> {
-    if let Some(archive) = spec.http.as_ref().and_then(|http| http.archive.as_ref()) {
-        if spec.source_type == DataSourceType::Http {
-            return archive_processors(spec, archive, context);
+    if let (DataSourceType::Http, Some(http)) = (&spec.source_type, spec.http.as_ref()) {
+        let mut processors = body_bound(http.max_bytes());
+        if let Some(archive) = &http.archive {
+            processors.extend(archive_processors(spec, archive, context));
         }
+        return processors;
     }
     if spec.source_type != DataSourceType::GtfsRt {
         return Vec::new();
@@ -289,6 +292,34 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
     let mut processor = Mapping::new();
     processor.insert(key("protobuf"), Value::Mapping(protobuf));
     vec![Value::Mapping(processor)]
+}
+
+/// The refusal of a response body over `maxBytes` (PL-113): logged at ERROR and dropped, so the
+/// author's steps never see it. Bento's `http_client` and `http` have no body limit, so the check
+/// runs after the read. ponytail: it keeps an oversized body out of the pipeline, not out of the
+/// runner's memory (the stream's quota bounds that); a reader that stops at the bound would.
+fn body_bound(max_bytes: u64) -> Vec<Value> {
+    let check = format!(
+        "root = if content().length() > {max_bytes} {{ throw(\"the response body is %d bytes, over spec.http.maxBytes {max_bytes}\".format(content().length())) }}"
+    );
+    let mut log = Mapping::new();
+    log.insert(key("level"), text("ERROR"));
+    log.insert(key("message"), text("http read refused: ${! error() }"));
+    let one = |name: &str, body: Value| {
+        let mut processor = Mapping::new();
+        processor.insert(key(name), body);
+        Value::Mapping(processor)
+    };
+    vec![
+        one("mutation", text(&check)),
+        one(
+            "catch",
+            Value::Sequence(vec![
+                one("log", Value::Mapping(log)),
+                one("mapping", text("root = deleted()")),
+            ]),
+        ),
+    ]
 }
 
 /// The ranged read of an archive's named members (PL-72, Architecture/08 §6).

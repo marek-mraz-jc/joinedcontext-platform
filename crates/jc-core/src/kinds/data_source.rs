@@ -178,6 +178,22 @@ pub struct HttpConnection {
     /// The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<HttpArchive>,
+    /// The largest response body accepted, in bytes; 32 MiB when absent, at most 256 MiB. The
+    /// runner refuses a larger body before any step of the pipeline sees it (PL-113).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+}
+
+impl HttpConnection {
+    /// The body bound when the manifest names none.
+    pub const DEFAULT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+    /// The largest bound a manifest may set.
+    pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// The bound in force.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes.unwrap_or(Self::DEFAULT_MAX_BYTES)
+    }
 }
 
 /// The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).
@@ -543,6 +559,13 @@ impl DataSourceSpec {
                 }
                 if let Some(archive) = &http.archive {
                     archive.validate(http)?;
+                }
+                if !(1..=HttpConnection::MAX_BYTES).contains(&http.max_bytes()) {
+                    return Err(Error::Name {
+                        field: "spec.http.maxBytes",
+                        value: http.max_bytes().to_string(),
+                        reason: "maxBytes is 1 to 268435456 (256 MiB)",
+                    });
                 }
                 verb(http.verb.as_deref())
             }
