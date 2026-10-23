@@ -242,9 +242,11 @@ fn upstream_headers(space: &str, subject: &Subject) -> Option<HeaderMap> {
     let mut request = axum::extract::Request::new(Body::empty());
     tenancy::pin_caller(&mut request, space, subject).ok()?;
     let mut headers = std::mem::take(request.headers_mut());
-    // Provenance names a writer; the upstream writes nothing, and a hub is shared by identity.
+    // Provenance names a writer and one request; the upstream writes nothing, and a hub is
+    // shared by identity.
     headers.remove(tenancy::PROVENANCE_CHANNEL);
     headers.remove(tenancy::PROVENANCE_ACTOR);
+    headers.remove(tenancy::REQUEST_ID);
     Some(headers)
 }
 
