@@ -1506,3 +1506,64 @@ fn the_quality_measurements_reach_the_record_and_the_dataset() {
         Some(1)
     );
 }
+
+// --- what the public may read of the history: the automatic charts (T-5421) ----------------
+
+fn policy(name: &str, operations: &str, rest: &str) -> String {
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: {name}\n  namespace: ovzdusie\n\
+         spec:\n  contextSpaceRef: ovzdusie\n  assigner: did:web:banskabystrica.sk\n  \
+         assignee: {{ kind: role, id: public }}\n  operations: {operations}\n{rest}"
+    )
+}
+
+/// zilina-mhd (T-5421): a read Policy without queryTemporal grants no chart; one with it and a
+/// moving `temporalQ` grants its types and attributes back that far; a fixed period grants none.
+#[test]
+fn the_walk_reads_the_public_temporal_grants_and_the_retention_of_the_space() {
+    let dir = repo("temporal-grants");
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ovzdusie\n  namespace: ovzdusie\n\
+         spec:\n  isSandbox: false\n  retention:\n    - { entityType: AirQualityObserved, history: P30D }\n",
+    );
+    let at = "projects/ovzdusie/spaces/ovzdusie/policies";
+    common::write(
+        &dir,
+        &format!("{at}/current.yaml"),
+        &policy("current", "[retrieveOps]", ""),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/history.yaml"),
+        &policy(
+            "history",
+            "[queryTemporal]",
+            "  information:\n    - entities: [{ type: AirQualityObserved }]\n      propertyNames: [no2]\n  temporalQ: timerel=after;timeAt=P-1D\n",
+        ),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/fixed.yaml"),
+        &policy(
+            "fixed",
+            "[queryTemporal]",
+            "  temporalQ: timerel=before;timeAt=2026-01-01T00:00:00Z\n",
+        ),
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let history = &found[0].history;
+    assert_eq!(
+        history.grants,
+        [ckan::TemporalGrant {
+            types: vec![AIR.to_owned()],
+            attrs: vec!["no2".to_owned()],
+            seconds: Some(86_400),
+        }]
+    );
+    assert_eq!(history.window(AIR, "no2").as_deref(), Some("P1D"));
+    assert_eq!(history.window(AIR, "pm10"), None);
+    assert_eq!(history.window("WeatherObserved", "no2"), None);
+}

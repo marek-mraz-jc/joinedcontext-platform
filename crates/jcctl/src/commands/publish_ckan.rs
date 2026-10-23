@@ -21,6 +21,7 @@ use jc_core::display_order::Display;
 use jc_core::envelope::{Kind, Ref};
 use jc_core::i18n::Text;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
+use jc_core::kinds::policy::{Operation, OperationRef, PolicySpec, PrincipalKind};
 use jc_core::kinds::{ContextSpaceSpec, EndpointSpec, Representation};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +57,8 @@ pub struct Target {
     /// The instance's `metadata.title` in that language: what its organization is called,
     /// created or renamed to, before the installation's branding name (ADR-N-058 2.6).
     pub instance_title: Option<String>,
+    /// What the public may read of the Endpoint's history: its automatic charts (T-5421).
+    pub history: ckan::History,
 }
 
 impl Target {
@@ -257,7 +260,12 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             instance: Box::new(instance_id.clone()),
             message: e.to_string(),
         })?;
-        let language = space_language(repo, id, &spec);
+        let space = space_of(repo, id, &spec);
+        let language = space
+            .as_ref()
+            .and_then(|space| space.default_locale.clone())
+            .filter(|locale| !locale.trim().is_empty());
+        let history = history(repo, id, &spec, space.as_ref());
         let instance_title = title_in(
             &instance_manifest.manifest.metadata.rest,
             language.as_deref(),
@@ -271,13 +279,18 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             instance,
             language,
             instance_title,
+            history,
         });
     }
     Ok(targets)
 }
 
-/// The `defaultLocale` of the space an Endpoint serves, looked up in the Endpoint's project.
-fn space_language(repo: &Repository, endpoint: &ResourceId, spec: &EndpointSpec) -> Option<String> {
+/// The space an Endpoint serves, looked up in the Endpoint's project.
+fn space_of(
+    repo: &Repository,
+    endpoint: &ResourceId,
+    spec: &EndpointSpec,
+) -> Option<ContextSpaceSpec> {
     let namespace = match &spec.context_space_ref {
         Ref::Typed(typed) => typed
             .namespace
@@ -291,11 +304,79 @@ fn space_language(repo: &Repository, endpoint: &ResourceId, spec: &EndpointSpec)
         namespace,
         spec.context_space_ref.name(),
     );
-    let space: ContextSpaceSpec =
-        serde_json::from_value(repo.get(&space)?.manifest.spec.clone()).ok()?;
-    space
-        .default_locale
-        .filter(|locale| !locale.trim().is_empty())
+    serde_json::from_value(repo.get(&space)?.manifest.spec.clone()).ok()
+}
+
+/// What the public may read of the history an Endpoint serves (T-5421): the `queryTemporal`
+/// grants to the public role in the Policies of its project and space it binds (all of them
+/// when it names none, ADR-N-057), and the space's retention.
+fn history(
+    repo: &Repository,
+    endpoint: &ResourceId,
+    spec: &EndpointSpec,
+    space: Option<&ContextSpaceSpec>,
+) -> ckan::History {
+    let bound = |name: &str| {
+        spec.policy_refs()
+            .is_none_or(|refs| refs.iter().any(|r| r.local_id() == name))
+    };
+    let grants = repo
+        .iter()
+        .filter(|(id, _)| {
+            id.kind == PolicySpec::KIND && id.namespace == endpoint.namespace && bound(&id.name)
+        })
+        .filter_map(|(id, resource)| {
+            let policy: PolicySpec = serde_json::from_value(resource.manifest.spec.clone()).ok()?;
+            policy.expand(&id.name).ok()
+        })
+        .flatten()
+        .filter(|(_, policy)| policy.context_space_ref.name() == spec.context_space_ref.name())
+        .flat_map(|(_, policy)| temporal_grants(&policy))
+        .collect();
+    ckan::History {
+        grants,
+        retention: space.map(|s| s.retention.clone()).unwrap_or_default(),
+    }
+}
+
+/// The public `queryTemporal` grants of one single-rule Policy, one per `information` entry. A
+/// `temporalQ` other than a moving window (`timerel=after;timeAt=P-30D`) grants no chart: a fixed
+/// period would leave the chart empty once it is over.
+fn temporal_grants(policy: &PolicySpec) -> Vec<ckan::TemporalGrant> {
+    let temporal = |op: &OperationRef| match op {
+        OperationRef::Single(op) => *op == Operation::QueryTemporal,
+        OperationRef::Group(group) => group.operations().contains(&Operation::QueryTemporal),
+    };
+    let public = policy.assignee.kind == PrincipalKind::Role && policy.assignee.id == "public";
+    let seconds = policy.temporal_q.as_deref().map(|q| {
+        q.strip_prefix("timerel=after;timeAt=P-")
+            .and_then(|back| jc_core::kinds::space::duration_seconds(&format!("P{back}")))
+    });
+    if !policy.effect.is_permission() || !public || !policy.operations.iter().any(temporal) {
+        return Vec::new();
+    }
+    let Some(seconds) = seconds.map_or(Some(None), |window| window.map(Some)) else {
+        return Vec::new();
+    };
+    if policy.information.is_empty() {
+        return vec![ckan::TemporalGrant {
+            seconds,
+            ..Default::default()
+        }];
+    }
+    policy
+        .information
+        .iter()
+        .map(|info| ckan::TemporalGrant {
+            types: info
+                .entities
+                .iter()
+                .map(|e| e.entity_type.clone())
+                .collect(),
+            attrs: info.property_names.clone(),
+            seconds,
+        })
+        .collect()
 }
 
 /// A manifest's `metadata.title`, a plain string or the legacy language map, in `language`
@@ -564,12 +645,17 @@ pub fn publish_one(
     };
     let views = match outcome {
         Outcome::NotPublished => ckan::Views::default(),
-        _ => ckan::publish_views(
-            api,
-            &target.manifest,
-            &settings,
-            rows.and_then(|r| r.schema.as_ref()),
-        )?,
+        _ => {
+            let automatic = rows
+                .and_then(|r| {
+                    r.schema
+                        .as_ref()
+                        .map(|schema| (schema, r.linkml.as_deref()))
+                })
+                .map(|(schema, linkml)| ckan::series_charts(schema, linkml, &target.history))
+                .unwrap_or_default();
+            ckan::publish_views(api, &target.manifest, &settings, &automatic)?
+        }
     };
     Ok(Line {
         endpoint: target.id.clone(),
