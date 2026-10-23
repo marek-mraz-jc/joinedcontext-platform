@@ -183,6 +183,7 @@ fn context_space_sandbox_ttl_rules_pf_19() {
         retention: Vec::new(),
         quality: Vec::new(),
         broker_ref: None,
+        personal_data: None,
     };
     assert!(spec.validate().is_ok());
 
@@ -650,5 +651,46 @@ fn a_retention_rule_records_on_change_with_a_heartbeat_dm_108() {
     assert!(
         ContextSpace::from_yaml(&unknown).is_err(),
         "an unknown field is refused"
+    );
+}
+
+/// DM-121, ADR-N-054 2.6: a space names the key of its `keyedHash` slots by `secretRef`, never
+/// the key itself.
+#[test]
+fn a_space_names_its_personal_data_key_by_secret_ref_dm_121() {
+    let with = |block: &str| {
+        GOLDEN_SPACE.replace("defaultLocale: sk", &format!("defaultLocale: sk\n{block}"))
+    };
+
+    let cs = ContextSpace::from_yaml(&with(
+        "  personalData:\n    keyRef: { name: rides-key, key: hmac }",
+    ))
+    .expect("a keyRef parses");
+    let key = cs.spec.personal_data.expect("personalData").key_ref;
+    assert_eq!(
+        (key.name.as_str(), key.key.as_deref()),
+        ("rides-key", Some("hmac"))
+    );
+
+    let unknown = with("  personalData:\n    keyRef: { name: rides-key }\n    key: 0123456789abcdef0123456789abcdef");
+    assert!(
+        ContextSpace::from_yaml(&unknown).is_err(),
+        "a key typed into the manifest is refused"
+    );
+
+    let pasted = with("  personalData:\n    keyRef: { name: glpat-0123456789abcdefghij }");
+    let refused = ContextSpace::from_yaml(&pasted)
+        .expect("the manifest parses")
+        .spec
+        .validate()
+        .expect_err("a token pasted as the name");
+    let message = refused.to_string();
+    assert!(
+        message.contains("spec.personalData.keyRef.name"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("glpat-0123"),
+        "the refusal never repeats what was pasted: {message}"
     );
 }
