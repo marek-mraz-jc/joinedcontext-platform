@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl fmt [--check] <file or dir>...\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]... [--org-dir <organization checkout>]\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--org-dir <organization checkout>] [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--docs-url <url>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]\n       jcctl changelog --repo-dir <project checkout> [--days <1..366>] [--format md|json]\n       jcctl login --idm <issuer url> [--token-file <path>]\n       jcctl get <plural> [<name>] --project <slug> [-o name|yaml|json] [-l <labelSelector>] [--server <url>] [--token-file <path>]\n       jcctl describe <plural> <name> --project <slug> [--server <url>] [--token-file <path>]\n       jcctl apply -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl diff -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl delete -f <file> [--project <slug>] [--server <url>] [--token-file <path>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <d>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl fmt [--check] <file or dir>...\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]... [--org-dir <organization checkout>]\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--org-dir <organization checkout>] [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl policy export <policy.yaml>\n       jcctl policy import <set.jsonld> [--project <slug>] [--space <name>] [--name <name>] [--out <file.yaml>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--docs-url <url>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]\n       jcctl changelog --repo-dir <project checkout> [--days <1..366>] [--format md|json]\n       jcctl login --idm <issuer url> [--token-file <path>]\n       jcctl get <plural> [<name>] --project <slug> [-o name|yaml|json] [-l <labelSelector>] [--server <url>] [--token-file <path>]\n       jcctl describe <plural> <name> --project <slug> [--server <url>] [--token-file <path>]\n       jcctl apply -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl diff -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl delete -f <file> [--project <slug>] [--server <url>] [--token-file <path>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -38,6 +38,7 @@ fn run(words: &[&str]) -> ExitCode {
         ["login", rest @ ..] => login_command(rest),
         ["fmt", rest @ ..] => fmt_command(rest),
         ["changelog", rest @ ..] => changelog(rest),
+        ["policy", rest @ ..] => policy_command(rest),
         ["validate" | "migrate" | "checkouts" | "plan" | "apply" | "drift", ..] => {
             repository_command(words)
         }
@@ -849,6 +850,29 @@ fn changelog(words: &[&str]) -> ExitCode {
         }
         Err(err) => {
             eprintln!("{err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `policy export` and `policy import`: a Policy as an ODRL `Set` and back (T-5039).
+fn policy_command(words: &[&str]) -> ExitCode {
+    use jcctl::commands::policy;
+    let result = match words {
+        ["export", path] => policy::export(Path::new(path)),
+        ["import", rest @ ..] => match policy::ImportOptions::parse(rest) {
+            Some(options) => policy::import(&options),
+            None => return usage(),
+        },
+        _ => return usage(),
+    };
+    match result {
+        Ok(text) => {
+            println!("{}", text.trim_end());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("jcctl: {err}");
             ExitCode::FAILURE
         }
     }

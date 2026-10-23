@@ -1,0 +1,8 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "ngsi-ld": "https://joinedcontext.com/odrl/ngsi-ld/v1#",
+    "geojson": "https://purl.org/geojson/vocab#",
+    "coordinates": { "@id": "geojson:coordinates", "@type": "@json" }
+  }
+}

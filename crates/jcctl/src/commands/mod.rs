@@ -10,6 +10,7 @@ pub mod git_bundle;
 pub mod import;
 pub mod migrate;
 pub mod plan;
+pub mod policy;
 pub mod publish_ckan;
 pub mod seed;
 pub mod sync;

@@ -1,0 +1,60 @@
+# SHACL shapes of the ngsi-ld: ODRL 2.2 profile (ADR-N-057 decision 4, R52, T-5039).
+#
+# A Set in this profile is what `jcctl policy import` turns into a Policy manifest; the shapes are
+# closed, so an ODRL member the profile does not map (a duty, an obligation, another conflict
+# strategy, an Offer or Agreement, another left operand) fails here as it fails in the import.
+# Read with the contexts http://www.w3.org/ns/odrl.jsonld and ./context.jsonld.
+# The import also refuses members a JSON-LD processor drops before SHACL sees them (an unknown
+# key), and checks each action against the CIM 009 operation list.
+
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ngsi-ld: <https://joinedcontext.com/odrl/ngsi-ld/v1#> .
+@prefix geojson: <https://purl.org/geojson/vocab#> .
+
+ngsi-ld:SetShape a sh:NodeShape ;
+  sh:targetSubjectsOf odrl:permission, odrl:prohibition, odrl:obligation ;
+  sh:closed true ;
+  sh:property [ sh:path rdf:type ; sh:in ( odrl:Set ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path odrl:assigner ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path odrl:assignee ; sh:maxCount 1 ; sh:node ngsi-ld:PartyShape ] ;
+  sh:property [ sh:path odrl:conflict ; sh:maxCount 1 ; sh:in ( odrl:prohibit ) ] ;
+  sh:property [ sh:path odrl:permission ; sh:node ngsi-ld:RuleShape ] ;
+  sh:property [ sh:path odrl:prohibition ; sh:node ngsi-ld:RuleShape ] .
+
+ngsi-ld:PartyShape a sh:NodeShape ;
+  sh:closed true ;
+  sh:property [ sh:path rdf:type ; sh:maxCount 1 ;
+    sh:in ( ngsi-ld:User ngsi-ld:Group ngsi-ld:Role ngsi-ld:ServiceAccount ngsi-ld:Did ) ] .
+
+ngsi-ld:RuleShape a sh:NodeShape ;
+  sh:closed true ;
+  sh:property [ sh:path odrl:action ; sh:minCount 1 ; sh:nodeKind sh:IRI ;
+    sh:pattern "^https://joinedcontext\\.com/odrl/ngsi-ld/v1#[A-Za-z]+$" ] ;
+  sh:property [ sh:path odrl:assignee ; sh:maxCount 1 ; sh:node ngsi-ld:PartyShape ] ;
+  sh:property [ sh:path odrl:assigner ; sh:maxCount 1 ] ;
+  sh:property [ sh:path odrl:target ; sh:maxCount 1 ; sh:node ngsi-ld:EntityTypeShape ] ;
+  sh:property [ sh:path odrl:constraint ; sh:node ngsi-ld:ConstraintShape ] .
+
+ngsi-ld:EntityTypeShape a sh:NodeShape ;
+  sh:closed true ;
+  sh:property [ sh:path rdf:type ; sh:in ( ngsi-ld:EntityType ) ; sh:minCount 1 ; sh:maxCount 1 ] ;
+  sh:property [ sh:path odrl:refinement ; sh:node ngsi-ld:RefinementShape ] ;
+  sh:property [ sh:path odrl:partOf ; sh:maxCount 1 ; sh:nodeKind sh:IRI ] .
+
+ngsi-ld:ConstraintShape a sh:NodeShape ;
+  sh:closed true ;
+  sh:property [ sh:path odrl:leftOperand ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( ngsi-ld:q ngsi-ld:scopeQ ngsi-ld:geoQ ngsi-ld:temporalQ ngsi-ld:validity odrl:dateTime ) ] ;
+  sh:property [ sh:path odrl:operator ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( odrl:eq odrl:isPartOf odrl:gteq odrl:lteq odrl:lt ngsi-ld:within ngsi-ld:contains
+            ngsi-ld:intersects ngsi-ld:disjoint ngsi-ld:equals ngsi-ld:overlaps ) ] ;
+  sh:property [ sh:path odrl:rightOperand ; sh:minCount 1 ; sh:maxCount 1 ] .
+
+ngsi-ld:RefinementShape a sh:NodeShape ;
+  sh:closed true ;
+  sh:property [ sh:path odrl:leftOperand ; sh:minCount 1 ; sh:maxCount 1 ;
+    sh:in ( ngsi-ld:id ngsi-ld:idPattern ngsi-ld:attrs ngsi-ld:propertyNames ngsi-ld:relationshipNames ) ] ;
+  sh:property [ sh:path odrl:operator ; sh:minCount 1 ; sh:maxCount 1 ; sh:in ( odrl:eq odrl:isAnyOf ) ] ;
+  sh:property [ sh:path odrl:rightOperand ; sh:minCount 1 ] .
