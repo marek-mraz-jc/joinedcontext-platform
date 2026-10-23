@@ -337,6 +337,15 @@
           "description": "Static request headers. A header carrying a credential belongs in `authorization`.",
           "type": "object"
         },
+        "maxBytes": {
+          "description": "The largest response body accepted, in bytes; 32 MiB when absent, at most 256 MiB. The runner refuses a larger body before any step of the pipeline sees it (PL-113).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "timeout": {
           "description": "Request timeout as a Bento duration, `10s`.",
           "type": [
