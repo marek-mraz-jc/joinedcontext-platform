@@ -10,8 +10,8 @@
 
 mod common;
 
+use context_gateway::auth::subject::Subject;
 use context_gateway::handlers::schema;
-use context_gateway::pdp::evaluator::Subject;
 use context_gateway::resolver::{Endpoint, Model};
 use jc_core::envelope::ResourceEnvelope;
 use jc_core::kinds::{Audience, ModelProjectionSpec, PolicySpec, Representation};

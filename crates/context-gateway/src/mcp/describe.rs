@@ -8,12 +8,12 @@
 //! gateway renders none (T-3646, map 7.4).
 
 use crate::app::Gateway;
+use crate::auth::subject::Subject;
 use crate::handlers::schema_routes;
 use crate::handlers::view_access::{self, AccessFormat};
 use crate::mcp::jsonrpc::{answered, error, refused, result};
 use crate::mcp::tools::{granted, reads_anything, validate, ACCESS_FORMATS, TOOLS};
 use crate::middleware::response::{self, Artifact};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use axum::http::StatusCode;
 use serde_json::{json, Map, Value};

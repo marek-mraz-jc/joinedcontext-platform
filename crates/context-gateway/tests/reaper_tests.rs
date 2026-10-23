@@ -2,7 +2,8 @@
 //! (R48, EP-19, OPS-45).
 
 use context_gateway::app::Gateway;
-use context_gateway::pdp::evaluator::{Request as PolicyRequest, Subject, Verdict};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{Request as PolicyRequest, Verdict};
 use context_gateway::pdp::reaper::{Reaper, INTERVAL};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;

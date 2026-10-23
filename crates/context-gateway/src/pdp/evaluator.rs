@@ -11,6 +11,7 @@
 //! against (GW10). The floor for an ordinary caller is always REWRITE: the tenant alone is
 //! pinned by the gateway, never chosen by the client (GW3, GW20).
 
+use crate::auth::subject::Subject;
 use crate::pdp::grants::GrantView;
 use crate::pdp::temporal::{self, Window};
 use crate::pdp::{geo, scope_folding};
@@ -20,47 +21,7 @@ use jc_core::kinds::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Who is calling, as established by the PEP — never as claimed by the client (GW20).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct Subject {
-    /// The authenticated user, absent for an anonymous caller.
-    pub user: Option<String>,
-    /// The service account, when a workload is calling (PF-34).
-    pub service_account: Option<String>,
-    /// The project that service account belongs to: a `{project}/{name}` assignee matches only
-    /// that project's account (PL-92).
-    pub service_account_project: Option<String>,
-    /// The groups the token asserts.
-    pub groups: BTreeSet<String>,
-    /// The roles the token asserts. An anonymous caller holds exactly `public` (GW22).
-    pub roles: BTreeSet<String>,
-    /// The decentralized identifier of a data-space participant, when one is calling.
-    pub did: Option<String>,
-    /// The data space agreement this caller acts under, which every audit record produced
-    /// under it carries (DS-13). Never a grant of its own: what the agreement allows is in
-    /// the `Policy` entities compiled from it.
-    pub agreement: Option<String>,
-    /// The service account a person's call came through, when a delegating client exchanged
-    /// their token (ADR-N-038, AG-95). The audit line names it; it grants nothing, so it is
-    /// never matched as a principal.
-    pub via: Option<String>,
-    /// The Keycloak client a person's token was issued to (`azp`): `portal-ui` makes a write's
-    /// channel `ui` (ADR-N-054 2.3). Grants nothing.
-    pub client: Option<String>,
-    /// The Organization of the Project the caller was admitted under, for a write's provenance
-    /// (ADR-N-054 2.3). Grants nothing.
-    pub organization: Option<String>,
-}
-
 impl Subject {
-    /// The anonymous caller: the role `public` and nothing else (GW22).
-    pub fn anonymous() -> Self {
-        Self {
-            roles: BTreeSet::from(["public".to_owned()]),
-            ..Self::default()
-        }
-    }
-
     /// Whether this policy's assignee is this caller.
     fn is(&self, assignee: &Principal) -> bool {
         let id = assignee.id.as_str();

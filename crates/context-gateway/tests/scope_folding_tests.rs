@@ -1,7 +1,8 @@
 //! Hierarchical scopes folded into the query as an anchored regex (T-0148, R12, R13, R30).
 
 use chrono::{DateTime, Utc};
-use context_gateway::pdp::evaluator::{evaluate, Request, Subject};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{evaluate, Request};
 use context_gateway::pdp::scope_folding::fold;
 use jc_core::kinds::{Operation, PolicySpec};
 use regex::Regex;

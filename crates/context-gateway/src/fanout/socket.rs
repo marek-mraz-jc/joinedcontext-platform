@@ -3,8 +3,8 @@
 
 use super::hub::{self, Answer, Hub, Out, Queue, KEPT};
 use crate::app::Gateway;
+use crate::auth::subject::Subject;
 use crate::middleware::tenancy;
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::ws::{self, WebSocket};

@@ -146,7 +146,7 @@ fn claims_of(value: &Value) -> Claims {
     serde_json::from_value(value.clone()).expect("the claims parse")
 }
 
-fn establish(value: &Value) -> Result<context_gateway::pdp::evaluator::Subject, Refused> {
+fn establish(value: &Value) -> Result<context_gateway::auth::subject::Subject, Refused> {
     subject(&claims_of(value), &serving_now(), &endpoint(), now())
 }
 
