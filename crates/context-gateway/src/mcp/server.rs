@@ -247,7 +247,7 @@ pub(crate) async fn serve(
 
     let authorization = request.headers().get(AUTHORIZATION).cloned();
     let presented = authorization.as_ref().and_then(|value| value.to_str().ok());
-    let caller = rate_limit::caller_key(request.headers());
+    let caller = rate_limit::caller_key(&gateway, request.headers());
     let (subject_key, reach, reads_only) = match token::bearer(presented) {
         // A public server answers an anonymous caller with each member's public grants
         // (ADR-N-043 §2.2); the members' own audience decides, as on their URLs.
