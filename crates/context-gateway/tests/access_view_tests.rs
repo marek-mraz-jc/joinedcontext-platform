@@ -271,6 +271,8 @@ async fn odrl_carries_the_licence_duties_and_the_public_uid() {
         json!([{ "action": "attribute" }])
     );
     assert_eq!(document["assigner"], format!("did:web:{DOMAIN}"));
+    // ADR-N-057: a prohibition rule wins over every permission (GW4).
+    assert_eq!(document["conflict"], "prohibit");
 }
 
 /// EP-59: the `uid` is the digest of the rules as published, so a licence that adds a duty is a
@@ -307,6 +309,10 @@ async fn turtle_is_written_from_the_published_odrl() {
         "{body}"
     );
     assert!(!body.contains("/x/views/"), "{body}");
+    assert!(
+        body.contains(" ;\n  odrl:conflict odrl:prohibit ;"),
+        "{body}"
+    );
 }
 
 /// EP-58: the grant tree goes through as the broker wrote it, under its own media type.

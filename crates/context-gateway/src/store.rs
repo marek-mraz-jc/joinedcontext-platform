@@ -982,6 +982,7 @@ fn portal_personal_data_read(
         return None;
     }
     Some(PolicySpec {
+        rules: None,
         context_space_ref: jc_core::envelope::Ref::Name(space.to_owned()),
         effect: PolicyEffect::default(),
         assigner: assigner.to_owned(),
@@ -1056,13 +1057,22 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
         if id.kind != "Policy" {
             continue;
         }
-        if let Some(spec) = spec_of::<PolicySpec>(&resource.manifest) {
-            let project = id.namespace.clone().unwrap_or_default();
-            let space = spec.context_space_ref.name().to_owned();
-            policies
-                .entry((project, space))
-                .or_default()
-                .push((id.name.clone(), spec));
+        let Some(spec) = spec_of::<PolicySpec>(&resource.manifest) else {
+            continue;
+        };
+        // One grant per rule, named `{policy}#{n}` (ADR-N-057); an invalid shape is left out
+        // like an unreadable manifest.
+        match spec.expand(&id.name) {
+            Ok(rules) => {
+                let project = id.namespace.clone().unwrap_or_default();
+                let space = spec.context_space_ref.name().to_owned();
+                policies.entry((project, space)).or_default().extend(rules);
+            }
+            Err(error) => tracing::warn!(
+                name = %id.name,
+                %error,
+                "Policy left out of the endpoint table"
+            ),
         }
     }
     // Each Pipeline's Policies, granted to its own account and derived with it (PL-20).
@@ -1077,7 +1087,7 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
     policies
 }
 
-/// The one Policy an endpoint with `spec.policyRef` evaluates (EP-14, GW8).
+/// The one Policy an endpoint with `spec.policyRef` evaluates, every rule of it (EP-14, GW8).
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
 /// that Policy alone, which is how several endpoints over one space each publish a different
@@ -1095,7 +1105,7 @@ fn bound_policy(
         && policy_ref.space() == Some(space);
     let bound: Vec<(String, PolicySpec)> = named
         .iter()
-        .filter(|(name, _)| ours && name == policy_ref.local_id())
+        .filter(|(name, _)| ours && PolicySpec::policy_of(name) == policy_ref.local_id())
         .cloned()
         .collect();
     if bound.is_empty() {

@@ -432,3 +432,100 @@ fn is_endpoint_grant_takes_the_endpoints_own_roles_alone() {
         "endpoint:helsinki/app-alerts"
     ));
 }
+
+const RULES_POLICY: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Policy
+metadata:
+  name: kiosks
+  namespace: bbsk
+spec:
+  contextSpaceRef: { kind: ContextSpace, name: kiosks }
+  assigner: did:web:bbsk.sk
+  rules:
+    - assignee: { kind: role, id: public }
+      operations: [retrieveOps]
+    - effect: prohibition
+      assignee: { kind: serviceAccount, id: kiosk-editor }
+      operations: [updateAttrs]
+      information:
+        - entities: [{ type: Kiosk, id: "urn:ngsi-ld:Kiosk:bbsk.sk:kiosks:hlavne-namestie" }]
+      q: "open==true"
+  validity: { from: "2026-09-01T00:00:00Z" }
+"#;
+
+/// ADR-N-057 decision 1 (T-5036): the rules shape parses, validates, round-trips as rules, and
+/// expands to one single-rule spec per rule named `{policy}#{n}` sharing assigner and validity.
+#[test]
+fn rules_policy_roundtrips_and_expands_one_grant_per_rule() {
+    let p = Policy::from_yaml(RULES_POLICY).expect("the rules shape parses");
+    p.validate().expect("the rules shape validates");
+    let yaml = p.to_yaml().expect("serialize");
+    assert!(
+        !yaml.contains("assignee: {kind") && yaml.contains("rules:"),
+        "{yaml}"
+    );
+    assert!(!yaml.contains("operations: []"), "{yaml}");
+    assert_eq!(p, Policy::from_yaml(&yaml).expect("re-import"));
+
+    let rules = p.spec.expand("kiosks").expect("a valid shape expands");
+    let names: Vec<&str> = rules.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["kiosks#1", "kiosks#2"]);
+    let (_, editor) = &rules[1];
+    assert!(editor.effect.is_prohibition());
+    assert_eq!(
+        editor.assignee,
+        Principal::new(PrincipalKind::ServiceAccount, "kiosk-editor")
+    );
+    assert_eq!(editor.q.as_deref(), Some("open==true"));
+    assert_eq!(editor.assigner, "did:web:bbsk.sk");
+    assert!(editor.validity.is_some() && editor.rules.is_none());
+    assert_eq!(jc_core::kinds::PolicySpec::policy_of("kiosks#2"), "kiosks");
+    assert_eq!(jc_core::kinds::PolicySpec::policy_of("kiosks"), "kiosks");
+}
+
+/// The single-rule shape stays valid and is a list of one under its own name.
+#[test]
+fn single_rule_policy_expands_to_itself() {
+    let p = Policy::from_yaml(GOLDEN_POLICY).expect("valid golden YAML");
+    let rules = p.spec.expand("public-air-quality").expect("expands");
+    assert_eq!(
+        rules,
+        vec![("public-air-quality".to_owned(), p.spec.clone())]
+    );
+}
+
+/// Both shapes at once, an empty `rules[]`, or neither shape is refused, never half read.
+#[test]
+fn both_shapes_empty_rules_or_no_rule_are_refused() {
+    let both = RULES_POLICY.replace("  rules:\n", "  operations: [deleteEntity]\n  rules:\n");
+    let both = Policy::from_yaml(&both).expect("parses");
+    let error = both.validate().expect_err("both shapes are refused");
+    assert!(error.to_string().contains("operations"), "{error}");
+    assert!(both.spec.expand("kiosks").is_err());
+
+    let empty = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Policy
+metadata: { name: kiosks, namespace: bbsk }
+spec:
+  contextSpaceRef: kiosks
+  assigner: did:web:bbsk.sk
+  rules: []
+"#;
+    let empty = Policy::from_yaml(empty).expect("parses");
+    assert!(empty.validate().is_err(), "an empty rules[] is refused");
+    assert!(empty.spec.expand("kiosks").is_err());
+
+    let neither = Policy::from_yaml(&RULES_POLICY[..RULES_POLICY.find("  rules:").expect("rules")])
+        .expect("parses");
+    assert!(neither.validate().is_err(), "no assignee is refused");
+    assert!(
+        neither.spec.expand("kiosks").is_err(),
+        "a Policy with neither shape expands to no grant"
+    );
+
+    let unknown = RULES_POLICY.replace("q: \"open==true\"", "validity: {}");
+    assert!(
+        Policy::from_yaml(&unknown).is_err(),
+        "validity stays on the Policy"
+    );
+}

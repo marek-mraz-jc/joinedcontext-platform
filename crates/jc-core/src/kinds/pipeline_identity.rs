@@ -200,6 +200,7 @@ fn policy(
     entity_type: Option<&str>,
 ) -> PolicySpec {
     PolicySpec {
+        rules: None,
         context_space_ref: Ref::Typed(TypedRef {
             kind: "ContextSpace".to_owned(),
             name: space.to_owned(),
