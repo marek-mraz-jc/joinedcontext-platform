@@ -273,18 +273,22 @@ pub async fn flush(client: &reqwest::Client, url: &str, anonymous_too: bool) {
     }
 }
 
-/// Posts every [`INTERVAL`], the anonymous rows every [`ANONYMOUS_EVERY`]th time. A post
-/// never holds a call: [`record`] only adds to the tally.
-pub async fn follow(url: String) {
+fn client() -> Option<reqwest::Client> {
     let built = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build();
-    let client = match built {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(%error, "no HTTP client for the MCP activity; none is posted");
-            return;
-        }
+    built
+        .inspect_err(
+            |error| tracing::error!(%error, "no HTTP client for the MCP activity; none is posted"),
+        )
+        .ok()
+}
+
+/// Posts every [`INTERVAL`], the anonymous rows every [`ANONYMOUS_EVERY`]th time. A post
+/// never holds a call: [`record`] only adds to the tally.
+pub async fn follow(url: String) {
+    let Some(client) = client() else {
+        return;
     };
     let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
