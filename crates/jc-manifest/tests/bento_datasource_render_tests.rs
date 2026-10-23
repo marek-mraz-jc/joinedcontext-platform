@@ -423,12 +423,20 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let outer = doc["pipeline"]["processors"]
         .as_sequence()
         .expect("processors");
-    assert_eq!(names(outer), ["try", "catch", "for_each", "unarchive"]);
+    assert_eq!(
+        names(outer),
+        ["mutation", "catch", "try", "catch", "for_each", "unarchive"]
+    );
+    // The body bound comes first, so even a server that ignores Range is held to maxBytes.
+    assert!(outer[0]["mutation"]
+        .as_str()
+        .unwrap()
+        .contains("content().length() > 33554432"));
     // The first refusal skips the rest, so an unchecked directory never reaches a request.
-    let listing = outer[0]["try"].as_sequence().expect("the directory");
+    let listing = outer[2]["try"].as_sequence().expect("the directory");
     assert_eq!(names(listing), ["mapping", "unarchive"]);
     // Each member is a batch of its own, so a refused one never stops another (T-4752).
-    let each = outer[2]["for_each"].as_sequence().expect("per member");
+    let each = outer[4]["for_each"].as_sequence().expect("per member");
     assert_eq!(names(each), ["try", "catch"]);
     let steps = each[0]["try"].as_sequence().expect("the read");
     assert_eq!(
@@ -460,12 +468,12 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let check = steps[4]["mapping"].as_str().unwrap();
     assert!(check.contains("the directory says"));
     assert!(!out.contains("wasm"), "{out}");
-    for refused in [&outer[1]["catch"], &each[1]["catch"]] {
+    for refused in [&outer[1]["catch"], &outer[3]["catch"], &each[1]["catch"]] {
         assert_eq!(refused[1]["mapping"].as_str(), Some("root = deleted()"));
     }
-    assert_eq!(outer[3]["unarchive"]["format"].as_str(), Some("csv"));
+    assert_eq!(outer[5]["unarchive"]["format"].as_str(), Some("csv"));
 
-    // Without `archive` the same connection renders as it did: no range, nothing prepended.
+    // Without `archive` the same connection keeps only the body bound: no range, no member read.
     let plain = source(
         &ZIP.split("    archive:")
             .next()
@@ -473,7 +481,10 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
             .replace("hsl.zip", "x.json"),
     );
     let out = render("", &plain, &context("hsl-gtfs")).expect("renders");
-    assert!(!out.contains("Range") && !out.contains("pipeline"), "{out}");
+    assert!(!out.contains("Range") && !out.contains("for_each"), "{out}");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let steps = doc["pipeline"]["processors"].as_sequence().expect("bound");
+    assert_eq!(names(steps), ["mutation", "catch"]);
 }
 
 const CSV_HTTP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -486,9 +497,10 @@ spec:
     format: csv
 "#;
 
-/// PL-113, T-5350: an `http` body is one message unless the connection says it is CSV; then the
+/// PL-114, T-5350: an `http` body is one message unless the connection says it is CSV; then the
 /// rows reach the author's steps one message each, before them, the way the pipeline test splits
-/// a CSV sample. Without `format` nothing is prepended, so a JSON page stays whole (PL-47).
+/// a CSV sample, after the body bound (PL-113). Without `format` only the bound is prepended, so a
+/// JSON page stays whole (PL-47).
 #[test]
 fn a_csv_http_body_reaches_the_steps_one_row_per_message() {
     let spec = source(CSV_HTTP);
@@ -502,13 +514,14 @@ fn a_csv_http_body_reaches_the_steps_one_row_per_message() {
     let processors = doc["pipeline"]["processors"]
         .as_sequence()
         .expect("processors");
-    assert_eq!(processors.len(), 2);
+    assert_eq!(processors.len(), 4, "{out}");
+    assert!(processors[1].get("catch").is_some(), "{out}");
     assert_eq!(
-        processors[0]["unarchive"]["format"].as_str(),
+        processors[2]["unarchive"]["format"].as_str(),
         Some("csv"),
         "{out}"
     );
-    assert_eq!(processors[1]["mapping"].as_str(), Some("root = this"));
+    assert_eq!(processors[3]["mapping"].as_str(), Some("root = this"));
 
     let whole = source(&CSV_HTTP.replace("    format: csv\n", ""));
     let out = render(
@@ -520,18 +533,18 @@ fn a_csv_http_body_reaches_the_steps_one_row_per_message() {
     let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
     assert_eq!(
         doc["pipeline"]["processors"].as_sequence().map(Vec::len),
-        Some(1)
+        Some(3)
     );
 }
 
-/// PL-113: `csv` is the only body format; anything else is refused when the manifest is read.
+/// PL-114: `csv` is the only body format; anything else is refused when the manifest is read.
 #[test]
 fn an_unknown_http_body_format_is_refused() {
     let yaml = CSV_HTTP.replace("format: csv", "format: xlsx");
     assert!(ResourceEnvelope::<DataSourceSpec>::from_yaml(&yaml).is_err());
 }
 
-/// PL-72 + PL-113: the rows of a CSV member are split after the archive read, never before it.
+/// PL-72 + PL-114: the rows of a CSV member are split after the archive read, never before it.
 #[test]
 fn an_archive_of_csv_members_splits_rows_after_the_ranged_read() {
     let spec = source(&ZIP.replace("    archive:\n", "    format: csv\n    archive:\n"));
@@ -541,7 +554,7 @@ fn an_archive_of_csv_members_splits_rows_after_the_ranged_read() {
     let processors = doc["pipeline"]["processors"]
         .as_sequence()
         .expect("processors");
-    assert_eq!(processors.len(), 4);
-    assert!(processors[2].get("for_each").is_some());
-    assert_eq!(processors[3]["unarchive"]["format"].as_str(), Some("csv"));
+    assert_eq!(processors.len(), 6);
+    assert!(processors[4].get("for_each").is_some());
+    assert_eq!(processors[5]["unarchive"]["format"].as_str(), Some("csv"));
 }

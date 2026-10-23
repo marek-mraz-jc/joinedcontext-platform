@@ -13,6 +13,7 @@
 //! 6. forward with the tenant pinned, then project the answer back down (R9, R22).
 
 use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, admit_space, principal_of};
 use crate::handlers::respond::{json_response, typed_json_response};
 use crate::handlers::schema;
@@ -23,7 +24,7 @@ use crate::handlers::writes::{
     Refused,
 };
 use crate::middleware::response::RESULTS_RESTRICTED;
-use crate::pdp::evaluator::{Constraints, Subject};
+use crate::pdp::evaluator::Constraints;
 use crate::pdp::write_guard;
 use crate::proxy::{self};
 use crate::resolver::Endpoint;

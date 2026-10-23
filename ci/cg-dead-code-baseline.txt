@@ -3,7 +3,7 @@
 agent-proxy | 3
 assistant | 1
 context-gateway | 20
-jc-core | 44
+jc-core | 41
 jc-manifest | 2
 jcctl | 28
 wasm-host | 6

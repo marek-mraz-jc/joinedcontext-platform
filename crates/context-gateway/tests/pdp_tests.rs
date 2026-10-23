@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use context_gateway::pdp::evaluator::{evaluate, Request, Subject, Verdict, NOTHING};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{evaluate, Request, Verdict, NOTHING};
 use jc_core::kinds::{Operation, PolicySpec};
 use std::collections::BTreeSet;
 

@@ -14,8 +14,8 @@
 //! `agreementId` establishes the consumer's DID and nothing else, and every grant it gets
 //! comes from the `Policy` entities the ODRL mapper compiled from the agreement.
 
+use crate::auth::subject::Subject;
 use crate::auth::token::Claims;
-use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
 use jc_core::kinds::{AgreementRole, DataAgreementSpec};

@@ -305,7 +305,7 @@
       "type": "object"
     },
     "HttpBodyFormat": {
-      "description": "How an `http` connection splits the body it fetched into messages (PL-113).",
+      "description": "How an `http` connection splits the body it fetched into messages (PL-114).",
       "oneOf": [
         {
           "description": "A CSV file with a header row: one message per row, the shape Bento's `csv` input sends.",
@@ -351,7 +351,7 @@
               "type": "null"
             }
           ],
-          "description": "How the body becomes messages: `csv` hands each row to the steps as one message keyed by the header's column names; absent, the whole body is one message (PL-113)."
+          "description": "How the body becomes messages: `csv` hands each row to the steps as one message keyed by the header's column names; absent, the whole body is one message (PL-114)."
         },
         "headers": {
           "additionalProperties": {
@@ -359,6 +359,15 @@
           },
           "description": "Static request headers. A header carrying a credential belongs in `authorization`.",
           "type": "object"
+        },
+        "maxBytes": {
+          "description": "The largest response body accepted, in bytes; 32 MiB when absent, at most 256 MiB. The runner refuses a larger body before any step of the pipeline sees it (PL-113).",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "timeout": {
           "description": "Request timeout as a Bento duration, `10s`.",

@@ -1381,7 +1381,8 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{language_map, normalize, portal_personal_data_read, PORTAL_RECONCILER_USER};
-    use crate::pdp::evaluator::{evaluate, Request, Subject};
+    use crate::auth::subject::Subject;
+    use crate::pdp::evaluator::{evaluate, Request};
     use crate::resolver::DeclaredTypes;
     use jc_core::kinds::Operation;
     use jc_manifest::model_schema::ModelSchema;

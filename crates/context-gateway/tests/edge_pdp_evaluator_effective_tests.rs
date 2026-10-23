@@ -8,7 +8,8 @@
 //! is a policy a caller is told about without holding it.
 
 use chrono::{DateTime, Utc};
-use context_gateway::pdp::evaluator::{effective, Subject};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::effective;
 use jc_core::kinds::{PolicySpec, Principal, PrincipalKind};
 use std::collections::BTreeSet;
 

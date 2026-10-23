@@ -582,7 +582,7 @@ fn unknown_type_nope_is_refused_and_names_accepted_types() {
 }
 
 /// PL-50: the inputs `kinds/bento_inputs.rs` marks as file readers (`FILE_READERS`) read only
-/// under `/data`.
+/// under their own project's folder, `/data/<project>/` (T-5337).
 #[test]
 fn file_reader_paths_must_start_with_data_and_have_no_dotdot() {
     let csv_bad_path = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -599,11 +599,20 @@ spec:
     let err = source.validate().expect_err("/tmp path refused");
     assert!(err.to_string().contains("spec.input.paths"), "{err}");
 
-    let csv_valid = csv_bad_path.replace("/tmp/x.csv", "/data/x.csv");
-    let source_ok = DataSource::from_yaml(&csv_valid).expect("parses");
-    source_ok.validate().expect("/data/x.csv accepted");
+    let csv_other = csv_bad_path.replace("/tmp/x.csv", "/data/x.csv");
+    let source_other = DataSource::from_yaml(&csv_other).expect("parses");
+    let err = source_other
+        .validate()
+        .expect_err("outside the project's folder");
+    assert!(err.to_string().contains("/data/<project>/"), "{err}");
 
-    let csv_dotdot = csv_bad_path.replace("/tmp/x.csv", "/data/../x.csv");
+    let csv_valid = csv_bad_path.replace("/tmp/x.csv", "/data/bb-ovzdusie/x.csv");
+    let source_ok = DataSource::from_yaml(&csv_valid).expect("parses");
+    source_ok
+        .validate()
+        .expect("/data/bb-ovzdusie/x.csv accepted");
+
+    let csv_dotdot = csv_bad_path.replace("/tmp/x.csv", "/data/bb-ovzdusie/../x.csv");
     let source_dotdot = DataSource::from_yaml(&csv_dotdot).expect("parses");
     let err = source_dotdot.validate().expect_err(".. refused");
     assert!(err.to_string().contains("spec.input.paths"), "{err}");
@@ -772,4 +781,30 @@ fn a_broker_ref_names_an_mqtt_broker_of_the_project_and_no_credential() {
         let err = source.validate().expect_err(why).to_string();
         assert!(err.contains(why), "{extra}: {err}");
     }
+}
+
+/// PL-113: every `http` connection bounds the body it reads; the bound ends up in the rendered
+/// mapping, so it is a number in range or the manifest is refused.
+#[test]
+fn an_http_body_bound_is_one_byte_to_256_mib() {
+    let plain = ZIP.split("    archive:").next().unwrap().to_owned();
+    let source = DataSource::from_yaml(&plain).expect("parses");
+    source.validate().expect("no bound named");
+    let http = source.spec.http.as_ref().unwrap();
+    assert_eq!(http.max_bytes(), 32 * 1024 * 1024, "the default bound");
+    for (bound, valid) in [
+        ("0", false),
+        ("1", true),
+        ("268435456", true),
+        ("268435457", false),
+        ("-1", false),
+        ("'16'", false),
+    ] {
+        let yaml = format!("{plain}    maxBytes: {bound}\n");
+        let accepted = DataSource::from_yaml(&yaml).is_ok_and(|s| s.validate().is_ok());
+        assert_eq!(accepted, valid, "maxBytes {bound}");
+    }
+    let zero = DataSource::from_yaml(&format!("{plain}    maxBytes: 0\n")).unwrap();
+    let refused = zero.validate().unwrap_err().to_string();
+    assert!(refused.contains("spec.http.maxBytes"), "{refused}");
 }

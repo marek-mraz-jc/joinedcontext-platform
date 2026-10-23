@@ -13,7 +13,8 @@
 //! It prints one line, `pdp_decision p50_us=… p99_us=… rules=250`. Under `cargo test`
 //! (no `--bench`) it decides a hundred times and checks the verdict, so the bench cannot rot.
 
-use context_gateway::pdp::evaluator::{Request, Subject, Verdict};
+use context_gateway::auth::subject::Subject;
+use context_gateway::pdp::evaluator::{Request, Verdict};
 use context_gateway::pdp::{Pdp, PolicyPdp};
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Operation, PolicySpec, Representation};

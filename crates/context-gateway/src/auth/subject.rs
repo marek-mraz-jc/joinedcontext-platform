@@ -4,7 +4,6 @@
 use crate::app::Gateway;
 use crate::auth::dataspace_token::{self};
 use crate::auth::token::{self, Claims};
-use crate::pdp::evaluator::Subject;
 use crate::resolver::{Endpoint, Space};
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
@@ -15,6 +14,48 @@ use jc_core::kinds::{Audience, Operation, Representation};
 use jc_core::ProblemDetails;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+
+/// Who is calling, as established by the PEP — never as claimed by the client (GW20).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Subject {
+    /// The authenticated user, absent for an anonymous caller.
+    pub user: Option<String>,
+    /// The service account, when a workload is calling (PF-34).
+    pub service_account: Option<String>,
+    /// The project that service account belongs to: a `{project}/{name}` assignee matches only
+    /// that project's account (PL-92).
+    pub service_account_project: Option<String>,
+    /// The groups the token asserts.
+    pub groups: BTreeSet<String>,
+    /// The roles the token asserts. An anonymous caller holds exactly `public` (GW22).
+    pub roles: BTreeSet<String>,
+    /// The decentralized identifier of a data-space participant, when one is calling.
+    pub did: Option<String>,
+    /// The data space agreement this caller acts under, which every audit record produced
+    /// under it carries (DS-13). Never a grant of its own: what the agreement allows is in
+    /// the `Policy` entities compiled from it.
+    pub agreement: Option<String>,
+    /// The service account a person's call came through, when a delegating client exchanged
+    /// their token (ADR-N-038, AG-95). The audit line names it; it grants nothing, so it is
+    /// never matched as a principal.
+    pub via: Option<String>,
+    /// The Keycloak client a person's token was issued to (`azp`): `portal-ui` makes a write's
+    /// channel `ui` (ADR-N-054 2.3). Grants nothing.
+    pub client: Option<String>,
+    /// The Organization of the Project the caller was admitted under, for a write's provenance
+    /// (ADR-N-054 2.3). Grants nothing.
+    pub organization: Option<String>,
+}
+
+impl Subject {
+    /// The anonymous caller: the role `public` and nothing else (GW22).
+    pub fn anonymous() -> Self {
+        Self {
+            roles: BTreeSet::from(["public".to_owned()]),
+            ..Self::default()
+        }
+    }
+}
 
 /// Establishes who is calling, from the verified token or from nobody (PF-45, PF-46).
 ///

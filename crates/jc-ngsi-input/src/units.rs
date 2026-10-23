@@ -154,7 +154,7 @@ pub struct Shape<'a> {
     pub targeted: Option<&'a str>,
 }
 
-pub(crate) fn types_of<'a>(
+pub fn types_of<'a>(
     entity: &'a serde_json::Map<String, Value>,
     addressed: Option<&'a str>,
 ) -> Vec<&'a str> {

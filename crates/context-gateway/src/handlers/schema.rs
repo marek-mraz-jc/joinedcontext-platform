@@ -8,9 +8,8 @@
 //!
 //! A class or a slot the caller may not read is absent, and nothing says which (EP-47, T-2133).
 
-use crate::pdp::evaluator::{
-    effective, granted_attrs, granted_types, narrow, narrow_to_identity, Subject,
-};
+use crate::auth::subject::Subject;
+use crate::pdp::evaluator::{effective, granted_attrs, granted_types, narrow, narrow_to_identity};
 use crate::resolver::{Endpoint, Model};
 use chrono::{DateTime, Utc};
 use jc_core::system_members::is_entity_system_member;

@@ -3,12 +3,12 @@
 
 use crate::activity::Outcome;
 use crate::app::{Gateway, MAX_BODY};
+use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, admit_space, principal_of};
 use crate::auth::token;
 use crate::handlers::ngsi_ld::{broker_failure, view_request, MAX_VIEW_ID};
 use crate::handlers::respond::json_response;
 use crate::middleware::rate_limit::{self};
-use crate::pdp::evaluator::Subject;
 use crate::proxy::{self};
 use crate::resolver::Endpoint;
 use crate::{mcp, middleware::tenancy, query};

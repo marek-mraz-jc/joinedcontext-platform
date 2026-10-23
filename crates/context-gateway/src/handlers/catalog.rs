@@ -2,9 +2,9 @@
 
 use crate::app::Gateway;
 use crate::auth::subject::admit;
+use crate::auth::subject::Subject;
 use crate::handlers::{endpoint_surface, schema_routes, space_surface};
 use crate::middleware::tenancy;
-use crate::pdp::evaluator::Subject;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response};

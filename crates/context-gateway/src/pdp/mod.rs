@@ -10,9 +10,10 @@ pub mod scope_folding;
 pub mod temporal;
 pub mod write_guard;
 
+use crate::auth::subject::Subject;
 use crate::resolver::Endpoint;
 use chrono::{DateTime, Utc};
-use evaluator::{Request, Subject, Verdict};
+use evaluator::{Request, Verdict};
 use jc_core::kinds::Operation;
 use jc_core::system_members::is_entity_system_member;
 use std::collections::{BTreeMap, BTreeSet};

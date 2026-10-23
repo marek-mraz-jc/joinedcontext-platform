@@ -12,6 +12,7 @@ use crate::urn::Urn;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// The entity type of every indicator.
 pub const KPI_TYPE: &str = "KeyPerformanceIndicator";
@@ -62,6 +63,24 @@ impl<T> Property<T> {
 pub enum PropertyKind {
     /// `"Property"`.
     Property,
+}
+
+/// A LanguageProperty in normalized NGSI-LD form: one text per language.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct LanguageProperty {
+    /// Always `LanguageProperty`.
+    #[serde(rename = "type")]
+    pub kind: LanguagePropertyKind,
+    /// The text per BCP 47 language tag, such as `{"sk": "Index starnutia", "en": "Ageing index"}`.
+    pub language_map: BTreeMap<String, String>,
+}
+
+/// The one value `type` takes on a LanguageProperty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum LanguagePropertyKind {
+    /// `"LanguageProperty"`.
+    LanguageProperty,
 }
 
 /// Provenance in normalized NGSI-LD form (PF-55): a Property whose value is one URN or several.
@@ -154,6 +173,9 @@ pub struct KeyPerformanceIndicator {
     pub entity_type: String,
     /// The short name, the `{localId}` of the id.
     pub name: Property<String>,
+    /// The human name per language, which a table labels the row with in place of `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<LanguageProperty>,
     /// How the value is computed, e.g. `avg(pm10) over AirQualityObserved`.
     pub calculation_formula: Property<String>,
     /// The value as last computed, with its unit code and observation time.
@@ -191,6 +213,7 @@ impl KeyPerformanceIndicator {
             id: urn.to_string(),
             entity_type: KPI_TYPE.to_owned(),
             name: Property::new(urn.local_id().to_owned()),
+            title: None,
             calculation_formula: Property::new(formula.to_owned()),
             current_value,
             calculation_period: Property::new(period),
@@ -237,6 +260,20 @@ impl KeyPerformanceIndicator {
                 value: self.name.value.clone(),
                 reason: "the name is the {localId} of the id",
             });
+        }
+        if let Some(title) = &self.title {
+            let blank = |(tag, text): (&String, &String)| {
+                tag.is_empty()
+                    || !tag.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    || text.trim().is_empty()
+            };
+            if title.language_map.is_empty() || title.language_map.iter().any(blank) {
+                return Err(Error::Name {
+                    field: "title",
+                    value: String::new(),
+                    reason: "a text in at least one language, each under a language tag such as sk or en",
+                });
+            }
         }
         if self.calculation_formula.value.trim().is_empty() {
             return Err(Error::Name {
@@ -314,6 +351,7 @@ pub fn context() -> Value {
         {
             "KeyPerformanceIndicator": format!("{KPI_NAMESPACE}KeyPerformanceIndicator"),
             "name": format!("{KPI_NAMESPACE}name"),
+            "title": format!("{KPI_NAMESPACE}title"),
             "calculationFormula": format!("{KPI_NAMESPACE}calculationFormula"),
             "currentValue": format!("{KPI_NAMESPACE}currentValue"),
             "calculationPeriod": format!("{KPI_NAMESPACE}calculationPeriod"),

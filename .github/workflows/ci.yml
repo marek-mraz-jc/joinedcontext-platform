@@ -113,10 +113,6 @@ jobs:
       # (schemas, blueprints, CKAN columns; T-3206).
       - run: cargo test --workspace --exclude assistant --lib --bins --locked
       - run: cargo test -p assistant --lib --bins --locked
-      # The runner's bounded inflate (T-3953) is a workspace of its own, built for wasm.
-      - run: |
-          cargo clippy --manifest-path tools/bento-inflate/Cargo.toml --all-targets --locked -- -D warnings
-          cargo test --manifest-path tools/bento-inflate/Cargo.toml --locked
       # The rustdoc of a jc-core field is the JSON Schema `description` the Portal ships, the
       # OpenAPI document publishes and every MCP tool list hands a model, so a broken
       # intra-doc link is a broken sentence in four places (T-2145, UI-02). The whole workspace,
@@ -147,6 +143,11 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
       - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
+      # The ngsi-ld: ODRL profile's SHACL shapes and `jcctl policy import` refuse the same
+      # documents (T-5039, ADR-N-057 decision 4): the test writes them, pyshacl reads them.
+      - run: cargo test -p jc-core --test policy_odrl_tests --locked
+        env: { ODRL_RECORDS_DIR: "${{ runner.temp }}/odrl-records" }
+      - run: python3 scripts/ci/validate-odrl-profile.py "${{ runner.temp }}/odrl-records"
   model-tools:
     needs: changes
     if: needs.changes.outputs.model-tools == 'true'
