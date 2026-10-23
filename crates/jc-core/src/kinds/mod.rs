@@ -79,7 +79,7 @@ pub use data_model::{
 };
 pub use data_source::{
     check_class, ArchiveFormat, Authorization, DataSourceSpec, DataSourceType, GtfsFeed,
-    GtfsRtConnection, HttpArchive, HttpConnection, MqttConnection, TlsSettings,
+    GtfsRtConnection, HttpArchive, HttpBodyFormat, HttpConnection, MqttConnection, TlsSettings,
     WebSocketConnection,
 };
 pub use dataspace::{

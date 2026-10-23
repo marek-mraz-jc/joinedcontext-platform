@@ -178,6 +178,10 @@ pub struct HttpConnection {
     /// The members of a zip archive to read, by HTTP `Range`, instead of the whole body (PL-72).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<HttpArchive>,
+    /// How the body becomes messages: `csv` hands each row to the steps as one message keyed by
+    /// the header's column names; absent, the whole body is one message (PL-114).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<HttpBodyFormat>,
     /// The largest response body accepted, in bytes; 32 MiB when absent, at most 256 MiB. The
     /// runner refuses a larger body before any step of the pipeline sees it (PL-113).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +198,14 @@ impl HttpConnection {
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes.unwrap_or(Self::DEFAULT_MAX_BYTES)
     }
+}
+
+/// How an `http` connection splits the body it fetched into messages (PL-114).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpBodyFormat {
+    /// A CSV file with a header row: one message per row, the shape Bento's `csv` input sends.
+    Csv,
 }
 
 /// The named members of the archive an `http` connection serves (PL-72, Architecture/08 §6).

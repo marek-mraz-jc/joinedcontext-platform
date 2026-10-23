@@ -486,3 +486,75 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let steps = doc["pipeline"]["processors"].as_sequence().expect("bound");
     assert_eq!(names(steps), ["mutation", "catch"]);
 }
+
+const CSV_HTTP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DataSource
+metadata: { name: stations-csv, namespace: helsinki }
+spec:
+  type: http
+  http:
+    url: https://data.example.org/stations.csv
+    format: csv
+"#;
+
+/// PL-114, T-5350: an `http` body is one message unless the connection says it is CSV; then the
+/// rows reach the author's steps one message each, before them, the way the pipeline test splits
+/// a CSV sample, after the body bound (PL-113). Without `format` only the bound is prepended, so a
+/// JSON page stays whole (PL-47).
+#[test]
+fn a_csv_http_body_reaches_the_steps_one_row_per_message() {
+    let spec = source(CSV_HTTP);
+    let out = render(
+        "pipeline:\n  processors:\n    - mapping: root = this\n",
+        &spec,
+        &context("stations-csv"),
+    )
+    .expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let processors = doc["pipeline"]["processors"]
+        .as_sequence()
+        .expect("processors");
+    assert_eq!(processors.len(), 4, "{out}");
+    assert!(processors[1].get("catch").is_some(), "{out}");
+    assert_eq!(
+        processors[2]["unarchive"]["format"].as_str(),
+        Some("csv"),
+        "{out}"
+    );
+    assert_eq!(processors[3]["mapping"].as_str(), Some("root = this"));
+
+    let whole = source(&CSV_HTTP.replace("    format: csv\n", ""));
+    let out = render(
+        "pipeline:\n  processors:\n    - mapping: root = this\n",
+        &whole,
+        &context("stations-csv"),
+    )
+    .expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    assert_eq!(
+        doc["pipeline"]["processors"].as_sequence().map(Vec::len),
+        Some(3)
+    );
+}
+
+/// PL-114: `csv` is the only body format; anything else is refused when the manifest is read.
+#[test]
+fn an_unknown_http_body_format_is_refused() {
+    let yaml = CSV_HTTP.replace("format: csv", "format: xlsx");
+    assert!(ResourceEnvelope::<DataSourceSpec>::from_yaml(&yaml).is_err());
+}
+
+/// PL-72 + PL-114: the rows of a CSV member are split after the archive read, never before it.
+#[test]
+fn an_archive_of_csv_members_splits_rows_after_the_ranged_read() {
+    let spec = source(&ZIP.replace("    archive:\n", "    format: csv\n    archive:\n"));
+    let out =
+        render("pipeline:\n  processors: []\n", &spec, &context("hsl-gtfs")).expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let processors = doc["pipeline"]["processors"]
+        .as_sequence()
+        .expect("processors");
+    assert_eq!(processors.len(), 6);
+    assert!(processors[4].get("for_each").is_some());
+    assert_eq!(processors[5]["unarchive"]["format"].as_str(), Some("csv"));
+}

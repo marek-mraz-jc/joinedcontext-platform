@@ -304,6 +304,18 @@
       ],
       "type": "object"
     },
+    "HttpBodyFormat": {
+      "description": "How an `http` connection splits the body it fetched into messages (PL-114).",
+      "oneOf": [
+        {
+          "description": "A CSV file with a header row: one message per row, the shape Bento's `csv` input sends.",
+          "enum": [
+            "csv"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "HttpConnection": {
       "additionalProperties": false,
       "description": "An HTTP resource the runner polls (Architecture/08 §6).",
@@ -329,6 +341,17 @@
             }
           ],
           "description": "The `Authorization` header, built from a secret (CC-06)."
+        },
+        "format": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HttpBodyFormat"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the body becomes messages: `csv` hands each row to the steps as one message keyed by the header's column names; absent, the whole body is one message (PL-114)."
         },
         "headers": {
           "additionalProperties": {
