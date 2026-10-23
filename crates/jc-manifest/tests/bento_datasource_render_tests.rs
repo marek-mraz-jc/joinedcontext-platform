@@ -423,12 +423,20 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let outer = doc["pipeline"]["processors"]
         .as_sequence()
         .expect("processors");
-    assert_eq!(names(outer), ["try", "catch", "for_each", "unarchive"]);
+    assert_eq!(
+        names(outer),
+        ["mutation", "catch", "try", "catch", "for_each", "unarchive"]
+    );
+    // The body bound comes first, so even a server that ignores Range is held to maxBytes.
+    assert!(outer[0]["mutation"]
+        .as_str()
+        .unwrap()
+        .contains("content().length() > 33554432"));
     // The first refusal skips the rest, so an unchecked directory never reaches a request.
-    let listing = outer[0]["try"].as_sequence().expect("the directory");
+    let listing = outer[2]["try"].as_sequence().expect("the directory");
     assert_eq!(names(listing), ["mapping", "unarchive"]);
     // Each member is a batch of its own, so a refused one never stops another (T-4752).
-    let each = outer[2]["for_each"].as_sequence().expect("per member");
+    let each = outer[4]["for_each"].as_sequence().expect("per member");
     assert_eq!(names(each), ["try", "catch"]);
     let steps = each[0]["try"].as_sequence().expect("the read");
     assert_eq!(
@@ -460,12 +468,12 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
     let check = steps[4]["mapping"].as_str().unwrap();
     assert!(check.contains("the directory says"));
     assert!(!out.contains("wasm"), "{out}");
-    for refused in [&outer[1]["catch"], &each[1]["catch"]] {
+    for refused in [&outer[1]["catch"], &outer[3]["catch"], &each[1]["catch"]] {
         assert_eq!(refused[1]["mapping"].as_str(), Some("root = deleted()"));
     }
-    assert_eq!(outer[3]["unarchive"]["format"].as_str(), Some("csv"));
+    assert_eq!(outer[5]["unarchive"]["format"].as_str(), Some("csv"));
 
-    // Without `archive` the same connection renders as it did: no range, nothing prepended.
+    // Without `archive` the same connection keeps only the body bound: no range, no member read.
     let plain = source(
         &ZIP.split("    archive:")
             .next()
@@ -473,5 +481,8 @@ fn an_archive_reads_its_named_members_by_range_before_the_authors_processors() {
             .replace("hsl.zip", "x.json"),
     );
     let out = render("", &plain, &context("hsl-gtfs")).expect("renders");
-    assert!(!out.contains("Range") && !out.contains("pipeline"), "{out}");
+    assert!(!out.contains("Range") && !out.contains("for_each"), "{out}");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let steps = doc["pipeline"]["processors"].as_sequence().expect("bound");
+    assert_eq!(names(steps), ["mutation", "catch"]);
 }
