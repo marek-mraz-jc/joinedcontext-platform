@@ -17,7 +17,7 @@ use crate::handlers::respond::text_response;
 use crate::handlers::respond::typed_json_response;
 use crate::pdp::evaluator::Subject;
 use crate::resolver::Endpoint;
-use crate::{middleware::tenancy, proxy};
+use crate::{middleware::rate_limit, middleware::tenancy, proxy};
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::extract::{Path, Request, State};
@@ -28,6 +28,7 @@ use axum::http::{HeaderValue, Method};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use futures_util::stream::{self, StreamExt};
 use jc_core::kinds::Operation;
 use jc_core::ProblemDetails;
 use serde::Deserialize;
@@ -323,6 +324,218 @@ pub(crate) async fn access_check(
     }
 }
 
+/// The most decisions one `access/v1/evaluations` request asks (ADR-N-057 decision 3): a form
+/// asks once for every option it shows, and no caller turns one request into more broker hops.
+pub(crate) const MAX_EVALUATIONS: usize = 100;
+
+/// How many of a batch's decisions are asked of the broker at once.
+const EVALUATIONS_IN_FLIGHT: usize = 16;
+
+/// `POST access/v1/evaluation`: one AuthZEN 1.0 Access Evaluation, decided by the broker's engine
+/// through the view like `access/check` and a real request (EP-06, ADR-N-057 decision 3).
+pub(crate) async fn access_evaluation(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    let (endpoint, subject, asked) = match evaluation_request(&gateway, &slug, request).await {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let item = match evaluation(&subject, &asked, &Value::Null) {
+        Ok(item) => item,
+        Err(problem) => return *problem,
+    };
+    match from_view(&gateway, &endpoint, &subject, ViewCall::Check(item)).await {
+        Ok(decision) => json_response(&decision),
+        Err(answer) => *answer,
+    }
+}
+
+/// `POST access/v1/evaluations`: up to [`MAX_EVALUATIONS`] AuthZEN 1.0 evaluations, each item's
+/// members over the request's defaults, every one decided (`execute_all`) and answered in the
+/// order asked. A malformed item refuses the whole request before the broker is asked, and a
+/// broker failure on any item fails it whole: no partial answer reads as a decision.
+pub(crate) async fn access_evaluations(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    let caller = rate_limit::caller_of(&gateway, &request);
+    let (endpoint, subject, asked) = match evaluation_request(&gateway, &slug, request).await {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let asks = match batch(&subject, &asked) {
+        Ok(asks) => asks,
+        Err(problem) => return *problem,
+    };
+    // The rate limit layer spent one request; each further decision is one more (EP-20).
+    let extra = u32::try_from(asks.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let charged = match rate_limit::charge(&gateway, &endpoint, &caller, extra) {
+        Ok(charged) => charged,
+        Err(refused) => return *refused,
+    };
+    let decisions: Vec<_> = stream::iter(asks)
+        .map(|ask| from_view(&gateway, &endpoint, &subject, ViewCall::Check(ask)))
+        .buffered(EVALUATIONS_IN_FLIGHT)
+        .collect()
+        .await;
+    let mut answer = match decisions.into_iter().collect::<Result<Vec<_>, _>>() {
+        Ok(decisions) => json_response(&json!({ "evaluations": decisions })),
+        Err(answer) => *answer,
+    };
+    if let Some(charged) = charged {
+        rate_limit::set_headers(answer.headers_mut(), &charged);
+    }
+    answer
+}
+
+/// The evaluations of a batch request, each as the view's `access/check` reads it, or the `400`
+/// (or `403`) that refuses the whole request.
+fn batch(subject: &Subject, asked: &Value) -> Result<Vec<Bytes>, Box<Response<Body>>> {
+    let refused = |detail: String| {
+        Box::new(
+            ProblemDetails::bad_request()
+                .with_detail(detail)
+                .into_response(),
+        )
+    };
+    let semantic = asked.pointer("/options/evaluations_semantic");
+    if semantic.is_some_and(|semantic| semantic != "execute_all") {
+        return Err(refused(
+            "options.evaluations_semantic: only execute_all is served".to_owned(),
+        ));
+    }
+    let Some(items) = asked.get("evaluations").and_then(Value::as_array) else {
+        return Err(refused(format!(
+            "evaluations is required: a list of 1 to {MAX_EVALUATIONS} evaluations"
+        )));
+    };
+    if items.is_empty() || items.len() > MAX_EVALUATIONS {
+        return Err(refused(format!(
+            "evaluations holds {} items; 1 to {MAX_EVALUATIONS} are answered",
+            items.len()
+        )));
+    }
+    if items.iter().any(|item| !item.is_object()) {
+        return Err(refused(
+            "every item of evaluations is a JSON object".to_owned(),
+        ));
+    }
+    let asks = items
+        .iter()
+        .map(|item| evaluation(subject, asked, item))
+        .collect::<Result<Vec<_>, _>>()?;
+    if asks.iter().map(Bytes::len).sum::<usize>() > MAX_BATCH_BYTES {
+        return Err(refused(
+            "the evaluations with the request's defaults copied into each are over 1 MiB together: send a smaller context or fewer items".to_owned(),
+        ));
+    }
+    Ok(asks)
+}
+
+/// The most bytes an evaluation request may hold: what `access/check` reads. An ask is built
+/// from members of the body, so none is longer.
+const MAX_EVALUATION_BYTES: usize = 64 * 1024;
+
+/// The most bytes a batch's asks send on together, 16 checks' worth: the request's defaults are
+/// copied into every item, and one request never turns into megabytes of broker bodies.
+const MAX_BATCH_BYTES: usize = 16 * MAX_EVALUATION_BYTES;
+
+/// The admitted caller and their request body, read the way `access/check` reads one.
+async fn evaluation_request(
+    gateway: &Gateway,
+    slug: &str,
+    mut request: Request,
+) -> Result<(Arc<Endpoint>, Subject, Value), Box<Response<Body>>> {
+    tenancy::strip_client_headers(&mut request);
+    let (endpoint, subject) = admit(gateway, slug, None, request.headers())?;
+    let (_, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_EVALUATION_BYTES).await else {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail("the request body is over 64 KiB")
+                .into_response(),
+        ));
+    };
+    let Ok(asked @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) else {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail("request body is not a JSON object")
+                .into_response(),
+        ));
+    };
+    if !has_view(&view_of(&endpoint)) {
+        return Err(Box::new(no_view(&endpoint)));
+    }
+    Ok((endpoint, subject, asked))
+}
+
+/// One evaluation as the view's `access/check` reads it: `item`'s `action`, `resource` and
+/// `context`, each falling back to the request's own (AuthZEN 1.0 section 7.1). The subject is the
+/// caller's token alone: a `subject` that names anyone else is a 403 (only `access/simulate`
+/// asks about another caller, EP-103), and none is sent on, so the engine decides for the pinned
+/// caller whatever the body says.
+fn evaluation(
+    subject: &Subject,
+    defaults: &Value,
+    item: &Value,
+) -> Result<Bytes, Box<Response<Body>>> {
+    let member = |name: &str| item.get(name).or_else(|| defaults.get(name));
+    if let Some(named) = member("subject") {
+        if !names_the_caller(subject, named) {
+            tracing::warn!(
+                principal = %principal_of(subject),
+                "an access evaluation named a subject other than the caller"
+            );
+            return Err(Box::new(
+                ProblemDetails::forbidden()
+                    .with_detail("subject must be the caller: omit it or name your own token's")
+                    .into_response(),
+            ));
+        }
+    }
+    let mut ask = serde_json::Map::new();
+    for name in ["action", "resource", "context"] {
+        if let Some(value) = member(name) {
+            ask.insert(name.to_owned(), value.clone());
+        }
+    }
+    if ask
+        .get("action")
+        .and_then(|action| action.get("name"))
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail("action.name is required")
+                .into_response(),
+        ));
+    }
+    Ok(Bytes::from(Value::Object(ask).to_string()))
+}
+
+/// Whether an AuthZEN `subject` (`type` and `id`) is the caller: their user, their service
+/// account, their DID, or, for an anonymous caller, the role `public` the engine names them by.
+fn names_the_caller(subject: &Subject, named: &Value) -> bool {
+    let (Some(kind), Some(id)) = (
+        named.get("type").and_then(Value::as_str),
+        named.get("id").and_then(Value::as_str),
+    ) else {
+        return false;
+    };
+    let own = match kind {
+        "user" => subject.user.as_deref(),
+        "serviceAccount" => subject.service_account.as_deref(),
+        "did" => subject.did.as_deref(),
+        "role" if principal_of(subject) == "anonymous" => Some("public"),
+        _ => None,
+    };
+    own == Some(id)
+}
+
 /// One `access/simulate` request (EP-103): the `access/check` request with the subject it is
 /// asked for, or, with no `action`, the question of everything the subject is granted (T-3792).
 #[derive(Debug, Deserialize)]
@@ -597,7 +810,60 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
         .route(
+            "/api/endpoint/{slug}/access/v1/evaluation",
+            post(access_evaluation),
+        )
+        .route(
+            "/api/endpoint/{slug}/access/v1/evaluations",
+            post(access_evaluations),
+        )
+        .route(
             "/api/endpoint/{slug}/access/simulate",
             post(access_simulate),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ADR-N-057 decision 3: an evaluation names the caller or nobody; the caller's own name in
+    /// any other kind, or anyone else's, is not theirs.
+    #[test]
+    fn a_subject_is_the_callers_only_by_their_own_kind_and_id() {
+        let jana = Subject {
+            user: Some("jana".to_owned()),
+            ..Subject::default()
+        };
+        assert!(names_the_caller(
+            &jana,
+            &json!({ "type": "user", "id": "jana" })
+        ));
+        for other in [
+            json!({ "type": "user", "id": "peter" }),
+            json!({ "type": "serviceAccount", "id": "jana" }),
+            json!({ "type": "role", "id": "public" }),
+            json!({ "type": "user" }),
+            json!("jana"),
+        ] {
+            assert!(!names_the_caller(&jana, &other), "{other}");
+        }
+        let anonymous = Subject::anonymous();
+        assert!(names_the_caller(
+            &anonymous,
+            &json!({ "type": "role", "id": "public" })
+        ));
+        assert!(!names_the_caller(
+            &anonymous,
+            &json!({ "type": "role", "id": "admin" })
+        ));
+        let account = Subject {
+            service_account: Some("ingest".to_owned()),
+            ..Subject::default()
+        };
+        assert!(names_the_caller(
+            &account,
+            &json!({ "type": "serviceAccount", "id": "ingest" })
+        ));
+    }
 }

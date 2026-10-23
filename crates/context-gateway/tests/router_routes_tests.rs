@@ -31,6 +31,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/mcp/p/n"),
     ("GET", "/api/mcp/p/n/.well-known/oauth-protected-resource"),
     ("POST", "/api/endpoint/s/access/check"),
+    ("POST", "/api/endpoint/s/access/v1/evaluation"),
+    ("POST", "/api/endpoint/s/access/v1/evaluations"),
     ("POST", "/api/endpoint/s/access/simulate"),
     ("GET", "/api/endpoint/s/file.csv"),
     ("GET", "/api/endpoint/s/ogc/features"),

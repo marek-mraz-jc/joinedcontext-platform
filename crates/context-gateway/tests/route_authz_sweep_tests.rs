@@ -117,6 +117,7 @@ fn rows() -> Vec<Row> {
         json!({"endpoint": SLUG, "type": "Device"}),
     );
     let check = json!({"operation": "queryEntity", "type": "Device"});
+    let evaluation = json!({"action": {"name": "queryEntity"}, "resource": {"type": "Device"}});
     use Guard::*;
     let row = |method, route, send, guard| Row {
         method,
@@ -251,6 +252,21 @@ fn rows() -> Vec<Row> {
             "POST",
             "/api/endpoint/{slug}/access/check",
             post(ep("/access/check"), check.clone()),
+            Member,
+        ),
+        row(
+            "POST",
+            "/api/endpoint/{slug}/access/v1/evaluation",
+            post(ep("/access/v1/evaluation"), evaluation.clone()),
+            Member,
+        ),
+        row(
+            "POST",
+            "/api/endpoint/{slug}/access/v1/evaluations",
+            post(
+                ep("/access/v1/evaluations"),
+                json!({ "evaluations": [evaluation.clone()] }),
+            ),
             Member,
         ),
         row(
