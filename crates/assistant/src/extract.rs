@@ -100,6 +100,71 @@ static EMPTY_BLOCK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new
     .unwrap_or_else(|err| unreachable!("the pattern is fixed: {err}"))
 });
 
+/// A page's navigation and footer: menus, share bars and the address block repeated on every
+/// page, which matched questions by their words and icon names (praha.eu's "Ikona hodiny" clock
+/// answered "otváracie hodiny", T-5368). Gone before conversion; the body keeps what it says.
+// ponytail: a regex over the HTML, not a parse; a nested `<nav>` leaves its outer tail behind.
+static CHROME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?is)<nav\b.*?</nav\s*>|<footer\b.*?</footer\s*>")
+        .unwrap_or_else(|err| unreachable!("the pattern is fixed: {err}"))
+});
+
+/// A Markdown image, `![alt](src)`: its alt text is an icon's name more often than content.
+static IMAGE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"!\[[^\]]*\]\([^)]*\)")
+        .unwrap_or_else(|err| unreachable!("the pattern is fixed: {err}"))
+});
+
+/// A Markdown link, `[text](href)`, read as its text.
+static LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"\[([^\]]*)\]\([^)]*\)")
+        .unwrap_or_else(|err| unreachable!("the pattern is fixed: {err}"))
+});
+
+/// The fewest characters of prose a passage of a page keeps to be stored when the page has a
+/// longer one: below it, a passage is a menu, a share bar or a caption (T-5368). A page whose
+/// every passage is shorter keeps them: a short page of office hours is an answer.
+pub const MIN_PROSE: usize = 200;
+
+/// The fewest characters of its own prose, outside images and links, a passage has to say
+/// anything: under it, it is chrome alone, icons and a menu (T-5368).
+pub const MIN_OWN_PROSE: usize = 40;
+
+/// The prose of a passage: images out, links as their text, heading lines and table and emphasis
+/// marks out, whitespace collapsed.
+pub fn prose(text: &str) -> String {
+    let text = IMAGE.replace_all(text, " ");
+    let text = LINK.replace_all(&text, "$1");
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(|line| line.split(|c: char| c.is_whitespace() || c == '*' || c == '|'))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a passage is chrome alone: images or links, and under [`MIN_OWN_PROSE`] characters
+/// once they are out, text and all (praha.eu's "![Ikona hodiny](clock.svg) Share ..."). A short
+/// sentence without either is content: an uploaded "Zber odpadu je v utorok."
+pub fn chrome_only(text: &str) -> bool {
+    let own = LINK
+        .replace_all(&IMAGE.replace_all(text, " "), " ")
+        .into_owned();
+    own != text && prose(&own).chars().count() < MIN_OWN_PROSE
+}
+
+/// The language of a passage, detected from its prose when the detector is sure; `None` lets
+/// the page's own language stand. A page's `lang` or its URL says what its template is in, not
+/// each passage (praha.eu's English section carries Czech passages, T-5368).
+pub fn language_of(text: &str) -> Option<&'static str> {
+    let info = whatlang::detect(&prose(text))?;
+    // The page detection's threshold: whatlang's own "reliable" refuses Czech beside Slovak.
+    if info.confidence() < 0.5 {
+        return None;
+    }
+    iso639_1(info.lang().code())
+}
+
 /// Extracts `bytes` of `mime`, keeping passages that start on a page up to `max_pages`.
 pub async fn extract(
     bytes: &[u8],
@@ -130,7 +195,9 @@ pub async fn extract(
     } else if mime.starts_with("text/html") {
         match std::str::from_utf8(bytes) {
             Ok(html) => {
-                cleaned = EMPTY_BLOCK.replace_all(html, "");
+                cleaned = EMPTY_BLOCK
+                    .replace_all(&CHROME.replace_all(html, ""), "")
+                    .into_owned();
                 cleaned.as_bytes()
             }
             Err(_) => bytes,
@@ -162,13 +229,19 @@ pub async fn extract(
             truncated = true;
             break;
         }
-        let text = chunk.content.trim();
-        if !text.is_empty() && !only_headings(text) {
+        let text = IMAGE.replace_all(chunk.content.trim(), "");
+        let text = text.trim();
+        if !only_headings(text) && !chrome_only(text) {
             passages.push(Passage {
                 text: text.to_owned(),
                 first_page,
             });
         }
+    }
+    // A page with a passage of prose loses its menus and captions; a short page keeps all.
+    let short = |p: &Passage| prose(&p.text).chars().count() < MIN_PROSE;
+    if passages.iter().any(|p| !short(p)) {
+        passages.retain(|p| !short(p));
     }
     Ok(Extracted {
         language,
@@ -265,7 +338,7 @@ pub async fn store(
         .bind(i32::try_from(ordinal).unwrap_or(i32::MAX))
         .bind(cited)
         .bind(&passage.text)
-        .bind(extracted.language.as_deref())
+        .bind(language_of(&passage.text).or(extracted.language.as_deref()))
         .bind(visibility)
         .execute(&mut *tx)
         .await?;
@@ -415,7 +488,46 @@ fn document_type(url: &str, mime: Option<&str>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{document_type, first_pages, only_headings};
+
+    #[test]
+    fn prose_leaves_out_images_link_targets_headings_and_marks() {
+        let text = "# Doprava > ## MHD\n![Ikona hodiny](https://praha.eu/clock.svg) **Jízdné** | [ceník](/cenik) |";
+        assert_eq!(prose(text), "Jízdné ceník");
+        assert!(
+            prose("![Ikona Facebook](f.svg)  Share  ![Ikona X](x.svg)")
+                .chars()
+                .count()
+                < MIN_PROSE
+        );
+    }
+
+    #[test]
+    fn a_passage_of_icons_and_links_alone_is_chrome() {
+        assert!(chrome_only(
+            "![Ikona hodiny](https://praha.eu/o/praha-theme/images/clock.svg)  Share  \
+             ![Ikona Facebook](f.svg) [Transport](/t) [Recommendation](/r) [Prague House](/h)"
+        ));
+        assert!(!chrome_only(
+            "# Úradné hodiny\nPodateľňa je otvorená v pondelok od 7.30 do 15.30. [Kontakt](/k)"
+        ));
+        assert!(!chrome_only("Zber odpadu je v utorok."));
+    }
+
+    #[test]
+    fn a_passage_is_in_the_language_of_its_own_text() {
+        let czech = "Technická správa komunikací hlavního města Prahy zajišťuje údržbu a opravy \
+                     komunikací, mostů a tunelů. Informace o uzavírkách najdete na webu.";
+        let english = "The City of Helsinki libraries are open every day of the week, and the \
+                       central library Oodi stays open late on weekdays for everyone.";
+        assert_eq!(language_of(czech), Some("cs"));
+        assert_eq!(language_of(english), Some("en"));
+        // The icons of a share bar say nothing the detector can be sure of.
+        assert_eq!(language_of("![Ikona](a.svg) Share"), None);
+    }
+
+    use super::{
+        chrome_only, document_type, first_pages, language_of, only_headings, prose, MIN_PROSE,
+    };
 
     /// A PDF of `pages` pages, page n showing "Strana n", with a correct cross-reference table.
     fn pdf(pages: usize) -> Vec<u8> {

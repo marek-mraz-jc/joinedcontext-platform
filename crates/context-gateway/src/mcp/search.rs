@@ -382,11 +382,20 @@ impl Index {
                 .then_with(|| a.1.dataset.cmp(&b.1.dataset))
         });
         // A Dataset of the named place before any other, and another place's only when no
-        // Dataset names this one, said so (T-4568).
+        // Dataset names this one, said so (T-4568). A question with words beside the place asks
+        // for a topic: a Dataset of the place that matches none of them is no answer, and the
+        // topic's Datasets of other places come instead, said so ("podujatia Žilina" listed
+        // Žilina's research Articles, T-5368).
         let local = |doc: &Doc| named.iter().all(|w| doc.terms.contains_key(w));
-        let elsewhere =
-            place.is_empty() && !named.is_empty() && !ranked.iter().any(|(_, doc)| local(doc));
-        if !elsewhere {
+        let topic: Vec<&String> = words.iter().filter(|w| !named.contains(w)).collect();
+        let topical =
+            |doc: &Doc| topic.is_empty() || topic.iter().any(|w| doc.terms.contains_key(*w));
+        let elsewhere = place.is_empty()
+            && !named.is_empty()
+            && !ranked.iter().any(|(_, doc)| local(doc) && topical(doc));
+        if elsewhere {
+            ranked.retain(|(_, doc)| topical(doc));
+        } else {
             ranked.retain(|(_, doc)| local(doc));
         }
         let asked = Asked {
@@ -414,7 +423,9 @@ impl Index {
             ));
         }
         if elsewhere {
-            text.push_str("no Dataset names the place asked; these are from other places\n");
+            text.push_str(
+                "no Dataset of the place asked matches the question; these are from other places\n",
+            );
         }
         text.push_str(&format!(
             "{} of {} matched; nextQuery is the call that reads a hit",
@@ -600,6 +611,59 @@ mod tests {
         assert!(hits
             .is_ok_and(|h| h["structuredContent"]["hits"][0]["endpoint"]
                 == json!(format!("{:0>26}", 4242))));
+    }
+
+    /// T-5368: on dev "podujatia Žilina" listed Žilina's research Articles, which match the place
+    /// alone; Žilina publishes no events, so the events of other places come, said so.
+    #[test]
+    fn a_place_without_the_topic_gives_the_topic_elsewhere_said_so() {
+        let dataset = |n: &str, title: &str, text: &str, place: &str| {
+            json!({
+                "id": format!("urn:ngsi-ld:Dataset:{n}"), "type": "Dataset",
+                "title": { "languageMap": { "en": title } },
+                "searchText": { "value": text },
+                "keyword": { "value": [place] },
+                "refDataService": { "type": "Relationship", "object": format!("urn:ngsi-ld:DataService:{n}") },
+            })
+        };
+        let entities = [
+            dataset(
+                "research",
+                "University of Žilina, research",
+                "research articles Žilina",
+                "Žilina",
+            ),
+            dataset(
+                "events",
+                "Events in Banská Bystrica",
+                "events concerts Banská Bystrica",
+                "Banská Bystrica",
+            ),
+        ];
+        let index = Index::build(&entities, &HashMap::new());
+        let ask = |query: &str| {
+            index
+                .search(json!({ "query": query }).as_object().expect("arguments"))
+                .expect("an answer")
+        };
+        let events = ask("podujatia Žilina");
+        assert_eq!(
+            events["structuredContent"]["hits"][0]["endpoint"], "events",
+            "{events}"
+        );
+        assert_eq!(events["structuredContent"]["elsewhere"], true, "{events}");
+        assert!(events["content"][0]["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("from other places")));
+        // The place's own Dataset answers what it holds, and the place alone lists the place's.
+        for query in ["research Žilina", "Žilina"] {
+            let own = ask(query);
+            assert_eq!(
+                own["structuredContent"]["hits"][0]["endpoint"], "research",
+                "{own}"
+            );
+            assert!(own["structuredContent"].get("elsewhere").is_none(), "{own}");
+        }
     }
 
     #[test]

@@ -169,19 +169,125 @@ async fn search(
         return problem(400, why);
     }
     let scope = grouped(&asked.sources, asked.publisher.as_deref());
-    match ranked(
-        &state,
-        &scope,
-        asked.query.trim(),
-        asked.lang.as_deref(),
-        asked.limit.unwrap_or(DEFAULT_HITS),
-        true,
-    )
-    .await
-    {
+    let query = asked.query.trim();
+    let (lang, limit) = (asked.lang.as_deref(), asked.limit.unwrap_or(DEFAULT_HITS));
+    // A question that names a publisher reads its pages first, and every source only when they
+    // hold no answer; a `publisher` argument has narrowed the scope already.
+    let routed = match (&asked.publisher, state.snapshot.read()) {
+        (None, Ok(snapshot)) => routed(&scope, query, &snapshot.titles),
+        _ => None,
+    };
+    if let Some(routed) = routed {
+        match ranked(&state, &routed, query, lang, limit, true).await {
+            Ok(hits) if !hits.is_empty() => return Json(json!({"hits": hits})).into_response(),
+            Ok(_) => {}
+            Err(err) => return failed(err),
+        }
+    }
+    match ranked(&state, &scope, query, lang, limit, true).await {
         Ok(hits) => Json(json!({"hits": hits})).into_response(),
         Err(err) => failed(err),
     }
+}
+
+/// Words of a project's title that say what it is, not where, folded (T-5368).
+const GENERIC: &[&str] = &[
+    "city",
+    "mesto",
+    "hlavni",
+    "obec",
+    "kraj",
+    "region",
+    "self",
+    "governing",
+    "samospravny",
+    "university",
+    "univerzita",
+    "municipality",
+    "kaupunki",
+];
+
+/// The folded words of `text` of four letters or more.
+fn words(text: &str) -> Vec<String> {
+    jc_core::ngsi_catalog::fold(text)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 4)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// How alike a question's word and a name's are: the letters they start with in common, when
+/// those are four or more and leave at most two letters of the shorter word, which a Slovak,
+/// Czech or Finnish case ending changes ("Žiline", "Helsingin", "Prahy"); else 0.
+fn alike(asked: &str, name: &str) -> usize {
+    let common = asked
+        .chars()
+        .zip(name.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let shorter = asked.chars().count().min(name.chars().count());
+    if common >= 4 && common + 2 >= shorter {
+        common
+    } else {
+        0
+    }
+}
+
+/// The part of `scope` whose projects the question names by their own titles or names (T-5368):
+/// each word of the question goes to the projects whose name it is most alike, shared when
+/// several are, and the projects with the most words win, ties together. `None` when it names
+/// none, or every project of the scope. Never wider than `scope`.
+fn routed(
+    scope: &[(String, Vec<String>)],
+    query: &str,
+    titles: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<(String, Vec<String>)>> {
+    let names: Vec<Vec<String>> = scope
+        .iter()
+        .map(|(project, _)| {
+            let mut names = words(&project.replace('-', " "));
+            names.push(project.replace('-', ""));
+            for title in titles.get(project).into_iter().flatten() {
+                names.extend(
+                    words(title)
+                        .into_iter()
+                        .filter(|w| !GENERIC.contains(&w.as_str())),
+                );
+            }
+            names
+        })
+        .collect();
+    let mut won = vec![0.0_f64; scope.len()];
+    for word in words(query) {
+        let best: Vec<usize> = names
+            .iter()
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| alike(&word, name))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let most = best.iter().copied().max().unwrap_or(0);
+        if most == 0 {
+            continue;
+        }
+        let winners = best.iter().filter(|b| **b == most).count();
+        for (score, b) in won.iter_mut().zip(&best) {
+            if *b == most {
+                *score += 1.0 / f64::from(u32::try_from(winners).unwrap_or(u32::MAX));
+            }
+        }
+    }
+    let top = won.iter().copied().fold(0.0, f64::max);
+    let kept: Vec<(String, Vec<String>)> = scope
+        .iter()
+        .zip(&won)
+        .filter(|(_, score)| top > 0.0 && **score == top)
+        .map(|(group, _)| group.clone())
+        .collect();
+    (!kept.is_empty() && kept.len() < scope.len()).then_some(kept)
 }
 
 /// The best `limit` passages of `scope` for `query` as hits of API/05 §4, each with what its page
@@ -198,7 +304,7 @@ pub(super) async fn ranked(
         return Ok(Vec::new());
     }
     let vector = state.embedder.query(query).await?;
-    let hits = crate::search_projects(
+    let found = crate::search_projects(
         &state.pool,
         scope,
         &Search {
@@ -206,11 +312,12 @@ pub(super) async fn ranked(
             embedding: &vector,
             sources: &[],
             public_only,
-            limit: i64::from(limit),
+            limit: i64::from(limit.saturating_mul(CANDIDATES_PER_HIT)),
             lang,
         },
     )
     .await?;
+    let hits = settled(found, usize::from(limit), time::OffsetDateTime::now_utc());
     let about = described(&state.pool, scope, &hits, public_only).await?;
     Ok(hits
         .iter()
@@ -224,12 +331,65 @@ pub(super) async fn ranked(
                 "published": about.published,
                 "modified": about.modified,
                 "crawled": about.crawled,
-                "language": about.language,
+                "language": crate::extract::language_of(&hit.text).map(str::to_owned).or_else(|| about.language.clone()),
                 "text": hit.text.chars().take(MAX_TEXT).collect::<String>(),
                 "score": hit.score,
             }))
         })
         .collect())
+}
+
+/// How many passages are ranked for each one answered, so the ones [`settled`] drops leave
+/// enough behind.
+const CANDIDATES_PER_HIT: u8 = 4;
+
+/// How much a passage's score keeps by the age of its page or document (T-5368): whole for a
+/// year, then a tenth less a year down to 0.7, so a 2021 waste schedule loses to a current page
+/// that matches as well. A page that states no date is a standing page and keeps its score.
+fn recency(dates: &crate::Dates, now: time::OffsetDateTime) -> f64 {
+    let Some(at) = dates
+        .modified
+        .as_deref()
+        .or(dates.published.as_deref())
+        .and_then(|d| {
+            time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339).ok()
+        })
+    else {
+        return 1.0;
+    };
+    let years = (now - at).whole_days() / 365;
+    match years {
+        ..=0 => 1.0,
+        1 => 0.9,
+        2 => 0.8,
+        _ => 0.7,
+    }
+}
+
+/// The best `limit` of `hits` to answer (T-5368): a passage of chrome alone (icons, a menu, a
+/// share bar, [`chrome_only`](crate::extract::chrome_only)) left out,
+/// the score weighed by [`recency`], and one passage per page, its best; an anchor is the same page.
+fn settled(hits: Vec<crate::Hit>, limit: usize, now: time::OffsetDateTime) -> Vec<crate::Hit> {
+    let mut kept: Vec<crate::Hit> = hits
+        .into_iter()
+        .filter(|hit| !crate::extract::chrome_only(&hit.text))
+        .map(|mut hit| {
+            hit.score *= recency(&hit.dates, now);
+            hit
+        })
+        .collect();
+    kept.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.chunk.cmp(&b.chunk)));
+    let mut pages: Vec<String> = Vec::new();
+    kept.retain(|hit| {
+        let page = hit.url.split('#').next().unwrap_or(&hit.url).to_owned();
+        let first = !pages.contains(&page);
+        if first {
+            pages.push(page);
+        }
+        first
+    });
+    kept.truncate(limit);
+    kept
 }
 
 /// What the page or document of a hit states of itself (AG-120).
@@ -411,6 +571,180 @@ mod tests {
         ] {
             assert!(refused(&bad).is_some(), "{bad:?}");
         }
+    }
+
+    /// The hub's projects as the deployment seed titles them (T-5368).
+    fn titles() -> BTreeMap<String, Vec<String>> {
+        [
+            (
+                "banskabystrica",
+                &["Mesto Banská Bystrica", "City of Banská Bystrica"][..],
+            ),
+            (
+                "bbsk",
+                &[
+                    "Banskobystrický samosprávny kraj",
+                    "Banská Bystrica Self-Governing Region",
+                ],
+            ),
+            (
+                "zilina",
+                &[
+                    "Mesto Žilina a Žilinská univerzita",
+                    "City of Žilina and the University of Žilina",
+                ],
+            ),
+            ("praha", &["Hlavní město Praha", "City of Prague"]),
+            ("helsinki", &["Helsinki"]),
+        ]
+        .into_iter()
+        .map(|(p, t)| (p.to_owned(), t.iter().map(|t| (*t).to_owned()).collect()))
+        .collect()
+    }
+
+    fn hub() -> Vec<(String, Vec<String>)> {
+        ["banskabystrica", "bbsk", "zilina", "praha", "helsinki"]
+            .into_iter()
+            .map(|p| (p.to_owned(), vec!["web".to_owned()]))
+            .collect()
+    }
+
+    #[test]
+    fn each_probe_question_reads_the_publisher_it_names_first() {
+        let probes: Vec<Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/hub_rag_probes.json"))
+                .expect("the probe set is JSON");
+        assert_eq!(probes.len(), 30);
+        let (scope, titles) = (hub(), titles());
+        for probe in &probes {
+            let query = probe["query"].as_str().expect("query");
+            let routed = routed(&scope, query, &titles).unwrap_or_default();
+            let projects: Vec<&str> = routed.iter().map(|(p, _)| p.as_str()).collect();
+            assert!(
+                projects.contains(&probe["publisher"].as_str().expect("publisher")),
+                "{query}: {projects:?}"
+            );
+            // The city and its region share their name; nothing else is read with them.
+            assert!(projects.len() <= 2, "{query}: {projects:?}");
+        }
+        let only = |query: &str| {
+            routed(&scope, query, &titles)
+                .map(|r| r.into_iter().map(|(p, _)| p).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            only("BBSK stredné školy prijímacie konanie"),
+            Some(vec!["bbsk".to_owned()])
+        );
+        assert_eq!(
+            only("Banskobystrický kraj údržba ciest"),
+            Some(vec!["bbsk".to_owned()])
+        );
+        assert_eq!(
+            only("Helsingin kirjastot aukioloajat"),
+            Some(vec!["helsinki".to_owned()])
+        );
+        assert_eq!(
+            only("úřední hodiny magistrátu Prahy"),
+            Some(vec!["praha".to_owned()])
+        );
+        assert_eq!(only("parkovanie v Žiline"), Some(vec!["zilina".to_owned()]));
+    }
+
+    #[test]
+    fn a_question_naming_no_publisher_or_one_outside_the_scope_reads_them_all() {
+        let (scope, titles) = (hub(), titles());
+        for query in [
+            "otváracie hodiny kúpaliska",
+            "mesto parkovanie",
+            "city library",
+            "Bratislava MHD",
+        ] {
+            assert_eq!(routed(&scope, query, &titles), None, "{query}");
+        }
+        // Routing narrows, never widens: a scope of one publisher stays as it is.
+        let one = vec![("bbsk".to_owned(), vec!["web".to_owned()])];
+        assert_eq!(routed(&one, "Helsinki library", &titles), None);
+        // A project without a title is named by its own name.
+        assert!(routed(&scope, "bbsk", &BTreeMap::new()).is_some());
+    }
+
+    fn hit(chunk: i64, url: &str, text: &str, score: f64, modified: Option<&str>) -> crate::Hit {
+        crate::Hit {
+            chunk,
+            url: url.into(),
+            text: text.into(),
+            score,
+            site: "p/web".into(),
+            dates: crate::Dates {
+                modified: modified.map(Into::into),
+                ..crate::Dates::default()
+            },
+        }
+    }
+
+    #[test]
+    fn chrome_goes_one_passage_per_page_stays_and_old_pages_give_way() {
+        let now = time::macros::datetime!(2026-10-22 20:00 UTC);
+        let prose = "Kúpalisko Aqualand je otvorené denne od 9.00 do 20.00 hod. ".repeat(5);
+        // praha.eu's English section: icons, a share bar and a menu, no prose (T-5368).
+        let chrome = "![Ikona hodiny](https://praha.eu/o/praha-theme/images/clock.svg)  Share  \
+                      ![Ikona Facebook](https://praha.eu/f.svg) [Transport](/t) [Recommendation](/r)";
+        let hits = vec![
+            hit(
+                1,
+                "https://praha.eu/web/prague-international/w/a",
+                chrome,
+                0.05,
+                None,
+            ),
+            hit(2, "https://hel.fi/on-duty#a", &prose, 0.04, None),
+            hit(3, "https://hel.fi/on-duty#b", &prose, 0.035, None),
+            hit(
+                4,
+                "https://zilina.sk/odpad-2021",
+                &prose,
+                0.033,
+                Some("2021-03-01T00:00:00Z"),
+            ),
+            hit(
+                5,
+                "https://zilina.sk/odpad",
+                &prose,
+                0.03,
+                Some("2026-09-01T00:00:00Z"),
+            ),
+        ];
+        let kept: Vec<i64> = settled(hits, 5, now).iter().map(|h| h.chunk).collect();
+        assert_eq!(kept, [2, 5, 4]);
+        // The limit holds after the drops.
+        let many: Vec<crate::Hit> = (0..8)
+            .map(|i| hit(i, &format!("https://x.sk/{i}"), &prose, 1.0, None))
+            .collect();
+        assert_eq!(settled(many, 5, now).len(), 5);
+    }
+
+    #[test]
+    fn a_page_keeps_its_score_for_a_year_then_loses_a_tenth_a_year_to_seven_tenths() {
+        let now = time::macros::datetime!(2026-10-22 20:00 UTC);
+        let at = |modified: Option<&str>, published: Option<&str>| {
+            recency(
+                &crate::Dates {
+                    modified: modified.map(Into::into),
+                    published: published.map(Into::into),
+                    crawled: Some("2026-10-01T00:00:00Z".into()),
+                },
+                now,
+            )
+        };
+        assert_eq!(at(None, None), 1.0);
+        assert_eq!(at(Some("not a date"), None), 1.0);
+        assert_eq!(at(Some("2026-01-01T00:00:00Z"), None), 1.0);
+        assert_eq!(at(None, Some("2025-06-01T00:00:00Z")), 0.9);
+        assert_eq!(
+            at(Some("2024-06-01T00:00:00Z"), Some("2010-01-01T00:00:00Z")),
+            0.8
+        );
+        assert_eq!(at(Some("2021-03-01T00:00:00Z"), None), 0.7);
     }
 
     #[test]

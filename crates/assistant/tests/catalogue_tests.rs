@@ -43,6 +43,8 @@ fn checkout(test: &str) -> Checkout {
     let endpoint = |slug: &str, space: &str, audience: &str, extra: &str| {
         format!("  contextSpaceRef: {space}\n  slug: {slug}\n  audience: {audience}\n  enabledRepresentations: [ngsi-ld]\n{extra}")
     };
+    write(&dir, "projects/bb/project.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: bb\n  namespace: org\n  title: { sk: Mesto Banská Bystrica, en: City of Banská Bystrica }\nspec:\n  organizationRef: org\n");
     write(&dir, "projects/bb/spaces/ovzdusie/datamodels/air.yaml", &manifest("DataModel", "air",
         "  contextSpaceRef: ovzdusie\n  linkml: ./air.linkml.yaml\n  version: 1.0.0\n  lifecycle: draft\n  classes: [AirQualityObserved, AirQualityStation]\n  artifacts:\n    jsonSchema: ./air.v1.schema.json\n"));
     write(&dir, "projects/bb/spaces/ovzdusie/datamodels/air.v1.schema.json", &serde_json::json!({
@@ -474,4 +476,20 @@ async fn a_type_one_dataset_publishes_is_indexed_and_cited_at_that_dataset() {
     let urls: Vec<&str> = public.iter().map(|d| d.url.as_str()).collect();
     assert_eq!(urls, [stations]);
     db::drop_database(admin, pool, &name).await;
+}
+
+/// T-5368: the hub's document search reads a question's publisher by the project's own title,
+/// in every language the Project manifest gives it.
+#[test]
+fn each_project_is_named_by_its_title_in_every_language() {
+    let snapshot = worker::snapshot(&checkout("titles")).expect("reads");
+    assert_eq!(
+        snapshot.titles.get("bb").map(Vec::as_slice),
+        Some(
+            &[
+                "City of Banská Bystrica".to_owned(),
+                "Mesto Banská Bystrica".to_owned()
+            ][..]
+        )
+    );
 }
