@@ -13,6 +13,7 @@ use axum::routing::get;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::fanout::socket::LINGER;
 use context_gateway::handlers::ws::PER_CALLER;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -262,15 +263,17 @@ async fn gateway(test: &str, upstream: &str, realm: &common::Realm) -> String {
 
 /// [`gateway`] with a token caller's socket ending after `lifetime`.
 async fn lived(test: &str, upstream: &str, realm: &common::Realm, lifetime: Duration) -> String {
-    held(&repo(test), upstream, realm, lifetime).await.0
+    held(&repo(test), upstream, realm, lifetime, LINGER).await.0
 }
 
-/// [`lived`] over the repository `dir`, with the gateway itself, so a test can reload its tables.
+/// [`lived`] over the repository `dir`, with a hub dropping its upstream `linger` after its last
+/// client left, and the gateway itself, so a test can reload its tables.
 async fn held(
     dir: &std::path::Path,
     upstream: &str,
     realm: &common::Realm,
     lifetime: Duration,
+    linger: Duration,
 ) -> (String, Arc<Gateway>) {
     let (endpoints, ..) = store::load(dir).expect("the repository loads");
     let mut gateway = Gateway::new(
@@ -285,6 +288,7 @@ async fn held(
         Some(HOST.to_owned()),
     );
     gateway.ws_token_lifetime = lifetime;
+    gateway.ws_linger = linger;
     let gateway = Arc::new(gateway);
     (serve(router(Arc::clone(&gateway))).await, gateway)
 }
@@ -819,7 +823,7 @@ async fn a_lasting_refusal_is_not_retried_until_the_endpoint_changes() {
     let realm = common::Realm::new();
     let (upstream, stub) = broker_answering(405).await;
     let dir = repo("lasting");
-    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300), LINGER).await;
     let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
         "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
     let (mut first, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
@@ -859,6 +863,34 @@ async fn a_lasting_refusal_is_not_retried_until_the_endpoint_changes() {
     asked(&stub, 2).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(stub.upgrades().len(), 2);
+}
+
+/// T-5321 review: a hub held after a lasting refusal still stops once its last client has been
+/// gone for the linger, so the next client opens a fresh upstream instead of joining the old
+/// refusal for as long as the Endpoint stays unchanged.
+#[tokio::test]
+async fn a_held_refusal_ends_when_the_last_client_has_lingered() {
+    let realm = common::Realm::new();
+    let (upstream, stub) = broker_answering(405).await;
+    let dir = repo("held-linger");
+    let linger = Duration::from_secs(1);
+    let (at, _gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300), linger).await;
+    let subscribe = json!({"metadata": {"x-op": "x-subscribe", "x-id": "s1"},
+        "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}});
+    let (mut only, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    only.send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    asked(&stub, 1).await;
+    drop(only);
+
+    // The held hub looks every 5 s (TICK); past the linger it is gone.
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    let (mut next, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    next.send(Message::text(subscribe.to_string()))
+        .await
+        .expect("sent");
+    asked(&stub, 2).await;
 }
 
 /// Reloads the gateway's endpoint table from `dir`, as the reaper does after a reconcile.
@@ -910,7 +942,7 @@ async fn public_to_restricted_closes_anonymous_sockets_at_the_reload() {
     let realm = common::Realm::new();
     let (upstream, stub) = broker().await;
     let dir = repo("narrowed");
-    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300), LINGER).await;
     let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
     subscribe_docks(&mut socket).await;
     upstreams(&stub, 1).await;
@@ -945,7 +977,7 @@ async fn a_policy_change_or_a_deleted_endpoint_closes_open_sockets() {
     let realm = common::Realm::new();
     let (upstream, _) = broker().await;
     let dir = repo("revoked");
-    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300)).await;
+    let (at, gateway) = held(&dir, &upstream, &realm, Duration::from_secs(300), LINGER).await;
     let token = person(&realm, "hel-mobility", INTERNAL);
     let bearer = [("authorization", format!("Bearer {token}"))];
 
