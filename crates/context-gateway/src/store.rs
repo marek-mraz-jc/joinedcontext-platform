@@ -2,7 +2,7 @@
 //!
 //! The repository is the configuration, so the gateway's table is a projection of it and
 //! nothing else: an `Endpoint` manifest, plus every `Policy` of the same project that
-//! names the same context space — or the one Policy its `spec.policyRef` names, when several
+//! names the same context space — or the Policies its `spec.policyRefs` names, when several
 //! endpoints publish different slices of one space. A manifest the gateway cannot make sense of is left out
 //! rather than half-applied — an endpoint that is not in the table answers 404, which is
 //! the same thing an endpoint that does not exist answers (EP-03).
@@ -649,10 +649,8 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         let key = (project.clone(), space_name.clone());
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
         let app_client = app_of(repo, &project, &id.name);
-        let mut bound = match &spec.policy_ref {
-            Some(policy_ref) => {
-                bound_policy(&id.name, policy_ref, (repo.org_domain(), &space), named)
-            }
+        let mut bound = match spec.policy_refs() {
+            Some(refs) => bound_policies(&id.name, refs, (repo.org_domain(), &space), named),
             None => named.to_vec(),
         };
         // An App's generated Endpoint evaluates its own grants and the space's prohibitions
@@ -1087,35 +1085,40 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
     policies
 }
 
-/// The one Policy an endpoint with `spec.policyRef` evaluates, every rule of it (EP-14, GW8).
+/// The Policies an endpoint with `spec.policyRefs` (or `policyRef`) evaluates, every rule of each
+/// (EP-14, GW8, ADR-N-057).
 ///
-/// Without a reference an endpoint evaluates every Policy of its space; with one it evaluates
-/// that Policy alone, which is how several endpoints over one space each publish a different
-/// slice of it. A reference to a Policy of another space or another organization's domain (when
-/// the load knows its own), or to none the repository has, binds nothing and says so: an
-/// endpoint that widened to the whole space instead would publish exactly what its author
+/// Without a reference an endpoint evaluates every Policy of its space; with references it
+/// evaluates the named Policies alone, which is how several endpoints over one space each publish
+/// a different slice of it. A reference to a Policy of another space or another organization's
+/// domain (when the load knows its own), or to none the repository has, binds nothing and says
+/// so: an endpoint that widened to the whole space instead would publish exactly what its author
 /// narrowed away.
-fn bound_policy(
+fn bound_policies(
     endpoint: &str,
-    policy_ref: &Urn,
+    refs: &[Urn],
     (domain, space): (Option<&str>, &str),
     named: &[(String, PolicySpec)],
 ) -> Vec<(String, PolicySpec)> {
-    let ours = domain.is_none_or(|domain| policy_ref.org_domain() == Some(domain))
-        && policy_ref.space() == Some(space);
-    let bound: Vec<(String, PolicySpec)> = named
-        .iter()
-        .filter(|(name, _)| ours && PolicySpec::policy_of(name) == policy_ref.local_id())
-        .cloned()
-        .collect();
-    if bound.is_empty() {
-        tracing::warn!(
-            endpoint,
-            policy = %policy_ref,
-            "policyRef names no Policy of the endpoint's space; the endpoint grants nothing"
-        );
+    let names = |policy_ref: &Urn, name: &str| {
+        domain.is_none_or(|domain| policy_ref.org_domain() == Some(domain))
+            && policy_ref.space() == Some(space)
+            && PolicySpec::policy_of(name) == policy_ref.local_id()
+    };
+    for policy_ref in refs {
+        if !named.iter().any(|(name, _)| names(policy_ref, name)) {
+            tracing::warn!(
+                endpoint,
+                policy = %policy_ref,
+                "policyRef names no Policy of the endpoint's space; it grants nothing"
+            );
+        }
     }
-    bound
+    named
+        .iter()
+        .filter(|(name, _)| refs.iter().any(|policy_ref| names(policy_ref, name)))
+        .cloned()
+        .collect()
 }
 
 /// The data models of every space, with the artifacts the checkout carries (DM-02).

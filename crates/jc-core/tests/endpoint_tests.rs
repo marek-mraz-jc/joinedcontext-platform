@@ -202,6 +202,63 @@ fn endpoint_spec_invariants_and_rate_limits() {
     assert!(refused.to_string().contains("policyRef"), "{refused}");
 }
 
+/// ADR-N-057 decision 2 (T-5037): `policyRef: X` reads as `policyRefs: [X]`; both together, or an
+/// empty list, are refused, and every listed reference is checked as `policyRef` is.
+#[test]
+fn policy_refs_is_one_list_with_policy_ref() {
+    let ep = Endpoint::from_yaml(GOLDEN).expect("valid golden YAML");
+    let urn = |name: &str| {
+        format!("urn:ngsi-ld:Policy:banskabystrica.sk:ovzdusie:{name}")
+            .parse::<Urn>()
+            .expect("valid URN")
+    };
+    assert_eq!(
+        ep.spec.policy_refs(),
+        Some(&[urn("public-air-quality")][..])
+    );
+
+    let mut listed = ep.spec.clone();
+    listed.policy_ref = None;
+    listed.policy_refs = Some(vec![urn("public-air-quality"), urn("sensors-write")]);
+    listed.validate().expect("two Policies of the space");
+    assert_eq!(listed.policy_refs().map(<[Urn]>::len), Some(2));
+
+    let mut neither = listed.clone();
+    neither.policy_refs = None;
+    neither
+        .validate()
+        .expect("no reference binds the whole space");
+    assert_eq!(neither.policy_refs(), None);
+
+    let mut both = listed.clone();
+    both.policy_ref = Some(urn("public-air-quality"));
+    let refused = both.validate().expect_err("policyRef beside policyRefs");
+    assert!(refused.to_string().contains("spec.policyRefs"), "{refused}");
+
+    let mut empty = listed.clone();
+    empty.policy_refs = Some(Vec::new());
+    let refused = empty.validate().expect_err("an empty policyRefs");
+    assert!(
+        refused.to_string().contains("at least one Policy"),
+        "{refused}"
+    );
+
+    let mut unprefixed = listed.clone();
+    unprefixed.policy_refs = Some(vec![
+        urn("public-air-quality"),
+        "urn:ngsi-ld:Policy:loose"
+            .parse::<Urn>()
+            .expect("valid URN"),
+    ]);
+    unprefixed
+        .validate()
+        .expect_err("an unprefixed entry of policyRefs");
+
+    let wire = serde_json::to_value(&listed).expect("serializes");
+    assert_eq!(wire["policyRefs"][1], urn("sensors-write").to_string());
+    assert!(wire.get("policyRef").is_none());
+}
+
 #[test]
 fn golden_shared_space_reference_parses_validates_and_paths() {
     let shared = SharedSpaceReference::from_yaml(GOLDEN_SHARED).expect("valid golden YAML");
