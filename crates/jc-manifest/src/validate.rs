@@ -1187,7 +1187,7 @@ fn writes_nobody_can_make(repo: &Repository) -> Located {
 pub struct UnmadeWrite {
     /// The Policy or Pipeline the finding is on.
     pub id: ResourceId,
-    /// The member's path in the manifest, `spec.outputs[0].targetEndpoint`; `None` for a Policy.
+    /// The member's path in the manifest, `spec.outputs.0.targetEndpoint`; `None` for a Policy.
     pub field: Option<String>,
     /// What is wrong and what to change.
     pub message: String,
@@ -1207,14 +1207,14 @@ fn output_field(spec: &jc_core::kinds::PipelineSpec, index: usize) -> String {
     let lane = spec.lane_outputs().len();
     if index < lane {
         return match spec.is_second_shape() {
-            true => format!("spec.outputs[{index}].targetEndpoint"),
+            true => format!("spec.outputs.{index}.targetEndpoint"),
             false => "spec.targetEndpoint".to_owned(),
         };
     }
     let mut rest = index - lane;
     for (route, outputs) in spec.routes.iter().map(|r| r.outputs.len()).enumerate() {
         if rest < outputs {
-            return format!("spec.routes[{route}].outputs[{rest}].targetEndpoint");
+            return format!("spec.routes.{route}.outputs.{rest}.targetEndpoint");
         }
         rest -= outputs;
     }
