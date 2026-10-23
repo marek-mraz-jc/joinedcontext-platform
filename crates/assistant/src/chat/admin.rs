@@ -714,8 +714,14 @@ async fn search(
     if let Err(refused) = site(&state, &project, &source).await {
         return *refused;
     }
-    match super::documents::ranked(&state, &[(project, vec![source])], q, None, limit, false).await
-    {
+    let scope = [(project, vec![source])];
+    let found = match state.embedder.query(q).await {
+        Ok(vector) => {
+            super::documents::ranked(&state, &scope, q, &vector, None, limit, false).await
+        }
+        Err(err) => Err(err),
+    };
+    match found {
         Ok(hits) => Json(json!({"hits": hits})).into_response(),
         Err(err) => failed(err),
     }

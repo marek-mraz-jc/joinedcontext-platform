@@ -386,6 +386,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "whatlang",
  "wiremock",
 ]
 
