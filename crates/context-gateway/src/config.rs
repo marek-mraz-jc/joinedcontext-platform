@@ -29,6 +29,11 @@ pub struct Config {
     /// capture subscriber only from an address this name resolves to; absent admits none
     /// (ADR-N-048 §2.10).
     pub mqtt_portal_host: Option<String>,
+    /// The Portal's mesh identity as `{serviceaccount}.{namespace}`
+    /// (`JC_GATEWAY_MQTT_PORTAL_IDENTITY`, e.g. `portal.portal`): the only caller that reads the
+    /// refused MQTT CONNECTs at `/internal/mqtt/refusals/{broker}`; absent, or not two labels,
+    /// admits none (T-5534).
+    pub mqtt_portal_identity: Option<String>,
     /// The broker to forward to, scheme and authority only (`JC_GATEWAY_BROKER_URL`): the
     /// implicit `main`, and every space when the organization declares no broker.
     pub broker_url: String,
@@ -311,6 +316,9 @@ impl Config {
                 .ok()
                 .map(|host| host.trim().to_owned())
                 .filter(|host| !host.is_empty()),
+            mqtt_portal_identity: std::env::var("JC_GATEWAY_MQTT_PORTAL_IDENTITY")
+                .ok()
+                .and_then(|identity| mesh_name(&identity)),
             broker_url,
             broker_url_template,
             repo_dir: std::env::var("JC_GATEWAY_REPO_DIR").ok().map(PathBuf::from),
@@ -394,6 +402,25 @@ fn positive(
 /// The forwarded path is always built by the gateway from the route it matched, so a base
 /// that carried a path of its own would silently prefix every request; refusing it here is
 /// cheaper than debugging it later.
+/// A Linkerd workload name `{serviceaccount}.{namespace}`: two DNS labels, nothing else.
+fn mesh_name(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let label = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 63
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    let mut parts = raw.split('.');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(account), Some(namespace), None) if label(account) && label(namespace) => {
+            Some(raw.to_owned())
+        }
+        _ => None,
+    }
+}
+
 fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     let invalid = |reason: &str| ConfigError::Invalid {
         name: "JC_GATEWAY_BROKER_URL",
@@ -455,6 +482,7 @@ mod tests {
             internal_bind: None,
             mqtt_runner_host: None,
             mqtt_portal_host: None,
+            mqtt_portal_identity: None,
             broker_url: "http://broker:1026".to_owned(),
             broker_url_template: None,
             repo_dir: None,
@@ -618,5 +646,23 @@ mod tests {
             include_str!("config.rs").contains(&documented),
             "{documented}"
         );
+    }
+
+    #[test]
+    fn the_portal_identity_is_two_dns_labels_or_none() {
+        assert_eq!(
+            mesh_name(" portal.portal "),
+            Some("portal.portal".to_owned())
+        );
+        for bad in [
+            "",
+            "portal",
+            "portal.portal.svc",
+            "Portal.portal",
+            "portal..x",
+            "por tal.p",
+        ] {
+            assert_eq!(mesh_name(bad), None, "{bad}");
+        }
     }
 }
