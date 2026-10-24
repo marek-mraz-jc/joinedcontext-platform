@@ -1,5 +1,6 @@
 name: ship
-# builds, smoke-tests and pushes the OCI image(s) once an hour when main moved and on tags; skipped
+# builds, smoke-tests and pushes the OCI image(s) once an hour when main moved, once a day on a
+# quiet main (its Debian fixes, T-5485) and on tags; skipped
 # until a Dockerfile exists. The ship lane of T-4721: the file keeps the name image.yml because the
 # signing identity (`.github/workflows/image.yml@refs/heads/main`) is what pin-images verifies.
 # At most hourly, not per main push (T-4696): one build per merge billed ~960 minutes a day, and
@@ -72,14 +73,19 @@ jobs:
           if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_run ]; then
             gap=3600
             [ "$TRIGGER" = ci-full ] && gap=0
-            built=$(python3 scripts/ci/image-gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$gap")
-            if [ "$built" = "$GITHUB_SHA" ]; then
+            gate=$(python3 scripts/ci/image-gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$gap")
+            read -r built refresh <<< "$gate"
+            # built on an earlier UTC day: rebuild so APT_REFRESH takes today's Debian fixes
+            # (T-5485); model-tools has no such layer, its rebuild would be all cache hits
+            if [ "$built" = "$GITHUB_SHA" ] && [ "${refresh:-}" = refresh ]; then
+              models=false
+            elif [ "$built" = "$GITHUB_SHA" ]; then
               build=false models=false
             elif [ -n "$built" ] && git cat-file -e "${built}^{commit}" 2>/dev/null; then
               git diff --name-only "$built" "$GITHUB_SHA" | grep -q '^tools/model-tools/' || models=false
             fi
           fi
-          echo "built: ${built:-none}; build=$build model-tools=$models"
+          echo "built: ${built:-none} ${refresh:-}; build=$build model-tools=$models"
           printf 'build=%s\nmodel-tools=%s\n' "$build" "$models" >> "$GITHUB_OUTPUT"
   build:
     needs: changes
