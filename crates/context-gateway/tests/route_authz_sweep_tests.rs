@@ -255,6 +255,12 @@ fn rows() -> Vec<Row> {
             Member,
         ),
         row(
+            "GET",
+            "/api/endpoint/{slug}/access/attributes",
+            get(ep("/access/attributes?type=AirQualityObserved")),
+            Member,
+        ),
+        row(
             "POST",
             "/api/endpoint/{slug}/access/v1/evaluation",
             post(ep("/access/v1/evaluation"), evaluation.clone()),
