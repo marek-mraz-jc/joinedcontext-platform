@@ -401,7 +401,11 @@ fn copy_relayable(from: &HeaderMap, to: &mut HeaderMap) {
 
 /// Replaces a buffered body, so the length the broker or the client reads is the length of
 /// what it is actually given.
-pub fn with_body(mut parts: axum::http::response::Parts, bytes: Vec<u8>) -> Response<Body> {
+pub fn with_body(
+    mut parts: axum::http::response::Parts,
+    bytes: impl Into<axum::body::Bytes>,
+) -> Response<Body> {
+    let bytes = bytes.into();
     parts.headers.remove(CONTENT_LENGTH);
     parts.headers.remove(TRANSFER_ENCODING);
     parts.headers.insert(
@@ -498,5 +502,43 @@ mod tests {
             1
         );
         assert_eq!(roots.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn with_body_keeps_the_bytes_and_sets_content_length() {
+        let held = axum::body::Bytes::from_static(b"{\"id\":\"urn:ngsi-ld:T:1\"}");
+        let (mut parts, _) = Response::new(Body::empty()).into_parts();
+        parts
+            .headers
+            .insert(CONTENT_LENGTH, HeaderValue::from_static("999"));
+        parts
+            .headers
+            .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+
+        let answer = with_body(parts, held.clone());
+        assert_eq!(
+            answer
+                .headers()
+                .get(CONTENT_LENGTH)
+                .expect("length")
+                .to_str()
+                .expect("ascii"),
+            held.len().to_string()
+        );
+        assert!(answer.headers().get(TRANSFER_ENCODING).is_none());
+        let sent = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(sent, held);
+
+        let (mut parts, _) = Response::new(Body::empty()).into_parts();
+        parts.status = StatusCode::NO_CONTENT;
+        let empty = with_body(parts, Vec::new());
+        assert_eq!(empty.status(), StatusCode::NO_CONTENT);
+        assert_eq!(empty.headers().get(CONTENT_LENGTH).expect("length"), "0");
+        let sent = axum::body::to_bytes(empty.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(sent.is_empty());
     }
 }

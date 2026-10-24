@@ -5,5 +5,5 @@ assistant | 1
 context-gateway | 20
 jc-core | 41
 jc-manifest | 2
-jcctl | 28
+jcctl | 25
 wasm-host | 6
