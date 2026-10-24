@@ -79,7 +79,7 @@ pub struct Constraints {
     /// point, which knows the endpoint's models.
     pub type_iris: BTreeSet<String>,
     /// The anchored id patterns of the matching grants (R24).
-    pub id_patterns: BTreeSet<String>,
+    pub id_patterns: super::id_match::IdPatterns,
     /// The attributes the response is projected to; empty means no projection (R9).
     ///
     /// One set for the whole request, which is what CIM 009's own `attrs` parameter is and

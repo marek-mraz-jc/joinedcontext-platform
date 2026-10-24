@@ -131,7 +131,8 @@ fn a_grant_that_names_ids_still_bounds_a_write_whatever_its_urn_says() {
     let mut narrowed = grant();
     narrowed.id_patterns = BTreeSet::from([
         "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:.*$".to_owned(),
-    ]);
+    ])
+    .into();
     check_granted_id(ID, &narrowed).expect("inside the pattern");
     for outside in [
         "urn:ngsi-ld:AirQualityObserved:BANSKABYSTRICA.SK:ovzdusie:station-01",
@@ -180,7 +181,8 @@ fn an_identifier_outside_every_granted_pattern_is_refused() {
     let narrowed = Constraints {
         id_patterns: names(&[
             "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:radvan-.*$",
-        ]),
+        ])
+        .into(),
         ..grant()
     };
     check_granted_id(
@@ -202,7 +204,8 @@ fn an_identifier_is_inside_the_grant_when_any_one_pattern_admits_it() {
         id_patterns: names(&[
             "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:radvan-.*$",
             "^urn:ngsi-ld:AirQualityObserved:banskabystrica\\.sk:ovzdusie:station-.*$",
-        ]),
+        ])
+        .into(),
         ..grant()
     };
     check_granted_id(ID, &two).expect("the second pattern admits it");
