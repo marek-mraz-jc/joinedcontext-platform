@@ -13,4 +13,3 @@ spec:
       instanceRef: { kind: CkanInstance, name: open-data }
       organization: mesto-banska-bystrica
       name: kvalita-ovzdusia
-      datastore: { representation: csv, refresh: onChange }

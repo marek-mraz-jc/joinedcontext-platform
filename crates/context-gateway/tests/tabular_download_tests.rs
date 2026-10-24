@@ -260,7 +260,7 @@ async fn the_endpoints_byte_ceiling_refuses_the_file() {
 
 /// T-3141: a typed literal (`{"@type": "DateTime", "@value": …}`, NGSI-LD 4.6.3) is one cell,
 /// its `@value`. Skipping every `@` member dropped the whole attribute: the Žilina KPIs'
-/// `updatedAt` was missing from `file.csv`, so the CKAN DataStore held it empty and the
+/// `updatedAt` was missing from `file.csv`, so the CKAN table held it empty and the
 /// table's freshness fell back to the statistic's period.
 #[test]
 fn a_typed_literal_is_its_value() {

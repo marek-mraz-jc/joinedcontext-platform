@@ -346,7 +346,7 @@ fn walk(path: &str, value: &Value, cells: &mut Vec<(String, Value)>) {
         }
         // Only an array of scalars spreads over indexed columns (a Point's two coordinates).
         // One holding arrays or objects, such as a polygon's rings, stays one JSON cell, so
-        // no geometry widens the table past what a spreadsheet or a DataStore holds.
+        // no geometry widens the table past what a spreadsheet holds.
         Value::Array(items)
             if !items.is_empty()
                 && !items.iter().any(|item| item.is_array() || item.is_object()) =>

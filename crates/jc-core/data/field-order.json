@@ -1,5 +1,5 @@
 {
-  "$comment": "One importance order and one label table for NGSI-LD attributes (T-4661): the jcctl CKAN publisher orders DataStore fields and writes info.label from it, the assistant widget labels its table columns from it, and the CKAN theme (a byte copy in joinedcontext-deployment) orders and labels the map popup. Groups are in order; an attribute no group lists goes to 'value' when it is a number, else to 'other'.",
+  "$comment": "One importance order and one label table for NGSI-LD attributes (T-4661): the assistant widget labels its table columns from it, and the Portal orders entity fields from its byte copy (ui/src/data/field-order.json). Groups are in order; an attribute no group lists goes to 'value' when it is a number, else to 'other'.",
   "groups": [
     { "group": "name", "attributes": ["name", "title", "alternateName"] },
     { "group": "time", "attributes": ["startDate", "startTime", "endDate", "endTime", "dateObserved", "observedAt", "validFrom", "validTo", "openingHours"] },

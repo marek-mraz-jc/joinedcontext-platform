@@ -65,7 +65,7 @@ pub use catalog::{
     Catalog, ContactPoint, DataTheme, Duty, Frequency, Licence, PersonalData, ProjectCatalog,
     Publisher, Source, Temporal,
 };
-pub use ckan::{CkanInstanceSpec, CkanPublication, DataStore, DataStoreRefresh, Publication};
+pub use ckan::{CkanInstanceSpec, CkanPublication, Publication};
 pub use context_broker::{
     broker_of, validate_brokers, BrokerFeature, BrokerSize, ContextBrokerSpec, IMPLICIT_BROKER,
 };

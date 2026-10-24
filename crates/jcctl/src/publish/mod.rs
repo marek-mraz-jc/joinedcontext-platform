@@ -5,5 +5,4 @@
 //! only ever carry what the Endpoint's policy set allows (EP-66).
 
 pub mod ckan;
-pub mod ckan_datastore;
 pub mod ckan_http;

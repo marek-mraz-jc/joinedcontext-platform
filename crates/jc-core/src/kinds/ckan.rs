@@ -9,11 +9,9 @@
 
 use crate::envelope::{Kind, ObjectMeta, Ref, Scope, SecretRef};
 use crate::error::{Error, Result};
-use crate::kinds::endpoint::Representation;
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Desired specification of a [`CkanInstance`][crate::kinds::CkanInstance] resource (EP-62).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -77,38 +75,6 @@ impl CkanInstanceSpec {
     }
 }
 
-/// How often the DataStore mirror is refreshed (EP-65).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum DataStoreRefresh {
-    /// Driven by the Endpoint's own subscription: one upsert per changed entity (the default).
-    #[default]
-    OnChange,
-    /// Reloaded whenever the Endpoint is reconciled, for a space without a subscription.
-    OnReconcile,
-}
-
-impl DataStoreRefresh {
-    /// Wire name of this cadence.
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::OnChange => "onChange",
-            Self::OnReconcile => "onReconcile",
-        }
-    }
-}
-
-/// The optional row mirror in the CKAN DataStore (EP-65).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct DataStore {
-    /// The tabular representation the rows are read through; it must be enabled (EP-44).
-    pub representation: Representation,
-    /// How the mirror is kept current.
-    #[serde(default)]
-    pub refresh: DataStoreRefresh,
-}
-
 /// Publication of one Endpoint as one CKAN dataset (EP-62…EP-65).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -121,9 +87,12 @@ pub struct CkanPublication {
     /// The CKAN dataset name; the Endpoint's own name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The optional row mirror (EP-65).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub datastore: Option<DataStore>,
+    /// The removed row mirror (T-5060). Read only so that `validate` can refuse the block
+    /// with the fix instead of serde's bare "unknown field"; absent from the schema.
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
+    pub datastore: Option<serde_json::Value>,
     /// The CKAN licence id the organization chose, such as `cc-by` for CC-BY 4.0. Used when the
     /// Endpoint's DCAT-AP record names no `dct:license`, which is the one term the record does
     /// not carry (EP-62, EP-63).
@@ -137,7 +106,7 @@ impl CkanPublication {
         self.name.as_deref().unwrap_or(endpoint)
     }
 
-    fn validate(&self, enabled: &[Representation]) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         names::validate_dns1123_label(self.instance_ref.name())
             .map_err(|e| names::rename(e, "publish.ckan.instanceRef"))?;
         if let Some(kind) = self.instance_ref.kind() {
@@ -157,24 +126,13 @@ impl CkanPublication {
         if let Some(license) = &self.license {
             validate_license(license)?;
         }
-        if let Some(datastore) = &self.datastore {
-            // A mirror of a representation the Endpoint does not serve would have nothing to
-            // read: the publisher is an ordinary consumer of this Endpoint (EP-66).
-            if !enabled.contains(&datastore.representation) {
-                return Err(Error::Name {
-                    field: "publish.ckan.datastore.representation",
-                    value: datastore.representation.as_str().to_string(),
-                    reason:
-                        "the mirror reads a representation the endpoint does not enable (EP-65)",
-                });
-            }
-            if datastore.representation != Representation::Csv {
-                return Err(Error::Name {
-                    field: "publish.ckan.datastore.representation",
-                    value: datastore.representation.as_str().to_string(),
-                    reason: "a DataStore table is filled from a tabular representation (EP-44)",
-                });
-            }
+        if self.datastore.is_some() {
+            return Err(Error::Name {
+                field: "publish.ckan.datastore",
+                value: String::new(),
+                reason: "publish.ckan.datastore was removed (T-5060): CKAN holds no rows, the \
+                         catalogue reads the Endpoint live; delete the block",
+            });
         }
         Ok(())
     }
@@ -190,10 +148,10 @@ pub struct Publication {
 }
 
 impl Publication {
-    /// Validates every declared target against the representations the Endpoint enables.
-    pub fn validate(&self, enabled: &[Representation]) -> Result<()> {
+    /// Validates every declared target.
+    pub fn validate(&self) -> Result<()> {
         match &self.ckan {
-            Some(ckan) => ckan.validate(enabled),
+            Some(ckan) => ckan.validate(),
             None => Ok(()),
         }
     }
@@ -244,10 +202,4 @@ fn validate_license(value: &str) -> Result<()> {
         });
     }
     Ok(())
-}
-
-impl fmt::Display for DataStoreRefresh {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }

@@ -143,7 +143,7 @@ fn the_dataset_metadata_is_the_endpoints_own_dcat_record() {
 
 /// T-2982, EP-63: a keyword CKAN cannot hold as a tag is written the way it can, never sent as it
 /// is: CKAN refuses the whole `package_update` over one tag, and praha-mesto's "P+R" kept its
-/// dataset, its DataStore and its grid view from being published on every pass.
+/// dataset and its views from being published on every pass.
 #[test]
 fn a_keyword_becomes_a_tag_ckan_accepts() {
     let long = "a".repeat(120);
