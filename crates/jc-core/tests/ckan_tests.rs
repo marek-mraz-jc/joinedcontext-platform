@@ -1,8 +1,6 @@
 //! T-0314/T-0316: `kind: CkanInstance` and `Endpoint.spec.publish.ckan` (EP-62…EP-67).
 
 use jc_core::error::Error;
-use jc_core::kinds::ckan::DataStoreRefresh;
-use jc_core::kinds::endpoint::Representation;
 use jc_core::kinds::{CkanInstance, EndpointSpec};
 
 fn instance(yaml: &str) -> Result<CkanInstance, Error> {
@@ -103,7 +101,6 @@ fn an_endpoint_publishes_to_a_named_instance() {
     instanceRef: { kind: CkanInstance, name: open-data }
     organization: mesto-banska-bystrica
     name: kvalita-ovzdusia
-    datastore: { representation: csv, refresh: onChange }
 "#,
     )
     .expect("the endpoint validates");
@@ -117,10 +114,6 @@ fn an_endpoint_publishes_to_a_named_instance() {
         publication.dataset_name("ovzdusie-public"),
         "kvalita-ovzdusia"
     );
-    let datastore = publication.datastore.as_ref().expect("a datastore");
-    assert_eq!(datastore.representation, Representation::Csv);
-    assert_eq!(datastore.refresh, DataStoreRefresh::OnChange);
-    assert_eq!(datastore.refresh.as_str(), "onChange");
 }
 
 #[test]
@@ -141,58 +134,33 @@ fn a_publication_without_a_name_is_the_endpoints_own_name() {
         publication.dataset_name("ovzdusie-public"),
         "ovzdusie-public"
     );
-    assert!(
-        publication.datastore.is_none(),
-        "no mirror unless asked for"
-    );
 }
 
-/// EP-65: a mirror reads through the endpoint, so it can only read what the endpoint serves.
+/// T-5060: CKAN holds no rows any more; an old `datastore:` block is refused with the fix,
+/// whatever it held, and never written back.
 #[test]
-fn a_mirror_of_a_representation_the_endpoint_does_not_serve_is_refused() {
-    let error = endpoint(
-        r#"publish:
-  ckan:
-    instanceRef: { kind: CkanInstance, name: open-data }
-    datastore: { representation: sta }
-"#,
-    )
-    .expect_err("sta is not enabled");
-
-    assert!(
-        matches!(
-            error,
-            Error::Name {
-                field: "publish.ckan.datastore.representation",
-                ..
-            }
-        ),
-        "{error}"
-    );
-}
-
-/// EP-65, EP-44: a DataStore table is rows, so it is filled from a tabular representation.
-#[test]
-fn a_mirror_of_a_non_tabular_representation_is_refused() {
-    let error = endpoint(
-        r#"publish:
-  ckan:
-    instanceRef: { kind: CkanInstance, name: open-data }
-    datastore: { representation: ogc-features }
-"#,
-    )
-    .expect_err("ogc-features is not tabular");
-
-    assert!(
-        matches!(
-            error,
-            Error::Name {
-                field: "publish.ckan.datastore.representation",
-                ..
-            }
-        ),
-        "{error}"
-    );
+fn a_datastore_block_is_refused_with_the_fix() {
+    for block in [
+        "{ representation: csv, refresh: onChange }",
+        "{ representation: sta }",
+        "{}",
+    ] {
+        let error = endpoint(&format!(
+            "publish:\n  ckan:\n    instanceRef: {{ kind: CkanInstance, name: open-data }}\n    datastore: {block}\n"
+        ))
+        .expect_err("the datastore block is gone");
+        assert!(
+            matches!(
+                error,
+                Error::Name {
+                    field: "publish.ckan.datastore",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains("delete the block"), "{error}");
+    }
 }
 
 #[test]

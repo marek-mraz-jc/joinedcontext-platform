@@ -1,5 +1,5 @@
-//! The HTTP `CkanApi` against a CKAN that answers from a script (T-0487, EP-62, EP-65,
-//! EP-67, CC-18).
+//! The HTTP `CkanApi` against a CKAN that answers from a script (T-0487, EP-62, EP-67,
+//! CC-18).
 //!
 //! The fake speaks the Action API the way CKAN 2.10 does — the `success`/`result`
 //! envelope, `404` with a Not Found error for a `*_show` that finds nothing, `403` with an
@@ -13,7 +13,6 @@ use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     publish, withdraw, CkanApi, CkanError, Outcome, PublishError, Settings,
 };
-use jcctl::publish::ckan_datastore::{self as datastore, PRIMARY_KEY};
 use jcctl::publish::ckan_http::HttpCkan;
 use jcctl::secrets::SecretValue;
 use serde_json::{json, Value};
@@ -40,8 +39,6 @@ struct Catalogue {
     organizations: BTreeSet<String>,
     /// Datasets by name, stored the way `package_show` answers them.
     packages: BTreeMap<String, Value>,
-    /// DataStore tables by resource id: fields, then rows by primary key.
-    tables: BTreeMap<String, (Vec<Value>, BTreeMap<String, Value>)>,
     calls: Vec<Call>,
     minted: usize,
     /// When set, every answer is a proxy's error page rather than CKAN.
@@ -148,22 +145,6 @@ impl Catalogue {
                 Some(resource) => ok(resource),
                 None => not_found(),
             },
-            ("GET", "datastore_search") => {
-                let resource_id = query.get("resource_id").cloned().unwrap_or_default();
-                match self.tables.get(&resource_id) {
-                    Some((fields, rows)) => {
-                        let mut all = vec![json!({ "id": "_id", "type": "int" })];
-                        all.extend(fields.iter().cloned());
-                        ok(json!({
-                            "resource_id": resource_id,
-                            "fields": all,
-                            "records": [],
-                            "total": rows.len()
-                        }))
-                    }
-                    None => not_found(),
-                }
-            }
             ("POST", _) if call.authorization.as_deref() != Some(TOKEN) => (
                 403,
                 json!({
@@ -215,53 +196,6 @@ impl Catalogue {
                 self.packages.insert(name, package);
                 ok(Value::Null)
             }
-            ("POST", "datastore_create") => {
-                let fields: Vec<Value> =
-                    call.body["fields"].as_array().cloned().unwrap_or_default();
-                if let Some(resource_id) = call.body["resource_id"].as_str() {
-                    let Some((existing, _)) = self.tables.get_mut(resource_id) else {
-                        return not_found();
-                    };
-                    existing.extend(fields);
-                    return ok(json!({ "resource_id": resource_id }));
-                }
-                let package_key = call.body["resource"]["package_id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned();
-                let Some((name, mut package)) = self.package_by_id_or_name(&package_key) else {
-                    return not_found();
-                };
-                let resource_id = self.mint("res");
-                let resource = json!({
-                    "id": resource_id,
-                    "package_id": package["id"],
-                    "name": call.body["resource"]["name"],
-                    "format": call.body["resource"]["format"],
-                    "url": format!("http://ckan.test/datastore/dump/{resource_id}"),
-                    "url_type": "datastore",
-                    "datastore_active": true,
-                });
-                package["resources"]
-                    .as_array_mut()
-                    .expect("resources")
-                    .push(resource);
-                self.packages.insert(name, package);
-                self.tables
-                    .insert(resource_id.clone(), (fields, BTreeMap::new()));
-                ok(json!({ "resource_id": resource_id }))
-            }
-            ("POST", "datastore_upsert") => {
-                let resource_id = call.body["resource_id"].as_str().unwrap_or_default();
-                let Some((_, rows)) = self.tables.get_mut(resource_id) else {
-                    return not_found();
-                };
-                for record in call.body["records"].as_array().into_iter().flatten() {
-                    let key = record[PRIMARY_KEY].as_str().unwrap_or_default().to_owned();
-                    rows.insert(key, record.clone());
-                }
-                ok(json!({ "resource_id": resource_id }))
-            }
             ("POST", "resource_patch") => {
                 let id = call.body["id"].clone();
                 let modified = self.mint("modified");
@@ -284,13 +218,6 @@ impl Catalogue {
                 let patched = resource.clone();
                 package["metadata_modified"] = json!(modified);
                 ok(patched)
-            }
-            ("POST", "datastore_delete") => {
-                let resource_id = call.body["resource_id"].as_str().unwrap_or_default();
-                if self.tables.remove(resource_id).is_none() {
-                    return not_found();
-                }
-                ok(json!({ "resource_id": resource_id }))
             }
             _ => (
                 400,
@@ -822,109 +749,60 @@ fn an_answer_past_the_cap_is_not_read() {
     assert!(error.to_string().contains("more than"), "{error}");
 }
 
-// --- the DataStore over HTTP ---------------------------------------------------------------
+// --- what older runs left ------------------------------------------------------------------
 
-fn page() -> (Vec<String>, Vec<Vec<Value>>) {
-    (
-        vec!["id".to_owned(), "temperature.value".to_owned()],
-        vec![
-            vec![
-                json!("urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:1"),
-                json!(12.5),
-            ],
-            vec![
-                json!("urn:ngsi-ld:AirQualityObserved:bb.sk:ovzdusie:2"),
-                json!(13.0),
-            ],
-        ],
-    )
-}
-
-/// EP-65, CC-18: the table is created through `datastore_create` and filled through
-/// `datastore_upsert`; the resource CKAN minted is found again by id, its fields read
-/// through `datastore_search`, and a table that already has them is left alone. The
-/// dataset, which now carries the DataStore resource, still reads as unchanged, and an
-/// update carries that resource over instead of dropping it.
+/// T-5060: CKAN holds no rows. A live dataset still carrying a DataStore table resource from an
+/// older run is drift: the next publish updates the dataset without it, and the run after
+/// writes nothing.
 #[test]
-fn the_datastore_mirror_reaches_the_catalogue_and_survives_an_update() {
+fn a_dead_datastore_resource_is_dropped_by_the_next_publish() {
     let (catalogue, base) = catalogue();
     let mut api = client(&base, TOKEN);
-    publish(
-        &mut api,
-        &endpoint(),
-        &instance(),
-        &record("Air quality"),
-        &settings(),
-    )
-    .expect("the dataset");
-    let (columns, rows) = page();
-    let fields = datastore::fields(&columns, &rows, &[]);
-    let records = datastore::records(&columns, &rows).expect("records");
-
-    let (resource, outcome) =
-        datastore::ensure(&mut api, "kvalita-ovzdusia", "DataStore", &fields).expect("created");
-    assert_eq!(outcome, datastore::Outcome::Created);
-    let synced = datastore::sync(&mut api, &resource, &[], &records).expect("synced");
-    assert_eq!(synced.upserted.len(), 2);
-    {
-        let catalogue = catalogue.lock().expect("the catalogue");
-        assert_eq!(
-            catalogue.writes(),
-            vec![
-                "package_create",
-                "datastore_create",
-                "datastore_upsert",
-                "resource_patch"
-            ]
-        );
-        let (_, stored) = &catalogue.tables[&resource];
-        assert_eq!(stored.len(), 2);
-    }
-
-    let (again, outcome) =
-        datastore::ensure(&mut api, "kvalita-ovzdusia", &resource, &fields).expect("unchanged");
-    assert_eq!(
-        (again.as_str(), outcome),
-        (resource.as_str(), datastore::Outcome::Unchanged)
-    );
-
-    assert_eq!(
+    let run = |api: &mut HttpCkan| {
         publish(
-            &mut api,
+            api,
             &endpoint(),
             &instance(),
             &record("Air quality"),
-            &settings()
+            &settings(),
         )
-        .expect("the dataset again"),
-        Outcome::Unchanged,
-        "the DataStore resource is not drift"
-    );
-    assert_eq!(
-        publish(
-            &mut api,
-            &endpoint(),
-            &instance(),
-            &record("Air quality, hourly"),
-            &settings()
-        )
-        .expect("the update"),
-        Outcome::Updated
-    );
+        .expect("the dataset")
+    };
+    assert_eq!(run(&mut api), Outcome::Created);
+    let managed = {
+        let mut catalogue = catalogue.lock().expect("the catalogue");
+        let package = catalogue
+            .packages
+            .get_mut("kvalita-ovzdusia")
+            .expect("the dataset");
+        let resources = package["resources"].as_array_mut().expect("resources");
+        let managed = resources.len();
+        resources.push(json!({
+            "id": "res-table",
+            "name": "AirQualityObserved",
+            "url": "http://ckan.test/datastore/dump/res-table",
+            "url_type": "datastore",
+            "datastore_active": true,
+        }));
+        managed
+    };
+
+    assert_eq!(run(&mut api), Outcome::Updated);
+    {
+        let catalogue = catalogue.lock().expect("the catalogue");
+        let resources = catalogue.packages["kvalita-ovzdusia"]["resources"]
+            .as_array()
+            .expect("resources")
+            .clone();
+        assert_eq!(resources.len(), managed, "{resources:?}");
+        assert!(
+            resources
+                .iter()
+                .all(|r| r["url_type"] != json!("datastore")),
+            "{resources:?}"
+        );
+    }
+    assert_eq!(run(&mut api), Outcome::Unchanged);
     let catalogue = catalogue.lock().expect("the catalogue");
-    let resources = catalogue.packages["kvalita-ovzdusia"]["resources"]
-        .as_array()
-        .expect("resources")
-        .clone();
-    assert!(
-        resources
-            .iter()
-            .any(|r| r["id"] == json!(resource) && r["url_type"] == json!("datastore")),
-        "{resources:?}"
-    );
-    drop(catalogue);
-    assert_eq!(
-        datastore::drop_table(&mut api, &resource).expect("dropped"),
-        datastore::Outcome::NotMirrored
-    );
+    assert_eq!(catalogue.writes(), vec!["package_create", "package_update"]);
 }

@@ -81,4 +81,3 @@ spec:
               instanceRef: { kind: CkanInstance, name: "{{ ckanInstance }}" }
               organization: "{{ ckanOrganization }}"
               name: "{{ name }}"
-              datastore: { representation: csv, refresh: onChange }

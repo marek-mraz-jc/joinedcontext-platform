@@ -18,4 +18,3 @@ spec:
       instanceRef: { kind: CkanInstance, name: open-data }
       organization: city-of-helsinki
       name: weather-observations-kaisaniemi
-      datastore: { representation: csv, refresh: onChange }

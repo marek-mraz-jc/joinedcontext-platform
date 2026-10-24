@@ -935,7 +935,7 @@ impl EndpointSpec {
         }
 
         if let Some(ref publish) = self.publish {
-            publish.validate(&self.served_representations())?;
+            publish.validate()?;
         }
 
         if let Some(ref deprecation) = self.deprecation {

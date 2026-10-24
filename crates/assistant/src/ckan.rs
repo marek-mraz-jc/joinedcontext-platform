@@ -5,8 +5,8 @@
 //! Every run lists the catalogue's datasets anonymously, so only public ones come back (and a
 //! dataset marked private is skipped all the same); a dataset whose `metadata_modified` changed
 //! is indexed again, one the catalogue no longer lists is removed with its passages. A listing
-//! that fails part way removes nothing. DataStore rows are data, not knowledge: the assistant
-//! reaches them through its MCP connectors, never through this index.
+//! that fails part way removes nothing. Rows are data, not knowledge: CKAN holds none (T-5060),
+//! and the assistant reaches them through its MCP connectors, never through this index.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;

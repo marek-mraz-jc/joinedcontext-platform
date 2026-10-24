@@ -308,17 +308,6 @@
       "additionalProperties": false,
       "description": "Publication of one Endpoint as one CKAN dataset (EP-62…EP-65).",
       "properties": {
-        "datastore": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/DataStore"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The optional row mirror (EP-65)."
-        },
         "instanceRef": {
           "allOf": [
             {
@@ -440,52 +429,6 @@
         }
       },
       "type": "object"
-    },
-    "DataStore": {
-      "additionalProperties": false,
-      "description": "The optional row mirror in the CKAN DataStore (EP-65).",
-      "properties": {
-        "refresh": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/DataStoreRefresh"
-            }
-          ],
-          "default": "onChange",
-          "description": "How the mirror is kept current."
-        },
-        "representation": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/Representation"
-            }
-          ],
-          "description": "The tabular representation the rows are read through; it must be enabled (EP-44)."
-        }
-      },
-      "required": [
-        "representation"
-      ],
-      "type": "object"
-    },
-    "DataStoreRefresh": {
-      "description": "How often the DataStore mirror is refreshed (EP-65).",
-      "oneOf": [
-        {
-          "description": "Driven by the Endpoint's own subscription: one upsert per changed entity (the default).",
-          "enum": [
-            "onChange"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Reloaded whenever the Endpoint is reconciled, for a space without a subscription.",
-          "enum": [
-            "onReconcile"
-          ],
-          "type": "string"
-        }
-      ]
     },
     "DataTheme": {
       "description": "A theme of the EU data-theme table.",

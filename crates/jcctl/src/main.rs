@@ -1412,8 +1412,8 @@ fn publish_ckan(options: &PublishCkanOptions) -> ExitCode {
             command::withdraw_one(api, target)
         } else {
             command::record(target, &settings).and_then(|record| {
-                let rows = command::rows(target, &settings)?;
-                command::publish_one(api, target, &record, rows.as_ref(), &settings)
+                let models = command::models(target, &settings)?;
+                command::publish_one(api, target, &record, Some(&models), &settings)
             })
         };
         match line {

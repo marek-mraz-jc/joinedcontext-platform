@@ -150,7 +150,7 @@ hide them from it.
 - jcctl: `csr::InMemoryBroker` (6 rows),
   `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (9 rows);
   `commands::drift::write_adoptions`; `csr::forwards_caller_identity`;
-  `ckan_datastore::missing_attributes`; `HttpBao::with_ca_file`; `SecretValue::len`,
+  `HttpBao::with_ca_file`; `SecretValue::len`,
   `SecretStore::load_file`, `source_of`; `ModelTools::generate`.
 - wasm-host: `Host::cached`, `Host::serve` (production calls `serve_admitted`);
   `provision::{database, shard, owner_of, app}`, which `examples/fleet.rs` and the tests use.

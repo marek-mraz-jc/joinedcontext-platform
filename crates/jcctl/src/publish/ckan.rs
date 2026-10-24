@@ -596,22 +596,6 @@ pub fn publish(
             if deleted(&live) {
                 payload["state"] = json!("active");
             }
-            // `package_update` replaces the resource list, so the DataStore table the
-            // mirror created (EP-65) is carried over by id or CKAN drops it with its rows.
-            let kept: Vec<Value> = live
-                .get("resources")
-                .and_then(Value::as_array)
-                .map(|resources| {
-                    resources
-                        .iter()
-                        .filter(|resource| is_datastore(resource))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(resources) = payload["resources"].as_array_mut() {
-                resources.extend(kept);
-            }
             api.action("package_update", &payload)?;
             Ok(Outcome::Updated)
         }
@@ -1043,12 +1027,6 @@ fn quality_extras(record: &Value) -> Vec<Value> {
 /// Whether CKAN holds the dataset as deleted: `package_delete` marks rather than purges.
 fn deleted(live: &Value) -> bool {
     live.get("state").and_then(Value::as_str) == Some("deleted")
-}
-
-/// Whether a live resource is a DataStore table rather than one of the representation
-/// resources this module writes; CKAN marks the ones `datastore_create` made (EP-65).
-fn is_datastore(resource: &Value) -> bool {
-    resource.get("url_type").and_then(Value::as_str) == Some("datastore")
 }
 
 /// One resource per enabled representation, the schema index, and every schema
@@ -1589,7 +1567,6 @@ fn managed_resources(resources: Option<&Value>) -> Vec<Value> {
         .map(|items| {
             items
                 .iter()
-                .filter(|resource| !is_datastore(resource))
                 .map(|resource| {
                     json!({
                         "name": resource.get("name"),
@@ -1617,8 +1594,6 @@ pub struct InMemoryCkan {
     /// Organizations by name, with the title CKAN holds when a test set one.
     organizations: BTreeMap<String, Option<String>>,
     packages: BTreeMap<String, Value>,
-    /// DataStore tables by resource id: the declared fields, and the rows by primary key.
-    tables: BTreeMap<String, (Vec<Value>, BTreeMap<String, Value>)>,
     /// Resource views by resource id, in creation order.
     views: BTreeMap<String, Vec<Value>>,
     calls: Vec<(String, Value)>,
@@ -1670,31 +1645,18 @@ impl InMemoryCkan {
         &self.token
     }
 
-    /// The DataStore rows under one resource, keyed by their primary key (EP-65).
-    pub fn rows(&self, resource_id: &str) -> Option<&BTreeMap<String, Value>> {
-        self.tables.get(resource_id).map(|(_, rows)| rows)
-    }
-
     /// The views of one resource, in creation order; empty for a resource without any.
     pub fn views(&self, resource_id: &str) -> &[Value] {
         self.views.get(resource_id).map_or(&[], Vec::as_slice)
     }
 
-    /// The DataStore fields declared for one resource, in declaration order.
-    pub fn table_fields(&self, resource_id: &str) -> Option<&[Value]> {
-        self.tables
-            .get(resource_id)
-            .map(|(fields, _)| fields.as_slice())
-    }
-
-    /// A DataStore table or a resource of a dataset.
+    /// A resource of a dataset.
     fn holds_resource(&self, id: &str) -> bool {
-        self.tables.contains_key(id)
-            || self.packages.values().any(|p| {
-                p["resources"]
-                    .as_array()
-                    .is_some_and(|rs| rs.iter().any(|r| r["id"] == json!(id)))
-            })
+        self.packages.values().any(|p| {
+            p["resources"]
+                .as_array()
+                .is_some_and(|rs| rs.iter().any(|r| r["id"] == json!(id)))
+        })
     }
 
     fn rejected(action: &str, message: &str) -> CkanError {
@@ -1713,10 +1675,6 @@ impl CkanApi for InMemoryCkan {
                 Some(title) => json!({ "name": name, "title": title }),
                 None => json!({ "name": name }),
             })),
-            "resource_show" => Ok(self
-                .tables
-                .get(name)
-                .map(|(fields, _)| json!({ "resource_id": name, "id": name, "fields": fields }))),
             // CKAN answers 404 for a resource it does not hold, and a list for one it does.
             "resource_view_list" => Ok(self.holds_resource(name).then(|| json!(self.views(name)))),
             other => Err(Self::rejected(other, "unknown show action")),
@@ -1725,9 +1683,6 @@ impl CkanApi for InMemoryCkan {
 
     fn action(&mut self, action: &str, payload: &Value) -> Result<Value, CkanError> {
         self.calls.push((action.to_owned(), payload.clone()));
-        if action.starts_with("datastore_") {
-            return self.datastore(action, payload);
-        }
         // CKAN refuses a view field neither its core nor the view type declares (EP-144).
         if action.starts_with("resource_view_")
             && payload.get("view_type").and_then(Value::as_str) == Some(VISUALIZATION_VIEW)
@@ -1840,12 +1795,7 @@ impl CkanApi for InMemoryCkan {
                     Some((package, index))
                 });
                 let Some((package, index)) = listed else {
-                    // A table made without its dataset, as the DataStore tests make them.
-                    return if self.tables.contains_key(&name) {
-                        Ok(payload.clone())
-                    } else {
-                        Err(Self::rejected(action, "unknown resource"))
-                    };
+                    return Err(Self::rejected(action, "unknown resource"));
                 };
                 let resource = &mut package["resources"][index];
                 for (key, value) in payload.as_object().into_iter().flatten() {
@@ -1868,7 +1818,6 @@ impl CkanApi for InMemoryCkan {
                 if !found {
                     return Err(Self::rejected(action, "unknown resource"));
                 }
-                self.tables.remove(&name);
                 self.views.remove(&name);
                 Ok(json!({}))
             }
@@ -1878,143 +1827,6 @@ impl CkanApi for InMemoryCkan {
 }
 
 impl InMemoryCkan {
-    /// The DataStore half of the Action API: create or extend a table, upsert rows, delete.
-    ///
-    /// It enforces the one rule that matters to a caller building payloads: an upsert
-    /// naming a field the table does not declare is refused, the way CKAN refuses it.
-    fn datastore(&mut self, action: &str, payload: &Value) -> Result<Value, CkanError> {
-        match action {
-            "datastore_create" => {
-                let declared = payload
-                    .get("fields")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                match payload.get("resource_id").and_then(Value::as_str) {
-                    Some(id) => {
-                        // A resource whose table was dropped gets a new one, as CKAN does: the
-                        // resource outlives `datastore_delete` without filters.
-                        let (fields, _) = self
-                            .tables
-                            .entry(id.to_owned())
-                            .or_insert_with(|| (Vec::new(), BTreeMap::new()));
-                        fields.extend(declared);
-                        Ok(json!({ "resource_id": id }))
-                    }
-                    None => {
-                        let id = payload["resource"]["name"]
-                            .as_str()
-                            .ok_or_else(|| Self::rejected(action, "the resource has no name"))?
-                            .to_owned();
-                        if self.tables.contains_key(&id) {
-                            return Err(Self::rejected(action, "that table already exists"));
-                        }
-                        // CKAN lists the resource the table was created under on its dataset.
-                        let package = payload["resource"]["package_id"]
-                            .as_str()
-                            .unwrap_or_default();
-                        let key = self.key_of(&json!({ "id": package }), package);
-                        if let Some(resources) = self
-                            .packages
-                            .get_mut(&key)
-                            .and_then(|live| live["resources"].as_array_mut())
-                        {
-                            resources.push(
-                                json!({ "id": id, "name": id, "url_type": "datastore", "hash": "" }),
-                            );
-                        }
-                        self.tables.insert(id.clone(), (declared, BTreeMap::new()));
-                        Ok(json!({ "resource_id": id }))
-                    }
-                }
-            }
-            "datastore_upsert" => {
-                let id = Self::resource_of(action, payload)?;
-                let (fields, rows) = self
-                    .tables
-                    .get_mut(&id)
-                    .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
-                let known: BTreeSet<&str> =
-                    fields.iter().filter_map(|f| f["id"].as_str()).collect();
-                for record in payload["records"].as_array().into_iter().flatten() {
-                    let members = record
-                        .as_object()
-                        .ok_or_else(|| Self::rejected(action, "a record is not an object"))?;
-                    if let Some(unknown) = members.keys().find(|key| !known.contains(key.as_str()))
-                    {
-                        return Err(Self::rejected(
-                            action,
-                            &format!("the table has no field '{unknown}'"),
-                        ));
-                    }
-                    let key = members
-                        .get("entity_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| Self::rejected(action, "a record has no entity_id"))?
-                        .to_owned();
-                    rows.insert(key, record.clone());
-                }
-                Ok(json!({}))
-            }
-            "datastore_search" => {
-                let id = Self::resource_of(action, payload)?;
-                let (_, rows) = self
-                    .tables
-                    .get(&id)
-                    .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
-                let count = |key: &str| {
-                    payload
-                        .get(key)
-                        .and_then(Value::as_u64)
-                        .and_then(|n| usize::try_from(n).ok())
-                };
-                let fields: Option<Vec<&str>> = payload
-                    .get("fields")
-                    .and_then(Value::as_array)
-                    .map(|fields| fields.iter().filter_map(Value::as_str).collect());
-                let records: Vec<Value> = rows
-                    .values()
-                    .skip(count("offset").unwrap_or(0))
-                    .take(count("limit").unwrap_or(100))
-                    .map(|row| match &fields {
-                        Some(fields) => Value::Object(
-                            fields
-                                .iter()
-                                .filter_map(|field| {
-                                    Some(((*field).to_owned(), row.get(*field)?.clone()))
-                                })
-                                .collect(),
-                        ),
-                        None => row.clone(),
-                    })
-                    .collect();
-                Ok(json!({ "records": records, "total": rows.len() }))
-            }
-            "datastore_delete" => {
-                let id = Self::resource_of(action, payload)?;
-                match payload.get("filters") {
-                    None => {
-                        self.tables.remove(&id);
-                        self.views.remove(&id);
-                    }
-                    Some(filters) => {
-                        let (_, rows) = self
-                            .tables
-                            .get_mut(&id)
-                            .ok_or_else(|| Self::rejected(action, "unknown resource"))?;
-                        for key in filters["entity_id"].as_array().into_iter().flatten() {
-                            if let Some(key) = key.as_str() {
-                                rows.remove(key);
-                            }
-                        }
-                    }
-                }
-                Ok(json!({}))
-            }
-            other => Err(Self::rejected(other, "unknown action")),
-        }
-    }
-
     /// The next `metadata_modified`, later than every one before it.
     fn tick(&mut self) -> String {
         self.revision += 1;

@@ -100,7 +100,7 @@ Public endpoints can be published directly to an open-data portal using native D
 4. Click **Propose catalogue**.
 5. Once merged, open `/projects/helsinki/endpoints` and edit your public endpoint, such as `helsinki-bikes`.
 6. In the endpoint configuration, select `helsinki-ckan` as the target open-data catalogue.
-You should see the dataset listed under Published endpoints with direct links to DCAT-AP records and DataStore mirrors.
+You should see the dataset listed under Published endpoints with direct links to its DCAT-AP record and the Endpoint's own APIs.
 
 #### By asking the assistant
 

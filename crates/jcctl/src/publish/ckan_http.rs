@@ -1,7 +1,6 @@
-//! The CKAN Action API over HTTPS (T-0487, EP-62, EP-65, EP-67).
+//! The CKAN Action API over HTTPS (T-0487, EP-62, EP-67).
 //!
-//! [`super::ckan`] and [`super::ckan_datastore`] build payloads and decide which action to
-//! call; this is the one place a socket is opened towards the catalogue. The API token is
+//! [`super::ckan`] builds payloads and decides which action to call; this is the one place a socket is opened towards the catalogue. The API token is
 //! held here and travels in the `Authorization` header of every request and nowhere else:
 //! not in a URL, not in a payload, and never in an error, which repeats what CKAN said and
 //! the status it said it with (EP-67).
@@ -20,20 +19,17 @@ use std::time::Duration;
 /// How long a connection may take to open.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long one action may take end to end. A `datastore_upsert` of a full table is the
-/// slow one, and CKAN writes it in one transaction.
+/// How long one action may take end to end: a `package_update` of a dataset with many
+/// resources is the slow one.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The longest answer read from the catalogue: a package or a field list is kilobytes, so a host
+/// The longest answer read from the catalogue: a package is kilobytes, so a host
 /// that streams more is cut off rather than filling the publisher's memory (T-4776).
 const MAX_ANSWER: u64 = 32 * 1024 * 1024;
 
 /// How much of a non-JSON answer an error repeats: enough to see a proxy's error page,
 /// not enough to flood a log.
 const SNIPPET: usize = 200;
-
-/// The DataStore's own row number, which CKAN adds to every table and no mirror declares.
-const ROW_NUMBER: &str = "_id";
 
 /// One CKAN instance reached over HTTP(S), holding the token its `apiTokenRef` resolved to.
 #[derive(Debug)]
@@ -164,55 +160,12 @@ impl HttpCkan {
         let request = self.client.get(self.url(action)?).query(query);
         self.send(action, request)
     }
-
-    /// The DataStore fields of one resource, as the mirror declares them: every column but
-    /// CKAN's own row number (EP-65).
-    fn fields_of(&self, resource_id: &str) -> Result<Vec<Value>, CkanError> {
-        let table = self
-            .get(
-                "datastore_search",
-                &[("resource_id", resource_id), ("limit", "0")],
-            )?
-            .unwrap_or(Value::Null);
-        Ok(table
-            .get("fields")
-            .and_then(Value::as_array)
-            .map(|fields| {
-                fields
-                    .iter()
-                    .filter(|field| field.get("id").and_then(Value::as_str) != Some(ROW_NUMBER))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
-    }
 }
 
 impl CkanApi for HttpCkan {
     /// `GET {action}?id={name}`.
-    ///
-    /// `resource_show` answers the resource together with the fields of its DataStore
-    /// table, which is what [`super::ckan_datastore::ensure`] reads and what CKAN keeps
-    /// behind a second action (`datastore_search`); a resource without a table has none.
     fn show(&self, action: &str, name: &str) -> Result<Option<Value>, CkanError> {
-        let Some(mut object) = self.get(action, &[("id", name)])? else {
-            return Ok(None);
-        };
-        if action == "resource_show" {
-            let active = object.get("datastore_active") == Some(&json!(true));
-            let id = object
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or(name)
-                .to_owned();
-            let fields = if active {
-                self.fields_of(&id)?
-            } else {
-                Vec::new()
-            };
-            object["fields"] = Value::Array(fields);
-        }
-        Ok(Some(object))
+        self.get(action, &[("id", name)])
     }
 
     /// `POST {action}` with the payload as its JSON body.
