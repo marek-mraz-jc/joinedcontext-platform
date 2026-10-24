@@ -355,7 +355,7 @@ impl Model {
             }
         }
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        let reply = reply(deployment, answer).await?;
         parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
@@ -372,7 +372,7 @@ impl Model {
     ) -> Result<Completion, CallError> {
         let body = self.body(call, messages, false);
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        let reply = reply(deployment, answer).await?;
         parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
@@ -397,7 +397,7 @@ impl Model {
             }
         }
         let answer = self.send(deployment, tokens_per_day, &body).await?;
-        let reply: Value = answer.json().await.unwrap_or(Value::Null);
+        let reply = reply(deployment, answer).await?;
         parse(&reply).map(|c| c.of(&body)).ok_or_else(|| {
             unavailable(deployment, "the provider's answer is not a chat completion")
         })
@@ -516,6 +516,19 @@ pub const DAY_SPENT: &str = "the model proxy refused the deployment's day (budge
 /// never that the visitor used up a share.
 pub const CONVERSATION_SPENT: &str =
     "Tento rozhovor je už dlhý. Pokračujte v novom rozhovore, otázku v ňom položím znova.";
+
+/// The most of one unstreamed model answer the assistant holds (T-5510): ample for
+/// [`MAX_ANSWER_TOKENS`], and a provider that answers without end is cut off here.
+pub const MAX_REPLY_BYTES: usize = 1 << 20;
+
+/// An unstreamed answer as JSON, read only up to [`MAX_REPLY_BYTES`]; a body that is not JSON is
+/// `null`, which [`parse`] refuses as no chat completion.
+async fn reply(deployment: &str, answer: reqwest::Response) -> Result<Value, CallError> {
+    let body = jc_core::outbound::read_capped(answer, MAX_REPLY_BYTES)
+        .await
+        .map_err(|err| unavailable(deployment, &err.to_string()))?;
+    Ok(serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
 
 fn unavailable(deployment: &str, why: &str) -> CallError {
     tracing::warn!(%deployment, %why, "a model call failed");
@@ -688,6 +701,34 @@ pub fn parse(body: &Value) -> Option<Completion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-5510: a provider that answers without end is cut off at [`MAX_REPLY_BYTES`].
+    #[tokio::test]
+    async fn an_endless_reply_is_refused_at_the_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("an address");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.expect("a connection");
+            let _ = socket.read(&mut [0u8; 4096]).await;
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = format!("10000\r\n{}\r\n", "x".repeat(0x10000));
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        });
+        let answer = reqwest::get(format!("http://{addr}/"))
+            .await
+            .expect("an answer");
+        let refused = reply("helsinki/assistant", answer).await;
+        assert!(
+            matches!(refused, Err(CallError::Unavailable(_))),
+            "{refused:?}"
+        );
+    }
 
     /// T-4681: the cached prompt tokens and the reasoning text are kept as the provider sent
     /// them, in a reply and in a stream; none sent is `None`, never invented.
