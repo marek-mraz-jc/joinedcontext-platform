@@ -264,7 +264,7 @@ pub(crate) async fn mcp_answer(
         if narrowed {
             return unreadable_tool_list(id, &endpoint);
         }
-        return proxy::with_body(parts, held.to_vec());
+        return proxy::with_body(parts, held);
     };
     if decorated {
         federated(&mut listed, &method, &federates);

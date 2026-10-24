@@ -132,7 +132,7 @@ async fn odata_error(answer: Response<Body>) -> Response<Body> {
         .await
         .unwrap_or_default();
     let Ok(document) = serde_json::from_slice::<Value>(&held) else {
-        return proxy::with_body(parts, held.to_vec());
+        return proxy::with_body(parts, held);
     };
     parts
         .headers
@@ -343,7 +343,7 @@ async fn answered(
             .starts_with(b"application/vnd.mapbox-vector-tile")
     });
     let Some(text) = std::str::from_utf8(&held).ok().filter(|_| !tile) else {
-        return proxy::with_body(parts, held.to_vec());
+        return proxy::with_body(parts, held);
     };
     let mut text = text.replace(&from, &to).replace(&view_from, &view_to);
     if surface.representation == Representation::Feed {
