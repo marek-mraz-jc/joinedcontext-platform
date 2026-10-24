@@ -66,6 +66,8 @@ from 39 to 31, and 32 with T-4444's `Reaper::files_walked` (test API) merged mea
 T-4728: the walk keyed a trait impl by cg's `self_type` with its arguments (`Reference<'_>`), so
 a reached type with a lifetime or generic never reached its `Drop` or `Display`; keyed by the
 name alone, jcctl's `commands::import::Reference::fmt` is reached and jcctl falls to 28.
+T-5087 removed the DataStore row mirror with its test helpers `InMemoryCkan::rows`, `views` and
+`table_fields`; jcctl falls to 25.
 
 `ci/cg-dead-code-baseline.txt` holds the after column. The check is red when a crate has more
 rows than its line (new code nothing calls, or a caller deleted and its callees kept) and red
@@ -148,8 +150,8 @@ hide them from it.
   `KeyPerformanceIndicator::from_json`; `urn::EntityRef` and its `new`, `space`, `urn`.
 - jc-manifest (moved from jcctl, T-4604): `bento::InputContext::new`, `with_pipeline_spec`.
 - jcctl: `csr::InMemoryBroker` (6 rows),
-  `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (9 rows);
-  `commands::drift::write_adoptions`; `csr::forwards_caller_identity`;
+  `platform::InMemory` (4 rows), `publish::ckan::InMemoryCkan` (7 rows);
+  `commands::drift::write_adoptions`;
   `HttpBao::with_ca_file`; `SecretValue::len`,
   `SecretStore::load_file`, `source_of`; `ModelTools::generate`.
 - wasm-host: `Host::cached`, `Host::serve` (production calls `serve_admitted`);
