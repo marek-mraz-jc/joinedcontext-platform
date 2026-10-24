@@ -208,7 +208,7 @@ async fn from_view(
         return Err(Box::new(not_a_document()));
     };
     if !parts.status.is_success() {
-        return Err(Box::new(proxy::with_body(parts, held.to_vec())));
+        return Err(Box::new(proxy::with_body(parts, held)));
     }
     // Every document and decision of the surface is a JSON object; anything else is not an
     // answer the gateway can add to or pass on.

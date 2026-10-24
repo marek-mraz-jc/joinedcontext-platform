@@ -279,7 +279,7 @@ pub(crate) async fn read_body(
     let limit = gateway.max_request_body();
     axum::body::to_bytes(body, limit)
         .await
-        .map(|bytes| bytes.to_vec())
+        .map(Vec::from)
         .map_err(|_| {
             Box::new(
                 ProblemDetails::bad_request()
@@ -522,7 +522,7 @@ pub(crate) async fn serve_ngsi_ld_view(
             .await
             .unwrap_or_default();
         if !names_no_tenant(&held) {
-            return proxy::with_body(parts, held.to_vec());
+            return proxy::with_body(parts, held);
         }
         return match empty_space(operation) {
             Some(empty) => json_response(&empty),
@@ -579,7 +579,7 @@ async fn logged_read(
         entities = %read_entities(&held).join(","),
         "personal attributes read"
     );
-    proxy::with_body(parts, held.to_vec())
+    proxy::with_body(parts, held)
 }
 
 /// The URNs of the Entities an NGSI-LD answer holds: one Entity, a list of them, or a GeoJSON
@@ -612,7 +612,7 @@ pub(crate) async fn with_platform_slug(answer: Response<Body>) -> Response<Body>
         .await
         .unwrap_or_default();
     let Ok(mut problem) = serde_json::from_slice::<Value>(&held) else {
-        return proxy::with_body(parts, held.to_vec());
+        return proxy::with_body(parts, held);
     };
     let denied = problem["type"] == ANTARES_ACCESS_DENIED;
     if let Some(members) = problem.as_object_mut().filter(|_| denied) {
