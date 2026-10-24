@@ -4,10 +4,10 @@
 use crate::app::{Gateway, MAX_BODY, MAX_COLLECTED, PAGE};
 use crate::auth::subject::Subject;
 use crate::handlers::ngsi_ld::{has_view, ANTARES_RESTRICTED};
+use crate::handlers::types_list::dataset_types;
 use crate::handlers::view_access::no_view;
 use crate::handlers::writes::names_no_tenant;
 use crate::resolver::Endpoint;
-use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
 use axum::body::{Body, Bytes};
 use axum::extract::Request;
@@ -16,60 +16,8 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
 use jc_core::ProblemDetails;
+use jc_tabular::{page_entities, Collect, Collector, Limits, Table, Window};
 use serde_json::Value;
-
-/// Every entity type the pinned tenant holds, as the broker's own `EntityTypeList` reports it.
-///
-/// Used only as the selector of last resort for a file download. It can only narrow: the
-/// broker's view decides what this caller may see of it (T-3651). An empty list
-/// means an empty space, a space with no tenant at the broker included, which is an empty file
-/// rather than an error.
-///
-/// Asked on the gateway's own account (T-3790): no grant gives a caller the type list (5.7.5),
-/// and the broker's engine refuses it to them; the entity query that follows is the caller's.
-pub(super) async fn dataset_types(
-    gateway: &Gateway,
-    slug: &str,
-    headers: &HeaderMap,
-) -> Result<Vec<String>, Box<Response<Body>>> {
-    let mut headers = headers.clone();
-    tenancy::as_gateway(&mut headers);
-    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    let answer = gateway
-        .broker
-        .send(
-            axum::http::Method::GET,
-            "/ngsi-ld/v1/types",
-            headers,
-            Body::empty(),
-        )
-        .await
-        .map_err(|error| Box::new(ProblemDetails::from(error).into_response()))?;
-
-    let (parts, body) = answer.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    // A space nobody has written to has no tenant at the broker, and holds no type (EP-22).
-    if parts.status == StatusCode::NOT_FOUND && names_no_tenant(&bytes) {
-        return Ok(Vec::new());
-    }
-    if !parts.status.is_success() {
-        return Err(broker_failed(slug, parts.status, Body::from(bytes)).await);
-    }
-    let list: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-
-    Ok(list["typeList"]
-        .as_array()
-        .map(|types| {
-            types
-                .iter()
-                .filter_map(|entry| entry.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default())
-}
 
 /// The gateway's own answer to a broker that failed a read behind one of its representations
 /// (T-2340, EP-26, R22).
@@ -81,7 +29,11 @@ pub(super) async fn dataset_types(
 /// refusing the query this request became and a `404` is a miss; a `5xx` keeps its status, as on
 /// the NGSI-LD surface (T-2260). Any other refusal (the gateway's own credentials, its rate at
 /// the broker) is the gateway failing rather than the caller, so it is a `502`.
-async fn broker_failed(slug: &str, status: StatusCode, body: Body) -> Box<Response<Body>> {
+pub(super) async fn broker_failed(
+    slug: &str,
+    status: StatusCode,
+    body: Body,
+) -> Box<Response<Body>> {
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
@@ -112,7 +64,7 @@ async fn broker_failed(slug: &str, status: StatusCode, body: Body) -> Box<Respon
 /// The answer is bigger than this endpoint allows one download to be (EP-44).
 pub(crate) fn too_large() -> Response<Body> {
     let mut response = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
-        .with_detail(tabular::TooLarge.to_string())
+        .with_detail(jc_tabular::TooLarge.to_string())
         .into_response();
     *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
     response
@@ -136,8 +88,8 @@ pub(crate) async fn paged_entities(
     subject: &Subject,
     (params, view): (&[(String, String)], &str),
     request: &mut Request,
-    limits: &tabular::Limits,
-) -> Result<(tabular::Table, bool), Box<Response<Body>>> {
+    limits: &Limits,
+) -> Result<(Table, bool), Box<Response<Body>>> {
     if !has_view(view) {
         return Err(Box::new(no_view(endpoint)));
     }
@@ -154,32 +106,37 @@ async fn paged_view(
     subject: &Subject,
     (params, view): (&[(String, String)], &str),
     request: &mut Request,
-    limits: &tabular::Limits,
-) -> Result<(tabular::Table, bool), Box<Response<Body>>> {
+    limits: &Limits,
+) -> Result<(Table, bool), Box<Response<Body>>> {
     let slug = endpoint.slug.as_str();
-    let window = window(params)?;
+    let window = Window::parse(params).map_err(|bad| {
+        Box::new(
+            ProblemDetails::new(400, "bad-request", "Bad Request")
+                .with_detail(bad.to_string())
+                .into_response(),
+        )
+    })?;
     view_hop(endpoint, subject, request)?;
-    // The row ceiling is the refusal (EP-44); `limit` and `offset` cut the answer (T-4591).
-    let wanted = u64::from(limits.max_rows);
     let windowless: Vec<(String, String)> = params
         .iter()
         .filter(|(name, _)| name != "limit" && name != "offset")
         .cloned()
         .collect();
     let Some(types) = selector(gateway, view, &windowless, request.headers()).await? else {
-        return Ok((tabular::Table::default(), false));
+        return Ok((Table::default(), false));
     };
     let narrowed = query::view_read(&windowless, &types);
 
     // The first page with the broker's count, then every further page the count names,
     // PARALLEL_PAGES at a time (T-4082): read one after another, a 25 000-entity download took
-    // 20-28 s behind a broker answering a page in about 0.9 s. The pages stay in their order,
-    // and the ceilings hold as each page arrives.
+    // 20-28 s behind a broker answering a page in about 0.9 s. The pages stay in their order;
+    // the collector holds the ceilings as each page arrives and drops its entities (T-4782).
     let headers = request.headers().clone();
     let read = |target: String| {
         let headers = &headers;
-        async move { view_page(gateway, slug, view, &target, headers).await }
+        async move { view_bytes(gateway, slug, view, &target, headers).await }
     };
+    let at = |offset: usize| format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
     // A `q` the view checks entity by entity cannot be counted under the broker's scan ceiling:
     // it answers TooManyResults past 10 000 stored rows (T-4324), so such a read is walked page
     // by page, as a broker that sends no count is.
@@ -188,100 +145,48 @@ async fn paged_view(
     } else {
         "&count=true"
     };
-    let (page, mut restricted, bytes, total) = read(format!(
-        "entities?{narrowed}&limit={PAGE}&offset=0{counted}"
-    ))
-    .await?;
-    // What the broker sent is held either way: a ceiling on the gateway's memory (T-0810).
-    let mut held = bytes as u64;
-    let full = page.len() >= PAGE;
-    // Each page goes into the table as it arrives and its entities are dropped (T-4782).
-    let mut seen: usize = 0;
-    let mut table = tabular::table(&in_window(page, window, &mut seen), limits)
-        .map_err(|_| Box::new(too_large()))?;
+    // The row ceiling is the refusal (EP-44), the broker JSON held a ceiling on the gateway's
+    // memory (T-0810); `limit` and `offset` cut the answer (T-4591).
+    let mut table = Collector::new(*limits, window, MAX_COLLECTED);
+    let (bytes, mut restricted, total) = read(format!("{}{counted}", at(0))).await?;
+    let mut fetched = table.push_page(&bytes).map_err(collect_failed)?;
     let mut further = Vec::new();
-    if full {
-        match total {
-            // The ceiling is known before the rest is read.
-            Some(total) if total > wanted => return Err(Box::new(too_large())),
-            Some(total) => further.extend(
-                (PAGE..usize::try_from(total).unwrap_or(usize::MAX))
-                    .step_by(PAGE)
-                    .map(|offset| format!("entities?{narrowed}&limit={PAGE}&offset={offset}")),
-            ),
-            // A broker that sends no count is walked page by page, as before.
-            None => {
-                let mut offset = PAGE;
-                loop {
-                    let target = format!("entities?{narrowed}&limit={PAGE}&offset={offset}");
-                    let (page, narrowed_page, bytes, _) = read(target).await?;
-                    restricted |= narrowed_page;
-                    held += bytes as u64;
-                    let fetched = page.len();
-                    table.append(&in_window(page, window, &mut seen));
-                    if seen as u64 > wanted || held > MAX_COLLECTED {
-                        return Err(Box::new(too_large()));
-                    }
-                    if fetched < PAGE {
-                        break;
-                    }
-                    offset += PAGE;
-                }
+    match total {
+        _ if fetched < PAGE => {}
+        // The ceiling is known before the rest is read.
+        Some(total) if total > u64::from(limits.max_rows) => return Err(Box::new(too_large())),
+        Some(total) => further.extend(
+            (PAGE..usize::try_from(total).unwrap_or(usize::MAX))
+                .step_by(PAGE)
+                .map(at),
+        ),
+        // A broker that sends no count is walked page by page.
+        None => {
+            let mut offset = PAGE;
+            while fetched >= PAGE {
+                let (bytes, narrowed_page, _) = read(at(offset)).await?;
+                restricted |= narrowed_page;
+                fetched = table.push_page(&bytes).map_err(collect_failed)?;
+                offset += PAGE;
             }
         }
     }
-    if seen as u64 > wanted || held > MAX_COLLECTED {
-        return Err(Box::new(too_large()));
-    }
     // Read ahead as bytes and parsed one at a time as each joins the table (T-5182).
-    let ahead = |target: String| {
-        let headers = &headers;
-        async move { view_bytes(gateway, slug, view, &target, headers).await }
-    };
-    let mut pages = stream::iter(further).map(ahead).buffered(PARALLEL_PAGES);
+    let mut pages = stream::iter(further).map(&read).buffered(PARALLEL_PAGES);
     while let Some(page) = pages.next().await {
         let (bytes, narrowed_page, _) = page?;
         restricted |= narrowed_page;
-        held += bytes.len() as u64;
-        table.append(&in_window(parse_page(&bytes)?, window, &mut seen));
-        if seen as u64 > wanted || held > MAX_COLLECTED {
-            return Err(Box::new(too_large()));
-        }
+        table.push_page(&bytes).map_err(collect_failed)?;
     }
-    Ok((table, restricted))
+    Ok((table.finish(), restricted))
 }
 
-/// The entities of `page` inside the caller's `(offset, limit)` window, `seen` the rows read
-/// before it and counted on: a row outside the window counts against the ceiling and is not kept.
-fn in_window(page: Vec<Value>, (offset, limit): (usize, usize), seen: &mut usize) -> Value {
-    let first = *seen;
-    *seen += page.len();
-    Value::Array(
-        page.into_iter()
-            .enumerate()
-            .filter(|(index, _)| {
-                (first + index)
-                    .checked_sub(offset)
-                    .is_some_and(|at| at < limit)
-            })
-            .map(|(_, entity)| entity)
-            .collect(),
-    )
-}
-
-/// The `offset` and `limit` a download asks for (T-4591), none the whole answer; a value that is
-/// no whole number is the caller's mistake, said, never a silent default.
-fn window(params: &[(String, String)]) -> Result<(usize, usize), Box<Response<Body>>> {
-    let read = |name: &str, none: usize| match query::first(params, name).map(str::parse) {
-        Some(Err(_)) => Err(Box::new(
-            ProblemDetails::new(400, "bad-request", "Bad Request")
-                .with_detail(format!("{name} must be a whole number"))
-                .into_response(),
-        )),
-        Some(Ok(value)) => Ok(value),
-        None => Ok(none),
-    };
-    Ok((read("offset", 0)?, read("limit", usize::MAX)?))
+/// The gateway's answer to a page walk the collector stopped: a ceiling is the download's `413`.
+fn collect_failed(failed: Collect) -> Box<Response<Body>> {
+    Box::new(match failed {
+        Collect::TooLarge => too_large(),
+        Collect::Unreadable => ProblemDetails::internal().into_response(),
+    })
 }
 
 /// Pins the tenant and the verified caller for a hop to the view; a caller who asked about
@@ -324,7 +229,8 @@ pub(super) async fn view_page(
     headers: &HeaderMap,
 ) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
     let (bytes, restricted, total) = view_bytes(gateway, slug, view, target, headers).await?;
-    Ok((parse_page(&bytes)?, restricted, bytes.len(), total))
+    let page = page_entities(&bytes).map_err(collect_failed)?;
+    Ok((page, restricted, bytes.len(), total))
 }
 
 /// [`view_page`] unparsed: a download holds the pages it reads ahead as JSON, about a fifteenth of
@@ -376,20 +282,6 @@ async fn view_bytes(
         return Err(broker_failed(slug, parts.status, Body::from(bytes)).await);
     }
     Ok((bytes, restricted, total))
-}
-
-/// The entities of a page [`view_bytes`] read: an array, a single entity, or none.
-fn parse_page(bytes: &[u8]) -> Result<Vec<Value>, Box<Response<Body>>> {
-    if bytes.is_empty() {
-        return Ok(Vec::new());
-    }
-    let page: Value = serde_json::from_slice(bytes)
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
-    Ok(match page {
-        Value::Array(entities) => entities,
-        entity if entity.is_object() => vec![entity],
-        _ => Vec::new(),
-    })
 }
 
 /// Whether a broker answer is CIM 009's TooManyResults.
