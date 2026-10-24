@@ -121,19 +121,21 @@ jobs:
       # ci-full; T-5312). --no-deps after clippy and the tests: ~20 s warm.
       - run: cargo doc --workspace --no-deps --locked
         env: { RUSTDOCFLAGS: "-D warnings" }
-      # And the contract those descriptions make: every field has one, and none of them is a
-      # credential. `--lib --bins` above does not run an integration test (T-2145).
-      - run: cargo test -p jc-core --test kind_documentation_tests --locked
+      # jc-core's integration tests, one binary (T-5512): `--lib --bins` above runs none of them,
+      # and a stale committed schema went red only in the nightly ci-full (T-5379). Among them the
+      # contract the descriptions make: every field has one, and none of them is a credential
+      # (kind_documentation_tests, T-2145); every environment variable a service reads is
+      # explained where it is read, and no secret is read into a log line
+      # (configuration_documentation_tests, T-2140, OPS-27; the configuration reference in the
+      # docs is generated from those sentences); and policy_odrl_tests writes the ODRL records
+      # validate-odrl-profile.py reads below.
+      - run: cargo test -p jc-core --test it --locked
+        env: { ODRL_RECORDS_DIR: "${{ runner.temp }}/odrl-records" }
       # The gateway library builds no jemalloc for its dependents (the Portal); only the image's
       # `--features context-gateway/jemalloc` links it (T-5017).
       - run: |
           tree="$(cargo tree -p context-gateway -e normal --prefix none --locked)"
           if grep -q '^tikv-jemalloc' <<<"$tree"; then echo "context-gateway's default features pull jemalloc" >&2; exit 1; fi
-      # Every environment variable a service reads is explained where it is read, and no
-      # secret is read into a log line (T-2140, OPS-27). The configuration reference in the
-      # docs is generated from those sentences, so a variable added without one is caught
-      # here rather than a lane later.
-      - run: cargo test -p jc-core --test configuration_documentation_tests --locked
       # Every variant of an Endpoint's DCAT-AP record against the SEMIC DCAT-AP 3.0 shapes pinned
       # in the repository, and its JSON-LD and Turtle as one graph (T-2789, EP-78). The test
       # writes the records, pyshacl reads them: one test binary and a pip install, under a minute.
@@ -144,9 +146,8 @@ jobs:
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
       - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
       # The ngsi-ld: ODRL profile's SHACL shapes and `jcctl policy import` refuse the same
-      # documents (T-5039, ADR-N-057 decision 4): the test writes them, pyshacl reads them.
-      - run: cargo test -p jc-core --test policy_odrl_tests --locked
-        env: { ODRL_RECORDS_DIR: "${{ runner.temp }}/odrl-records" }
+      # documents (T-5039, ADR-N-057 decision 4): policy_odrl_tests in the jc-core step above
+      # writes them, pyshacl reads them.
       - run: python3 scripts/ci/validate-odrl-profile.py "${{ runner.temp }}/odrl-records"
   model-tools:
     needs: changes

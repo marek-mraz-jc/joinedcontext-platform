@@ -12,7 +12,7 @@ use jc_core::registry;
 
 type Subscription = ResourceEnvelope<SubscriptionSpec>;
 
-const GOLDEN: &str = include_str!("golden/027-Subscription-06-configuration-as-code.yaml");
+const GOLDEN: &str = include_str!("../golden/027-Subscription-06-configuration-as-code.yaml");
 
 /// A moment before the golden manifest's `expiresAt`, so the expiry check has something to
 /// compare against without a clock (jc-core takes chrono without `clock` on purpose).

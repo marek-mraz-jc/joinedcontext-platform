@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 /// Policies of the shapes the seeds and the Portal write: an App's history grant, a public grant
 /// with every residual filter, a service account over several selectors, and `rules[]`.
 const POLICIES: &[&str] = &[
-    include_str!("golden/006-Policy-03-domain-model.yaml"),
+    include_str!("../golden/006-Policy-03-domain-model.yaml"),
     r#"
 apiVersion: joinedcontext.com/v1alpha1
 kind: Policy
