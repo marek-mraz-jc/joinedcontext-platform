@@ -271,7 +271,13 @@ pub async fn enforce(
         .rate_limiter
         .check(&endpoint.slug, &caller, &limits, Instant::now());
     if !decision.allowed {
-        tracing::info!(slug = %endpoint.slug, "rate limit reached");
+        // The caller as the Endpoint admits its token, or anonymous: the Activity row an
+        // operator looks for (runbook 3), never the address the bucket may be keyed by (T-5624).
+        let subject = crate::auth::subject::authenticate(&gateway, &endpoint, request.headers())
+            .unwrap_or_else(|_| crate::auth::subject::Subject::anonymous());
+        let named = crate::auth::subject::principal_of(&subject);
+        tracing::info!(slug = %endpoint.slug, caller = %named, "rate limit reached");
+        crate::activity::rate_limited(&endpoint, named);
         return too_many(
             &decision,
             "the endpoint's rate limit is spent; retry after the seconds the RateLimit-Reset header names",
