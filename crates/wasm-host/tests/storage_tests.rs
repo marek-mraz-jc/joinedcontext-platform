@@ -437,6 +437,7 @@ async fn a_presigned_url_opens_one_key_for_one_method_for_minutes() {
         .expect("put");
     let url = blob
         .presign(&a, "photo.png", Method::Get, 86_400)
+        .await
         .expect("presign");
     assert!(
         url.contains("X-Amz-Expires=300&"),
@@ -468,7 +469,7 @@ async fn a_presigned_url_opens_one_key_for_one_method_for_minutes() {
         403
     );
     assert!(matches!(
-        blob.presign(&a, "../b/photo.png", Method::Put, 60),
+        blob.presign(&a, "../b/photo.png", Method::Put, 60).await,
         Err(BlobError::Refused(_))
     ));
 }
@@ -485,4 +486,29 @@ async fn the_blob_quota_stops_a_write_with_a_reason() {
         Err(BlobError::Quota(why)) => assert!(why.contains("4 bytes"), "{why}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// T-5701: a presigned PUT bypasses `put`, so it is refused once the files are at their quota,
+/// and a `get` stops at the read limit instead of holding an object of any size whole.
+#[tokio::test]
+async fn a_presigned_put_stops_at_the_quota_and_a_read_at_its_limit() {
+    let store = Store::new().await;
+    let blob = store.blob("s1", 4).with_read_limit(3);
+    let a = app("presign_quota");
+    blob.put(&a, "full", b"abcd".to_vec(), None)
+        .await
+        .expect("exactly the quota");
+    match blob.presign(&a, "more", Method::Put, 60).await {
+        Err(BlobError::Quota(why)) => assert!(why.contains("4 bytes"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    blob.presign(&a, "full", Method::Get, 60)
+        .await
+        .expect("a read URL is no write");
+    match blob.get(&a, "full").await {
+        Err(BlobError::Refused(why)) => assert!(why.contains("3 bytes"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let roomy = store.blob("s1", 4).with_read_limit(4);
+    assert_eq!(roomy.get(&a, "full").await.expect("at the limit"), b"abcd");
 }

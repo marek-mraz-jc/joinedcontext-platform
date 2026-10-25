@@ -132,11 +132,10 @@ async fn run() -> Result<(), String> {
     };
     let blob = match bucket {
         None => None,
-        Some(bucket) => Some(S3Blob::new(
-            bucket,
-            &id,
-            bytes("JC_WASM_BLOB_QUOTA_BYTES", 1 << 30)?,
-        )),
+        Some(bucket) => Some(
+            S3Blob::new(bucket, &id, bytes("JC_WASM_BLOB_QUOTA_BYTES", 1 << 30)?)
+                .with_read_limit(limits.response_bytes),
+        ),
     };
     let storage: Arc<dyn Storage> = if sql.is_none() && blob.is_none() {
         Arc::new(Unconfigured)
