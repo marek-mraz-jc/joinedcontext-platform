@@ -66,7 +66,10 @@ impl Pdp for PolicyPdp {
         // representation has to remember it.
         let verdict = match verdict {
             Verdict::Rewrite(mut constraints) if !endpoint.hidden_attributes.is_empty() => {
-                constraints.hidden = endpoint.hidden_attributes.clone();
+                // Beside what a prohibition withholds, never in its place (GW4).
+                constraints
+                    .hidden
+                    .extend(endpoint.hidden_attributes.iter().cloned());
                 constraints.restricted = true;
                 Verdict::Rewrite(constraints)
             }

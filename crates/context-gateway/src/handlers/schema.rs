@@ -477,4 +477,30 @@ mod visible_tests {
         assert!(seen.only("AirQualityObserved").is_some());
         assert!(seen.only("Vehicle").is_none());
     }
+
+    /// T-5586 (GW4, EP-61): the data path withholds what the schema takes back, the
+    /// prohibition's attributes beside the ones the Endpoint hides, never one in place of the
+    /// other.
+    #[test]
+    fn the_decision_withholds_what_the_schema_takes_back() {
+        use crate::pdp::evaluator::Request;
+        use crate::pdp::{Pdp, PolicyPdp};
+        let mut both = endpoint(vec![
+            granting(&["AirQualityObserved"], &["pm10", "pm25", "contact"]),
+            prohibiting(&["AirQualityObserved"], &["pm25"]),
+        ]);
+        both.hidden_attributes = ["contact".to_owned()].into_iter().collect();
+        let verdict = PolicyPdp.decide(
+            &Subject::anonymous(),
+            jc_core::kinds::Operation::QueryEntity,
+            &Request::default(),
+            &both,
+        );
+        let constraints = verdict.constraints().expect("a rewrite");
+        let withheld: Vec<&str> = constraints.hidden.iter().map(String::as_str).collect();
+        assert_eq!(withheld, vec!["contact", "pm25"]);
+        let seen = visible(&Subject::anonymous(), &both, now());
+        assert!(seen.denied_attrs.contains("pm25"));
+        assert!(seen.denied_attrs.contains("contact"));
+    }
 }

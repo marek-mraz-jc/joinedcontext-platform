@@ -192,10 +192,19 @@ fn check_type(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> 
     }
 }
 
-/// GW17: a write touching any attribute outside the grant is denied whole, never trimmed.
+/// GW17: a write touching any attribute outside the grant, or one a prohibition withholds
+/// (GW4), is denied whole, never trimmed.
 fn check_attributes(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
-    match ungranted(entity, &constraints.attrs).first() {
-        Some(name) => Err(Refusal::AttributeOutsideGrant((*name).to_owned())),
+    let withheld = entity
+        .as_object()
+        .and_then(|members| {
+            members
+                .keys()
+                .find(|name| constraints.hidden.contains(*name))
+        })
+        .map(String::as_str);
+    match withheld.or_else(|| ungranted(entity, &constraints.attrs).first().copied()) {
+        Some(name) => Err(Refusal::AttributeOutsideGrant(name.to_owned())),
         None => Ok(()),
     }
 }

@@ -600,6 +600,7 @@ impl HeldDelete<'_> {
             {
                 Verdict::Rewrite(granted) => {
                     !granted.empty
+                        && !granted.hidden.contains(slot)
                         && !conditional::state_dependent(&granted)
                         && write_guard::check_granted_id(other, &granted).is_ok()
                 }

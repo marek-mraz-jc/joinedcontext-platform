@@ -413,10 +413,19 @@ async fn send(
     uri: &str,
     body: Option<Value>,
 ) -> Answer {
+    send_to(endpoint(writable), failing, method, uri, body).await
+}
+
+async fn send_to(
+    endpoint: Endpoint,
+    failing: &[&str],
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> Answer {
     let (upstream, store) = broker(campus(), failing).await;
     let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
-            .serve([endpoint(writable)]),
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
     );
     let request = Request::builder()
         .method(method)
@@ -650,6 +659,56 @@ async fn a_held_delete_unlinks_as_the_gateway() {
     for (call, client) in unlinked {
         assert_eq!(*client, Some("context-gateway"), "{call}");
     }
+}
+
+/// T-5586 (GW4): a prohibition naming the slot keeps the unlinking from writing it, though it
+/// no longer refuses the caller's other writes of the type; one naming another attribute
+/// leaves the unlinking alone.
+#[tokio::test]
+async fn a_prohibition_of_the_slot_keeps_the_set_null_unlink_and_one_of_another_does_not() {
+    let prohibiting = |attribute: &str| {
+        let prohibition: PolicySpec = serde_norway::from_str(&format!(
+            "contextSpaceRef: {SPACE}\n\
+             effect: prohibition\n\
+             assigner: did:web:{DOMAIN}\n\
+             assignee: {{ kind: role, id: public }}\n\
+             operations: [updateAttrs, deleteAttrs]\n\
+             information:\n\
+             \x20 - entities:\n\
+             \x20     - type: Teacher\n\
+             \x20   propertyNames: [{attribute}]\n"
+        ))
+        .expect("the prohibition parses");
+        let mut endpoint = endpoint(CLASSES);
+        endpoint.policies.push(prohibition);
+        endpoint
+    };
+    let desk = urn("Desk", "d1");
+    let kept = send_to(
+        prohibiting("desk"),
+        &[],
+        Method::DELETE,
+        &format!("/entities/{desk}"),
+        None,
+    )
+    .await;
+    assert_eq!(kept.status, StatusCode::CONFLICT, "{}", kept.body);
+    assert_eq!(kept.body["slot"], "desk");
+    assert!(kept.writes().is_empty(), "{:?}", kept.writes());
+
+    let unlinked = send_to(
+        prohibiting("name"),
+        &[],
+        Method::DELETE,
+        &format!("/entities/{desk}"),
+        None,
+    )
+    .await;
+    assert_eq!(unlinked.status, StatusCode::NO_CONTENT, "{}", unlinked.body);
+    let teacher = unlinked
+        .held(&urn("Teacher", "t1"))
+        .expect("the teacher stays");
+    assert!(teacher.get("desk").is_none(), "{teacher}");
 }
 
 #[tokio::test]
