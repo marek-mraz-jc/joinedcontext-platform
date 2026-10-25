@@ -828,7 +828,7 @@ async fn a_workload_or_a_refused_token_naming_a_reader_gets_the_unknown_slug_404
 #[tokio::test]
 async fn a_preview_slug_cannot_be_derived_from_public_inputs() {
     let served = served("salt").await;
-    let guessed = jc_manifest::loader::preview_slug("ws-air-", PUBLIC_SLUG);
+    let guessed = jc_manifest::loader::preview_slug_salted("ws-air-", "", PUBLIC_SLUG);
     assert_ne!(served.slug, guessed);
     let author = person(&served.realm, AUTHOR);
     let (status, body) = call(&served, "GET", &entities(&guessed), Some(&author), None).await;
