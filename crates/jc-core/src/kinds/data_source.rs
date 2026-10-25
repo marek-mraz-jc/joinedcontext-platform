@@ -756,7 +756,9 @@ impl DataSourceSpec {
                     reason: reason.to_owned(),
                 });
             }
-            if path.ends_with(".user") && runner_user(text) {
+            if path.ends_with(".user")
+                && (runner_user(text) || (path.contains(".mqtt.") && text.contains("${")))
+            {
                 return Err(Error::Invalid {
                     field: path,
                     reason: RUNNER_USER.to_owned(),
@@ -824,7 +826,11 @@ impl DataSourceSpec {
         for broker in &mqtt.urls {
             url(broker, MQTT_SCHEMES, "spec.mqtt.urls")?;
         }
-        if let Some(user) = mqtt.username.as_ref().filter(|user| runner_user(user)) {
+        if let Some(user) = mqtt
+            .username
+            .as_ref()
+            .filter(|user| runner_user(user) || user.contains("${"))
+        {
             return Err(Error::Name {
                 field: "spec.mqtt.username",
                 value: user.clone(),
@@ -1270,9 +1276,9 @@ const TOKEN_SERVICES: &[&str] = &[
     "wasm-host-tokens",
 ];
 
-const RUNNER_USER: &str = "the pipeline runner's name is the platform's: a broker of the \
-                           project is read by spec.mqtt.brokerRef, which signs in as the runner \
-                           (PL-76)";
+const RUNNER_USER: &str = "an MQTT username is literal text, never a `${VAR}`, and the pipeline \
+                           runner's name is the platform's: a broker of the project is read by \
+                           spec.mqtt.brokerRef, which signs in as the runner (PL-76)";
 
 /// Whether a username is one a broker reads as the pipeline runner's, `pipeline-runner` or
 /// `pipeline-runner-{project}`, which only a `brokerRef` renders (T-5561, PL-76).
