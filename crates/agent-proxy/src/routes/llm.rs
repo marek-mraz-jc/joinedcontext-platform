@@ -414,10 +414,7 @@ async fn assistant_caller(state: &ProxyState, headers: &HeaderMap) -> Result<Cal
     };
     let Some(bearer) = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .and_then(|v| jc_core::http::bearer(v.to_str().ok()))
     else {
         return Err(refused());
     };
@@ -485,10 +482,7 @@ async fn app_caller(state: &ProxyState, headers: &HeaderMap) -> Result<Caller, R
     };
     let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .and_then(|v| jc_core::http::bearer(v.to_str().ok()))
         .ok_or_else(refused)?;
     match state.credentials.grants().is_portal(bearer).await {
         Ok(true) => {}

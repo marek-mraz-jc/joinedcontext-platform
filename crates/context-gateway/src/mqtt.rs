@@ -44,6 +44,9 @@ pub struct Broker {
     /// The topic filters of the DataSources of its project that name it, which the runner may
     /// subscribe to (PL-76).
     pub runner_topics: Vec<String>,
+    /// The manifest's `limits.messagesPerSecond`: what one client may publish per second
+    /// before [`Rates`] refuses it and the broker disconnects it (T-5562).
+    pub messages_per_second: u32,
     /// What the Portal's capture subscriber may subscribe to: the publish filters of the roles,
     /// each `${clientid}` level widened to `+`; empty unless the broker is in `capture` mode.
     pub capture_topics: Vec<String>,
@@ -99,6 +102,7 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
                         },
                         roles: spec.roles,
                         runner_topics: Vec::new(),
+                        messages_per_second: spec.limits.messages_per_second,
                     },
                 );
             }
@@ -159,10 +163,59 @@ impl std::fmt::Debug for Connect {
     }
 }
 
-/// How long, in milliseconds, the broker keeps an allowed publish before it asks again
-/// (`X-Cache`): the bound on how long a device keeps publishing after its role, account or
-/// credential ends (T-5560).
-pub const PUBLISH_CACHE_MS: u32 = 10_000;
+/// The publish rate of each client of each broker, one token bucket per (broker, client id) that
+/// holds `messagesPerSecond` and refills that many per second (T-5562). RMQTT 0.24 limits only
+/// what it delivers to a subscriber (`mqueue_rate_limit`), so the broker asks for each publish
+/// and this refuses the one above the rate; the broker then disconnects the client.
+#[derive(Debug, Default)]
+pub struct Rates {
+    buckets: std::sync::Mutex<HashMap<(String, String), Bucket>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+/// Buckets kept before the idle ones go; only clients the publish check admitted get one.
+const RATE_BUCKETS: usize = 4096;
+
+impl Rates {
+    /// Whether `clientid` of `broker` may publish one more message at `now`.
+    pub fn admit(
+        &self,
+        broker: &str,
+        clientid: &str,
+        per_second: u32,
+        now: std::time::Instant,
+    ) -> bool {
+        let capacity = f64::from(per_second.max(1));
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if buckets.len() >= RATE_BUCKETS {
+            // A bucket idle for a second is full again: dropping it changes no answer.
+            buckets.retain(|_, b| now.saturating_duration_since(b.at).as_secs_f64() < 1.0);
+        }
+        let bucket = buckets
+            .entry((broker.to_owned(), clientid.to_owned()))
+            .or_insert(Bucket {
+                tokens: capacity,
+                at: now,
+            });
+        let refill = now.saturating_duration_since(bucket.at).as_secs_f64() * capacity;
+        bucket.tokens = (bucket.tokens + refill).min(capacity);
+        bucket.at = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// RMQTT's answer format (`docs/en_US/auth-http.md`, `perm-list.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -423,9 +476,9 @@ pub fn filter_matches(filter: &str, topic: &str, clientid: &str) -> bool {
 
 /// Decides one publish (T-5560) against the repository as it is now: the account must still
 /// exist, still belong to the broker's project, still hold a role whose publish filter covers
-/// the topic and still have a credential in force. The broker keeps an allow for
-/// [`PUBLISH_CACHE_MS`] and disconnects a client whose publish is refused, so a device the
-/// repository no longer admits stops within that time instead of at its token's `exp`.
+/// the topic and still have a credential in force. The broker asks for every publish (no
+/// `X-Cache`, T-5562) and disconnects a client whose publish is refused, so a device the
+/// repository no longer admits stops at its next publish instead of at its token's `exp`.
 pub fn publish_check(
     brokers: &Brokers,
     accounts: &ServiceAccounts,
@@ -517,6 +570,7 @@ struct Internal {
     runner_host: Option<Arc<str>>,
     portal_host: Option<Arc<str>>,
     refusals: Arc<Refusals>,
+    rates: Arc<Rates>,
 }
 
 /// `POST /internal/mqtt/auth`, on the internal listener only. Always 200 with `allow` or `deny`:
@@ -527,6 +581,7 @@ async fn auth(
         runner_host,
         portal_host,
         refusals,
+        ..
     }): State<Internal>,
     headers: HeaderMap,
     Json(connect): Json<Connect>,
@@ -578,26 +633,36 @@ async fn auth(
     Json(answer)
 }
 
-/// `POST /internal/mqtt/acl`, on the internal listener only: 200 with `allow`, kept by the broker
-/// for [`PUBLISH_CACHE_MS`], or `deny`, which disconnects the client.
+/// `POST /internal/mqtt/acl`, on the internal listener only: 200 with `allow`, which the broker
+/// keeps for no time, or `deny`, which disconnects the client: a publish the repository no longer
+/// admits, or one above the broker's `messagesPerSecond` for that client (T-5562).
 async fn acl(
-    State(Internal { gateway, .. }): State<Internal>,
+    State(Internal { gateway, rates, .. }): State<Internal>,
     headers: HeaderMap,
     Json(access): Json<Access>,
-) -> (HeaderMap, Json<serde_json::Value>) {
+) -> Json<serde_json::Value> {
     let caller = headers
         .get(MESH_IDENTITY)
         .and_then(|value| value.to_str().ok());
-    let (allowed, why) = publish_check(
-        &gateway.brokers(),
-        &gateway.service_accounts(),
-        caller,
-        &access,
-    );
-    let mut answer = HeaderMap::new();
+    let brokers = gateway.brokers();
+    let (mut allowed, mut why) =
+        publish_check(&brokers, &gateway.service_accounts(), caller, &access);
     if allowed {
-        answer.insert("x-cache", axum::http::HeaderValue::from(PUBLISH_CACHE_MS));
-    } else {
+        let release = caller.map(broker_of).unwrap_or_default();
+        let per_second = brokers.get(release).map_or(1, |b| b.messages_per_second);
+        if !rates.admit(
+            release,
+            &access.clientid,
+            per_second,
+            std::time::Instant::now(),
+        ) {
+            (allowed, why) = (
+                false,
+                "the client publishes above the broker's messagesPerSecond",
+            );
+        }
+    }
+    if !allowed {
         tracing::info!(
             broker = caller.map(broker_of).unwrap_or_default(),
             clientid = %access.clientid,
@@ -606,7 +671,7 @@ async fn acl(
         );
     }
     let result = if allowed { "allow" } else { "deny" };
-    (answer, Json(serde_json::json!({ "result": result })))
+    Json(serde_json::json!({ "result": result }))
 }
 
 /// The internal listener's router: the CONNECT check, the publish check and the record of the
@@ -633,6 +698,7 @@ pub fn internal_router(
             runner_host: runner_host.map(Arc::from),
             portal_host: portal_host.map(Arc::from),
             refusals,
+            rates: Arc::default(),
         })
         .merge(
             axum::Router::new()
@@ -691,6 +757,7 @@ mod tests {
                 roles: Vec::new(),
                 runner_topics: Vec::new(),
                 capture_topics: Vec::new(),
+                messages_per_second: 10,
             },
         )]);
         let accounts = ServiceAccounts::new();
@@ -775,6 +842,28 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Answer::deny()).expect("serializes"),
             serde_json::json!({"result": "deny", "superuser": false})
+        );
+    }
+
+    #[test]
+    fn a_client_above_its_rate_is_refused_until_its_bucket_refills() {
+        let rates = Rates::default();
+        let start = std::time::Instant::now();
+        let at = |ms| start + std::time::Duration::from_millis(ms);
+        // A burst of messagesPerSecond passes, the next one does not.
+        assert!((0..5).all(|_| rates.admit("mqtt-p-b", "p-cam", 5, at(0))));
+        assert!(!rates.admit("mqtt-p-b", "p-cam", 5, at(0)));
+        // Another client and another broker keep their own buckets.
+        assert!(rates.admit("mqtt-p-b", "p-other", 5, at(0)));
+        assert!(rates.admit("mqtt-q-b", "p-cam", 5, at(0)));
+        // 200 ms refill one message at 5 per second, and never more than the burst.
+        assert!(rates.admit("mqtt-p-b", "p-cam", 5, at(200)));
+        assert!(!rates.admit("mqtt-p-b", "p-cam", 5, at(200)));
+        assert_eq!(
+            (0..10)
+                .filter(|_| rates.admit("mqtt-p-b", "p-cam", 5, at(60_000)))
+                .count(),
+            5
         );
     }
 }

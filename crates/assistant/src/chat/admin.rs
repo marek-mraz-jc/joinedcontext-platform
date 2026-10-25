@@ -337,10 +337,7 @@ async fn erase_mentioning(
 pub(super) async fn the_portal(state: &ChatState, headers: &HeaderMap) -> Result<(), Refusal> {
     let Some(bearer) = headers
         .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+        .and_then(|v| jc_core::http::bearer(v.to_str().ok()))
     else {
         return Err(Box::new(problem(
             401,

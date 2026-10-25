@@ -637,109 +637,17 @@ impl Hub {
 
     async fn call(&self, id: Value, params: Value) -> Answer {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        // Before any routing, so a write is refused whichever Endpoint it names (T-4168).
-        if self.reads_only && !tools::anonymous_may(name) {
-            return Answer::Json(tools::anonymous_refusal(id, name));
-        }
-        let mut arguments = match params.get("arguments") {
-            None => Map::new(),
-            Some(Value::Object(arguments)) => arguments.clone(),
-            Some(_) => {
-                return Answer::Json(error(id, -32602, "`arguments` is an object"));
-            }
+        let mut arguments = match self.bounded_arguments(&id, name, &params) {
+            Ok(arguments) => arguments,
+            Err(answer) => return *answer,
         };
-        // What one anonymous call costs the broker, bounded before it is routed (T-4261).
-        if self.reads_only {
-            if let Err(why) = tools::anonymous_bounds(name, &mut arguments) {
-                return Answer::Json(result(id, refused(&why, &Value::Null)));
-            }
+        if let Some(answer) = self.own_tool(&id, name, &arguments).await {
+            return answer;
         }
-        if name == "list_endpoints" {
-            return Answer::Json(self.list_endpoints(id, &arguments));
-        }
-        if name == "get_endpoint" {
-            return Answer::Json(self.get_endpoint(id, &arguments).await);
-        }
-        if name == "search" {
-            return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments).await);
-        }
-        if name == super::documents::NAME {
-            if let Some(documents) = &self.gateway.documents {
-                let sources = self.knowledge_sources(documents);
-                return Answer::Json(
-                    documents
-                        .call(&self.gateway, &self.caller, sources, id, &arguments)
-                        .await,
-                );
-            }
-        }
-
-        // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).
-        let slug = match arguments.remove("endpoint") {
-            Some(Value::String(slug)) => slug,
-            Some(_) => return Answer::Json(error(
-                id,
-                -32602,
-                "`endpoint` names one Endpoint by its slug: a single string, never a list (EP-87)",
-            )),
-            // A named server's read visits every member it may (ADR-N-043 §2.4).
-            None if self.server.is_some() && server::FAN_OUT.contains(&name) => {
-                return self.fan_out(id, name, &params, arguments).await;
-            }
-            // Catalogue first: a read that names no Endpoint asks the catalogue (T-4501).
-            None => catalog::NAME.to_owned(),
+        let (endpoint, subject) = match self.route_call(&id, name, &params, &mut arguments).await {
+            Ok(routed) => routed,
+            Err(answer) => return *answer,
         };
-        if let Some(refusal) = misrouted(&id, &arguments) {
-            return Answer::Json(refusal);
-        }
-        // The caller's own catalogue, built from `reach` alone (T-4503).
-        if catalog::names_catalog(&slug) {
-            return Answer::Json(
-                catalog::call(&self.gateway, &self.reach, id, name, &arguments).await,
-            );
-        }
-
-        // An Endpoint outside the caller's list and one that does not exist are the same answer,
-        // byte for byte (SP-20): both are searched for in the caller's list only.
-        let (endpoint, subject) = match resolve(&self.reach, &slug) {
-            Ok(found) => found,
-            // A slug outside the list is answered the same whatever it is, with no suggestion
-            // that would vary with it (SP-20): without a token the login prompt, an internal one
-            // and one that does not exist alike.
-            Err(_) if EndpointSlug::new(&slug).is_ok() => {
-                if self.anonymous {
-                    return Answer::Refused(unauthorized(&self.gateway));
-                }
-                return Answer::Json(error(id, -32602, "unknown endpoint"));
-            }
-            Err(candidates) => {
-                return Answer::Json(error(
-                    id,
-                    -32602,
-                    &format!(
-                        "no Endpoint of yours is named `{slug}`; closest: {}",
-                        if candidates.is_empty() {
-                            "none".to_owned()
-                        } else {
-                            candidates.join(", ")
-                        }
-                    ),
-                ))
-            }
-        };
-        match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
-            // The types list_endpoints already names this caller, when the Policy grants no
-            // retrieveEntityTypes: a reader of an Endpoint may ask what it reads (T-4567).
-            HubTool::Unknown | HubTool::Ungranted(_) if name == "list_types" => {
-                let visible = schema::visible(subject, endpoint, crate::pdp::now());
-                let types = schema::visible_types(endpoint, &visible);
-                return Answer::Json(result(id, answered(&json!(types), "entityTypes")));
-            }
-            HubTool::Unknown => return Answer::Json(error(id, -32602, "unknown tool")),
-            HubTool::Ungranted(refusal) => return Answer::Json(result(id, refusal)),
-            HubTool::Granted => {}
-        }
-
         if let Err(decision) = self.spend(endpoint) {
             return Answer::Refused(rate_limit::too_many(
                 &decision,
@@ -767,6 +675,159 @@ impl Hub {
                 }
             },
         )
+    }
+
+    /// A call's arguments, refused before any routing when they are no object, and an anonymous
+    /// caller's write refused whichever Endpoint it names (T-4168) and its reads bounded by
+    /// what one anonymous call may cost the broker (T-4261).
+    fn bounded_arguments(
+        &self,
+        id: &Value,
+        name: &str,
+        params: &Value,
+    ) -> Result<Map<String, Value>, Box<Answer>> {
+        if self.reads_only && !tools::anonymous_may(name) {
+            return Err(Box::new(Answer::Json(tools::anonymous_refusal(
+                id.clone(),
+                name,
+            ))));
+        }
+        let mut arguments = match params.get("arguments") {
+            None => Map::new(),
+            Some(Value::Object(arguments)) => arguments.clone(),
+            Some(_) => {
+                return Err(Box::new(Answer::Json(error(
+                    id.clone(),
+                    -32602,
+                    "`arguments` is an object",
+                ))));
+            }
+        };
+        if self.reads_only {
+            if let Err(why) = tools::anonymous_bounds(name, &mut arguments) {
+                return Err(Box::new(Answer::Json(result(
+                    id.clone(),
+                    refused(&why, &Value::Null),
+                ))));
+            }
+        }
+        Ok(arguments)
+    }
+
+    /// The hub's own tools, answered without an Endpoint: the listing, one Endpoint's card, the
+    /// search and the knowledge documents.
+    async fn own_tool(
+        &self,
+        id: &Value,
+        name: &str,
+        arguments: &Map<String, Value>,
+    ) -> Option<Answer> {
+        let id = id.clone();
+        match name {
+            "list_endpoints" => Some(Answer::Json(self.list_endpoints(id, arguments))),
+            "get_endpoint" => Some(Answer::Json(self.get_endpoint(id, arguments).await)),
+            "search" => Some(Answer::Json(
+                catalog::search(&self.gateway, &self.reach, id, arguments).await,
+            )),
+            _ if name == super::documents::NAME => {
+                let documents = self.gateway.documents.as_ref()?;
+                let sources = self.knowledge_sources(documents);
+                Some(Answer::Json(
+                    documents
+                        .call(&self.gateway, &self.caller, sources, id, arguments)
+                        .await,
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The Endpoint one call goes to and the caller it is answered under, by its one `endpoint`
+    /// argument (ADR-N-025 2.5, 2.6), with the tool granted there. A call that names none goes
+    /// to a named server's members or to the caller's catalogue, answered here.
+    async fn route_call(
+        &self,
+        id: &Value,
+        name: &str,
+        params: &Value,
+        arguments: &mut Map<String, Value>,
+    ) -> Result<(&Arc<Endpoint>, &Subject), Box<Answer>> {
+        let id = id.clone();
+        // The one routing argument, one string, never a list (ADR-N-025 2.5, 2.6).
+        let slug = match arguments.remove("endpoint") {
+            Some(Value::String(slug)) => slug,
+            Some(_) => return Err(Box::new(Answer::Json(error(
+                id,
+                -32602,
+                "`endpoint` names one Endpoint by its slug: a single string, never a list (EP-87)",
+            )))),
+            // A named server's read visits every member it may (ADR-N-043 §2.4).
+            None if self.server.is_some() && server::FAN_OUT.contains(&name) => {
+                let answer = self.fan_out(id, name, params, std::mem::take(arguments));
+                return Err(Box::new(answer.await));
+            }
+            // Catalogue first: a read that names no Endpoint asks the catalogue (T-4501).
+            None => catalog::NAME.to_owned(),
+        };
+        if let Some(refusal) = misrouted(&id, arguments) {
+            return Err(Box::new(Answer::Json(refusal)));
+        }
+        // The caller's own catalogue, built from `reach` alone (T-4503).
+        if catalog::names_catalog(&slug) {
+            return Err(Box::new(Answer::Json(
+                catalog::call(&self.gateway, &self.reach, id, name, arguments).await,
+            )));
+        }
+        let (endpoint, subject) = self.resolved(&id, &slug)?;
+        match tools::hub_tool(&self.gateway, endpoint, subject, &self.reach, name) {
+            // The types list_endpoints already names this caller, when the Policy grants no
+            // retrieveEntityTypes: a reader of an Endpoint may ask what it reads (T-4567).
+            HubTool::Unknown | HubTool::Ungranted(_) if name == "list_types" => {
+                let visible = schema::visible(subject, endpoint, crate::pdp::now());
+                let types = schema::visible_types(endpoint, &visible);
+                Err(Box::new(Answer::Json(result(
+                    id,
+                    answered(&json!(types), "entityTypes"),
+                ))))
+            }
+            HubTool::Unknown => Err(Box::new(Answer::Json(error(id, -32602, "unknown tool")))),
+            HubTool::Ungranted(refusal) => Err(Box::new(Answer::Json(result(id, refusal)))),
+            HubTool::Granted => Ok((endpoint, subject)),
+        }
+    }
+
+    /// The Endpoint a slug names in the caller's list. An Endpoint outside the caller's list and
+    /// one that does not exist are the same answer, byte for byte (SP-20): both are searched for
+    /// in the caller's list only.
+    fn resolved(&self, id: &Value, slug: &str) -> Result<(&Arc<Endpoint>, &Subject), Box<Answer>> {
+        match resolve(&self.reach, slug) {
+            Ok(found) => Ok(found),
+            // A slug outside the list is answered the same whatever it is, with no suggestion
+            // that would vary with it (SP-20): without a token the login prompt, an internal one
+            // and one that does not exist alike.
+            Err(_) if EndpointSlug::new(slug).is_ok() => {
+                if self.anonymous {
+                    return Err(Box::new(Answer::Refused(unauthorized(&self.gateway))));
+                }
+                Err(Box::new(Answer::Json(error(
+                    id.clone(),
+                    -32602,
+                    "unknown endpoint",
+                ))))
+            }
+            Err(candidates) => {
+                let closest = if candidates.is_empty() {
+                    "none".to_owned()
+                } else {
+                    candidates.join(", ")
+                };
+                Err(Box::new(Answer::Json(error(
+                    id.clone(),
+                    -32602,
+                    &format!("no Endpoint of yours is named `{slug}`; closest: {closest}"),
+                ))))
+            }
+        }
     }
 
     /// Spends the Endpoint's own bucket, as a call to its URL spends it (EP-20).
@@ -1405,4 +1466,74 @@ pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response
             "scopes_supported": ["endpoint:*"],
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hub(anonymous: bool) -> Hub {
+        let gateway = Gateway::new(
+            crate::proxy::Broker::new("http://localhost:9"),
+            Box::new(crate::pdp::PolicyPdp),
+            "example.org",
+        );
+        Hub {
+            gateway: Arc::new(gateway),
+            reach: Arc::from(Vec::new()),
+            caller: "caller".to_owned(),
+            server: None,
+            anonymous,
+            reads_only: anonymous,
+        }
+    }
+
+    fn code(answer: Option<Answer>) -> Option<i64> {
+        match answer {
+            Some(Answer::Json(value)) => value["error"]["code"].as_i64(),
+            _ => None,
+        }
+    }
+
+    /// T-5508, T-4168: an anonymous write is refused before routing, whichever Endpoint it
+    /// names, and arguments that are no object are refused for every caller.
+    #[test]
+    fn bounded_arguments_refuses_an_anonymous_write_and_a_scalar() {
+        let id = json!(1);
+        let write = json!({"name": "create_entity", "arguments": {"endpoint": "x"}});
+        let refused = hub(true).bounded_arguments(&id, "create_entity", &write);
+        assert_eq!(code(refused.err().map(|answer| *answer)), Some(-32602));
+        let scalar = json!({"name": "query_entities", "arguments": 3});
+        let refused = hub(false).bounded_arguments(&id, "query_entities", &scalar);
+        assert_eq!(code(refused.err().map(|answer| *answer)), Some(-32602));
+        let none = json!({"name": "query_entities"});
+        let kept = hub(false).bounded_arguments(&id, "query_entities", &none);
+        assert!(kept.is_ok_and(|arguments| arguments.is_empty()));
+    }
+
+    /// T-5508, SP-20: a slug outside the caller's list is the login prompt without a token and
+    /// the same unknown Endpoint with one; a list as `endpoint` is refused; no own tool answers
+    /// a broker tool.
+    #[tokio::test]
+    async fn route_call_refuses_a_list_and_an_endpoint_outside_the_reach() {
+        let id = json!(2);
+        let slug = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let anonymous = hub(true).resolved(&id, slug).err().map(|answer| *answer);
+        assert!(matches!(anonymous, Some(Answer::Refused(_))));
+        let outside = hub(false).resolved(&id, slug).err().map(|answer| *answer);
+        assert_eq!(code(outside), Some(-32602));
+
+        let mut arguments = Map::new();
+        arguments.insert("endpoint".to_owned(), json!(["a", "b"]));
+        let params = json!({});
+        let signed_in = hub(false);
+        let listed = signed_in
+            .route_call(&id, "query_entities", &params, &mut arguments)
+            .await;
+        assert_eq!(code(listed.err().map(|answer| *answer)), Some(-32602));
+        let own = hub(false)
+            .own_tool(&id, "query_entities", &Map::new())
+            .await;
+        assert!(own.is_none());
+    }
 }

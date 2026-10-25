@@ -77,7 +77,7 @@ fn credentials(headers: &HeaderMap) -> Option<(String, String)> {
         return Some((run, ticket));
     }
     let bearer = header("authorization")?;
-    let token = bearer.strip_prefix("Bearer ")?.trim();
+    let token = jc_core::http::bearer(Some(&bearer))?;
     let (run, ticket) = token.strip_prefix(TICKET_BEARER_PREFIX)?.split_once('.')?;
     if run.is_empty() || ticket.is_empty() {
         return None;

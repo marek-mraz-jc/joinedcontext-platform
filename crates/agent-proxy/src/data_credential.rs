@@ -97,8 +97,7 @@ impl DataCredentials {
 
 /// The run and secret of an `Authorization: Bearer jcd_<run>.<secret>`, when that is what came.
 pub fn presented(headers: &HeaderMap) -> Option<(String, String)> {
-    let bearer = headers.get("authorization")?.to_str().ok()?.trim();
-    let token = bearer.strip_prefix("Bearer ")?.trim();
+    let token = jc_core::http::bearer(headers.get("authorization")?.to_str().ok())?;
     let (run, secret) = token.strip_prefix(PREFIX)?.split_once('.')?;
     if run.is_empty() || secret.is_empty() {
         return None;

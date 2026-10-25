@@ -12,7 +12,6 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::accounts_of;
 use context_gateway::mqtt::{
     brokers_of, decide, internal_router, publish_check, Access, Brokers, Connect, Pods,
-    PUBLISH_CACHE_MS,
 };
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -644,10 +643,11 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
     );
 }
 
-/// T-5560: the publish check answers on the internal router with the broker's cache time on an
-/// allow and none on a deny.
+/// T-5560, T-5562: the publish check answers on the internal router with no cache time, so the
+/// broker asks for every publish; a client above its broker's `messagesPerSecond` (10 by
+/// default) is refused at once, which disconnects it.
 #[tokio::test]
-async fn the_publish_check_answers_on_the_internal_router_with_its_cache_time() {
+async fn the_publish_check_answers_each_publish_and_refuses_a_flood() {
     let f = Fixture::new("acl-router");
     let gateway = Gateway::new(
         Broker::new("http://broker.invalid:1026"),
@@ -656,15 +656,8 @@ async fn the_publish_check_answers_on_the_internal_router_with_its_cache_time() 
     )
     .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
     gateway.replace_brokers(f.brokers.clone());
-    let gateway = Arc::new(gateway);
-    for (topic, result, cache) in [
-        (
-            "cameras/ovzdusie-cam-north/frame",
-            "allow",
-            Some(PUBLISH_CACHE_MS.to_string()),
-        ),
-        ("cameras/ovzdusie-cam-soon/frame", "deny", None),
-    ] {
+    let app = internal_router(Arc::new(gateway), None, None, None);
+    let ask = |topic: &str| {
         let body = json!({
             "access": "2", "clientid": "ovzdusie-cam-north",
             "username": "ovzdusie-cam-north", "topic": topic
@@ -675,25 +668,28 @@ async fn the_publish_check_answers_on_the_internal_router_with_its_cache_time() 
             .header("l5d-client-id", CAMERAS)
             .body(Body::from(body))
             .expect("a request");
-        let response = internal_router(Arc::clone(&gateway), None, None, None)
-            .oneshot(request)
-            .await
-            .expect("answers");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get("x-cache")
-                .map(|v| v.to_str().expect("ascii").to_owned()),
-            cache,
-            "{topic}"
-        );
-        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
-            .await
-            .expect("a body");
-        let answer: Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(answer, json!({"result": result}), "{topic}");
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.expect("answers");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers().get("x-cache").is_none(), "no cache time");
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("a body");
+            let answer: Value = serde_json::from_slice(&bytes).expect("json");
+            answer["result"].as_str().expect("a result").to_owned()
+        }
+    };
+    assert_eq!(ask("cameras/ovzdusie-cam-soon/frame").await, "deny");
+    let mut answers = Vec::new();
+    for _ in 0..30 {
+        answers.push(ask("cameras/ovzdusie-cam-north/frame").await);
     }
+    assert!(answers[..10].iter().all(|a| a == "allow"), "{answers:?}");
+    assert!(
+        answers.iter().any(|a| a == "deny"),
+        "a flood of 30 passed: {answers:?}"
+    );
 }
 
 /// T-4004: on the internal router, the tokenless runner is admitted from what the configured

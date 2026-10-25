@@ -391,6 +391,23 @@ async fn only_the_portals_service_account_may_hand_over() {
         .any(|b| b.contains("token-exchange")));
 }
 
+/// RFC 7235 section 2.1: the auth-scheme is case-insensitive, so the Portal's token under a
+/// lowercase `bearer` passes `portal_only` like any other spelling (T-5509).
+#[tokio::test]
+async fn a_lowercase_bearer_scheme_is_the_portals_token_too() {
+    let (realm, portal, gateway) = (realm(300).await, portal("building").await, gateway().await);
+    let mut request = hand_over(PORTAL_TOKEN, PERSON_TOKEN);
+    request.headers_mut().insert(
+        "authorization",
+        format!("bearer {PORTAL_TOKEN}").parse().expect("a header"),
+    );
+    let answer = proxy(&realm, &portal, &gateway)
+        .oneshot(request)
+        .await
+        .expect("an answer");
+    assert_eq!(answer.status(), StatusCode::NO_CONTENT);
+}
+
 /// The token must be an active token of the run's own person; another person's is refused
 /// before the exchange, and a refused exchange leaves the run without a grant.
 #[tokio::test]

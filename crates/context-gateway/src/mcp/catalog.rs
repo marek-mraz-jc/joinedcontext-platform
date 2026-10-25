@@ -605,10 +605,11 @@ fn shaped(entity: &Value, key_values: bool, attrs: Option<&[&str]>) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn fixture() -> Endpoint {
+    /// An Endpoint with nothing declared, for the unit tests of this crate.
+    pub(crate) fn fixture() -> Endpoint {
         Endpoint {
             declared_types: None,
             roles: Default::default(),

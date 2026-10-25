@@ -19,13 +19,13 @@ path = "src/bin/jc-assistant.rs"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "migrate", "macros"] }
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["outbound"] }
 agent-proxy = { path = "../agent-proxy", version = "0.1.0" }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
+reqwest = { workspace = true, features = ["rustls-tls-native-roots", "stream"] }
 # The crawler's own TLS check (T-3298): webpki over the native roots, with the public
 # intermediates some sites do not send. Same versions and features as context-gateway.
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
 rustls-pki-types = "1"
 rustls-native-certs = "0.8"
-regex = "1"
+regex.workspace = true
 # The detector kreuzberg already links: a passage's own language, not its page's (T-5368).
 whatlang = "0.18"
 url = "2.5"
@@ -34,14 +34,14 @@ sha2 = "0.10"
 ring = "0.17"
 hex = "0.4"
 scraper = "0.27"
-quick-xml = "0.42"
+quick-xml = "0.41"
 texting_robots = "0.2.2"
 futures-util = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
 # The worker: the organization's manifests read the way the gateway reads them (layout 1 and 2),
 # its schedule, its log and its health probe.
 jc-manifest = { path = "../jc-manifest", version = "0.1.0" }
-serde_json = "1"
+serde_json.workspace = true
 serde = { version = "1", features = ["derive"] }
 # A polygon answer's geodesic area and perimeter and its simpler outline for the map (T-4697);
 # already in the tree through ngsild-ql, no default features there either.
@@ -77,4 +77,4 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tower = { version = "0.5", features = ["util"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "test-util"] }
 # The gateway's q grammar, so a query card's example is one the gateway takes (T-4759).
-antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-ql.workspace = true
