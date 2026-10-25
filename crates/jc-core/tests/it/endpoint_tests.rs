@@ -395,7 +395,7 @@ fn a_hidden_attribute_the_gateway_always_serves_is_refused() {
 fn an_endpoint_with_a_caller_role_and_named_roles_parses_validates_and_names_them() {
     let text = GOLDEN.replace(
         "  audience: public\n",
-        "  audience: public\n  callerRole: true\n  roles:\n    - name: editor\n      subjects: [{ user: jana@hel.fi }, { group: alert-editors }]\n",
+        "  audience: public\n  callerRole: true\n  roles:\n    - name: editor\n      subjects: [{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }, { group: alert-editors }]\n",
     );
     let endpoint = Endpoint::from_yaml(&text).expect("the roles parse");
     endpoint.validate().expect("the roles validate");
@@ -430,15 +430,16 @@ fn an_endpoint_with_a_caller_role_and_named_roles_parses_validates_and_names_the
 }
 
 /// AP-96: an Endpoint role follows the App role rules: a slug, declared once, and members that
-/// are one lower-case address or one group each.
+/// are one Keycloak user id or one group each (PF-126).
 #[test]
 fn an_endpoint_role_with_a_bad_name_a_twin_or_a_bad_member_is_refused() {
     for roles in [
-        "    - name: Editor\n      subjects: [{ user: jana@hel.fi }]\n",
-        "    - name: editor\n      subjects: [{ user: jana@hel.fi }]\n    - name: editor\n      subjects: [{ group: x }]\n",
+        "    - name: Editor\n      subjects: [{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]\n",
+        "    - name: editor\n      subjects: [{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]\n    - name: editor\n      subjects: [{ group: x }]\n",
         "    - name: editor\n      subjects: []\n",
         "    - name: editor\n      subjects: [{ user: JANA@hel.fi }]\n",
-        "    - name: editor\n      subjects: [{ user: jana@hel.fi, group: x }]\n",
+        "    - name: editor\n      subjects: [{ user: jana@hel.fi }]\n",
+        "    - name: editor\n      subjects: [{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14, group: x }]\n",
     ] {
         let text = GOLDEN.replace("  audience: public\n", &format!("  audience: public\n  roles:\n{roles}"));
         let endpoint = Endpoint::from_yaml(&text).expect("the shape parses");

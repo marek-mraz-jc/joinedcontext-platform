@@ -529,3 +529,34 @@ spec:
         "validity stays on the Policy"
     );
 }
+
+/// PF-126, ADR-N-061: a `user` assignee is a Keycloak user id or a client's own
+/// `service-account-<client>` user; an e-mail or a username is refused with the field named.
+#[test]
+fn a_user_assignee_is_a_keycloak_id_never_an_e_mail() {
+    let mut p = Policy::from_yaml(GOLDEN_POLICY)
+        .expect("valid golden YAML")
+        .spec;
+    for id in [
+        "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
+        "service-account-portal-reconciler",
+    ] {
+        p.assignee = Principal::new(PrincipalKind::User, id);
+        p.validate().unwrap_or_else(|err| panic!("{id}: {err}"));
+    }
+    for id in [
+        "demo.steward@hel.fi",
+        "demo.steward",
+        "service-account-",
+        "service-account-a b",
+        "3F2A9C1E-7B4D-4E8A-9C61-0D5E2B7F8A14",
+    ] {
+        p.assignee = Principal::new(PrincipalKind::User, id);
+        let err = p.validate().expect_err(id).to_string();
+        assert!(err.contains("spec.assignee.id"), "{id}: {err}");
+        assert!(err.contains("Keycloak user id"), "{id}: {err}");
+    }
+    // The other kinds keep their own names.
+    p.assignee = Principal::new(PrincipalKind::Group, "air-quality-team");
+    p.validate().expect("a group assignee is a name");
+}

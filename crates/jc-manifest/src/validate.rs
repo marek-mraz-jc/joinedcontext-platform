@@ -485,18 +485,6 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
         });
     }
 
-    for (location, message) in app_members_outside_the_domain(&repo)
-        .into_iter()
-        .filter(|_| organization)
-    {
-        report.findings.push(Finding {
-            path: location.0,
-            document: location.1,
-            line: location.2,
-            message,
-        });
-    }
-
     for (location, message) in app_writes_open_to_everyone(&repo) {
         report.warnings.push(Finding {
             path: location.0,
@@ -844,40 +832,6 @@ fn app_subjects(spec: &serde_json::Value) -> impl Iterator<Item = &serde_json::V
         .flatten()
         .filter_map(|entry| entry.get("subjects").and_then(|s| s.as_array()))
         .flatten()
-}
-
-/// Every App role member whose e-mail is outside the organization's domain (AP-91, PF-41): a
-/// role is a grant inside the organization, and an address of another domain is a person
-/// nobody here verified.
-fn app_members_outside_the_domain(repo: &Repository) -> Vec<(Location, String)> {
-    let Some(domain) = repo.org_domain().map(str::to_ascii_lowercase) else {
-        return Vec::new();
-    };
-    let mut findings = Vec::new();
-    for (id, resource) in repo.iter() {
-        if id.kind != "App" {
-            continue;
-        }
-        for user in app_subjects(&resource.manifest.spec)
-            .filter_map(|subject| subject.get("user").and_then(|u| u.as_str()))
-        {
-            let host = user
-                .rsplit_once('@')
-                .map(|(_, host)| host.to_ascii_lowercase());
-            let inside =
-                host.is_some_and(|host| host == domain || host.ends_with(&format!(".{domain}")));
-            if !inside {
-                findings.push((
-                    (resource.path.clone(), resource.document, resource.line),
-                    format!(
-                        "{id} gives a role to `{user}`, outside the organization's domain \
-                         `{domain}`: a role member is a person of this organization (AP-91, PF-41)"
-                    ),
-                ));
-            }
-        }
-    }
-    findings
 }
 
 /// Every App data need that writes and names no role: everyone who can open the app can make

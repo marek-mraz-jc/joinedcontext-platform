@@ -82,7 +82,9 @@ fn drop_identity(headers: &mut HeaderMap) {
     }
 }
 
-/// The user the gateway verified, as the broker's `joinedcontext` engine reads it (T-3641).
+/// The user the gateway verified, as the broker's `joinedcontext` engine matches a `user`
+/// assignee against it: a person's Keycloak id (PF-126), a client's own service-account user
+/// by name (T-3641).
 pub const SUBJECT: HeaderName = HeaderName::from_static("x-jc-subject");
 /// The groups of the verified caller, each percent-encoded, comma separated.
 pub const GROUPS: HeaderName = HeaderName::from_static("x-jc-groups");
@@ -162,7 +164,7 @@ pub fn pin_caller(
         one(headers, DID, subject.did.as_deref());
         return Ok(());
     }
-    one(headers, SUBJECT, subject.user.as_deref());
+    one(headers, SUBJECT, subject.user_principal());
     let named = subject.client.as_deref();
     one(
         headers,

@@ -1918,7 +1918,7 @@
           "description": "Who owns `group`'s members: absent for a `Group` manifest, `provider` for a group the identity provider owns, which the reconciler never manages. Only a `RoleBinding` subject carries it, and only with `group` (PF-63, PF-64)."
         },
         "user": {
-          "description": "The user's identifier in the identity provider (username or e-mail).",
+          "description": "The person's Keycloak user id, the `sub` of their token: a lower-case UUID, never an e-mail or a username (PF-126); or a client's own `service-account-<client>` user.",
           "type": [
             "string",
             "null"

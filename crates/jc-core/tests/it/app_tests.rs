@@ -757,7 +757,7 @@ fn an_app_with_roles_members_and_a_role_gated_write_parses_validates_and_roundtr
     assert_eq!(app.spec.roles[0].title["sk"], "Čitateľ");
     assert_eq!(
         app.spec.access[1].subjects[0].user.as_deref(),
-        Some("jana.kovacova@hel.fi")
+        Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14")
     );
     assert_eq!(app.spec.data_needs[1].roles, ["editor"]);
     assert!(
@@ -830,8 +830,8 @@ fn access_or_a_data_need_naming_an_undeclared_role_is_refused() {
     assert_eq!(refused(&need), ("dataNeeds[].roles", "admin".to_owned()));
 }
 
-/// AP-91: a member is exactly one of a lower-case e-mail and a group name, never a wildcard,
-/// never twice, and a role lists at least one.
+/// AP-91, PF-126: a member is exactly one of a Keycloak user id and a group name, never an
+/// e-mail, a username or a wildcard, never twice, and a role lists at least one.
 #[test]
 fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
     use jc_core::kinds::Subject;
@@ -846,13 +846,21 @@ fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
     for (subjects, value) in [
         (vec![user("Jana.Kovacova@hel.fi")], "Jana.Kovacova@hel.fi"),
         (vec![user("jana.kovacova")], "jana.kovacova"),
+        (vec![user("jana@hel.fi")], "jana@hel.fi"),
+        (
+            vec![user("3F2A9C1E-7B4D-4E8A-9C61-0D5E2B7F8A14")],
+            "3F2A9C1E-7B4D-4E8A-9C61-0D5E2B7F8A14",
+        ),
         (vec![user("*@hel.fi")], "*@hel.fi"),
-        (vec![user(" jana@hel.fi")], " jana@hel.fi"),
+        (
+            vec![user(" 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14")],
+            " 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
+        ),
         (vec![group("Alert Editors")], "Alert Editors"),
         (vec![group("*")], "*"),
         (
             vec![Subject {
-                user: Some("jana@hel.fi".into()),
+                user: Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14".into()),
                 group: Some("x".into()),
                 ..Subject::default()
             }],
@@ -861,8 +869,11 @@ fn a_member_that_is_not_one_lower_case_address_or_one_group_is_refused() {
         (vec![Subject::default()], ""),
         (vec![], ""),
         (
-            vec![user("jana@hel.fi"), user("jana@hel.fi")],
-            "jana@hel.fi",
+            vec![
+                user("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14"),
+                user("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14"),
+            ],
+            "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
         ),
         // PF-64: the identity provider's groups are a RoleBinding's to name, not an App's.
         (

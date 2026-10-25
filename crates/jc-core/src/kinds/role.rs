@@ -370,7 +370,8 @@ impl Constraint {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Subject {
-    /// The user's identifier in the identity provider (username or e-mail).
+    /// The person's Keycloak user id, the `sub` of their token: a lower-case UUID, never an
+    /// e-mail or a username (PF-126); or a client's own `service-account-<client>` user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
     /// A group: a `Group` manifest of the organization unless `source` says otherwise (PF-64).
@@ -450,6 +451,13 @@ impl RoleBindingSpec {
                         value: format!("{subject:?}"),
                         reason: "a subject is exactly one of `user`, `group`, and not empty",
                     })
+                }
+            }
+            if let Some(user) = &subject.user {
+                // A client's own service-account user, such as the build lane's, is no person
+                // and has no id a manifest could know (PF-126).
+                if !crate::kinds::policy::is_service_account_user(user) {
+                    crate::kinds::group::validate_person_id("spec.subjects[].user", user)?;
                 }
             }
             if let (Some(user), Some(_)) = (&subject.user, subject.source) {

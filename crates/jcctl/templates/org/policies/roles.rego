@@ -4,7 +4,7 @@
 #
 # input (built by .gitea/workflows/ci.yaml):
 #   author: the forge login of the merge request's author
-#   author_email: their e-mail, when the forge knows it
+#   author_email: their e-mail, when the forge knows it; no binding names one (PF-126)
 #   groups: the groups the author belongs to (empty when the forge cannot tell)
 #   changes: one per changed manifest: path, action (propose | delete), kind, name, project,
 #            manifest (the whole document, for the constraints)
@@ -42,14 +42,13 @@ rules_of(binding, change) := rules if {
 	rules := data.projectRoles[change.project][binding.role].rules
 }
 
+# A person's `user` subject is a Keycloak id (PF-126), which no forge login or e-mail is: a login
+# that reads like one must not pass as that person. A client's own service-account user, such as
+# the build lane's, commits under that name.
 subject_matches(binding) if {
 	some subject in binding.subjects
+	startswith(subject.user, "service-account-")
 	subject.user == input.author
-}
-
-subject_matches(binding) if {
-	some subject in binding.subjects
-	subject.user == input.author_email
 }
 
 subject_matches(binding) if {

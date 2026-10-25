@@ -3,7 +3,7 @@ apiVersion: joinedcontext.com/v1alpha1
 kind: RoleBinding
 metadata: { name: ovzdusie-developers, namespace: org }
 spec:
-  subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]
+  subjects: [{ group: air-quality-team }, { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]
   role: pipeline-developer
   scope: { project: ovzdusie }              # organization | project | contextSpace
   validity: { notAfter: "2026-12-31T23:59:59Z" }

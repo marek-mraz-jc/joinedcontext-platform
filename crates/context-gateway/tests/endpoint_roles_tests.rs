@@ -68,6 +68,9 @@ fn app_roles() -> EndpointRoles {
     )
 }
 
+/// Jana's Keycloak user id, the `sub` of her token (PF-126).
+const JANA: &str = "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14";
+
 /// The hand-written endpoint: the same roles, held by the subjects the manifest names.
 fn hand_roles() -> EndpointRoles {
     EndpointRoles::of(PROJECT, "hand-alerts", &roles_spec())
@@ -78,7 +81,7 @@ fn roles_spec() -> EndpointSpec {
         "contextSpaceRef: helsinki\nslug: {APP_SLUG}\naudience: organization\n\
          enabledRepresentations: [ngsi-ld]\ncallerRole: true\nroles:\n\
          \x20 - name: editor\n\
-         \x20   subjects: [{{ user: jana.kovacova@hel.fi }}, {{ group: alert-editors }}]\n"
+         \x20   subjects: [{{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }}, {{ group: alert-editors }}]\n"
     ))
     .expect("the endpoint spec parses");
     spec.validate().expect("the endpoint spec is valid");
@@ -207,6 +210,7 @@ async fn the_caller_role_is_held_on_the_apps_endpoint_and_not_on_another_of_the_
 fn with_client_roles(azp: &str, client: &str, roles: &[&str]) -> Value {
     json!({
         "preferred_username": "jana.kovacova@hel.fi",
+        "sub": JANA,
         "azp": azp,
         "resource_access": { client: { "roles": roles } },
     })
@@ -247,15 +251,15 @@ async fn a_named_role_comes_from_the_apps_own_client_alone() {
     }
 }
 
-/// An endpoint no App generated keeps its manifest's subjects: a role's user matches the token's
-/// `preferred_username` whatever its case, its group matches the `groups` claim with or without
-/// the leading slash, and nobody else holds it.
+/// An endpoint no App generated keeps its manifest's subjects: a role's user is a Keycloak id
+/// and matches the token's `sub` exactly, never a username somebody can rename to it (PF-126);
+/// its group matches the `groups` claim with or without the leading slash; nobody else holds it.
 #[tokio::test]
 async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
     let fixture = fixture(Audience::Organization).await;
     for editor in [
-        json!({ "preferred_username": "jana.kovacova@hel.fi" }),
-        json!({ "preferred_username": "Jana.Kovacova@HEL.fi" }),
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": JANA }),
+        json!({ "preferred_username": "renamed@hel.fi", "sub": JANA }),
         json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors"] }),
         json!({ "preferred_username": "someone@hel.fi", "groups": ["/alert-editors"] }),
     ] {
@@ -264,7 +268,10 @@ async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nob
     }
     for viewer in [
         json!({ "preferred_username": "someone@hel.fi" }),
-        json!({ "preferred_username": "jana.kovacova@hel.fi.evil.org" }),
+        // A username equal to the id is not the id.
+        json!({ "preferred_username": JANA }),
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": JANA.to_uppercase() }),
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": format!("{JANA}0") }),
         json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors-2", "editor"] }),
     ] {
         let (_, on_hand) = granted(&fixture, HAND_SLUG, Some(viewer.clone())).await;
@@ -328,6 +335,7 @@ async fn an_apps_client_reaches_the_endpoints_its_app_reads_and_no_other() {
     let token = |azp: &str| {
         json!({
             "preferred_username": "jana.kovacova@hel.fi",
+            "sub": JANA,
             "azp": azp,
             "aud": [azp, APP_SLUG, PLAIN_SLUG, HAND_SLUG],
         })

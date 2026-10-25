@@ -311,7 +311,11 @@ async fn the_engine_is_asked_about_the_callers_own_token() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(pinned(&broker, "x-jc-subject").as_deref(), Some("jana"));
+    // The person's Keycloak id, never their username (PF-126).
+    assert_eq!(
+        pinned(&broker, "x-jc-subject").as_deref(),
+        Some("a-steward")
+    );
     assert!(
         pinned(&broker, "x-jc-roles")
             .is_some_and(|roles| roles.split(',').any(|r| r == "data-steward")),

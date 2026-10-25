@@ -3,9 +3,9 @@
 //!
 //! Membership is configuration, not a console setting: the reconciler owns the Keycloak group of
 //! each manifest, adds and prunes members to match, and reports what somebody changed by hand as
-//! drift (PF-63). A member no Keycloak user carries yet is not an error here — the binding takes
-//! effect at that person's first login (PF-04, PF-49) — so this kind checks the shape of an
-//! address and nothing about who exists.
+//! drift (PF-63). A member is named by their Keycloak user id, never an e-mail or a name, so
+//! Git history holds nothing an erasure has to remove (PF-126, ADR-N-061); this kind checks the
+//! shape of the id and nothing about who exists.
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Member {
-    /// The person's e-mail address, the name Keycloak carries them under (PF-04).
+    /// The person's Keycloak user id, the `sub` of their token: a lower-case UUID such as
+    /// `3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14` (PF-126).
     pub user: String,
 }
 
@@ -47,18 +48,12 @@ impl Kind for GroupSpec {
 }
 
 impl GroupSpec {
-    /// Each member is an address, and nobody is in the group twice.
+    /// Each member is a Keycloak user id, and nobody is in the group twice.
     pub fn validate(&self) -> Result<()> {
         let mut seen: Vec<&str> = Vec::with_capacity(self.members.len());
         for member in &self.members {
-            let user = member.user.trim();
-            if user.len() < 3 || !is_address(user) {
-                return Err(Error::Name {
-                    field: "spec.members[].user",
-                    value: member.user.clone(),
-                    reason: "a member is an e-mail address, the name Keycloak carries (PF-62)",
-                });
-            }
+            let user = member.user.as_str();
+            validate_person_id("spec.members[].user", user)?;
             if seen.contains(&user) {
                 return Err(Error::Name {
                     field: "spec.members[].user",
@@ -71,21 +66,40 @@ impl GroupSpec {
         Ok(())
     }
 
-    /// Every member's address, trimmed: what the reconciler writes into the Keycloak group.
+    /// Every member's Keycloak user id: what the reconciler writes into the Keycloak group.
     pub fn members(&self) -> impl Iterator<Item = &str> {
-        self.members.iter().map(|member| member.user.trim())
+        self.members.iter().map(|member| member.user.as_str())
     }
 }
 
-/// `local@domain.tld`, checked no further: the identity provider owns what an address is, and a
-/// rule of our own would refuse addresses Keycloak accepts.
-pub(crate) fn is_address(value: &str) -> bool {
-    let Some((local, domain)) = value.split_once('@') else {
-        return false;
+/// Whether `value` is a Keycloak user id: a UUID in its lower-case hyphenated form
+/// (`8-4-4-4-12` hex digits), the form Keycloak puts in a token's `sub` (PF-126).
+pub fn is_person_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(at, byte)| match at {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+        })
+}
+
+/// Refuses a person named by anything but their Keycloak user id: an e-mail, a username or a
+/// display name in a manifest stays in Git history for good (PF-126, ADR-N-061).
+pub(crate) fn validate_person_id(field: &'static str, value: &str) -> Result<()> {
+    if is_person_id(value) {
+        return Ok(());
+    }
+    let reason = if value.contains('@') {
+        "a person is named by their Keycloak user id (a UUID such as \
+         3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14), never by e-mail: Git keeps every e-mail for good \
+         (PF-126)"
+    } else {
+        "a person is named by their Keycloak user id, a lower-case UUID such as \
+         3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 (PF-126)"
     };
-    !local.is_empty()
-        && !value.contains(char::is_whitespace)
-        && domain.contains('.')
-        && !domain.starts_with('.')
-        && !domain.ends_with('.')
+    Err(Error::Name {
+        field,
+        value: value.to_owned(),
+        reason,
+    })
 }

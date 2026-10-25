@@ -80,7 +80,7 @@ metadata:
 spec:
   description: The air quality domain, measurement and modelling
   members:
-    - { user: jana.kovacova@banskabystrica.sk }
+    - { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }
 "#;
 
 const ROLE: &str = r#"apiVersion: joinedcontext.com/v1alpha1
@@ -106,7 +106,7 @@ metadata:
   name: ovzdusie-developers
   namespace: org
 spec:
-  subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]
+  subjects: [{ group: air-quality-team }, { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]
   role: pipeline-developer
   scope: { project: ovzdusie }
   validity: { notAfter: "2026-12-31T23:59:59Z" }
@@ -352,7 +352,7 @@ metadata:
 spec:
   description: The team that maintains the air quality pipelines
   members:
-    - { user: jana.kovacova@banskabystrica.sk }
+    - { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }
 "#,
     );
     let report = validate::run(&dir);
@@ -415,7 +415,7 @@ metadata:
   namespace: org
 spec:
   members:
-    - { user: jana.kovacova@banskabystrica.sk }
+    - { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }
 "#,
     );
     let report = validate::run(&dir);
@@ -795,7 +795,7 @@ fn an_app_role_naming_an_undeclared_group_is_refused_and_a_declared_one_is_not()
         &dir,
         ROLES_APP_PATH,
         &roles_app(
-            "{ group: air-quality-team }, { user: jana@banskabystrica.sk }",
+            "{ group: air-quality-team }, { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }",
             gate,
         ),
     );
@@ -868,33 +868,6 @@ fn an_app_egress_of_every_address_or_a_host_name_is_refused() {
                 .any(|m| m.contains(entry) && m.contains("AP-134")),
             "{egress}: {found:?}"
         );
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// AP-91, PF-41: a role member outside the organization's domain is refused; a subdomain of it
-/// is the organization's.
-#[test]
-fn an_app_role_member_outside_the_organizations_domain_is_refused() {
-    let dir = valid_repo("app-role-domain");
-    let gate = "      roles: [editor]\n";
-    for (member, outside) in [
-        ("jana@mesto.banskabystrica.sk", false),
-        ("jana@example.org", true),
-        ("jana@banskabystrica.sk.evil.org", true),
-        ("jana@notbanskabystrica.sk", true),
-    ] {
-        write(
-            &dir,
-            ROLES_APP_PATH,
-            &roles_app(&format!("{{ user: {member} }}"), gate),
-        );
-        let report = validate::run(&dir);
-        let found = messages(&report.findings);
-        let said = found
-            .iter()
-            .any(|m| m.contains(member) && m.contains("AP-91"));
-        assert_eq!(said, outside, "{member}: {found:?}");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

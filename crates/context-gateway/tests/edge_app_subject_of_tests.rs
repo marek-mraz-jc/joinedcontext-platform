@@ -314,9 +314,10 @@ async fn a_token_with_azp_and_preferred_username_prefers_the_service_account_pat
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{document}");
+    // The person is named by their Keycloak id, the token's `sub` (PF-126).
     assert_eq!(
         document["subject"],
-        json!({ "type": "user", "id": "jana.novakova" })
+        json!({ "type": "user", "id": "f:1:someone" })
     );
 }
 
@@ -456,9 +457,10 @@ async fn a_delegated_token_is_decided_as_the_person_and_never_with_the_accounts_
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{document}");
+    // The person is named by their Keycloak id, the token's `sub` (PF-126).
     assert_eq!(
         document["subject"],
-        json!({ "type": "user", "id": "jana.novakova" })
+        json!({ "type": "user", "id": "f:1:someone" })
     );
     assert_eq!(
         granted(&document),

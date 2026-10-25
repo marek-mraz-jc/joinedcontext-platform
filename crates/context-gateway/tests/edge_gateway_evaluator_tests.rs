@@ -109,6 +109,7 @@ fn a_policy_is_about_exactly_one_kind_of_principal() {
     // not `jana` the group, and a service account is not a role.
     let subject = Subject {
         user: Some("jana".to_owned()),
+        id: Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14".to_owned()),
         groups: set(&["stewards"]),
         roles: set(&["public"]),
         service_account: Some("collector".to_owned()),
@@ -117,7 +118,10 @@ fn a_policy_is_about_exactly_one_kind_of_principal() {
     };
 
     for (kind, id, granted) in [
-        ("user", "jana", true),
+        // A person is their Keycloak id; their username, which can be renamed, is nobody
+        // (PF-126).
+        ("user", "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14", true),
+        ("user", "jana", false),
         ("group", "jana", false),
         ("role", "jana", false),
         ("serviceAccount", "jana", false),
@@ -132,6 +136,22 @@ fn a_policy_is_about_exactly_one_kind_of_principal() {
             granted,
             "a grant to {kind} {id} decided the wrong way"
         );
+    }
+
+    // A client's own service-account user is named by its username, the one `user` assignee
+    // no Keycloak id names (PF-126, T-5358); its id is not that name.
+    let reconciler = Subject {
+        user: Some("service-account-portal-reconciler".to_owned()),
+        id: Some("0d5e2b7f-8a14-4e8a-9c61-3f2a9c1e7b4d".to_owned()),
+        roles: set(&["public"]),
+        ..Subject::default()
+    };
+    for (id, granted) in [
+        ("service-account-portal-reconciler", true),
+        ("0d5e2b7f-8a14-4e8a-9c61-3f2a9c1e7b4d", false),
+    ] {
+        let decision = verdict(&reconciler, &[grant_to("user", id, "")], now());
+        assert_eq!(!decision.is_deny(), granted, "a grant to user {id}");
     }
 }
 
@@ -306,7 +326,7 @@ fn a_prohibition_to_somebody_else_does_not_reach_this_caller() {
     let forbid_jana = policy(
         "contextSpaceRef: ovzdusie\n\
          assigner: did:web:banskabystrica.sk\n\
-         assignee: { kind: user, id: jana }\n\
+         assignee: { kind: user, id: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }\n\
          effect: prohibition\n\
          operations: [queryEntity]\n\
          information:\n\
@@ -322,6 +342,7 @@ fn a_prohibition_to_somebody_else_does_not_reach_this_caller() {
 
     let jana = Subject {
         user: Some("jana".to_owned()),
+        id: Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14".to_owned()),
         roles: set(&["public"]),
         ..Subject::default()
     };
@@ -359,6 +380,7 @@ fn the_same_inputs_always_give_the_same_verdict() {
     // between two calls with the same arguments would make that endpoint a guess.
     let subject = Subject {
         user: Some("jana".to_owned()),
+        id: Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14".to_owned()),
         groups: set(&["stewards"]),
         roles: set(&["public"]),
         ..Subject::default()
