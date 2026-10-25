@@ -12,7 +12,8 @@
 
 use crate::app::Gateway;
 use crate::auth::accounts::ServiceAccounts;
-use crate::auth::token::Verifier;
+use crate::auth::token::{Rejected, Verifier};
+use crate::mqtt_refusals::{account_of, Reader, Reason, Refusal, Refusals};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -233,6 +234,36 @@ pub struct Pods {
     pub portal: Vec<IpAddr>,
 }
 
+/// What a CONNECT was decided on: the log's sentence and, for a refusal of a declared broker,
+/// the reason the refusal record keeps (T-5534).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Why {
+    /// The sentence the log line carries.
+    pub text: &'static str,
+    /// The reason a refusal of a declared broker is kept with; `None` for an admission or a
+    /// caller that is no broker.
+    pub refused: Option<Reason>,
+}
+
+impl Why {
+    fn unrecorded(text: &'static str) -> Self {
+        Self {
+            text,
+            refused: None,
+        }
+    }
+}
+
+fn refuse(text: &'static str, reason: Reason) -> (Answer, Why) {
+    (
+        Answer::deny(),
+        Why {
+            text,
+            refused: Some(reason),
+        },
+    )
+}
+
 /// Decides one CONNECT (PL-75, PL-76, ADR-N-048 §2.10). `caller` is the mesh identity of the
 /// broker asking; `pods` the addresses a tokenless CONNECT is admitted from.
 pub fn decide(
@@ -242,39 +273,50 @@ pub fn decide(
     caller: Option<&str>,
     pods: &Pods,
     connect: &Connect,
-) -> (Answer, &'static str) {
+) -> (Answer, Why) {
     let Some(release) = caller.map(broker_of) else {
-        return (Answer::deny(), "no mesh identity");
+        return (Answer::deny(), Why::unrecorded("no mesh identity"));
     };
     let Some(broker) = brokers.get(release) else {
         return (
             Answer::deny(),
-            "the caller is no broker this repository declares",
+            Why::unrecorded("the caller is no broker this repository declares"),
         );
     };
     if connect.password.is_empty() {
         return tokenless(broker, pods, connect);
     }
     let Some(verifier) = verifier else {
-        return (Answer::deny(), "no realm configured");
+        return refuse("no realm configured", Reason::NoRealm);
     };
-    let Ok(claims) = verifier.verify(&connect.password, &[release.to_owned()]) else {
-        return (Answer::deny(), "the token does not verify for this broker");
+    let claims = match verifier.verify(&connect.password, &[release.to_owned()]) {
+        Ok(claims) => claims,
+        Err(Rejected::Expired) => return refuse("the token is expired", Reason::Expired),
+        Err(Rejected::WrongAudience) => {
+            return refuse(
+                "the token is bound to another broker",
+                Reason::WrongAudience,
+            )
+        }
+        Err(_) => return refuse("the token does not verify", Reason::InvalidToken),
     };
     let Some(azp) = claims.azp.as_deref() else {
-        return (Answer::deny(), "the token names no client");
+        return refuse("the token names no client", Reason::WrongClient);
     };
     if azp != connect.username || azp != connect.clientid {
-        return (
-            Answer::deny(),
+        return refuse(
             "the username or client id is not the token's client",
+            Reason::WrongClient,
         );
     }
     let Some(account) = accounts.resolve(azp) else {
-        return (Answer::deny(), "the client is no ServiceAccount");
+        return refuse("the client is no ServiceAccount", Reason::UnknownAccount);
     };
     if account.project != broker.project {
-        return (Answer::deny(), "the account belongs to another project");
+        return refuse(
+            "the account belongs to another project",
+            Reason::OtherProject,
+        );
     }
     let mut acl = Vec::new();
     for role in broker
@@ -286,14 +328,17 @@ pub fn decide(
         acl.extend(role.subscribe.iter().map(|topic| rule("subscribe", topic)));
     }
     if acl.is_empty() {
-        return (Answer::deny(), "the account holds no role of this broker");
+        return refuse("the account holds no role of this broker", Reason::NoRole);
     }
-    (Answer::allow(acl, Some(claims.exp)), "a device")
+    (
+        Answer::allow(acl, Some(claims.exp)),
+        Why::unrecorded("a device"),
+    )
 }
 
 /// A CONNECT without a token: the runner or the Portal's capture subscriber, each by its name
 /// from one of its own pods, with `subscribe` only and no `expire_at`.
-fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, &'static str) {
+fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, Why) {
     let from = |addresses: &[IpAddr]| {
         connect
             .ipaddr
@@ -311,16 +356,16 @@ fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, &'stat
             "the Portal's capture",
             "the broker is not in capture mode",
         ),
-        _ => return (Answer::deny(), "no token"),
+        _ => return refuse("no token", Reason::NoToken),
     };
     if topics.is_empty() {
-        return (Answer::deny(), none);
+        return refuse(none, Reason::NoSubscription);
     }
     let acl = topics
         .iter()
         .map(|topic| rule("subscribe", topic))
         .collect();
-    (Answer::allow(acl, None), who)
+    (Answer::allow(acl, None), Why::unrecorded(who))
 }
 
 /// The addresses `host` resolves to: a headless Service lists one per pod. A name that does not
@@ -341,6 +386,7 @@ struct Internal {
     gateway: Arc<Gateway>,
     runner_host: Option<Arc<str>>,
     portal_host: Option<Arc<str>>,
+    refusals: Arc<Refusals>,
 }
 
 /// `POST /internal/mqtt/auth`, on the internal listener only. Always 200 with `allow` or `deny`:
@@ -350,6 +396,7 @@ async fn auth(
         gateway,
         runner_host,
         portal_host,
+        refusals,
     }): State<Internal>,
     headers: HeaderMap,
     Json(connect): Json<Connect>,
@@ -379,32 +426,60 @@ async fn auth(
         &pods,
         &connect,
     );
+    let release = caller.map(broker_of).unwrap_or_default();
+    if let (Some(reason), Some(broker)) = (why.refused, brokers.get(release)) {
+        refusals.record(
+            release,
+            Refusal {
+                at: chrono::Utc::now(),
+                reason,
+                account: account_of(broker, &connect.username),
+            },
+        );
+    }
     // The client id and the outcome, never the password.
     tracing::info!(
-        broker = caller.map(broker_of).unwrap_or_default(),
+        broker = release,
         clientid = %connect.clientid,
         result = answer.result,
-        why,
+        why = why.text,
         "mqtt connect"
     );
     Json(answer)
 }
 
-/// The internal listener's router: the CONNECT check and nothing else. `runner_host` and
-/// `portal_host` name the headless Services of the pipeline runner and of the Portal; without
-/// one, nobody connects under that name without a token.
+/// The internal listener's router: the CONNECT check and the record of its refusals.
+/// `runner_host` and `portal_host` name the headless Services of the pipeline runner and of the
+/// Portal; without one, nobody connects under that name without a token. `portal_identity` is
+/// the Portal's `{serviceaccount}.{namespace}`, the only mesh identity that reads the refusals;
+/// without it nobody does (T-5534).
 pub fn internal_router(
     gateway: Arc<Gateway>,
     runner_host: Option<String>,
     portal_host: Option<String>,
+    portal_identity: Option<String>,
 ) -> axum::Router {
+    let refusals = Arc::new(Refusals::default());
+    let reader = Reader {
+        refusals: Arc::clone(&refusals),
+        portal_identity: portal_identity.map(Arc::from),
+    };
     axum::Router::new()
         .route("/internal/mqtt/auth", axum::routing::post(auth))
         .with_state(Internal {
             gateway,
             runner_host: runner_host.map(Arc::from),
             portal_host: portal_host.map(Arc::from),
+            refusals,
         })
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/internal/mqtt/refusals/{broker}",
+                    axum::routing::get(crate::mqtt_refusals::read),
+                )
+                .with_state(reader),
+        )
 }
 
 #[cfg(test)]
