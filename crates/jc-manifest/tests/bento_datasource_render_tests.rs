@@ -145,7 +145,7 @@ spec:
   topics:
   - cameras/+/frame
   client_id: jc-bb-ovzdusie-aq-mqtt-ingest
-  user: pipeline-runner
+  user: pipeline-runner-bb-ovzdusie
 "#
     );
 }

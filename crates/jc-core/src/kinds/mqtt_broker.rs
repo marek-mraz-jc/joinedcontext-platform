@@ -23,8 +23,16 @@ pub const MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 pub const MAX_MESSAGES_PER_SECOND: u32 = 1000;
 /// The largest `limits.maxConnections` (MF-54).
 pub const MAX_CONNECTIONS: u32 = 10_000;
-/// The username a pipeline runner connects with on a broker's internal listener (PL-76).
+/// The prefix of the username a pipeline runner connects with on a broker's internal listener;
+/// no manifest may write a username that starts with it (PL-76).
 pub const RUNNER_USERNAME: &str = "pipeline-runner";
+
+/// The username the runner reads a broker of `project` with, `pipeline-runner-{project}`: a
+/// broker admits only its own project's, so one project's stream never reads another's devices
+/// (PL-76, T-5561).
+pub fn runner_username(project: &str) -> String {
+    format!("{RUNNER_USERNAME}-{project}")
+}
 /// The runner variable naming the namespace the brokers run in, filled by the runner.
 pub const NAMESPACE_VARIABLE: &str = "JC_MQTT_NAMESPACE";
 
@@ -146,6 +154,10 @@ pub struct MqttRole {
     /// Topic filters the role may subscribe to, each under the client's own `${clientid}`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subscribe: Vec<String>,
+    /// The role's devices share their `publish` topics, so each may publish as any other; without
+    /// it every `publish` filter holds `${clientid}` before any wildcard (T-5561).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_topics: bool,
 }
 
 /// The broker's limits (MF-54).
@@ -232,6 +244,17 @@ impl MqttBrokerSpec {
             }
             for filter in &role.publish {
                 check_filter("roles[].publish", filter)?;
+                if !role.shared_topics && !under_client_id(filter) {
+                    return Err(invalid(
+                        "roles[].publish",
+                        format!(
+                            "`{filter}` lets each device of role `{}` publish as any other: write \
+                             a {CLIENT_ID} level before any wildcard, or set sharedTopics: true \
+                             on the role",
+                            role.name
+                        ),
+                    ));
+                }
             }
             self.check_subscribe(role)?;
         }
@@ -415,6 +438,7 @@ mod tests {
             service_accounts: vec!["cam-north".into()],
             publish: publish.iter().map(|s| (*s).to_owned()).collect(),
             subscribe: subscribe.iter().map(|s| (*s).to_owned()).collect(),
+            shared_topics: false,
         }
     }
 
@@ -436,7 +460,7 @@ mod tests {
     fn a_camera_role_publishing_under_its_own_id_is_valid() {
         let camera = spec(vec![role(
             "camera",
-            &["cameras/${clientid}/#", "status/+/up"],
+            &["cameras/${clientid}/#", "status/${clientid}/up"],
             &["commands/${clientid}/+"],
         )]);
         assert_eq!(camera.validate().map_err(|e| e.to_string()), Ok(()));
@@ -462,15 +486,15 @@ mod tests {
     fn roles_are_named_once_and_each_grants_something_to_someone() {
         assert!(refusal(&spec(Vec::new())).contains("at least one role"));
         let twice = spec(vec![
-            role("camera", &["a"], &[]),
-            role("camera", &["b"], &[]),
+            role("camera", &["${clientid}/a"], &[]),
+            role("camera", &["${clientid}/b"], &[]),
         ]);
         assert!(refusal(&twice).contains("declared twice"));
-        let mut nobody = role("camera", &["a"], &[]);
+        let mut nobody = role("camera", &["${clientid}/a"], &[]);
         nobody.service_accounts.clear();
         assert!(refusal(&spec(vec![nobody])).contains("names no ServiceAccount"));
         assert!(refusal(&spec(vec![role("camera", &[], &[])])).contains("grants no topic"));
-        let mut bad_account = role("camera", &["a"], &[]);
+        let mut bad_account = role("camera", &["${clientid}/a"], &[]);
         bad_account.service_accounts = vec!["Cam_North".into()];
         assert!(spec(vec![bad_account]).validate().is_err());
     }
@@ -493,6 +517,31 @@ mod tests {
         }
         let long = "a/".repeat(200);
         assert!(refusal(&spec(vec![role("camera", &[&long], &[])])).contains("bytes long"));
+    }
+
+    #[test]
+    fn a_device_publish_filter_without_its_own_id_is_refused() {
+        for filter in ["cameras/+/#", "+/#", "cameras/x", "cameras/+/${clientid}"] {
+            let message = refusal(&spec(vec![role("camera", &[filter], &[])]));
+            assert!(
+                message.contains("publish as any other"),
+                "{filter}: {message}"
+            );
+        }
+        for filter in ["cameras/${clientid}/#", "${clientid}", "a/${clientid}/+/b"] {
+            assert_eq!(
+                spec(vec![role("camera", &[filter], &[])]).validate(),
+                Ok(())
+            );
+        }
+        let mut shared = role("camera", &["cameras/+/#"], &[]);
+        shared.shared_topics = true;
+        assert_eq!(spec(vec![shared]).validate(), Ok(()));
+    }
+
+    #[test]
+    fn the_runner_name_carries_the_project() {
+        assert_eq!(runner_username("pamiatky"), "pipeline-runner-pamiatky");
     }
 
     #[test]
@@ -534,7 +583,7 @@ mod tests {
                 "maxConnections",
             ),
         ] {
-            let mut broker = spec(vec![role("camera", &["a"], &[])]);
+            let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
             broker.limits = limits;
             assert!(refusal(&broker).contains(field), "{field}");
         }
@@ -552,7 +601,7 @@ mod tests {
 
     #[test]
     fn a_dedicated_port_comes_from_the_reserved_range() {
-        let mut broker = spec(vec![role("camera", &["a"], &[])]);
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
         for port in [*DEDICATED_PORTS.start(), *DEDICATED_PORTS.end()] {
             broker.port = Some(port);
             assert!(broker.validate().is_ok(), "{port}");
@@ -565,14 +614,18 @@ mod tests {
 
     #[test]
     fn devices_subscribe_only_on_a_relay_broker() {
-        let mut broker = spec(vec![role("camera", &["a"], &["commands/${clientid}/+"])]);
+        let mut broker = spec(vec![role(
+            "camera",
+            &["${clientid}/a"],
+            &["commands/${clientid}/+"],
+        )]);
         broker.mode = None;
         assert!(refusal(&broker).contains("set spec.mode: relay"));
         broker.mode = Some(MqttMode::Ingest);
         assert!(refusal(&broker).contains("in ingest mode devices get no subscribe right"));
         broker.mode = Some(MqttMode::Capture);
         assert!(refusal(&broker).contains("in capture mode"));
-        let mut ingest = spec(vec![role("camera", &["a"], &[])]);
+        let mut ingest = spec(vec![role("camera", &["${clientid}/a"], &[])]);
         ingest.mode = None;
         assert_eq!(ingest.validate().map_err(|e| e.to_string()), Ok(()));
         assert_eq!(ingest.effective_mode(), MqttMode::Ingest);
@@ -580,7 +633,7 @@ mod tests {
 
     #[test]
     fn a_capture_is_bounded_and_belongs_to_the_capture_mode() {
-        let mut broker = spec(vec![role("camera", &["a"], &[])]);
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
         broker.mode = Some(MqttMode::Ingest);
         broker.capture = Some(MqttCapture::default());
         assert!(refusal(&broker).contains("spec.mode: capture"));
@@ -614,7 +667,7 @@ mod tests {
         }
         let read: MqttBrokerSpec = serde_json::from_value(serde_json::json!({
             "mode": "capture", "capture": {},
-            "roles": [{"name": "camera", "serviceAccounts": ["cam-north"], "publish": ["a"]}]
+            "roles": [{"name": "camera", "serviceAccounts": ["cam-north"], "publish": ["${clientid}/a"]}]
         }))
         .expect("reads");
         assert_eq!(read.capture.and_then(|c| c.window_seconds()), Some(3600));

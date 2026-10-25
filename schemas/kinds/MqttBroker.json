@@ -236,6 +236,10 @@
           },
           "type": "array"
         },
+        "sharedTopics": {
+          "description": "The role's devices share their `publish` topics, so each may publish as any other; without it every `publish` filter holds `${clientid}` before any wildcard (T-5561).",
+          "type": "boolean"
+        },
         "subscribe": {
           "description": "Topic filters the role may subscribe to, each under the client's own `${clientid}`.",
           "items": {
