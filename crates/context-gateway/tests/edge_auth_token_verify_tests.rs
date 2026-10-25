@@ -300,6 +300,10 @@ fn the_bearer_header_yields_a_token_or_nothing_at_all() {
         Ok("abc"),
         "the token is trimmed"
     );
+    // The scheme is case-insensitive (RFC 7235 section 2.1, T-5509).
+    for spelling in ["bearer abc", "BEARER abc", " Bearer abc"] {
+        assert_eq!(bearer(Some(spelling)), Ok("abc"), "{spelling:?}");
+    }
 
     for not_a_bearer in [
         None,
@@ -307,11 +311,8 @@ fn the_bearer_header_yields_a_token_or_nothing_at_all() {
         Some("Bearer"),
         Some("Bearer "),
         Some("Bearer    "),
-        Some("bearer abc"),
-        Some("BEARER abc"),
         Some("Basic abc"),
         Some("Bearer\tabc"),
-        Some(" Bearer abc"),
     ] {
         assert_eq!(
             bearer(not_a_bearer),

@@ -343,6 +343,9 @@ async fn no_bearer_credential_that_fails_to_verify_is_served() {
         "Bearer eyJhbGciOiJub25lIn0.e30.c2ln",
         "Bearer ....",
         "Bearer  padded.token.here",
+        // The scheme is case-insensitive (RFC 7235 section 2.1, T-5509).
+        "bearer abc.def.ghi",
+        "BEARER abc.def.ghi",
     ] {
         let (status, _, body) = call(
             Request::builder()
@@ -366,11 +369,8 @@ async fn no_bearer_credential_that_fails_to_verify_is_served() {
 /// public endpoint admits (GW22). Written down because it is the one path where presenting
 /// *something* still gets served, and the list is exactly what falls into it.
 ///
-/// `auth::token::bearer` matches the scheme as the literal `Bearer `, so the lowercase
-/// spelling RFC 7235 section 2.1 also allows falls in here with the rest: a client that writes
-/// `bearer <token>` is served as the public instead of as itself. That is a downgrade rather
-/// than an escalation — the anonymous role is what a stranger with no header gets — so it is
-/// recorded as a defect and not as a hole (chyby.md).
+/// `bearer <token>` in any case is a credential since T-5509 and is refused when it does not
+/// verify (no_bearer_credential_that_fails_to_verify_is_served).
 #[tokio::test]
 async fn a_header_that_is_not_a_bearer_credential_is_no_credential() {
     for header in [
@@ -379,8 +379,6 @@ async fn a_header_that_is_not_a_bearer_credential_is_no_credential() {
         "Bearer",
         "Bearer ",
         "Bearer   ",
-        "bearer abc.def.ghi",
-        "BEARER abc.def.ghi",
         "Basic YWRtaW46YWRtaW4=",
         "Negotiate abcdef",
         // A value that is not ASCII at all: `to_str` refuses it, so nothing is presented.
