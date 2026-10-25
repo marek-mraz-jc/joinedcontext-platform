@@ -212,31 +212,7 @@ pub fn login(
     };
 
     let (verifier, challenge) = proof_key().map_err(|e| unavailable(issuer, &e))?;
-    let response = client
-        .post(endpoint("auth/device"))
-        .form(&[
-            ("client_id", CLIENT_ID),
-            ("scope", scope),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-        ])
-        .send()
-        .map_err(|e| unavailable(issuer, &e.without_url().to_string()))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .map_err(|e| unavailable(issuer, &e.to_string()))?;
-    if !status.is_success() {
-        return Err(LoginError::Refused(oauth_error(&text).unwrap_or_else(
-            || format!("the provider refused to start a device sign-in ({status})"),
-        )));
-    }
-    let device: DeviceAuthorization = serde_json::from_str(&text).map_err(|e| {
-        unavailable(
-            issuer,
-            &format!("the device authorization is unreadable: {e}"),
-        )
-    })?;
+    let device = authorize_device(&client, issuer, &endpoint("auth/device"), scope, &challenge)?;
     tell(&match &device.verification_uri_complete {
         Some(complete) => format!(
             "To sign in, open {complete} and confirm the code {}",
@@ -306,6 +282,41 @@ pub fn login(
             }
         }
     }
+}
+
+/// RFC 8628 §3.1–3.2: asks `url` for a device code of `scope`, with the proof key's `challenge`.
+fn authorize_device(
+    client: &Client,
+    issuer: &Url,
+    url: &str,
+    scope: &str,
+    challenge: &str,
+) -> Result<DeviceAuthorization, LoginError> {
+    let response = client
+        .post(url)
+        .form(&[
+            ("client_id", CLIENT_ID),
+            ("scope", scope),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ])
+        .send()
+        .map_err(|e| unavailable(issuer, &e.without_url().to_string()))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|e| unavailable(issuer, &e.to_string()))?;
+    if !status.is_success() {
+        return Err(LoginError::Refused(oauth_error(&text).unwrap_or_else(
+            || format!("the provider refused to start a device sign-in ({status})"),
+        )));
+    }
+    serde_json::from_str(&text).map_err(|e| {
+        unavailable(
+            issuer,
+            &format!("the device authorization is unreadable: {e}"),
+        )
+    })
 }
 
 fn unavailable(issuer: &Url, message: &str) -> LoginError {

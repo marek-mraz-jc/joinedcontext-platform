@@ -744,39 +744,7 @@ impl DataSourceSpec {
             });
         }
 
-        let mut strings = Vec::new();
-        strings_of(input_val, "spec.input".to_string(), &mut strings);
-        for (path, text) in strings {
-            // An input's Bloblang (`generate.mapping`, a `${! … }` in any field) runs in the same
-            // runner as a step's, so it is held to the same host rule (T-3833).
-            super::pipeline::validate_author_bloblang("spec.input", text)?;
-            if let Some(reason) = refused_target(text) {
-                return Err(Error::Invalid {
-                    field: path,
-                    reason: reason.to_owned(),
-                });
-            }
-            if path.ends_with(".user")
-                && (runner_user(text) || (path.contains(".mqtt.") && text.contains("${")))
-            {
-                return Err(Error::Invalid {
-                    field: path,
-                    reason: RUNNER_USER.to_owned(),
-                });
-            }
-            for caps in EMBEDDED_PASSWORD_RE.captures_iter(text) {
-                let password = caps
-                    .get(1)
-                    .or_else(|| caps.get(2))
-                    .map_or("", |m| m.as_str());
-                if is_exact_var_interpolation(password).is_none() {
-                    return Err(Error::Invalid {
-                        field: path,
-                        reason: "a password inside a connection string is a `${VAR}` naming an envVar of spec.secrets, never a literal (PL-50, MF-35)".to_string(),
-                    });
-                }
-            }
-        }
+        validate_input_strings(input_val)?;
 
         let own: Vec<&str> = known_vars.into_iter().collect();
         validate_input_tree(runner_name, input_obj, &own, files)
@@ -1275,6 +1243,44 @@ const TOKEN_SERVICES: &[&str] = &[
     "pipeline-runner-tokens",
     "wasm-host-tokens",
 ];
+
+/// The host, runner-user and connection-string rules over every string of a runner input.
+fn validate_input_strings(input_val: &serde_json::Value) -> Result<()> {
+    let mut strings = Vec::new();
+    strings_of(input_val, "spec.input".to_string(), &mut strings);
+    for (path, text) in strings {
+        // An input's Bloblang (`generate.mapping`, a `${! … }` in any field) runs in the same
+        // runner as a step's, so it is held to the same host rule (T-3833).
+        super::pipeline::validate_author_bloblang("spec.input", text)?;
+        if let Some(reason) = refused_target(text) {
+            return Err(Error::Invalid {
+                field: path,
+                reason: reason.to_owned(),
+            });
+        }
+        if path.ends_with(".user")
+            && (runner_user(text) || (path.contains(".mqtt.") && text.contains("${")))
+        {
+            return Err(Error::Invalid {
+                field: path,
+                reason: RUNNER_USER.to_owned(),
+            });
+        }
+        for caps in EMBEDDED_PASSWORD_RE.captures_iter(text) {
+            let password = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .map_or("", |m| m.as_str());
+            if is_exact_var_interpolation(password).is_none() {
+                return Err(Error::Invalid {
+                    field: path,
+                    reason: "a password inside a connection string is a `${VAR}` naming an envVar of spec.secrets, never a literal (PL-50, MF-35)".to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
 
 const RUNNER_USER: &str = "an MQTT username is literal text, never a `${VAR}`, and the pipeline \
                            runner's name is the platform's: a broker of the project is read by \
