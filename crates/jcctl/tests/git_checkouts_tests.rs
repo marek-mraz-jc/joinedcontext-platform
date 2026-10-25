@@ -98,7 +98,10 @@ fn each_ref_is_checked_out_at_its_commit() {
     assert!(first
         .join("spaces/ovzdusie/endpoints/public-air.yaml")
         .is_file());
-    assert!(tagged.exists(), "checkout prunes nothing: the link may still name it");
+    assert!(
+        tagged.exists(),
+        "checkout prunes nothing: the link may still name it"
+    );
     resolver.prune("ovzdusie", &first);
     assert!(
         !tagged.exists(),
