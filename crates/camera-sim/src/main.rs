@@ -24,8 +24,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use p256::elliptic_curve::Generate;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
 use p256::SecretKey;
 use rustls_pki_types::pem::PemObject;
@@ -84,7 +84,7 @@ fn error(e: impl std::fmt::Display) -> Failure {
 }
 
 fn keygen(dir: &std::path::Path) -> Result<(), Failure> {
-    let key = SecretKey::random(&mut OsRng);
+    let key = SecretKey::generate();
     let pem = key.to_pkcs8_pem(LineEnding::LF).map_err(error)?;
     let path = dir.join("camera.pem");
     write_private(&path, pem.as_bytes()).map_err(|e| error(format!("{}: {e}", path.display())))?;
@@ -105,7 +105,7 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// The public half as the ServiceAccount's `jwks` declares it: `kty`, `crv`, `x`, `y`, and no `d`.
 fn public_jwk(key: &SecretKey, kid: &str) -> Value {
-    let point = key.public_key().to_encoded_point(false);
+    let point = key.public_key().to_sec1_point(false);
     let coordinate = |c: Option<&p256::FieldBytes>| c.map(|c| URL_SAFE_NO_PAD.encode(c));
     json!({
         "kty": "EC",
@@ -119,9 +119,7 @@ fn public_jwk(key: &SecretKey, kid: &str) -> Value {
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {
-    let mut bytes = [0u8; N];
-    OsRng.fill_bytes(&mut bytes);
-    bytes
+    <[u8; N]>::generate()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -509,7 +507,7 @@ mod tests {
 
     #[test]
     fn the_assertion_is_signed_by_the_camera_key_for_its_own_client_and_the_token_endpoint() {
-        let key = SigningKey::from(SecretKey::random(&mut OsRng));
+        let key = SigningKey::from(SecretKey::generate());
         let jwt = client_assertion(
             &key,
             "cam-1",
@@ -535,7 +533,7 @@ mod tests {
         VerifyingKey::from(&key)
             .verify(input.as_bytes(), &signature)
             .expect("the camera's key signed it");
-        let other = SigningKey::from(SecretKey::random(&mut OsRng));
+        let other = SigningKey::from(SecretKey::generate());
         assert!(VerifyingKey::from(&other)
             .verify(input.as_bytes(), &signature)
             .is_err());
@@ -543,7 +541,7 @@ mod tests {
 
     #[test]
     fn the_public_jwk_has_the_point_and_never_the_private_scalar() {
-        let key = SecretKey::random(&mut OsRng);
+        let key = SecretKey::generate();
         let jwk = public_jwk(&key, "cam-1");
         assert_eq!(jwk["kty"], "EC");
         assert_eq!(jwk["crv"], "P-256");
