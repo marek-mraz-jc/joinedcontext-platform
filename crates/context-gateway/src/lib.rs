@@ -37,6 +37,7 @@ pub mod query;
 /// The relationship rules of a space's model, in their own crate since T-4771.
 pub use jc_relationships as relationships;
 pub mod resolver;
+pub mod revocations;
 pub mod store;
 pub mod telemetry;
 pub use jc_ngsi_input::units;

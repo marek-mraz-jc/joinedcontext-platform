@@ -162,6 +162,9 @@ pub enum Rejected {
     /// The token does not name the resource being called (RFC 8707).
     #[error("token is not bound to this resource")]
     WrongAudience,
+    /// The subject was disabled, deleted or logged out after the token was issued (AR-6).
+    #[error("token issued before its subject was revoked")]
+    Revoked,
 }
 
 impl From<Rejected> for crate::ProblemDetails {
@@ -191,6 +194,8 @@ struct Table {
 pub struct Verifier {
     issuer: String,
     keys: ArcSwap<Table>,
+    /// `sub` -> unix second of the subject's revocation, as the Portal lists it (T-5568).
+    revoked: ArcSwap<HashMap<String, i64>>,
 }
 
 impl std::fmt::Debug for Verifier {
@@ -209,7 +214,15 @@ impl Verifier {
         Self {
             issuer: issuer.into(),
             keys: ArcSwap::new(Arc::new(Table::default())),
+            revoked: ArcSwap::new(Arc::new(HashMap::new())),
         }
+    }
+
+    /// Replaces the revoked subjects: `sub` -> the unix second it was revoked at. A token of a
+    /// listed subject issued at or before its mark is refused by [`Self::verify`] from now on;
+    /// one issued later (the person enabled again and signed in anew) is not.
+    pub fn replace_revocations(&self, marks: HashMap<String, i64>) {
+        self.revoked.store(Arc::new(marks));
     }
 
     /// The realm this verifier accepts tokens from.
@@ -266,7 +279,8 @@ impl Verifier {
             // Nothing to bind the token to means nothing would refuse it.
             return Err(Rejected::WrongAudience);
         }
-        self.decode(token, Some(audiences))
+        let claims = self.decode(token, Some(audiences))?;
+        unrevoked(claims, &self.revoked.load())
     }
 
     /// Who a token names: signature, issuer and lifetime checked, the audience not (T-5290).
@@ -350,6 +364,15 @@ fn admit(claims: Claims, audiences: Option<&[String]>, now: i64) -> Result<Claim
     }
 }
 
+/// Claims whose subject was not revoked after they were issued. A token without `iat` cannot
+/// show it came later, so it counts as issued before the mark.
+fn unrevoked(claims: Claims, revoked: &HashMap<String, i64>) -> Result<Claims, Rejected> {
+    match revoked.get(&claims.sub) {
+        Some(mark) if claims.iat.unwrap_or(i64::MIN) <= *mark => Err(Rejected::Revoked),
+        _ => Ok(claims),
+    }
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -401,7 +424,8 @@ pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {
 
 #[cfg(test)]
 mod tests {
-    use super::{admit, Claims, Rejected, LEEWAY};
+    use super::{admit, unrevoked, Claims, Rejected, LEEWAY};
+    use std::collections::HashMap;
 
     const NOW: i64 = 1_800_000_000;
 
@@ -443,5 +467,21 @@ mod tests {
     fn identifying_asks_for_no_audience() {
         let missing = admit(claims(serde_json::Value::Null, NOW), None, NOW);
         assert_eq!(missing.map(|c| c.sub), Ok("f:1:a".to_owned()));
+    }
+
+    #[test]
+    fn a_revoked_subject_is_refused_for_tokens_issued_up_to_its_mark() {
+        let marks = HashMap::from([("f:1:a".to_owned(), NOW)]);
+        let issued = |iat: Option<i64>| {
+            let mut c = claims("slug".into(), NOW + 300);
+            c.iat = iat;
+            unrevoked(c, &marks).map(|c| c.sub)
+        };
+        assert_eq!(issued(Some(NOW - 1)), Err(Rejected::Revoked));
+        assert_eq!(issued(Some(NOW)), Err(Rejected::Revoked));
+        assert_eq!(issued(None), Err(Rejected::Revoked));
+        assert_eq!(issued(Some(NOW + 1)), Ok("f:1:a".to_owned()));
+        let other = unrevoked(claims("slug".into(), NOW + 300), &HashMap::new());
+        assert_eq!(other.map(|c| c.sub), Ok("f:1:a".to_owned()));
     }
 }
