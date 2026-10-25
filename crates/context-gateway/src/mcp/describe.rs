@@ -183,14 +183,13 @@ pub(crate) async fn read(
 
 /// The Endpoint's NGSI-LD query card for this caller (T-4759, T-4760): from the LinkML its view
 /// serves them, naming only the read tools their grants cover. Without a model, the query rules.
-async fn card(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Result<String, String> {
-    let mut asked = Map::new();
-    asked.insert("format".to_owned(), Value::from("linkml"));
-    let model = match describe_schema(gateway, endpoint, subject, &asked).await {
-        Ok(document) => document["document"].as_str().map(str::to_owned),
-        Err(message) if message == NO_MODEL => None,
-        Err(message) => return Err(message),
-    };
+/// `card://`, `get_endpoint` and the `initialize` instructions all answer this text (T-5642).
+pub(crate) async fn card(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+) -> Result<String, String> {
+    let model = served_model(gateway, endpoint, subject).await?;
     let offers = |name: &str| {
         TOOLS
             .iter()
@@ -211,6 +210,45 @@ async fn card(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Resu
         offers,
         model.as_deref(),
     ))
+}
+
+/// The card's type lines in full, every type the caller is served or the one `only` names, for
+/// `get_endpoint detail: "attributes"` (T-5642): a card past the token switch lists counts, and
+/// these are the lines it leaves out. `Ok(None)` when `only` is no type of the served model.
+pub(crate) async fn type_lines(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    only: Option<&str>,
+) -> Result<Option<String>, String> {
+    let model = served_model(gateway, endpoint, subject)
+        .await?
+        .ok_or_else(|| NO_MODEL.to_owned())?;
+    let classes = jc_core::display_order::query_attributes(&model).map_err(|_| {
+        tracing::warn!(slug = %endpoint.slug, "the served LinkML does not parse");
+        "the data model cannot be read right now; try again later".to_owned()
+    })?;
+    let lines: String = classes
+        .iter()
+        .filter(|(kind, _)| only.is_none_or(|wanted| wanted == kind.as_str()))
+        .map(|(kind, attributes)| jc_core::query_card::type_lines(kind, attributes, &[]))
+        .collect();
+    Ok((!lines.is_empty()).then(|| lines.trim_start().to_owned()))
+}
+
+/// The LinkML the Endpoint's view serves this caller, or `None` when it publishes no model.
+async fn served_model(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+) -> Result<Option<String>, String> {
+    let mut asked = Map::new();
+    asked.insert("format".to_owned(), Value::from("linkml"));
+    match describe_schema(gateway, endpoint, subject, &asked).await {
+        Ok(document) => Ok(document["document"].as_str().map(str::to_owned)),
+        Err(message) if message == NO_MODEL => Ok(None),
+        Err(message) => Err(message),
+    }
 }
 
 /// The two resource shapes the gateway serves.

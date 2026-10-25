@@ -261,6 +261,19 @@ pub struct QueryAttribute {
     pub example: Option<String>,
 }
 
+/// The NGSI-LD members that qualify an attribute rather than being one (TS 104 175 4.5): a
+/// model that writes them as slots still describes no attribute of that name (T-5642).
+pub const SUB_PROPERTIES: &[&str] = &[
+    "observedAt",
+    "unitCode",
+    "datasetId",
+    "instanceId",
+    "createdAt",
+    "modifiedAt",
+    "deletedAt",
+    "lang",
+];
+
 /// The most allowed values one attribute lists; more end in `|…`.
 const ENUM_VALUES: usize = 12;
 
@@ -291,7 +304,7 @@ fn is_value(value: &str) -> bool {
 
 /// Every class of the served LinkML with its attributes in written order, inherited ones
 /// included, as [`QueryAttribute`]s (T-4759). The schema is the one the caller is served, so it
-/// holds only what the caller may read; `id` and `type` are not listed.
+/// holds only what the caller may read; `id`, `type` and the [`SUB_PROPERTIES`] are not listed.
 pub fn query_attributes(linkml: &str) -> Result<BTreeMap<String, Vec<QueryAttribute>>, String> {
     let schema: Value = serde_norway::from_str(linkml).map_err(|err| err.to_string())?;
     let enums = schema.get("enums");
@@ -315,7 +328,11 @@ pub fn query_attributes(linkml: &str) -> Result<BTreeMap<String, Vec<QueryAttrib
             let (written, slots) = model_slots(&schema, class);
             let attributes = written
                 .iter()
-                .filter(|name| !matches!(name.as_str(), "id" | "type") && is_name(name))
+                .filter(|name| {
+                    !matches!(name.as_str(), "id" | "type")
+                        && !SUB_PROPERTIES.contains(&name.as_str())
+                        && is_name(name)
+                })
                 .map(|name| {
                     let slot = &slots[name];
                     let range = slot.range.as_deref().unwrap_or("string");

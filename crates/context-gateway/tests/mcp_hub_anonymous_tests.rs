@@ -368,27 +368,23 @@ async fn each_row_says_enough_to_pick_the_endpoint() {
     // The readable {project}/{name} names it too, without case.
     let by_name = call_ok(app.clone(), json!({ "endpoint": "Mesto/air-quality" })).await;
     assert_eq!(by_name["endpoint"]["slug"], json!(OPEN));
-    let detail = call_ok(
-        app.clone(),
-        json!({ "endpoint": OPEN, "detail": "attributes", "type": "AirQualityObserved" }),
-    )
-    .await;
-    assert_eq!(
-        detail["endpoint"]["attributes"],
-        json!({ "AirQualityObserved": ["location", "name"] })
+    // T-5642: the card and `detail` lines come from the broker's LinkML (mcp_schema_tests);
+    // this broker does not answer, so the links still come and the card says why it is missing.
+    let text = answer["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        text.starts_with("The query card could not be read"),
+        "{text}"
     );
     for (arguments, says) in [
         (
-            json!({ "endpoint": OPEN, "detail": "attributes" }),
-            "comes with one `type`",
-        ),
-        (
             json!({ "endpoint": OPEN, "type": "AirQualityObserved" }),
-            "comes with one `type`",
+            "comes with `detail",
         ),
         (
             json!({ "endpoint": OPEN, "detail": "attributes", "type": "Bike" }),
-            "is no type of this Endpoint",
+            "cannot be read right now",
         ),
         (
             json!({ "endpoint": OPEN, "detail": "everything" }),
