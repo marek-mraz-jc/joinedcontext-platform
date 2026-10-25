@@ -246,6 +246,7 @@ impl Storage for Stores {
                 .as_ref()
                 .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
                 .presign(app, &key, method, expires)
+                .await
         })
     }
 }
