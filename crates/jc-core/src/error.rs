@@ -175,6 +175,7 @@ pub const PROBLEM_TYPES: &[ProblemType] = &[
     ProblemType { slug: "fan-out-full", status: 503, title: "Service Unavailable", hint: "The gateway serves as many WebSocket fan-outs as it may; connect again in a minute." },
     ProblemType { slug: "space-full", status: 503, title: "Service Unavailable", hint: "The space has as many WebSocket connections open as it holds; close one or connect again in a minute." },
     ProblemType { slug: "no-view", status: 503, title: "The access surface of this endpoint is not served", hint: "The endpoint has no context broker view (its slug is longer than a view id can be); its status in the Portal says so. Give it a shorter slug." },
+    ProblemType { slug: "query-timeout", status: 504, title: "Query Timeout", hint: "Ask for less at once: a shorter time window, a smaller limit or lastN, or only the attributes you need." },
     ProblemType { slug: "delivery-timeout", status: 504, title: "Delivery Timeout", hint: "The receiver did not answer in time; check that it is reachable and try again." },
 ];
 
