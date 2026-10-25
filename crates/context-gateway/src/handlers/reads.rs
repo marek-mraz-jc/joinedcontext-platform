@@ -44,6 +44,7 @@ pub(super) async fn broker_failed(
         "the broker failed a read behind a representation; its own explanation is not passed on"
     );
     let problem = match status {
+        _ if super::ngsi_ld::timed_out(status, &held) => super::ngsi_ld::query_timeout(),
         StatusCode::BAD_REQUEST => ProblemDetails::bad_request()
             .with_detail("the context broker refused the query this request asks for"),
         StatusCode::NOT_FOUND => ProblemDetails::not_found(),

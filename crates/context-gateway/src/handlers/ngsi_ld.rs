@@ -238,6 +238,9 @@ pub(crate) async fn broker_failure(
         broker = %String::from_utf8_lossy(&held),
         "the broker failed; its own explanation is not passed on"
     );
+    if timed_out(status, &held) {
+        return query_timeout().into_response();
+    }
     let mut answer = ProblemDetails::new(
         status.as_u16(),
         "broker-failure",
@@ -249,6 +252,22 @@ pub(crate) async fn broker_failure(
         answer.headers_mut().insert("retry-after", retry_after);
     }
     answer
+}
+
+/// The broker's `500` for a query its database cancelled at the statement timeout (Antares names
+/// it in the detail, CIM 009 5.5.2 InternalError). Asking again asks the same query, so the caller
+/// gets a `504` that says to ask for less instead of a broker failure to retry (T-5616).
+pub(crate) fn timed_out(status: StatusCode, body: &[u8]) -> bool {
+    status == StatusCode::INTERNAL_SERVER_ERROR
+        && serde_json::from_slice::<Value>(body).is_ok_and(|problem| {
+            problem.get("detail").and_then(Value::as_str) == Some("database statement timeout")
+        })
+}
+
+/// The answer to a query the broker did not finish in time.
+pub(crate) fn query_timeout() -> ProblemDetails {
+    ProblemDetails::new(504, "query-timeout", "Query Timeout")
+        .with_detail("the context broker did not finish this query in time")
 }
 
 /// The NGSI-LD operation a request stands for, or the answer to one that stands for none: Set
