@@ -78,6 +78,21 @@ pub(crate) fn authenticate_on(
     headers: &HeaderMap,
     federated: bool,
 ) -> Result<Subject, Box<ProblemDetails>> {
+    let admitted = admit_on(gateway, endpoint, headers, federated);
+    // A preview is nobody's but its readers', and to anyone else it does not exist (CC-91):
+    // no token, a refused one and a workload's all get the 404 of a slug nobody created.
+    if gateway.preview(&endpoint.slug).is_some() {
+        return admitted.map_err(|_| Box::new(ProblemDetails::not_found()));
+    }
+    admitted
+}
+
+fn admit_on(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    headers: &HeaderMap,
+    federated: bool,
+) -> Result<Subject, Box<ProblemDetails>> {
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -86,10 +101,6 @@ pub(crate) fn authenticate_on(
         Ok(raw) => raw,
         // No token at all: the anonymous caller, which only a public endpoint admits
         // (EP-16, GW22).
-        // A preview is nobody's but its readers', and to anyone else it does not exist (CC-91).
-        Err(token::Rejected::NoToken) if gateway.preview(&endpoint.slug).is_some() => {
-            return Err(Box::new(ProblemDetails::not_found()));
-        }
         Err(token::Rejected::NoToken) if endpoint.admits(None) => {
             return Ok(anonymous_on(endpoint));
         }

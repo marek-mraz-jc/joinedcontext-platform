@@ -634,6 +634,13 @@ struct Served {
 /// its author and one reviewer.
 async fn served(test: &str) -> Served {
     let main = scratch(&format!("{test}-main"));
+    let accounts = main.join("projects/helsinki/access/serviceaccounts");
+    std::fs::create_dir_all(&accounts).expect("an account directory");
+    std::fs::write(
+        accounts.join("sensor.yaml"),
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: sensor\n  namespace: helsinki\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"a workload of main\"\n  roles:\n    - role: member\n      scope: { project: helsinki }\n  credentials:\n    - kind: oauth-client\n      name: default\n",
+    )
+    .expect("the account");
     let previews = scratch(&format!("{test}-previews"));
     Mirror::new(&previews)
         .apply(vec![Preview {
@@ -763,6 +770,56 @@ async fn a_preview_of_a_public_endpoint_answers_its_author_and_reviewers_only() 
         served.broker.hops().len(),
         2,
         "both reads reached the broker"
+    );
+}
+
+/// CC-91: a workload's token and a data space transfer token are never a reader, even when the
+/// name they carry is one; a token the gateway refuses gets the same 404 as no token, so a
+/// holder of the slug learns nothing about whether the preview exists.
+#[tokio::test]
+async fn a_workload_or_a_refused_token_naming_a_reader_gets_the_unknown_slug_404() {
+    let served = served("workloads").await;
+    let nobodys = call(
+        &served,
+        "GET",
+        &entities("n0bodysq2mzt6vhx3nbwrs5cjd"),
+        None,
+        None,
+    )
+    .await;
+    let claims = |extra: Value| {
+        let mut claims = json!({
+            "iss": common::ISSUER,
+            "sub": "f:1:demo.author",
+            "aud": "context-gateway",
+            "exp": common::in_seconds(300),
+            "iat": common::in_seconds(-10),
+            "preferred_username": AUTHOR,
+        });
+        claims
+            .as_object_mut()
+            .expect("an object")
+            .extend(extra.as_object().expect("an object").clone());
+        served.realm.mint(&claims)
+    };
+    let workload = claims(json!({
+        "azp": context_gateway::auth::accounts::client_id("helsinki", "sensor"),
+    }));
+    let transfer = claims(json!({ "agreementId": "urn:ngsi-ld:Agreement:air-1" }));
+    let expired =
+        claims(json!({ "exp": common::in_seconds(-900), "iat": common::in_seconds(-1200) }));
+    for (who, token) in [
+        ("a ServiceAccount", workload),
+        ("a data space consumer", transfer),
+        ("an expired token", expired),
+        ("a token that is no token", "not.a.jwt".to_owned()),
+    ] {
+        let answer = call(&served, "GET", &entities(&served.slug), Some(&token), None).await;
+        assert_eq!(answer, nobodys, "{who}");
+    }
+    assert!(
+        served.broker.hops().is_empty(),
+        "the broker was never asked"
     );
 }
 
