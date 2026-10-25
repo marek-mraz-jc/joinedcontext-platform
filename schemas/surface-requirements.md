@@ -1,6 +1,6 @@
 # Domain-standard representations and their mappings
 
-Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this file and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test endpoint_tests` rewrites it. An Endpoint that serves a representation below maps its fields from NGSI-LD attributes in `spec.representations.<name>`; `jcctl validate` and the Portal check the mapping against the space's data model (EP-125, API/02 §8b).
+Generated from `jc_core::kinds::ical_mapping` (jc-core); a test fails when this file and the code differ. `UPDATE_SCHEMAS=1 cargo test -p jc-core --test it endpoint_tests::` rewrites it. An Endpoint that serves a representation below maps its fields from NGSI-LD attributes in `spec.representations.<name>`; `jcctl validate` and the Portal check the mapping against the space's data model (EP-125, API/02 §8b).
 
 ## `ical` (RFC 5545)
 

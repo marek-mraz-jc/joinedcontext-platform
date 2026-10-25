@@ -4,8 +4,9 @@ use jc_core::error::Error;
 use jc_core::kinds::grid::GridFormat;
 use jc_core::kinds::{Dashboard, DashboardVisibility, Layer, LayerStyle};
 
-const DASHBOARD: &str = include_str!("golden/025-Dashboard-10-dashboards-and-visualization.yaml");
-const LAYER: &str = include_str!("golden/026-Layer-10-dashboards-and-visualization.yaml");
+const DASHBOARD: &str =
+    include_str!("../golden/025-Dashboard-10-dashboards-and-visualization.yaml");
+const LAYER: &str = include_str!("../golden/026-Layer-10-dashboards-and-visualization.yaml");
 
 fn dashboard(replace: &str, with: &str) -> Result<Dashboard, Error> {
     let manifest = Dashboard::from_yaml(&DASHBOARD.replace(replace, with))

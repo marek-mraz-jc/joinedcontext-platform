@@ -5,8 +5,8 @@ use jc_core::envelope::ResourceEnvelope;
 use jc_core::error::Error;
 use jc_core::kinds::{Role, RoleBindingSpec, SubjectSource, Verb};
 
-const ROLE: &str = include_str!("golden/023-Role-12-identity-and-access.yaml");
-const BINDING: &str = include_str!("golden/024-RoleBinding-12-identity-and-access.yaml");
+const ROLE: &str = include_str!("../golden/023-Role-12-identity-and-access.yaml");
+const BINDING: &str = include_str!("../golden/024-RoleBinding-12-identity-and-access.yaml");
 
 type RoleBinding = ResourceEnvelope<RoleBindingSpec>;
 
