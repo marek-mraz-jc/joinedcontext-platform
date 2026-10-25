@@ -1,7 +1,10 @@
 //! The tabular representations of an NGSI-LD answer (T-0157, EP-08, EP-44, EP-45).
 
-use jc_tabular::{csv, flatten, humanize, table, Dialect, Limits, Table, TooLarge};
+mod support;
+
+use jc_tabular::{csv, flatten, humanize, Collect, Dialect, Limits, Table, TooLarge};
 use serde_json::{json, Value};
+use support::table;
 
 fn station() -> Value {
     json!({
@@ -216,7 +219,7 @@ fn a_row_ceiling_refuses_rather_than_truncates() {
         max_rows: 3,
         max_bytes: Limits::DEFAULT.max_bytes,
     };
-    assert_eq!(table(&answer, &limits), Err(TooLarge));
+    assert_eq!(table(&answer, &limits), Err(Collect::TooLarge));
 
     // The same answer under a byte ceiling is refused the same way.
     let table = table(&answer, &Limits::default()).expect("within the row limit");

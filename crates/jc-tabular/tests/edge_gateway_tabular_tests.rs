@@ -1,4 +1,4 @@
-//! Edge cases of `jc_tabular::{table, humanize}` (T-1958, T-1959; EP-08, EP-44,
+//! Edge cases of the table of one answer (`support::table`, a whole-answer `Collector`) and of `humanize` (T-1958, T-1959; EP-08, EP-44,
 //! EP-45, DM-06). The workbook writer went with T-4597.
 //!
 //! Contracts, one sentence each:
@@ -12,8 +12,11 @@
 //! row ceiling. These are the shapes around them: what is not an entity, the bound and the bound
 //! plus one, and a header that collides.
 
-use jc_tabular::{flatten, humanize, table, Limits, Table};
+mod support;
+
+use jc_tabular::{flatten, humanize, Limits, Table};
 use serde_json::{json, Value};
+use support::table;
 
 fn reading(id: usize) -> Value {
     json!({
