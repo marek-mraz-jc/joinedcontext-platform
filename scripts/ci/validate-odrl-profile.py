@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ngsi-ld: ODRL profile's SHACL shapes refuse what `jcctl policy import` refuses (T-5039).
 
-`cargo test -p jc-core --test policy_odrl_tests` writes every rendered Policy and the broker's
+`cargo test -p jc-core --test it policy_odrl_tests::` writes every rendered Policy and the broker's
 access document into RECORDS_DIR/accepted, and each refused document the shapes can see into
 RECORDS_DIR/refused. This reads them with the two contexts of the profile (W3C's ODRL context
 pinned beside the test, its digest checked first, so nothing is fetched) and asserts the shapes

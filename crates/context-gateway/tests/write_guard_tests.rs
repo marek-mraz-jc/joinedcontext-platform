@@ -222,7 +222,7 @@ fn a_policy_refusal_discloses_no_rule() {
 fn an_identifier_outside_the_granted_type_or_pattern_is_refused_on_its_own() {
     let lamps = Constraints {
         types: names(&["Device"]),
-        id_patterns: names(&["^urn:ngsi-ld:Device:banskabystrica\\.sk:ovzdusie:lamps-.*$"]),
+        id_patterns: names(&["^urn:ngsi-ld:Device:banskabystrica\\.sk:ovzdusie:lamps-.*$"]).into(),
         ..grant()
     };
     check_granted_id(

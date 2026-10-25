@@ -101,7 +101,7 @@ fn an_opaque_slug_spells_no_term_of_three_characters() {
 // NotificationEndpoint (Subscription `notification.endpoint`)
 // -------------------------------------------------------------------------------------------------
 
-const SUBSCRIPTION: &str = include_str!("golden/027-Subscription-06-configuration-as-code.yaml");
+const SUBSCRIPTION: &str = include_str!("../golden/027-Subscription-06-configuration-as-code.yaml");
 const GOLDEN_URI: &str = "uri: https://alerts.example.fi/hooks/air-quality";
 
 fn subscription_with_uri(uri: &str) -> ResourceEnvelope<SubscriptionSpec> {
@@ -217,7 +217,7 @@ fn a_runner_input_names_each_secret_by_one_declared_variable() {
 // The duplicate checks of a Policy's `information` (seen_props, seen_rels)
 // -------------------------------------------------------------------------------------------------
 
-const POLICY: &str = include_str!("golden/006-Policy-03-domain-model.yaml");
+const POLICY: &str = include_str!("../golden/006-Policy-03-domain-model.yaml");
 
 fn policy(yaml: &str) -> Result<(), String> {
     let policy: Policy = ResourceEnvelope::from_yaml(yaml).map_err(|err| err.to_string())?;

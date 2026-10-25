@@ -1,4 +1,4 @@
-//! Edge cases of `translators::tabular::{table, humanize}` (T-1958, T-1959; EP-08, EP-44,
+//! Edge cases of `jc_tabular::{table, humanize}` (T-1958, T-1959; EP-08, EP-44,
 //! EP-45, DM-06). The workbook writer went with T-4597.
 //!
 //! Contracts, one sentence each:
