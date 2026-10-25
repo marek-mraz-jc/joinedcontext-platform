@@ -732,7 +732,7 @@ fn an_empty_build_or_a_rust_toolchain_is_refused_where_it_cannot_run_ap83() {
 
 /// An App with two roles and a role-gated write, the shape of docs Architecture/16 §12 and of
 /// the T-2598 sample (ADR-N-027), kept where a reader of the examples finds it.
-const ROLES: &str = include_str!("../../../examples/apps/alerts/app.yaml");
+const ROLES: &str = include_str!("../../../../examples/apps/alerts/app.yaml");
 
 /// The field and value of a refusal, which is what a person reads.
 fn refused(app: &App) -> (&'static str, String) {

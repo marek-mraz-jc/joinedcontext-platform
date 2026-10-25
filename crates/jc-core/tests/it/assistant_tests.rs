@@ -11,8 +11,9 @@ use jc_core::kinds::{
 };
 use jc_core::registry;
 
-const SOURCE: &str = include_str!("golden/028-KnowledgeSource-22-knowledge-assistant.yaml");
-const DEPLOYMENT: &str = include_str!("golden/029-AssistantDeployment-22-knowledge-assistant.yaml");
+const SOURCE: &str = include_str!("../golden/028-KnowledgeSource-22-knowledge-assistant.yaml");
+const DEPLOYMENT: &str =
+    include_str!("../golden/029-AssistantDeployment-22-knowledge-assistant.yaml");
 
 fn source(yaml: &str) -> Result<KnowledgeSource, Error> {
     let parsed: KnowledgeSource =

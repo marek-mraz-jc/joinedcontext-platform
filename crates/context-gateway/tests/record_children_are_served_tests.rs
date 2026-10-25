@@ -387,7 +387,7 @@ async fn file_csv_serves_the_projected_entities_as_an_attachment() {
             .headers()
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok()),
-        Some(context_gateway::translators::tabular::CSV_MEDIA_TYPE)
+        Some(jc_tabular::CSV_MEDIA_TYPE)
     );
     assert_eq!(
         response

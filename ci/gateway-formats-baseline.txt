@@ -2,10 +2,8 @@
 # crate <name> | <task>; file <path> <lines> | <task>. Only shrinks: the task that moves a row deletes it in the same commit.
 
 
-file crates/context-gateway/src/translators/mod.rs 3 | T-4478
-file crates/context-gateway/src/translators/tabular.rs 3 | T-4478
-file crates/context-gateway/src/handlers/files.rs 93 | T-4478
-file crates/context-gateway/src/handlers/reads.rs 391 | T-4478
-file crates/context-gateway/src/query.rs 730 | T-4479
-file crates/context-gateway/src/mcp/tools.rs 1240 | T-4480
-file crates/context-gateway/src/mcp/units.rs 121 | T-4480
+file crates/context-gateway/src/handlers/files.rs 113 | T-5507
+file crates/context-gateway/src/handlers/reads.rs 303 | T-5507
+file crates/context-gateway/src/query.rs 730 | T-5507
+file crates/context-gateway/src/mcp/tools.rs 1240 | T-5507
+file crates/context-gateway/src/mcp/units.rs 121 | T-5507
