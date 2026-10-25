@@ -362,13 +362,15 @@ async fn a_download_past_its_slots_is_refused_and_a_read_still_served() {
     let app = gateway(&broker, 8, 8);
     let first = tokio::spawn(app.clone().oneshot(download("192.0.2.1")));
     holding(&broker, 1).await;
-    assert_busy(
-        app.clone()
-            .oneshot(download("192.0.2.2"))
-            .await
-            .expect("an answer"),
-    )
-    .await;
+    // Another file: the same one would wait for the first's build and take no slot (T-5629).
+    let other = Request::builder()
+        .uri(format!(
+            "/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved&delimiter=semicolon"
+        ))
+        .header("x-forwarded-for", "192.0.2.2")
+        .body(Body::empty())
+        .expect("a request");
+    assert_busy(app.clone().oneshot(other).await.expect("an answer")).await;
     assert_eq!(
         broker.reads.load(Ordering::SeqCst),
         1,
