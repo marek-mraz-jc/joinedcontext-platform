@@ -46,3 +46,23 @@ fn a_domain_that_is_not_one_is_refused() {
         assert!(error.contains("spec.domain"), "{bad}: {error}");
     }
 }
+
+/// PF-61, T-5607: a project may keep itself to its members; absent, the Organization decides.
+#[test]
+fn a_project_may_keep_itself_to_its_members() {
+    use jc_core::kinds::organization::ProjectVisibility;
+
+    assert_eq!(project(None).spec.visibility, None);
+    let members = Project::from_yaml(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata: { name: zilina, namespace: org }\n\
+         spec:\n  organizationRef: { kind: Organization, name: helsinki }\n  visibility: members\n",
+    )
+    .expect("the manifest parses");
+    members.validate().expect("valid");
+    assert_eq!(members.spec.visibility, Some(ProjectVisibility::Members));
+    assert!(Project::from_yaml(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata: { name: zilina, namespace: org }\n\
+         spec:\n  organizationRef: { kind: Organization, name: helsinki }\n  visibility: granted\n",
+    )
+    .is_err());
+}
