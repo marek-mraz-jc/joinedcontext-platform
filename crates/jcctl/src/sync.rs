@@ -224,6 +224,16 @@ pub fn poll_now(
     judge(source, state, now, repo_dir, workspace, remote, true)
 }
 
+/// Whether a revision is one directory name: 1 to 128 of `[A-Za-z0-9._-]`, never `.` or `..`.
+fn is_revision_name(revision: &str) -> bool {
+    (1..=128).contains(&revision.len())
+        && revision != "."
+        && revision != ".."
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 /// The judgement both entry points share; `asked` is whether the wait has already been served.
 #[allow(clippy::too_many_arguments)]
 fn judge(
@@ -265,6 +275,15 @@ fn judge(
         });
     }
 
+    // The revision names a directory of the workspace, and a remote answers it: `../x` or an
+    // absolute path would write the checkout outside (F-PLT3-005).
+    if !is_revision_name(&revision) {
+        return Err(SyncError::Remote(RemoteError::Refused(format!(
+            "the source answered a revision that is not a commit or tag name ({} characters); \
+             a revision is letters, digits, `.`, `_` and `-`, at most 128",
+            revision.chars().count()
+        ))));
+    }
     let checkout = workspace.join(&revision);
     std::fs::create_dir_all(&checkout).map_err(|source| SyncError::Io {
         path: checkout.clone(),

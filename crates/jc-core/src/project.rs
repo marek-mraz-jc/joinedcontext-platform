@@ -88,6 +88,11 @@ impl ProjectRepository {
     }
 }
 
+/// The authority of a URL past its `scheme://`: up to the first `/`, `?` or `#`.
+pub(crate) fn authority(rest: &str) -> &str {
+    rest.split(['/', '?', '#']).next().unwrap_or_default()
+}
+
 /// Neither the credential nor the URL is repeated: a pasted URL may carry a live password.
 fn validate_url(url: &str) -> Result<()> {
     let Some(rest) = url.strip_prefix("https://") else {
@@ -96,7 +101,7 @@ fn validate_url(url: &str) -> Result<()> {
             "must be an https URL; a plain-http or ssh remote is not mirrored",
         ));
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = authority(rest);
     if authority.contains('@') {
         return Err(invalid(
             "spec.repository.url",

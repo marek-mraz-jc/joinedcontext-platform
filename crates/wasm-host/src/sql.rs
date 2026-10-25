@@ -484,6 +484,26 @@ fn url_has_password(url: &str) -> bool {
         .is_some_and(|(credentials, _)| credentials.contains(':'))
 }
 
+/// The shard pool's options: `size` connections, and each one reset when it goes back to the pool.
+///
+/// One App's statement runs on a connection the next App's statement reuses. A session lock
+/// (`pg_advisory_lock`, reachable through a view a migration may create) or a `LISTEN` outlives
+/// the transaction, so it would hold for whichever App ran next; releasing all of them on
+/// release closes that (F-PLT3-007). A connection the reset fails on is closed, not reused.
+pub fn pool_options(size: u32) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(size)
+        .acquire_timeout(Duration::from_secs(3))
+        .after_release(|conn, _| {
+            Box::pin(async move {
+                Ok(sqlx::raw_sql("select pg_advisory_unlock_all(); unlisten *")
+                    .execute(conn)
+                    .await
+                    .is_ok())
+            })
+        })
+}
+
 impl PgStore {
     /// A pool on `url`, the shard's login role (`wasm_host_<shard>`).
     pub async fn connect(
@@ -491,9 +511,7 @@ impl PgStore {
         size: u32,
         limits: SqlLimits,
     ) -> Result<Self, String> {
-        let pool = PgPoolOptions::new()
-            .max_connections(size)
-            .acquire_timeout(Duration::from_secs(3))
+        let pool = pool_options(size)
             .connect_with(options)
             .await
             .map_err(|err| format!("the apps database: {err}"))?;

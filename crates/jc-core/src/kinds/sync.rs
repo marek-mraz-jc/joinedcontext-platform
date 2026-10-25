@@ -676,12 +676,22 @@ impl fmt::Display for SyncMode {
 
 /// Rejects `http://` and anything that is not a URL we are willing to fetch (MF-31, MF-32).
 fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Result<()> {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
+    let (userinfo, host) = match crate::project::authority(rest).rsplit_once('@') {
+        Some((userinfo, host)) => (Some(userinfo), host),
+        None => (None, ""),
+    };
+    // A refusal repeats no userinfo: a pasted URL may carry a live password (F-PLT3-010).
+    let shown = || match userinfo {
+        Some(_) => format!("{scheme}://***@{host}"),
+        None => url.to_string(),
+    };
     let ok = url.starts_with("https://")
         || (allow_ssh && (url.starts_with("ssh://") || url.starts_with("git@")));
     if !ok {
         return Err(Error::Name {
             field,
-            value: url.to_string(),
+            value: shown(),
             reason: if allow_ssh {
                 "url must be https://, ssh:// or git@ — plaintext http is refused"
             } else {
@@ -689,5 +699,48 @@ fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Resul
             },
         });
     }
+    // A credential in the URL would sit in Git for everyone who reads the repository; the
+    // secret goes by `secretRef` (MF-24). An ssh user (`ssh://git@host`) is no credential, a
+    // password beside it is.
+    if userinfo.is_some_and(|userinfo| scheme == "https" || userinfo.contains(':')) {
+        return Err(Error::Name {
+            field,
+            value: shown(),
+            reason: "url carries credentials; the URL names the repository and `secretRef` \
+                     names the secret that reads it (MF-24)",
+        });
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod remote_url_tests {
+    use super::validate_remote_url;
+
+    /// F-PLT3-010: userinfo on https and a password on ssh are refused, and the refusal repeats
+    /// neither; an ssh user and a plain URL pass.
+    #[test]
+    fn a_url_carrying_credentials_is_refused_without_repeating_them() {
+        for url in [
+            "https://u:hunter2@forge.example.org/r.git",
+            "https://hunter2@forge.example.org/r.git",
+            "ssh://git:hunter2@forge.example.org/r.git",
+            "http://u:hunter2@forge.example.org/r.git",
+        ] {
+            let refusal = validate_remote_url("source.git.url", url, true)
+                .expect_err(url)
+                .to_string();
+            assert!(!refusal.contains("hunter2"), "{refusal}");
+        }
+        for url in [
+            "https://forge.example.org/r.git",
+            "ssh://git@forge.example.org/r.git",
+            "git@forge.example.org:o/r.git",
+        ] {
+            assert!(
+                validate_remote_url("source.git.url", url, true).is_ok(),
+                "{url}"
+            );
+        }
+    }
 }

@@ -30,12 +30,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let limits = LimitManager::default();
     // A run's grant ends with the run (ADR-N-038 §3.5): once a minute every held grant whose run
     // the Portal no longer holds as active is revoked and dropped.
-    let (grants, resolver) = (credentials.grants().clone(), runs.clone());
+    // The usage counted for such a run goes with it (F-PLT1-013).
+    let (grants, resolver, usage) = (credentials.grants().clone(), runs.clone(), limits.clone());
     tokio::spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             every.tick().await;
             grants.end_finished(&resolver).await;
+            usage.end_finished(&resolver).await;
         }
     });
     let state = Arc::new(ProxyState::new(config_arc, runs, credentials, limits));

@@ -143,6 +143,8 @@ pub struct Gateway {
     /// The anonymous `file.csv` answers and the space type lists a download reuses (T-5629).
     pub(crate) downloads: crate::handlers::download_cache::Downloads,
     pub(crate) held_types: crate::handlers::download_cache::HeldTypes,
+    /// The public catalogue records the feeds reuse (F-PLT1-012).
+    pub(crate) catalog_records: crate::handlers::download_cache::CatalogRecords,
 }
 
 /// The MiB of write bodies in the gateway at once unless the deployment names another
@@ -224,6 +226,7 @@ impl Gateway {
             in_flight: Default::default(),
             downloads: Default::default(),
             held_types: Default::default(),
+            catalog_records: Default::default(),
         }
     }
 
