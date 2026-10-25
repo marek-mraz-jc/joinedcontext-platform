@@ -28,17 +28,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = CredentialManager::new(config_arc.clone());
     let runs = RunResolver::new(config.portal_base.clone(), credentials.clone());
     let limits = LimitManager::default();
-    // A run's grant ends with the run (ADR-N-038 §3.5): once a minute every held grant whose run
-    // the Portal no longer holds as active is revoked and dropped.
-    let (grants, resolver) = (credentials.grants().clone(), runs.clone());
+    let state = Arc::new(ProxyState::new(config_arc, runs, credentials, limits));
+    // A run's grant and data credentials end with the run (ADR-N-038 §3.5, decision 6): once a
+    // minute every held one whose run the Portal no longer holds as active is revoked.
+    let ending = (*state).clone();
     tokio::spawn(async move {
         let mut every = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             every.tick().await;
-            grants.end_finished(&resolver).await;
+            ending.credentials.grants().end_finished(&ending.runs).await;
+            ending.data_credentials.end_finished(&ending.runs).await;
         }
     });
-    let state = Arc::new(ProxyState::new(config_arc, runs, credentials, limits));
     // The model key's state reaches the Portal within a probe interval (AG-96).
     tokio::spawn(agent_proxy::model_key::watch((*state).clone()));
 

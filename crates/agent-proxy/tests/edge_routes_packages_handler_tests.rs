@@ -251,3 +251,18 @@ async fn a_query_string_does_not_travel_with_the_download() {
         "the path was accepted and the unreachable host refused it"
     );
 }
+
+/// A HEAD is a GET without its body (axum answers it from the GET route): it passes the same
+/// checks and reaches the registry, never a `405` of the handler's own.
+#[tokio::test]
+async fn a_head_takes_the_get_path() {
+    let response = proxy(&["registry.invalid"])
+        .oneshot(
+            authed("HEAD", "/v1/packages/registry.invalid/serde")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+}

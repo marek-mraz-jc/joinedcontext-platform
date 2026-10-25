@@ -1031,15 +1031,12 @@ impl PipelineSpec {
         }
 
         if let Some(ref sched) = self.schedule {
-            // ponytail: we validate the cron expression by checking exactly five whitespace-separated
-            // fields. Full cron syntax and range parsing is performed downstream by the Kubernetes
-            // CronJob controller or Bento runner.
-            let fields: Vec<&str> = sched.split_whitespace().collect();
-            if fields.len() != 5 {
+            // The same cron rule as KnowledgeSource and App jobs: five fields, each in its range.
+            if !crate::cron::is_valid(sched) {
                 return Err(Error::Name {
                     field: "spec.schedule",
                     value: sched.clone(),
-                    reason: "schedule must contain exactly 5 whitespace-separated fields (standard cron expression)",
+                    reason: "schedule must be a five-field cron expression with every field in range, e.g. `*/15 * * * *`",
                 });
             }
         }

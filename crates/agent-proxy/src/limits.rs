@@ -31,6 +31,19 @@ struct DailySpend {
     deployments: HashMap<String, u64>,
 }
 
+impl DailySpend {
+    /// The spend of `day`: a new day starts every budget at zero.
+    fn on(&mut self, day: u64) -> &mut Self {
+        if self.day != day {
+            *self = DailySpend {
+                day,
+                ..DailySpend::default()
+            };
+        }
+        self
+    }
+}
+
 /// Whose daily budget a run's calls count against (AG-97).
 pub fn consumer_of(kind: &str) -> &'static str {
     match kind {
@@ -150,13 +163,8 @@ impl LimitManager {
         person: &str,
         day: u64,
     ) -> Result<(), String> {
-        let mut daily = self.daily.lock().await;
-        if daily.day != day {
-            *daily = DailySpend {
-                day,
-                ..DailySpend::default()
-            };
-        }
+        let mut guard = self.daily.lock().await;
+        let daily = guard.on(day);
         let consumer = consumer_of(kind);
         let (cap, whose) = match consumer {
             "assistant" => (caps.assistant, "the assistant"),
@@ -182,13 +190,8 @@ impl LimitManager {
     }
 
     async fn record_daily_on(&self, kind: &str, person: &str, tokens: u64, day: u64) {
-        let mut daily = self.daily.lock().await;
-        if daily.day != day {
-            *daily = DailySpend {
-                day,
-                ..DailySpend::default()
-            };
-        }
+        let mut guard = self.daily.lock().await;
+        let daily = guard.on(day);
         *daily.consumers.entry(consumer_of(kind)).or_default() += tokens;
         *daily.people.entry(person.to_owned()).or_default() += tokens;
     }
@@ -205,13 +208,8 @@ impl LimitManager {
         cap: u64,
         day: u64,
     ) -> Result<(), String> {
-        let mut daily = self.daily.lock().await;
-        if daily.day != day {
-            *daily = DailySpend {
-                day,
-                ..DailySpend::default()
-            };
-        }
+        let mut guard = self.daily.lock().await;
+        let daily = guard.on(day);
         if daily.deployments.get(deployment).copied().unwrap_or(0) >= cap {
             return Err(format!(
                 "Today's model budget of assistant {deployment} is spent. It starts again at 00:00 UTC; the deployment's budget.tokensPerDay sets it."
@@ -227,13 +225,8 @@ impl LimitManager {
     }
 
     async fn record_deployment_day_on(&self, deployment: &str, tokens: u64, day: u64) {
-        let mut daily = self.daily.lock().await;
-        if daily.day != day {
-            *daily = DailySpend {
-                day,
-                ..DailySpend::default()
-            };
-        }
+        let mut guard = self.daily.lock().await;
+        let daily = guard.on(day);
         *daily.deployments.entry(deployment.to_owned()).or_default() += tokens;
     }
 

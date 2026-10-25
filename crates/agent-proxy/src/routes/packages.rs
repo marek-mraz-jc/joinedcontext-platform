@@ -5,13 +5,12 @@ use crate::auth::authenticate;
 use crate::ProxyState;
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::time::Instant;
 
 pub async fn handler(
     State(state): State<ProxyState>,
-    method: Method,
     headers: HeaderMap,
     Path((host, rest)): Path<(String, String)>,
 ) -> Response {
@@ -20,10 +19,6 @@ pub async fn handler(
         Ok(r) => r,
         Err(p) => return (*p).into_response(),
     };
-
-    if method != Method::GET {
-        return StatusCode::METHOD_NOT_ALLOWED.into_response();
-    }
 
     // The path must stay a path on the host it is appended to (T-1301).
     if super::escapes(&rest) {

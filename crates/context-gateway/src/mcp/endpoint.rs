@@ -43,12 +43,7 @@ pub(crate) async fn mcp_message(
     if !public && anonymous {
         return unauthorized(&gateway, &slug);
     }
-    let spent = if anonymous {
-        rate_limit::spend_anonymous_mcp(&gateway, request.headers())
-    } else {
-        rate_limit::spend_subject_mcp(&gateway, &request)
-    };
-    if let Err(refusal) = spent {
+    if let Err(refusal) = rate_limit::spend_mcp(&gateway, &request, anonymous) {
         return *refusal;
     }
 
@@ -690,12 +685,7 @@ pub(crate) async fn space_mcp_message(
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
     let anonymous = !token::presents(request.headers());
-    let spent = if anonymous {
-        rate_limit::spend_anonymous_mcp(&gateway, request.headers())
-    } else {
-        rate_limit::spend_subject_mcp(&gateway, &request)
-    };
-    if let Err(refusal) = spent {
+    if let Err(refusal) = rate_limit::spend_mcp(&gateway, &request, anonymous) {
         return *refusal;
     }
     let (space, subject) = match admit_space(

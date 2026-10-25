@@ -168,21 +168,11 @@ impl HeldWrite<'_> {
             return Ok(());
         }
         let ids: Vec<String> = permitted.iter().filter_map(batch_entry_id).collect();
-        let refused = match divided.take() {
-            Some((_, mut earlier)) => {
-                earlier.extend(refused);
-                earlier
-            }
-            None => refused,
-        };
-        if permitted.is_empty() {
-            return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
-        }
+        divide(divided, ids, refused, permitted.is_empty())?;
         *sent = serde_json::to_vec(&permitted).map_err(|error| {
             tracing::error!(%error, "the entities a relationship check kept do not serialize");
             refuse(ProblemDetails::internal())
         })?;
-        *divided = Some((ids, refused));
         Ok(())
     }
 
@@ -429,21 +419,11 @@ impl HeldDelete<'_> {
             return Ok(false);
         }
         let ids: Vec<String> = permitted.iter().filter_map(batch_entry_id).collect();
-        let refused = match divided.take() {
-            Some((_, mut earlier)) => {
-                earlier.extend(refused);
-                earlier
-            }
-            None => refused,
-        };
-        if permitted.is_empty() {
-            return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
-        }
+        divide(divided, ids, refused, permitted.is_empty())?;
         *sent = serde_json::to_vec(&permitted).map_err(|error| {
             tracing::error!(%error, "the ids a delete's rules kept do not serialize");
             answer(Box::new(ProblemDetails::internal()))
         })?;
-        *divided = Some((ids, refused));
         Ok(true)
     }
 
@@ -957,17 +937,7 @@ pub(crate) fn quality_judged(
             if !refused.is_empty() {
                 changed = true;
                 let ids: Vec<String> = entries.iter().filter_map(batch_entry_id).collect();
-                let refused = match divided.take() {
-                    Some((_, mut earlier)) => {
-                        earlier.extend(refused);
-                        earlier
-                    }
-                    None => refused,
-                };
-                if entries.is_empty() {
-                    return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
-                }
-                *divided = Some((ids, refused));
+                divide(divided, ids, refused, entries.is_empty())?;
             }
         }
         payload => judge(payload).map_err(refuse)?,
@@ -1250,6 +1220,28 @@ fn refuse_entity(
 }
 
 /// The `errors` members of a `BatchOperationResult` for the entities the gateway refused.
+/// Merges `refused` into the refusals an earlier check of this write made and keeps `ids` as the
+/// entities still sent; a write with nothing left to send is answered by its 207 at once.
+fn divide(
+    divided: &mut Option<(Vec<String>, Refused)>,
+    ids: Vec<String>,
+    refused: Refused,
+    nothing_left: bool,
+) -> Result<(), Box<Response<Body>>> {
+    let refused = match divided.take() {
+        Some((_, mut earlier)) => {
+            earlier.extend(refused);
+            earlier
+        }
+        None => refused,
+    };
+    if nothing_left {
+        return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+    }
+    *divided = Some((ids, refused));
+    Ok(())
+}
+
 pub(crate) fn refusal_entries(refused: Refused) -> Vec<Value> {
     refused
         .into_iter()

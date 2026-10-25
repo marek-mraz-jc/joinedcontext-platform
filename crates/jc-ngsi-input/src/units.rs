@@ -7,7 +7,7 @@
 //! model's code, or refused in a space whose `spec.missingUnitCode` is `refuse`. Reads are not
 //! touched: `unitCode` comes back as stored (CIM 009).
 
-use jc_core::type_of_id;
+use jc_core::types_of;
 use std::collections::BTreeMap;
 
 use jc_core::kinds::MissingUnitCode;
@@ -152,24 +152,6 @@ pub struct Shape<'a> {
     pub addressed: Option<&'a str>,
     /// The attribute of the path, when the body is that attribute's bare value.
     pub targeted: Option<&'a str>,
-}
-
-pub fn types_of<'a>(
-    entity: &'a serde_json::Map<String, Value>,
-    addressed: Option<&'a str>,
-) -> Vec<&'a str> {
-    match entity.get("type").or_else(|| entity.get("@type")) {
-        Some(Value::String(one)) => vec![one.as_str()],
-        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
-        _ => entity
-            .get("id")
-            .or_else(|| entity.get("@id"))
-            .and_then(Value::as_str)
-            .or(addressed)
-            .and_then(type_of_id)
-            .into_iter()
-            .collect(),
-    }
 }
 
 /// Checks the unit of one attribute value, filling it when the space fills. `Ok(true)` when it
@@ -496,6 +478,6 @@ mod tests {
             ),
             Ok(vec![])
         );
-        assert_eq!(type_of_id("not-a-urn"), None);
+        assert_eq!(jc_core::type_of_id("not-a-urn"), None);
     }
 }
