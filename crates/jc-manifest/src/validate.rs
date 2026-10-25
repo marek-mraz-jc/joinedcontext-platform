@@ -1247,10 +1247,10 @@ impl<'a> WriteBindings<'a> {
     }
 
     fn is_app(&self, project: &str, endpoint: &str) -> bool {
+        // Looked up by id, not found by a scan (F-PLT3-020, as `space_segment`).
         endpoint.strip_prefix("app-").is_some_and(|app| {
-            self.repo.iter().any(|(id, _)| {
-                id.kind == "App" && id.name == app && id.namespace.as_deref() == Some(project)
-            })
+            let id = ResourceId::new("joinedcontext.com", "App", Some(project.to_owned()), app);
+            self.repo.get(&id).is_some()
         })
     }
 
@@ -1476,23 +1476,24 @@ fn assistant_references(repo: &Repository) -> Vec<(Location, String)> {
     // model as its types, their classification, and the themes set by hand. A projection may
     // serve fewer types; the finding below names the Endpoints so one can be excluded.
     let model_classes = |project: &Option<String>, space: &str| -> Vec<String> {
-        let model = repo
-            .iter()
-            .find(|(id, _)| {
-                id.kind == "ContextSpace" && id.namespace == *project && id.name == space
+        // Looked up by id: a scan per Endpoint made a large repository quadratic (F-PLT3-020).
+        let space_id = ResourceId::new("joinedcontext.com", "ContextSpace", project.clone(), space);
+        let model = repo.get(&space_id).and_then(|space| {
+            let reference = &space.manifest.spec["dataModelRef"];
+            let name = reference.as_str().or_else(|| reference["name"].as_str())?;
+            let namespace = reference["namespace"].as_str().map(str::to_owned);
+            Some((namespace.or_else(|| project.clone()), name.to_owned()))
+        });
+        model
+            .and_then(|(namespace, name)| {
+                repo.get(&ResourceId::new(
+                    "joinedcontext.com",
+                    "DataModel",
+                    namespace,
+                    name,
+                ))
             })
-            .and_then(|(_, space)| {
-                let reference = &space.manifest.spec["dataModelRef"];
-                let name = reference.as_str().or_else(|| reference["name"].as_str())?;
-                let namespace = reference["namespace"].as_str().map(str::to_owned);
-                Some((namespace.or_else(|| project.clone()), name.to_owned()))
-            });
-        repo.iter()
-            .find(|(id, _)| {
-                id.kind == "DataModel"
-                    && model.as_ref() == Some(&(id.namespace.clone(), id.name.clone()))
-            })
-            .map(|(_, model)| {
+            .map(|model| {
                 model.manifest.spec["classes"]
                     .as_array()
                     .into_iter()

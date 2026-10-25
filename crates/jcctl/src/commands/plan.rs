@@ -233,8 +233,7 @@ fn desired(repo: &Repository) -> BTreeMap<ResourceId, RawManifest> {
 
 /// The organization's domain, which every generated policy names as its assigner.
 fn organization_domain(repo: &Repository) -> String {
-    repo.iter()
-        .find(|(id, _)| id.kind == "Organization")
+    repo.installation_organization()
         .and_then(|(_, resource)| {
             resource
                 .manifest

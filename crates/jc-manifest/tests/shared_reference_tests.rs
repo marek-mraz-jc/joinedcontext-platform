@@ -324,3 +324,20 @@ fn two_shared_space_references_naming_the_same_endpoint_resolve_independently() 
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// F-PLT3-011: an organization endpoint admits the projects of its own Organization, never a
+/// project of another Organization the repository also holds.
+#[test]
+fn an_audience_of_organization_admits_no_project_of_another_organization() {
+    let dir = repo(
+        "org-cross",
+        "helsinki",
+        "espoo-mobility",
+        "organization",
+        "{ project: helsinki, name: bikes }",
+    );
+    write(&dir, "organizations/espoo.yaml", "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: espoo\n  namespace: org\nspec:\n  domain: espoo.fi\n  locales: [\"en\"]\n  defaultLocale: en\n");
+    write(&dir, "projects/espoo-mobility/project.yaml", "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: espoo-mobility\n  namespace: org\nspec:\n  organizationRef: espoo\n");
+    assert_eq!(slug_for(&dir, "espoo-mobility"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
