@@ -45,6 +45,10 @@ pub const PROVENANCE_ORGANIZATION: HeaderName =
     HeaderName::from_static("jc-provenance-organization");
 /// What kind of principal wrote: `person`, `serviceAccount`, `pipeline` or `agent` (ADR-N-054 2.3).
 pub const PROVENANCE_ACTOR_KIND: HeaderName = HeaderName::from_static("jc-provenance-actor-kind");
+/// The Keycloak client the verified token was issued to (`azp`), percent-encoded: the MCP client,
+/// CLI or App a person's write came through (ADR-N-054 2.3, DM-111). Provenance only: the
+/// broker decides on `x-jc-client`, which names a workload alone.
+pub const PROVENANCE_CLIENT: HeaderName = HeaderName::from_static("jc-provenance-client");
 /// `changes` on a write through an Endpoint with `spec.audit: changes` (ADR-N-054 2.8, DM-136):
 /// only the gateway may set it, so it shares the provenance prefix the edge and `drop_identity`
 /// remove.
@@ -159,6 +163,12 @@ pub fn pin_caller(
         return Ok(());
     }
     one(headers, SUBJECT, subject.user.as_deref());
+    let named = subject.client.as_deref();
+    one(
+        headers,
+        PROVENANCE_CLIENT,
+        named.filter(|c| *c != GATEWAY_CLIENT),
+    );
     // Only the gateway's own hops speak as the gateway, never a token of its client.
     let client = subject.service_account.as_deref();
     one(headers, CLIENT, client.filter(|c| *c != GATEWAY_CLIENT));
@@ -379,6 +389,41 @@ mod tests {
             ..Subject::default()
         };
         assert_eq!(actor_kind(&participant), None);
+    }
+
+    #[test]
+    fn a_persons_write_names_the_client_it_came_through() {
+        let mut request = Request::new(axum::body::Body::empty());
+        request
+            .headers_mut()
+            .insert(PROVENANCE_CLIENT, HeaderValue::from_static("forged"));
+        let person = Subject {
+            user: Some("jana".to_owned()),
+            client: Some("claude desktop".to_owned()),
+            ..Subject::default()
+        };
+        pin_caller(&mut request, "air", &person).expect("a usable space");
+        let named = request.headers().get_all(PROVENANCE_CLIENT);
+        assert_eq!(named.iter().collect::<Vec<_>>(), ["claude%20desktop"]);
+        // The client is provenance only: the broker still decides on the person alone.
+        assert!(!request.headers().contains_key(CLIENT));
+        // The gateway's own client and a participant under an agreement name no client.
+        for caller in [
+            Subject {
+                client: Some(GATEWAY_CLIENT.to_owned()),
+                ..Subject::default()
+            },
+            Subject {
+                did: Some("did:web:example.org".to_owned()),
+                agreement: Some("a1".to_owned()),
+                client: Some("connector".to_owned()),
+                ..Subject::default()
+            },
+        ] {
+            let mut hop = Request::new(axum::body::Body::empty());
+            pin_caller(&mut hop, "air", &caller).expect("a usable space");
+            assert!(!hop.headers().contains_key(PROVENANCE_CLIENT));
+        }
     }
 
     #[test]
