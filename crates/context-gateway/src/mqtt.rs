@@ -17,7 +17,9 @@ use crate::mqtt_refusals::{account_of, Reader, Reason, Refusal, Refusals};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use jc_core::kinds::mqtt_broker::{release_name, MqttMode, MqttRole, RUNNER_USERNAME};
+use jc_core::kinds::mqtt_broker::{
+    release_name, runner_username, MqttMode, MqttRole, RUNNER_USERNAME,
+};
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
 use jc_manifest::loader::Repository;
 use serde::{Deserialize, Serialize};
@@ -466,7 +468,8 @@ pub fn publish_check(
 }
 
 /// A CONNECT without a token: the runner or the Portal's capture subscriber, each by its name
-/// from one of its own pods, with `subscribe` only and no `expire_at`.
+/// from one of its own pods, with `subscribe` only and no `expire_at`. The runner's name carries
+/// the broker's project, so a stream of another project is refused here (T-5561).
 fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, Why) {
     let from = |addresses: &[IpAddr]| {
         connect
@@ -474,8 +477,9 @@ fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, Why) {
             .parse::<IpAddr>()
             .is_ok_and(|ip| addresses.contains(&ip.to_canonical()))
     };
+    let runner = runner_username(&broker.project);
     let (topics, who, none) = match connect.username.as_str() {
-        RUNNER_USERNAME if from(&pods.runner) => (
+        name if name == runner && from(&pods.runner) => (
             &broker.runner_topics,
             "the pipeline runner",
             "no DataSource reads this broker",
@@ -536,7 +540,7 @@ async fn auth(
     let mut pods = Pods::default();
     if connect.password.is_empty() {
         let (host, addresses) = match connect.username.as_str() {
-            RUNNER_USERNAME => (&runner_host, &mut pods.runner),
+            name if name.starts_with(RUNNER_USERNAME) => (&runner_host, &mut pods.runner),
             CAPTURE_USERNAME => (&portal_host, &mut pods.portal),
             _ => (&None, &mut pods.runner),
         };
@@ -666,6 +670,7 @@ mod tests {
             service_accounts: vec!["a".into()],
             publish: publish.iter().map(|t| (*t).to_owned()).collect(),
             subscribe: vec!["commands/${clientid}".into()],
+            shared_topics: false,
         };
         assert_eq!(
             capture_topics(&[

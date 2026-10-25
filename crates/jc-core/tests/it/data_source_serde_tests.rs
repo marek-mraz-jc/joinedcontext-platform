@@ -808,3 +808,80 @@ fn an_http_body_bound_is_one_byte_to_256_mib() {
     let refused = zero.validate().unwrap_err().to_string();
     assert!(refused.contains("spec.http.maxBytes"), "{refused}");
 }
+
+/// T-5561: a platform broker is read by `brokerRef`, which names one of the DataSource's own
+/// project; by URL, project A could name B's broker Service and read B's devices, and by the
+/// runner's username it could pass as B's runner on any listener.
+#[test]
+fn a_platform_broker_is_reached_by_brokerref_only() {
+    for url in [
+        "tcp://mqtt-pamiatky-cameras.dev-mqtt.svc.cluster.local:1883",
+        "tcp://MQTT-pamiatky-cameras.dev-mqtt.svc:1883",
+        "tcp://mqtt-pamiatky-cameras.dev-mqtt:1883",
+        "tcp://mqtt-pamiatky-cameras:1883",
+        "ws://mqtt-pamiatky-cameras.dev-mqtt.svc.cluster.local.:6060",
+    ] {
+        let file = MQTT.replace("tls://mqtt.banskabystrica.sk:8883", url);
+        let error = DataSource::from_yaml(&file)
+            .expect("parses")
+            .validate()
+            .expect_err(url);
+        assert!(error.to_string().contains("brokerRef"), "{url}: {error}");
+    }
+    for user in ["pipeline-runner", "pipeline-runner-pamiatky"] {
+        let file = MQTT.replace("username: bb-collector", &format!("username: {user}"));
+        let error = DataSource::from_yaml(&file)
+            .expect("parses")
+            .validate()
+            .expect_err(user);
+        assert!(error.to_string().contains("runner"), "{user}: {error}");
+    }
+    // A runner input is the same door: its `user` is read as the runner's name too.
+    let raw = KAFKA.replace(
+        "    sasl:\n",
+        "    sasl:\n      user: pipeline-runner-bb-ovzdusie\n",
+    );
+    let error = DataSource::from_yaml(&raw)
+        .expect("parses")
+        .validate()
+        .expect_err("a runner input user");
+    assert!(error.to_string().contains("runner"), "{error}");
+    // An interpolated name hides the runner's from the literal check: `${DS_U}` from the
+    // project's own spec.secrets could hold `pipeline-runner-pamiatky`.
+    for user in ["${DS_U}", "pipeline-${DS_U}"] {
+        let file = MQTT.replace("username: bb-collector", &format!("username: \"{user}\""));
+        let error = DataSource::from_yaml(&file)
+            .expect("parses")
+            .validate()
+            .expect_err(user);
+        assert!(error.to_string().contains("literal"), "{user}: {error}");
+    }
+    // The same in a runner input that wraps an mqtt input; a Kafka `user` may still come from a
+    // secret, it names no MQTT account.
+    let nested = KAFKA
+        .replace("type: kafka", "type: broker")
+        .replace(
+            "  input:\n    addresses: [\"kafka.banskabystrica.sk:9092\"]\n    topics: [\"sensors.aq\"]\n    sasl:\n      password: ${DS_KAFKA_PASSWORD}\n",
+            "  input:\n    inputs:\n      - mqtt:\n          urls: [\"tls://mqtt.banskabystrica.sk:8883\"]\n          topics: [\"aq/#\"]\n          user: ${DS_KAFKA_PASSWORD}\n",
+        );
+    assert!(nested.contains("mqtt:"), "{nested}");
+    let error = DataSource::from_yaml(&nested)
+        .expect("parses")
+        .validate()
+        .expect_err("an interpolated mqtt input user");
+    assert!(error.to_string().contains("literal"), "{error}");
+    let kafka_user = KAFKA.replace(
+        "    sasl:\n",
+        "    sasl:\n      user: ${DS_KAFKA_PASSWORD}\n",
+    );
+    DataSource::from_yaml(&kafka_user)
+        .expect("parses")
+        .validate()
+        .expect("a Kafka user from a secret");
+    // An outside broker whose name starts the same way is no platform Service.
+    let outside = MQTT.replace("mqtt.banskabystrica.sk", "mqtt-eu.banskabystrica.sk");
+    DataSource::from_yaml(&outside)
+        .expect("parses")
+        .validate()
+        .expect("an outside broker keeps its URL");
+}

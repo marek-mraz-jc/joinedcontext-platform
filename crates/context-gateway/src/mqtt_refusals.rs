@@ -187,6 +187,7 @@ mod tests {
                 service_accounts: vec!["cam-north".into()],
                 publish: vec!["cameras/${clientid}/#".into()],
                 subscribe: Vec::new(),
+                shared_topics: false,
             }],
             runner_topics: Vec::new(),
             capture_topics: Vec::new(),

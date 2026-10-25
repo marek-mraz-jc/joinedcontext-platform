@@ -559,7 +559,10 @@ fn mqtt(spec: &DataSourceSpec, context: &InputContext) -> Mapping {
         out.insert(key("clean_session"), Value::Bool(clean));
     }
     if connection.broker_ref.is_some() {
-        out.insert(key("user"), text(mqtt_broker::RUNNER_USERNAME));
+        out.insert(
+            key("user"),
+            text(&mqtt_broker::runner_username(context.project)),
+        );
     } else if let Some(user) = &connection.username {
         out.insert(key("user"), text(user));
     }

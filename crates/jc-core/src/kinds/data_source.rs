@@ -756,6 +756,14 @@ impl DataSourceSpec {
                     reason: reason.to_owned(),
                 });
             }
+            if path.ends_with(".user")
+                && (runner_user(text) || (path.contains(".mqtt.") && text.contains("${")))
+            {
+                return Err(Error::Invalid {
+                    field: path,
+                    reason: RUNNER_USER.to_owned(),
+                });
+            }
             for caps in EMBEDDED_PASSWORD_RE.captures_iter(text) {
                 let password = caps
                     .get(1)
@@ -817,6 +825,17 @@ impl DataSourceSpec {
         }
         for broker in &mqtt.urls {
             url(broker, MQTT_SCHEMES, "spec.mqtt.urls")?;
+        }
+        if let Some(user) = mqtt
+            .username
+            .as_ref()
+            .filter(|user| runner_user(user) || user.contains("${"))
+        {
+            return Err(Error::Name {
+                field: "spec.mqtt.username",
+                value: user.clone(),
+                reason: RUNNER_USER,
+            });
         }
         if let Some(qos) = mqtt.qos {
             if qos > 2 {
@@ -1257,6 +1276,27 @@ const TOKEN_SERVICES: &[&str] = &[
     "wasm-host-tokens",
 ];
 
+const RUNNER_USER: &str = "an MQTT username is literal text, never a `${VAR}`, and the pipeline \
+                           runner's name is the platform's: a broker of the project is read by \
+                           spec.mqtt.brokerRef, which signs in as the runner (PL-76)";
+
+/// Whether a username is one a broker reads as the pipeline runner's, `pipeline-runner` or
+/// `pipeline-runner-{project}`, which only a `brokerRef` renders (T-5561, PL-76).
+fn runner_user(user: &str) -> bool {
+    user.to_ascii_lowercase()
+        .starts_with(super::mqtt_broker::RUNNER_USERNAME)
+}
+
+/// Whether a host names a platform MQTT broker by its cluster Service, `mqtt-{project}-{name}`
+/// bare, in its namespace or under `.svc` (ADR-N-048 §2.4, T-5561). A public name such as
+/// `mqtt-eu.example.org` is not one.
+fn platform_broker(host: &str) -> bool {
+    let mut labels = host.split('.');
+    let service = labels.next().unwrap_or_default();
+    let third = labels.nth(1);
+    service.starts_with("mqtt-") && third.is_none_or(|label| label == "svc")
+}
+
 fn refused_host(host_port: &str) -> Option<&'static str> {
     use std::net::{IpAddr, Ipv4Addr};
     const OWN: &str = "a pipeline does not connect to the runner's own pod or a private address: \
@@ -1283,6 +1323,12 @@ fn refused_host(host_port: &str) -> Option<&'static str> {
         return Some(
             "a pipeline does not connect to a token Service: it mints tokens for every project's \
              pipelines (PL-07)",
+        );
+    }
+    if platform_broker(&host) {
+        return Some(
+            "a pipeline reads a platform broker by spec.mqtt.brokerRef, which names one of its \
+             own project, never by its Service name (PL-76)",
         );
     }
     if host == "localhost"
