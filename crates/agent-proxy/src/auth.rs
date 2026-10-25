@@ -96,7 +96,7 @@ impl Default for TicketCache {
 impl TicketCache {
     /// Whether `ticket` is the run's: a constant-time compare with the digest of the ticket that
     /// last verified against the same stored hash, else one Argon2 verify (at most
-    /// [`ARGON2_AT_ONCE`] at once). `Err` is a stored hash that is no PHC string.
+    /// `ARGON2_AT_ONCE` at once). `Err` is a stored hash that is no PHC string.
     pub async fn verify(
         &self,
         run: &RunContext,
