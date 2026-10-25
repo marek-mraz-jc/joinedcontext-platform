@@ -240,10 +240,13 @@ impl Answer {
 }
 
 async fn send(readable: &[&str], method: Method, uri: &str, body: Option<Value>) -> Answer {
+    send_to(endpoint(readable), method, uri, body).await
+}
+
+async fn send_to(endpoint: Endpoint, method: Method, uri: &str, body: Option<Value>) -> Answer {
     let (upstream, calls) = broker().await;
     let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
-            .serve([endpoint(readable)]),
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint]),
     );
     let request = Request::builder()
         .method(method)
@@ -447,6 +450,66 @@ async fn a_batch_writes_the_valid_entities_and_answers_the_others_per_entity() {
         "{errors:?}"
     );
     assert_eq!(answer.writes().len(), 1, "{:?}", answer.calls);
+}
+
+/// T-5720: a Pipeline's grant reads only by `queryBatch` (its write Policy is upsertBatch,
+/// createBatch, queryBatch). That read sees the targets as well as `queryEntity` does, so its
+/// links to entities the space holds are written, and a target it does not hold is still missing.
+#[tokio::test]
+async fn a_writer_that_reads_by_query_batch_finds_the_targets_it_may_read() {
+    let mut pipeline = endpoint(&[]);
+    pipeline.policies = vec![policy("upsertBatch, createBatch, queryBatch", READS_ALL)];
+    let answer = send_to(
+        pipeline,
+        Method::POST,
+        "/entityOperations/upsert",
+        Some(json!([
+            user("ok", at(SCHOOL), &[COURSE]),
+            user("gone", at(NO_SCHOOL), &[])
+        ])),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::MULTI_STATUS, "{}", answer.body);
+    let ok = format!("urn:ngsi-ld:User:{DOMAIN}:{SPACE}:ok");
+    assert_eq!(answer.body["success"], json!([ok]), "{}", answer.body);
+    let gone = format!("urn:ngsi-ld:User:{DOMAIN}:{SPACE}:gone");
+    assert_eq!(
+        answer.body["errors"][0]["entityId"],
+        json!(gone),
+        "{}",
+        answer.body
+    );
+    assert_eq!(
+        answer.body["errors"][0]["error"]["rule"],
+        json!("target-missing"),
+        "{}",
+        answer.body
+    );
+    assert_eq!(answer.writes().len(), 1, "{:?}", answer.calls);
+}
+
+/// A writer with no read grant at all still finds nothing: `queryBatch` counts only where it is
+/// granted.
+#[tokio::test]
+async fn a_writer_without_a_read_grant_finds_no_target() {
+    let mut writer = endpoint(&[]);
+    writer.policies = vec![policy("upsertBatch, createBatch", READS_ALL)];
+    let answer = send_to(
+        writer,
+        Method::POST,
+        "/entityOperations/upsert",
+        Some(json!([user("ok", at(SCHOOL), &[])])),
+    )
+    .await;
+    assert_eq!(answer.status, StatusCode::MULTI_STATUS, "{}", answer.body);
+    assert_eq!(answer.body["success"], json!([]), "{}", answer.body);
+    assert_eq!(
+        answer.body["errors"][0]["error"]["rule"],
+        json!("target-missing"),
+        "{}",
+        answer.body
+    );
+    assert!(answer.writes().is_empty(), "{:?}", answer.calls);
 }
 
 #[tokio::test]
