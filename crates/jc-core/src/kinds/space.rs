@@ -46,6 +46,11 @@ pub struct ProjectSpec {
     /// organization's (AP-163, AP-165).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<ProjectApps>,
+    /// Who reads the project through an organization-scope binding that only reads: absent is
+    /// the Organization's `projects.visibility`; `members` keeps it to the people a binding of
+    /// the project or of one of its context spaces names, so departments stay apart (PF-61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<crate::kinds::organization::ProjectVisibility>,
 }
 
 /// `spec.apps` of a Project (AP-163, AP-165, ADR-N-045).

@@ -51,8 +51,21 @@ pub type Tables = (
 pub struct Provenance {
     /// The Organization each Project names in `spec.organizationRef`, by Project.
     pub organizations: BTreeMap<String, String>,
-    /// The slugs of the Endpoints with `spec.audit: changes` (DM-136).
+    /// The slugs of the Endpoints with `spec.audit: changes` (DM-136), every preview's included
+    /// (CC-93).
     pub audited: BTreeSet<String>,
+    /// Who reads each preview Endpoint and preview space surface, by slug (CC-91).
+    pub previews: BTreeMap<String, PreviewReaders>,
+}
+
+/// The readers of one preview surface and the audience its branch declares, which decides the
+/// roles a reader is given (CC-91).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewReaders {
+    /// The Keycloak usernames the surface answers.
+    pub readers: BTreeSet<String>,
+    /// The `audience` the branch gave the Endpoint; `public` for a space surface.
+    pub audience: Audience,
 }
 
 /// The [`Provenance`] the repository declares. A manifest whose spec does not parse adds
@@ -602,11 +615,18 @@ pub fn load_with_previews(
         publishers,
         provenance,
     ) = load_from(dir, checkouts)?;
+    let mut provenance = provenance;
     let environment = std::env::var("JC_ENVIRONMENT")
         .ok()
         .filter(|value| !value.trim().is_empty());
     for (prefix, root) in previews.map(crate::previews::listed).unwrap_or_default() {
-        let repo = match Repository::load_preview(&root, environment.as_deref(), &prefix) {
+        let access = crate::previews::access_of(&root);
+        let repo = match Repository::load_preview_salted(
+            &root,
+            environment.as_deref(),
+            &prefix,
+            &access.salt,
+        ) {
             Ok(repo) => repo,
             Err(error) => {
                 tracing::warn!(%prefix, %error, "the preview does not render and is not served");
@@ -623,18 +643,38 @@ pub fn load_with_previews(
             .chain(endpoints.iter().map(|e| e.space.clone()))
             .collect();
         let models = ModelSet::of(&repo, Some(&root));
-        endpoints.extend(
-            endpoints_from(&repo, Some(&root), &models)
-                .into_iter()
-                .filter(|endpoint| {
-                    !slugs.contains(&endpoint.slug) && !segments.contains(&endpoint.space)
-                }),
-        );
-        spaces.extend(
-            spaces_from(&repo, &models)
-                .into_iter()
-                .filter(|space| !segments.contains(&space.endpoint.space)),
-        );
+        // A preview answers its readers alone, whatever audience the branch declares (CC-91):
+        // the project-list audience of a project no caller belongs to refuses everyone the
+        // reader table does not name, and every write is kept (CC-93).
+        let mut readers_of = |slug: &str, audience: Audience| {
+            provenance.audited.insert(slug.to_owned());
+            provenance.previews.insert(
+                slug.to_owned(),
+                PreviewReaders {
+                    readers: access.readers.clone(),
+                    audience,
+                },
+            );
+        };
+        for mut endpoint in endpoints_from(&repo, Some(&root), &models) {
+            if slugs.contains(&endpoint.slug) || segments.contains(&endpoint.space) {
+                continue;
+            }
+            readers_of(&endpoint.slug, endpoint.audience);
+            endpoint.audience = Audience::ProjectList;
+            endpoint.allowed_projects.clear();
+            endpoints.push(endpoint);
+        }
+        for mut space in spaces_from(&repo, &models) {
+            if segments.contains(&space.endpoint.space) {
+                continue;
+            }
+            let surface = Arc::make_mut(&mut space.endpoint);
+            readers_of(&surface.slug, surface.audience);
+            surface.audience = Audience::ProjectList;
+            surface.allowed_projects.clear();
+            spaces.push(space);
+        }
     }
     Ok((
         endpoints,
@@ -650,8 +690,8 @@ pub fn load_with_previews(
         mappings,
         // A preview's Project publishes no catalogue: only the merged repository's do.
         publishers,
-        // A preview's Endpoints keep no audit trail and its Projects name no writer's
-        // Organization: only the merged repository's do.
+        // A preview's Projects name no writer's Organization: only the merged repository's do.
+        // Its Endpoints are audited and read by its readers alone (CC-91, CC-93).
         provenance,
     ))
 }

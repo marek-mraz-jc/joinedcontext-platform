@@ -1,0 +1,94 @@
+# Branch preview images (T-5547, Deployment/17-branch-previews, ADR-N-062): the gateway image of
+# one branch (checkouts and model-tools stay dev's pins in a preview), tagged pv-<slug>-<sha12>
+# (scripts/ci/preview-tag.sh) and signed keylessly as image.yml signs main's. A file of its own, not a mode of image.yml: pin-images and
+# the hourly gate (scripts/ci/image-gate.py) read only image.yml runs, and pin-images verifies
+# image.yml's identity, so a preview run never counts as a main build and a preview image, signed
+# as preview.yml, is never pinned. Kyverno admits it (runtime-policies: any workflow of the owner),
+# and T-5548 runs it only in pv-<slug> namespaces.
+name: preview
+on:
+  # An agent asks for a preview by pushing preview/<slug> (ci runs on it) or by dispatching with
+  # the branch. Both run this file as main has it, so a branch cannot change which tags are pushed
+  # or the identity that signs them; a fork's pull request starts neither.
+  workflow_run: { workflows: [ci], types: [completed], branches: ["preview/**"] }
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build, e.g. agent/worker-1/T-5547 or preview/map-legend"
+        required: true
+        type: string
+permissions: { contents: read }
+# A newer push of the same branch replaces the build of the older one: a preview shows the head.
+concurrency:
+  group: "preview-${{ inputs.branch || github.event.workflow_run.head_branch }}"
+  cancel-in-progress: true
+jobs:
+  tag:
+    # workflow_run: only a green ci of a push in this repository. A dispatch runs main's file only:
+    # one from another ref would sign as that ref, which nothing verifies.
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs: { sha: "${{ steps.tag.outputs.sha }}", tag: "${{ steps.tag.outputs.tag }}" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: tag
+        env:
+          BRANCH: ${{ inputs.branch || github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -eu
+          git check-ref-format "refs/heads/$BRANCH" || { echo "'$BRANCH' is no branch name"; exit 1; }
+          sha=$RUN_SHA
+          if [ -z "$sha" ]; then
+            sha=$(git ls-remote --heads origin "refs/heads/$BRANCH" | cut -f1)
+            [ -n "$sha" ] || { echo "no branch '$BRANCH' in $GITHUB_REPOSITORY"; exit 1; }
+          fi
+          tag=$(sh scripts/ci/preview-tag.sh "$BRANCH" "$sha")
+          echo "$BRANCH $sha -> $tag"
+          printf 'sha=%s\ntag=%s\n' "$sha" "$tag" >> "$GITHUB_OUTPUT"
+  build:
+    needs: tag
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write, id-token: write }
+    timeout-minutes: 30
+    env: { IMAGE: "ghcr.io/${{ github.repository }}" }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { ref: "${{ needs.tag.outputs.sha }}" }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - id: day
+        run: echo "d=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      # Reads main's layer cache and writes none: a branch build must not evict main's entries
+      # from the repository's 10 GB cache.
+      - id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          build-args: APT_REFRESH=${{ steps.day.outputs.d }}
+          push: true
+          tags: ${{ env.IMAGE }}:${{ needs.tag.outputs.tag }}
+          cache-from: type=gha
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - run: cosign sign --yes "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}"
+      # The CycloneDX bill of materials travels with the image as main's does (OPS-41, T-2412).
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}"
+          format: cyclonedx
+          output: ${{ runner.temp }}/sbom.cdx.json
+          cache-dir: ${{ runner.temp }}/trivy
+      - run: cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}"
+      # Read back under this workflow's identity on main, the one T-5548's recipe verifies.
+      - run: |
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/preview.yml@refs/heads/main" \
+            "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}" > /dev/null
+      - run: echo "gateway ${{ needs.tag.outputs.tag }} digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

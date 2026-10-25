@@ -711,12 +711,42 @@
             }
           ],
           "description": "The project's version, released as the tag `v{version}`; the project file only (CC-88)."
+        },
+        "visibility": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectVisibility"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who reads the project through an organization-scope binding that only reads: absent is the Organization's `projects.visibility`; `members` keeps it to the people a binding of the project or of one of its context spaces names, so departments stay apart (PF-61)."
         }
       },
       "required": [
         "organizationRef"
       ],
       "type": "object"
+    },
+    "ProjectVisibility": {
+      "description": "Who holds the seeded `viewer` role at organization scope (PF-61).",
+      "oneOf": [
+        {
+          "description": "Every signed-in person of the organization reads every project.",
+          "enum": [
+            "organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Only a principal a binding names reads a project.",
+          "enum": [
+            "members"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "Publisher": {
       "additionalProperties": false,

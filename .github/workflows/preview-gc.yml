@@ -1,0 +1,26 @@
+# Weekly: delete the branch preview images (pv-* tags only, preview.yml) older than 14 days and
+# their cosign signatures (T-5547, scripts/ci/preview-gc.py). A dispatch is a dry run unless
+# `delete` is ticked.
+name: preview-gc
+on:
+  schedule: [{ cron: "23 4 * * 1" }]
+  workflow_dispatch:
+    inputs:
+      delete: { description: "Delete (unticked: only list what would go)", type: boolean, default: false }
+permissions: { contents: read }
+concurrency: { group: preview-gc, cancel-in-progress: false }
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          DRY: ${{ (github.event_name == 'workflow_dispatch' && !inputs.delete) && '--dry-run' || '' }}
+        run: |
+          name=${GITHUB_REPOSITORY#*/}
+          # shellcheck disable=SC2086 # DRY is empty or one flag
+          python3 scripts/ci/preview-gc.py "$OWNER" "$name" $DRY
