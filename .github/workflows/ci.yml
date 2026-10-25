@@ -144,6 +144,9 @@ jobs:
       # writes the records, pyshacl reads them: one test binary and a pip install, under a minute.
       - run: cargo test -p context-gateway --test dcat_ap_catalog_tests --locked
         env: { DCAT_RECORDS_DIR: "${{ runner.temp }}/dcat-records" }
+      # The MCP tools/list byte ceiling, which only comes down: a longer tool description went
+      # red only in the nightly ci-full, after the merge (T-5148, T-5576).
+      - run: cargo test -p context-gateway --test mcp_hub_names_tests --locked
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
