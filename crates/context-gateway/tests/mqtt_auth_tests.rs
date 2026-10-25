@@ -22,6 +22,7 @@ const CAMERAS: &str = "mqtt-ovzdusie-cameras.jc-mqtt.serviceaccount.identity.lin
 const METERS: &str = "mqtt-ovzdusie-meters.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
 const PROBE: &str = "mqtt-ovzdusie-probe.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
 const PLAIN: &str = "mqtt-ovzdusie-plain.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const ESPOO: &str = "mqtt-espoo-cameras.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);
@@ -57,9 +58,19 @@ fn repository(test: &str) -> PathBuf {
         write(
             &dir,
             &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
-            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: {mode}\n  roles:\n    - name: sensor\n      serviceAccounts: [cam-north]\n      publish: [\"air/${{clientid}}/pm\", \"air/status\"]\n"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: {mode}\n  roles:\n    - name: sensor\n      serviceAccounts: [cam-north]\n      sharedTopics: true\n      publish: [\"air/${{clientid}}/pm\", \"air/status\"]\n"),
         );
     }
+    write(
+        &dir,
+        "projects/espoo/mqttbrokers/cameras.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: cameras\n  namespace: espoo\nspec:\n  roles:\n    - name: camera\n      serviceAccounts: [cam-north]\n      publish: [\"cameras/${clientid}/#\"]\n",
+    );
+    write(
+        &dir,
+        "projects/espoo/datasources/frames.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: DataSource\nmetadata:\n  name: frames\n  namespace: espoo\nspec:\n  type: mqtt\n  mqtt:\n    brokerRef: { kind: MqttBroker, name: cameras }\n    topics: [\"cameras/+/frame\"]\n",
+    );
     write(
         &dir,
         "projects/ovzdusie/datasources/frames.yaml",
@@ -158,7 +169,7 @@ fn capture(ipaddr: &str) -> Connect {
 fn runner(ipaddr: &str) -> Connect {
     Connect {
         clientid: "jc-ovzdusie-frames".to_owned(),
-        username: "pipeline-runner".to_owned(),
+        username: "pipeline-runner-ovzdusie".to_owned(),
         password: String::new(),
         ipaddr: ipaddr.to_owned(),
     }
@@ -322,6 +333,33 @@ fn the_runner_subscribes_to_its_data_sources_topics_from_its_own_pods_only() {
     assert_eq!(f.decide(Some(METERS), &runner("10.42.0.17")), deny);
 }
 
+/// T-5561: the runner signs in under its project's name, and a broker grants only its own
+/// project's runner: a stream of espoo that dials ovzdusie's broker from a runner pod, under
+/// espoo's name or the bare one, gets no topic.
+#[test]
+fn the_runner_of_another_project_gets_no_topic() {
+    let f = Fixture::new("runner-project");
+    let deny = json!({"result": "deny", "superuser": false});
+    let espoo = Connect {
+        username: "pipeline-runner-espoo".to_owned(),
+        ..runner("10.42.0.17")
+    };
+    let answer = f.decide(Some(ESPOO), &espoo);
+    assert_eq!(answer["result"], "allow", "{answer}");
+    assert_eq!(
+        answer["acl"],
+        json!([{"permission": "allow", "action": "subscribe", "topic": "cameras/+/frame", "qos": [0, 1]}])
+    );
+    assert_eq!(f.decide(Some(CAMERAS), &espoo), deny);
+    assert_eq!(f.decide(Some(ESPOO), &runner("10.42.0.17")), deny);
+    let bare = Connect {
+        username: "pipeline-runner".to_owned(),
+        ..runner("10.42.0.17")
+    };
+    assert_eq!(f.decide(Some(CAMERAS), &bare), deny);
+    assert_eq!(f.decide(Some(ESPOO), &bare), deny);
+}
+
 /// ADR-N-048 §2.10: the Portal's capture subscriber connects without a token from a Portal pod,
 /// on a capture broker only, and may subscribe to the publish filters of its roles, each
 /// `${clientid}` level widened; it never publishes and never reads an ingest or relay broker.
@@ -432,7 +470,7 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
     let ask = |host: Option<&str>, ipaddr: &str| {
         let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned), None, None);
         let body = json!({
-            "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner",
+            "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner-ovzdusie",
             "password": "", "ipaddr": ipaddr
         })
         .to_string();
