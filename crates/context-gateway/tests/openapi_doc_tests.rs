@@ -150,6 +150,18 @@ fn projected() -> Endpoint {
     endpoint
 }
 
+/// The open Endpoint, its title and description in Slovak and English (T-5630).
+fn titled() -> Endpoint {
+    let mut endpoint = endpoint(OPEN, Audience::Public, narrow_grant());
+    endpoint.title = [("en", "Air quality"), ("sk", "Kvalita ovzdušia")]
+        .map(|(language, text)| (language.to_owned(), text.to_owned()))
+        .into();
+    endpoint.description = [("sk", "Merania kvality ovzdušia")]
+        .map(|(language, text)| (language.to_owned(), text.to_owned()))
+        .into();
+    endpoint
+}
+
 fn app_of(realm: &common::Realm) -> axum::Router {
     router(Arc::new(
         Gateway::new(
@@ -158,7 +170,7 @@ fn app_of(realm: &common::Realm) -> axum::Router {
             "banskabystrica.sk",
         )
         .serve([
-            endpoint(OPEN, Audience::Public, narrow_grant()),
+            titled(),
             endpoint(WIDE, Audience::Public, wide_grant()),
             endpoint(CLOSED, Audience::Organization, narrow_grant()),
             projected(),
@@ -172,13 +184,16 @@ fn app_of(realm: &common::Realm) -> axum::Router {
 }
 
 async fn get(slug: &str) -> (StatusCode, Value) {
+    get_in(slug, None).await
+}
+
+async fn get_in(slug: &str, language: Option<&str>) -> (StatusCode, Value) {
+    let mut request = Request::builder().uri(format!("/api/endpoint/{slug}/openapi.json"));
+    if let Some(language) = language {
+        request = request.header("Accept-Language", language);
+    }
     let response = app_of(&common::Realm::new())
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/endpoint/{slug}/openapi.json"))
-                .body(Body::empty())
-                .expect("a request"),
-        )
+        .oneshot(request.body(Body::empty()).expect("a request"))
         .await
         .expect("the gateway answers");
     let status = response.status();
@@ -268,4 +283,39 @@ async fn a_closed_endpoint_asks_the_anonymous_caller_to_sign_in_and_an_unknown_s
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = get("nosuchslugnosuchslugnosuch").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_title_and_description_follow_the_callers_accept_language() {
+    // T-5630: the developer page of a Slovak visitor headed in English.
+    for (language, title, description) in [
+        (None, "Air quality", "Merania kvality ovzdušia"),
+        (Some("sk"), "Kvalita ovzdušia", "Merania kvality ovzdušia"),
+        (Some("en"), "Air quality", "Merania kvality ovzdušia"),
+        (
+            Some("de-DE, sk-SK;q=0.8"),
+            "Kvalita ovzdušia",
+            "Merania kvality ovzdušia",
+        ),
+        (
+            Some("en;q=0.5, sk"),
+            "Kvalita ovzdušia",
+            "Merania kvality ovzdušia",
+        ),
+        (
+            Some("sk;q=0, de"),
+            "Air quality",
+            "Merania kvality ovzdušia",
+        ),
+        (
+            Some("*, sk;q=bad"),
+            "Air quality",
+            "Merania kvality ovzdušia",
+        ),
+    ] {
+        let (status, document) = get_in(OPEN, language).await;
+        assert_eq!(status, StatusCode::OK, "{language:?}");
+        assert_eq!(document["info"]["title"], title, "{language:?}");
+        assert_eq!(document["info"]["description"], description, "{language:?}");
+    }
 }

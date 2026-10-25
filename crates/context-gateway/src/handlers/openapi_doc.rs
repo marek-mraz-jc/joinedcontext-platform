@@ -13,7 +13,7 @@ use crate::middleware::tenancy;
 use crate::resolver::{Endpoint, Model};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::Response;
+use axum::http::{header::ACCEPT_LANGUAGE, HeaderMap, Response};
 use axum::routing::get;
 use axum::Router;
 use serde_json::{json, Map, Value};
@@ -32,7 +32,7 @@ pub(crate) async fn openapi(
     };
     let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
     revalidated(
-        &document(&endpoint, &visible),
+        &document(&endpoint, &visible, &languages(request.headers())),
         "application/json",
         request.headers(),
     )
@@ -61,9 +61,41 @@ fn rehome(value: &mut Value) {
     }
 }
 
-/// The text of a per-locale map: English first, then any, then `fallback`.
-fn text(map: &std::collections::BTreeMap<String, String>, fallback: &str) -> String {
-    map.get("en")
+/// The primary language subtags the caller's `Accept-Language` lists, most wanted first
+/// (T-5630): `sk-SK;q=0.9` counts as `sk`; `*`, `q=0` and a malformed entry count as none.
+fn languages(headers: &HeaderMap) -> Vec<String> {
+    let Some(value) = headers.get(ACCEPT_LANGUAGE).and_then(|v| v.to_str().ok()) else {
+        return Vec::new();
+    };
+    let mut ranked: Vec<(f32, String)> = value
+        .split(',')
+        .take(16)
+        .filter_map(|item| {
+            let mut parts = item.split(';');
+            let primary = parts.next()?.trim().split('-').next()?.to_ascii_lowercase();
+            let quality = match parts.find_map(|p| p.trim().strip_prefix("q=")) {
+                Some(q) => q.trim().parse::<f32>().ok()?,
+                None => 1.0,
+            };
+            let known = !primary.is_empty() && primary.chars().all(|c| c.is_ascii_alphabetic());
+            (known && quality > 0.0).then_some((quality, primary))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.into_iter().map(|(_, language)| language).collect()
+}
+
+/// The text of a per-locale map: the caller's first language it holds, then English, then any,
+/// then `fallback`.
+fn text(
+    map: &std::collections::BTreeMap<String, String>,
+    languages: &[String],
+    fallback: &str,
+) -> String {
+    languages
+        .iter()
+        .find_map(|language| map.get(language))
+        .or_else(|| map.get("en"))
         .or_else(|| map.values().next())
         .cloned()
         .unwrap_or_else(|| fallback.to_owned())
@@ -74,8 +106,8 @@ fn parameter(name: &str, description: &str, schema: Value) -> Value {
     json!({ "name": name, "in": "query", "required": false, "description": description, "schema": schema })
 }
 
-/// The document for one caller.
-pub fn document(endpoint: &Endpoint, visible: &Visible) -> Value {
+/// The document for one caller, its title and description in the caller's `languages`.
+pub fn document(endpoint: &Endpoint, visible: &Visible, languages: &[String]) -> Value {
     let newest = endpoint.models.iter().map(|model| model.major).max();
     let models: Vec<&Model> = endpoint
         .models
@@ -119,8 +151,8 @@ pub fn document(endpoint: &Endpoint, visible: &Visible) -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {
-            "title": text(&endpoint.title, &endpoint.slug),
-            "description": text(&endpoint.description, "The NGSI-LD read surface of one Endpoint."),
+            "title": text(&endpoint.title, languages, &endpoint.slug),
+            "description": text(&endpoint.description, languages, "The NGSI-LD read surface of one Endpoint."),
             "version": version,
         },
         "servers": [{ "url": endpoint.base_path }],
