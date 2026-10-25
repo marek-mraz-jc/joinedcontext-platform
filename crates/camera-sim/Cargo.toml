@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
 # The camera's key pair (PF-47): the private half in a PKCS#8 file, the public half as a JWK.
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.14", features = ["ecdsa", "getrandom", "pkcs8", "pem"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls-native-roots"] }
 # MQTT is three packets (src/mqtt.rs) over the TLS the workspace already uses.
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std", "logging"] }
