@@ -98,32 +98,67 @@ pub(crate) fn authenticate_on(
         tracing::warn!("a token was presented but no realm is configured");
         return Err(Box::new(ProblemDetails::unauthorized()));
     };
-    let mut audiences = gateway.audiences_for(endpoint);
+    let endpoint_audiences = gateway.audiences_for(endpoint);
+    let mut audiences = endpoint_audiences.clone();
+    audiences.push(CLI_AUDIENCE.to_owned());
     if federated {
         audiences.push(gateway.broker_audience(endpoint));
     }
     let claims = verifier
         .verify(raw, &audiences)
         .map_err(|rejected| Box::new(ProblemDetails::from(rejected)))?;
-    // A token naming only the broker's audience is a federated read's (T-3999, PF-114): the
-    // gateway's own exchange alone mints one, and it reads as the person it names.
-    if federated && !claims.names_audience(&gateway.audiences_for(endpoint)) {
-        if claims.azp.as_deref() != Some(tenancy::GATEWAY_CLIENT) {
-            tracing::warn!(
-                azp = claims.azp.as_deref().unwrap_or_default(),
-                slug = %endpoint.slug,
-                "a broker-audience token not from the gateway's exchange"
-            );
-            return Err(Box::new(ProblemDetails::unauthorized()));
-        }
-        let mut subject = subject_from(gateway, endpoint, &claims)?;
-        if subject.user.is_none() {
-            return Err(Box::new(ProblemDetails::unauthorized()));
-        }
-        subject.via = Some(tenancy::GATEWAY_CLIENT.to_owned());
-        return Ok(subject);
+    if claims.names_audience(&endpoint_audiences) {
+        return subject_from(gateway, endpoint, &claims);
     }
-    subject_from(gateway, endpoint, &claims)
+    if claims.names_audience(&[CLI_AUDIENCE.to_owned()]) {
+        return cli_subject(gateway, endpoint, &claims);
+    }
+    exchanged_subject(gateway, endpoint, &claims)
+}
+
+/// A token naming only the broker's audience is a federated read's (T-3999, PF-114): the
+/// gateway's own exchange alone mints one, and it reads as the person it names.
+fn exchanged_subject(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+) -> Result<Subject, Box<ProblemDetails>> {
+    if claims.azp.as_deref() != Some(tenancy::GATEWAY_CLIENT) {
+        tracing::warn!(
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "a broker-audience token not from the gateway's exchange"
+        );
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    }
+    let mut subject = subject_from(gateway, endpoint, claims)?;
+    if subject.user.is_none() {
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    }
+    subject.via = Some(tenancy::GATEWAY_CLIENT.to_owned());
+    Ok(subject)
+}
+
+/// A person's `jcctl token --resource` token (T-5614, PF-45, PF-46): the `jcctl` client's
+/// audience reaches an Endpoint only with the `endpoint:{slug}` scope naming that one, so a
+/// script holds nothing broader than one Endpoint, and the Endpoint's Policy decides by the
+/// person. `endpoint:*` is the hub's consent and reaches nothing here.
+fn cli_subject(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let picked = claims.azp.as_deref() == Some(CLI_CLIENT)
+        && claims.endpoint_scopes().any(|slug| slug == endpoint.slug);
+    if !picked {
+        tracing::info!(slug = %endpoint.slug, "a jcctl-audience token without this Endpoint's scope");
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    }
+    let subject = subject_from(gateway, endpoint, claims)?;
+    if subject.user.is_none() {
+        return Err(Box::new(ProblemDetails::unauthorized()));
+    }
+    Ok(subject)
 }
 
 /// The subject a verified token is on `endpoint`: who it names, admitted by the Endpoint's
@@ -181,6 +216,14 @@ fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles:
 /// on every endpoint, because a session cannot name an endpoint approved after the login. The
 /// Policy decision stays per endpoint (PF-46).
 pub const EDGE_AUDIENCE: &str = "context-gateway";
+
+/// The audience of every token of the `jcctl` client besides the Portal's (T-5614): on its own
+/// it reaches no Endpoint; with an `endpoint:{slug}` scope, the one that scope names.
+pub const CLI_AUDIENCE: &str = "jcctl-endpoint";
+
+/// The public Keycloak client of the command line, the only one whose token [`CLI_AUDIENCE`]
+/// admits (deployment `components/portal/keycloak-clients.yaml`).
+pub const CLI_CLIENT: &str = "jcctl";
 
 /// The audience of the Portal's token on `access/simulate` (EP-103), which no data path
 /// accepts: a token minted for it reaches that route and nothing else.

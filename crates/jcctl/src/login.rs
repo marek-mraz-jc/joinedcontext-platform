@@ -6,11 +6,25 @@
 //! writes the access token to a file only its owner may read. The client verbs read that file
 //! when neither `--token-file` nor `JC_TOKEN_FILE` names another. The refresh token is not kept:
 //! a session ends with its access token, and the next one is another `jcctl login`.
+//!
+//! A public client has no secret, so every sign-in carries RFC 7636's proof key (S256): a fresh
+//! verifier per sign-in, its hash on the device authorization and the verifier itself on the
+//! token request, so a device code read off the screen is worth nothing to anyone else. The realm
+//! refuses a device authorization without it (T-5614).
+//!
+//! `jcctl token --resource <endpoint url>` runs the same flow for a person's script: it asks for
+//! the `endpoint:{slug}` scope of that one Endpoint, and the gateway admits the token there alone,
+//! decided by the person's Policy (T-5614, PF-46). Keycloak's token exchange takes no public
+//! client, so the script's token is a sign-in of its own, which the browser session the person
+//! already has turns into one confirmation.
 
 use crate::secrets::SecretValue;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use reqwest::blocking::Client;
 use reqwest::Url;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -23,6 +37,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_INTERVAL: u64 = 5;
 /// RFC 8628 §3.5: what `slow_down` adds to the interval.
 const SLOW_DOWN: u64 = 5;
+/// The scope of a sign-in for the Portal.
+pub const PORTAL_SCOPE: &str = "openid";
+/// The path an Endpoint's NGSI-LD surface answers under, `{public url}/api/endpoint/{slug}/…`.
+const ENDPOINT_PATH: &str = "/api/endpoint/";
 
 /// Why no token was written.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,6 +80,56 @@ pub fn default_token_file() -> Option<PathBuf> {
     from("XDG_CONFIG_HOME")
         .or_else(|| from("HOME").map(|home| home.join(".config")))
         .map(|config| config.join("jcctl").join("token"))
+}
+
+/// Where `jcctl token` puts the token of one Endpoint: `endpoints/{slug}` beside the default
+/// token file.
+pub fn default_endpoint_token_file(slug: &str) -> Option<PathBuf> {
+    default_token_file().and_then(|file| file.parent().map(|dir| dir.join("endpoints").join(slug)))
+}
+
+/// The Endpoint slug an address names, e.g. `https://api.example.org/api/endpoint/{slug}/ngsi-ld/v1`:
+/// the segment after `/api/endpoint/`, lowercase letters and digits only, so it names exactly one
+/// scope.
+pub fn endpoint_slug(resource: &str) -> Result<String, LoginError> {
+    let bad = |why: &str| {
+        LoginError::Address(format!(
+            "--resource {resource}: {why}; pass the Endpoint's address as its page shows it, \
+             e.g. https://api.example.org/api/endpoint/<slug>"
+        ))
+    };
+    let parsed = Url::parse(resource).map_err(|e| bad(&format!("not a URL: {e}")))?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(bad("not an http address"));
+    }
+    let slug = parsed
+        .path()
+        .strip_prefix(ENDPOINT_PATH)
+        .map(|rest| rest.split('/').next().unwrap_or_default())
+        .ok_or_else(|| bad("its path does not start with /api/endpoint/"))?;
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return Err(bad("it names no Endpoint slug"));
+    }
+    Ok(slug.to_owned())
+}
+
+/// The scope that asks for a token of the one Endpoint `slug` (the gateway's `endpoint:{slug}`).
+pub fn endpoint_scope(slug: &str) -> String {
+    format!("{PORTAL_SCOPE} endpoint:{slug}")
+}
+
+/// RFC 7636 §4.1–4.2: a verifier of 32 random bytes (43 characters) and its S256 challenge.
+fn proof_key() -> Result<(SecretValue, String), String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| format!("no random source for the proof key: {e}"))?;
+    let verifier = URL_SAFE_NO_PAD.encode(bytes);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    Ok((SecretValue::new(verifier), challenge))
 }
 
 /// The realm's issuer, e.g. `https://idm.example.org/realms/city`. A token travels over it, so it
@@ -120,12 +188,13 @@ pub struct LoggedIn {
     pub expires_in: Option<u64>,
 }
 
-/// Runs the device flow against `issuer` and writes the token to `path`.
+/// Runs the device flow against `issuer` for `scope` and writes the token to `path`.
 ///
 /// `tell` receives the one sentence the person acts on (the address and the code), and `sleep`
 /// waits between polls, so a test drives the flow without waiting for real.
 pub fn login(
     issuer: &Url,
+    scope: &str,
     path: &Path,
     mut tell: impl FnMut(&str),
     mut sleep: impl FnMut(Duration),
@@ -142,9 +211,15 @@ pub fn login(
         )
     };
 
+    let (verifier, challenge) = proof_key().map_err(|e| unavailable(issuer, &e))?;
     let response = client
         .post(endpoint("auth/device"))
-        .form(&[("client_id", CLIENT_ID), ("scope", "openid")])
+        .form(&[
+            ("client_id", CLIENT_ID),
+            ("scope", scope),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ])
         .send()
         .map_err(|e| unavailable(issuer, &e.without_url().to_string()))?;
     let status = response.status();
@@ -188,6 +263,7 @@ pub fn login(
                 ("grant_type", GRANT),
                 ("device_code", device.device_code.as_str()),
                 ("client_id", CLIENT_ID),
+                ("code_verifier", verifier.expose()),
             ])
             .send()
             .map_err(|e| unavailable(issuer, &e.without_url().to_string()))?;
