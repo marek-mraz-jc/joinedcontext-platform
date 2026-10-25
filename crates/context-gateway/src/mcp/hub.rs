@@ -25,6 +25,7 @@ use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
+use jc_core::display_order::SUB_PROPERTIES;
 use jc_core::kinds::{Audience, EndpointSlug, Operation, Representation};
 use jc_core::ProblemDetails;
 use serde_json::{json, Map, Value};
@@ -528,6 +529,9 @@ impl Hub {
             .get("uri")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        if let Some(slug) = uri.strip_prefix("card://") {
+            return self.read_card(id, uri, slug).await;
+        }
         let (Some(server), Some(documents)) = (
             self.server
                 .as_ref()
@@ -569,21 +573,28 @@ impl Hub {
             ));
         };
         Answer::Json(match method {
-            "initialize" if self.server.is_some() => {
-                result(id, server::initialized(self.server.as_ref()))
+            "initialize" => {
+                let mut initialized = match &self.server {
+                    Some(named) => server::initialized(Some(named)),
+                    None => json!({
+                        "protocolVersion": jsonrpc::PROTOCOL_VERSION,
+                        "capabilities": { "tools": { "listChanged": false } },
+                        "serverInfo": {
+                            "name": "joinedcontext-hub",
+                            "version": env!("CARGO_PKG_VERSION"),
+                        },
+                        "instructions": super::PRIMER.as_str(),
+                    }),
+                };
+                if let (Some(cards), Some(Value::String(instructions))) = (
+                    self.cards_in_full().await,
+                    initialized.get_mut("instructions"),
+                ) {
+                    instructions.push_str("\n\n");
+                    instructions.push_str(&cards);
+                }
+                result(id, initialized)
             }
-            "initialize" => result(
-                id,
-                json!({
-                    "protocolVersion": jsonrpc::PROTOCOL_VERSION,
-                    "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": {
-                        "name": "joinedcontext-hub",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                    "instructions": super::PRIMER.as_str(),
-                }),
-            ),
             "ping" => result(id, json!({})),
             "tools/list" => {
                 let mut tools = vec![
@@ -647,7 +658,7 @@ impl Hub {
             return Answer::Json(self.list_endpoints(id, &arguments));
         }
         if name == "get_endpoint" {
-            return Answer::Json(self.get_endpoint(id, &arguments));
+            return Answer::Json(self.get_endpoint(id, &arguments).await);
         }
         if name == "search" {
             return Answer::Json(catalog::search(&self.gateway, &self.reach, id, &arguments).await);
@@ -868,12 +879,11 @@ impl Hub {
         result(id, answer)
     }
 
-    /// One Endpoint of the caller's list, whole: today's `list_endpoints` record with its
-    /// surface, DCAT, schema and MCP URLs (T-4492).
-    /// One Endpoint, short (T-4748): what it is, its types and every link, about 2 KB. Its
-    /// attributes come with `detail: "attributes"` and one `type`, so an agent asks for the type
-    /// it reads and never gets every attribute of every type (22 KB for bbsk-otvorene-data).
-    fn get_endpoint(&self, id: Value, arguments: &Map<String, Value>) -> Value {
+    /// One Endpoint (T-4748, T-5642): its query card first, the very text `card://` reads, then
+    /// what it is and every link. `detail: "attributes"` answers the card's type lines in full,
+    /// every type's or the one `type` names, so an agent of a card past the token switch reads
+    /// the type it queries without the other types.
+    async fn get_endpoint(&self, id: Value, arguments: &Map<String, Value>) -> Value {
         let refuse = |why: &str| result(id.clone(), refused(why, &Value::Null));
         if let Some(unknown) = arguments
             .keys()
@@ -887,11 +897,16 @@ impl Hub {
             );
         };
         let detail = match arguments.get("detail") {
-            None => None,
-            Some(Value::String(detail)) if detail == "attributes" => Some(detail),
-            Some(_) => return refuse("`detail` is \"attributes\", with one `type`"),
+            None => false,
+            Some(Value::String(detail)) if detail == "attributes" => true,
+            Some(_) => return refuse("`detail` is \"attributes\", optionally with one `type`"),
         };
-        let wanted = arguments.get("type").map(Value::as_str);
+        let wanted = match arguments.get("type") {
+            None => None,
+            Some(Value::String(kind)) if detail => Some(kind.as_str()),
+            Some(Value::String(_)) => return refuse("`type` comes with `detail: \"attributes\"`"),
+            Some(_) => return refuse("`type` is one entity type name"),
+        };
         let (endpoint, subject) = match resolve(&self.reach, named) {
             Ok(found) => found,
             Err(near) => {
@@ -901,32 +916,102 @@ impl Hub {
                 ))
             }
         };
-        let mut entry = described(&self.gateway, endpoint, subject);
-        entry["broker"] = json!(self.gateway.broker.broker_of_view(&endpoint.slug));
-        let attributes = entry
-            .as_object_mut()
-            .and_then(|e| e.remove("attributes"))
-            .unwrap_or_default();
-        match (detail, wanted) {
-            (None, None) => {}
-            (Some(_), Some(Some(kind))) => match attributes.get(kind) {
-                Some(names) => entry["attributes"] = json!({ kind: names }),
-                None => {
-                    return refuse(&format!(
-                        "`{kind}` is no type of this Endpoint you may read; its types: {}",
-                        entry["types"]
+        if detail {
+            return match describe::type_lines(&self.gateway, endpoint, subject, wanted).await {
+                Ok(Some(lines)) => {
+                    let mut answer = answered(
+                        &json!({ "slug": endpoint.slug, "attributes": lines }),
+                        "endpoint",
+                    );
+                    answer["content"][0]["text"] = json!(lines);
+                    result(id, answer)
+                }
+                Ok(None) => {
+                    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+                    refuse(&format!(
+                        "`{}` is no type of this Endpoint you may read; its types: {}",
+                        wanted.unwrap_or_default(),
+                        schema::visible_types(endpoint, &visible).join(", ")
                     ))
                 }
-            },
-            _ => {
-                return refuse(
-                    "`detail: \"attributes\"` comes with one `type`, a type of this Endpoint",
-                )
-            }
+                Err(why) => refuse(&why),
+            };
         }
-        result(id, answered(&entry, "endpoint"))
+        let mut entry = described(&self.gateway, endpoint, subject);
+        entry["broker"] = json!(self.gateway.broker.broker_of_view(&endpoint.slug));
+        if let Some(members) = entry.as_object_mut() {
+            members.remove("attributes");
+        }
+        let card = describe::card(&self.gateway, endpoint, subject).await;
+        let mut answer = answered(&entry, "endpoint");
+        // The card first, the record after it (T-4759 item 3); a card the broker could not
+        // give leaves the links and says so, rather than refusing them too.
+        let text = match &card {
+            Ok(card) => format!("{card}\n\n{entry}"),
+            Err(why) => format!("The query card could not be read: {why}.\n\n{entry}"),
+        };
+        answer["content"][0]["text"] = json!(text);
+        if let (Ok(card), Some(structured)) = (
+            card,
+            answer["structuredContent"]["endpoint"].as_object_mut(),
+        ) {
+            structured.insert("card".to_owned(), json!(card));
+        }
+        result(id, answer)
+    }
+
+    /// The query cards of every Endpoint of the caller's list, when there are at most
+    /// [`CARDS_ENDPOINTS`] and they fit in [`CARDS_TOKENS`] together (T-4759 item 2): a model
+    /// connected to a small server knows every type before its first call. Larger lists keep the
+    /// instructions short; get_endpoint gives each card.
+    async fn cards_in_full(&self) -> Option<String> {
+        if self.reach.is_empty() || self.reach.len() > CARDS_ENDPOINTS {
+            return None;
+        }
+        let cards = futures_util::future::join_all(
+            self.reach
+                .iter()
+                .filter(|(endpoint, subject)| {
+                    tools::reads_anything(&self.gateway, endpoint, subject)
+                })
+                .map(|(endpoint, subject)| describe::card(&self.gateway, endpoint, subject)),
+        )
+        .await;
+        // A card the broker could not give is left to get_endpoint; the others still help.
+        let cards: Vec<String> = cards.into_iter().filter_map(Result::ok).collect();
+        let joined = cards.join("\n\n");
+        (!cards.is_empty() && jc_core::query_card::tokens(&joined) <= CARDS_TOKENS)
+            .then_some(joined)
+    }
+
+    /// `card://{endpoint}` of any Endpoint of the caller's list (T-5642): the per-Endpoint
+    /// server's card, so a hub client reads the same text. One outside the list is unknown.
+    async fn read_card(&self, id: Value, uri: &str, slug: &str) -> Value {
+        let found = self.reach.iter().find(|(endpoint, subject)| {
+            endpoint.slug == slug && tools::reads_anything(&self.gateway, endpoint, subject)
+        });
+        let Some((endpoint, subject)) = found else {
+            return error(
+                id,
+                -32002,
+                "resource not found: `card://` names one Endpoint of list_endpoints by its slug",
+            );
+        };
+        match describe::card(&self.gateway, endpoint, subject).await {
+            Ok(card) => result(
+                id,
+                json!({ "contents": [{ "uri": uri, "mimeType": "text/plain", "text": card }] }),
+            ),
+            Err(why) => result(id, refused(&why, &Value::Null)),
+        }
     }
 }
+
+/// The most Endpoints whose cards an `initialize` reads (one broker read each, T-5642).
+const CARDS_ENDPOINTS: usize = 8;
+
+/// The most tokens the cards of a server's Endpoints add to its instructions (T-4759 item 2).
+const CARDS_TOKENS: usize = 2_000;
 
 /// One `list_endpoints` row (T-4492): the title in `lang`, else English, else any.
 fn compact(entry: &Value, lang: &str) -> Value {
@@ -1201,7 +1286,10 @@ fn attributes_of(
                     properties
                         .keys()
                         .map(String::as_str)
-                        .filter(|name| !matches!(*name, "id" | "type" | "@context"))
+                        .filter(|name| {
+                            !matches!(*name, "id" | "type" | "@context")
+                                && !SUB_PROPERTIES.contains(name)
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -1259,9 +1347,9 @@ pub(crate) fn list_endpoints_tool() -> Value {
 pub(crate) fn get_endpoint_tool() -> Value {
     json!({
         "name": "get_endpoint",
-        "description": "One Endpoint, short: title, publisher, types, history, and its links \
-                        (surfaces, DCAT, MCP, LinkML, SHACL, JSON Schema, context). With detail \
-                        attributes and a type: that type's attributes.",
+        "description": "One Endpoint: its NGSI-LD query card (types, attributes, units), then \
+                        title, history and links (surfaces, DCAT, MCP, LinkML, SHACL, JSON Schema, \
+                        context). detail attributes: all types, or one.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -36,12 +36,13 @@ spec:
   dataModelRef: { kind: DataModel, name: fleet, version: "1" }
   classes:
     - name: User
-      slots: [name, age, ssn]
+      slots: [name, age, ssn, observedAt]
     - name: Vehicle
       slots: [name, weight]
 "#;
 
-const ATTRS: &[&str] = &["name", "age", "weight", "ssn"];
+/// `observedAt` is a sub-property a model may write as a slot: no tool lists it (T-5642).
+const ATTRS: &[&str] = &["name", "age", "weight", "ssn", "observedAt"];
 
 /// `ssn` is a slot of the projection and an attribute the endpoint hides: the projection
 /// alone would not prove that `hidden_attributes` reaches every formalism (EP-61).
@@ -66,7 +67,9 @@ const FORMALISMS: [&str; 7] = [
 fn document(file: &str) -> Option<String> {
     Some(match file {
         "model.linkml.yaml" => {
-            "id: https://hel.fi/fleet\nname: fleet\nclasses:\n  User: {}\n".to_owned()
+            "id: https://hel.fi/fleet\nname: fleet\nslots:\n  age: { range: integer }\n\
+             classes:\n  User: { slots: [name, age, observedAt] }\n  Vehicle: { slots: [name, weight] }\n"
+                .to_owned()
         }
         "model.schema.json" => r#"{"$defs":{"User":{"type":"object"}}}"#.to_owned(),
         "context.jsonld" => r#"{"@context":{"@vocab":"https://hel.fi/schema/"}}"#.to_owned(),
@@ -790,4 +793,147 @@ async fn the_query_card_reads_back_from_the_served_model() {
     )
     .await;
     assert!(elsewhere.is_null(), "another Endpoint's card: {elsewhere}");
+}
+
+/// One JSON-RPC message to the hub, anonymous, as the `result` object.
+async fn hub(method: &str, params: Value) -> Value {
+    let payload = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let raw = body_of(
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/mcp")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .body(Body::from(payload.to_string()))
+            .expect("a request"),
+    )
+    .await;
+    let answer: Value = serde_json::from_str(raw.trim_start_matches("data: ").trim())
+        .unwrap_or_else(|error| panic!("the hub answered {raw}: {error}"));
+    answer["result"].clone()
+}
+
+/// The text of one `card://` read on the Endpoint's own server.
+async fn card_text() -> String {
+    let read = rpc(
+        SLUG,
+        "resources/read",
+        json!({ "uri": format!("card://{SLUG}") }),
+    )
+    .await;
+    read["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// T-5642 (T-4759 item 3): get_endpoint answers the card first, byte-identical to `card://` on
+/// the Endpoint's server and on the hub, then the links.
+#[tokio::test]
+async fn get_endpoint_answers_the_card_card_reads() {
+    let card = card_text().await;
+    assert!(card.contains("\nUser: age:integer"), "{card}");
+    let answer = hub(
+        "tools/call",
+        json!({ "name": "get_endpoint", "arguments": { "endpoint": SLUG } }),
+    )
+    .await;
+    let text = answer["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.starts_with(&format!("{card}\n\n{{")), "{text}");
+    let endpoint = &answer["structuredContent"]["endpoint"];
+    assert_eq!(endpoint["card"], json!(card), "{answer}");
+    assert_eq!(endpoint["slug"], json!(SLUG), "{answer}");
+    assert!(endpoint.get("attributes").is_none(), "{answer}");
+    let read = hub("resources/read", json!({ "uri": format!("card://{SLUG}") })).await;
+    assert_eq!(read["contents"][0]["text"], json!(card), "{read}");
+    // A slug outside the caller's list is no card of theirs.
+    let unknown = hub(
+        "resources/read",
+        json!({ "uri": "card://zzzzzzzzzzzzzzzzzzzzzzzzzzzz" }),
+    )
+    .await;
+    assert!(unknown.is_null(), "{unknown}");
+}
+
+/// T-5642: `detail: "attributes"` answers the card's type lines, every served type without
+/// `type`, one with it; a type outside the served model is refused by name.
+#[tokio::test]
+async fn detail_attributes_lists_every_served_type_or_one() {
+    let call = |arguments: Value| {
+        hub(
+            "tools/call",
+            json!({ "name": "get_endpoint", "arguments": arguments }),
+        )
+    };
+    let every = call(json!({ "endpoint": SLUG, "detail": "attributes" })).await;
+    let lines = every["content"][0]["text"].as_str().unwrap_or_default();
+    assert_eq!(
+        lines, "User: name, age:integer\n  e.g. q=age>0\nVehicle: name, weight",
+        "{every}"
+    );
+    assert_eq!(
+        every["structuredContent"]["endpoint"]["attributes"],
+        json!(lines)
+    );
+    let one = call(json!({ "endpoint": SLUG, "detail": "attributes", "type": "Vehicle" })).await;
+    assert_eq!(
+        one["content"][0]["text"],
+        json!("Vehicle: name, weight"),
+        "{one}"
+    );
+    for (arguments, says) in [
+        (
+            json!({ "endpoint": SLUG, "detail": "attributes", "type": "Depot" }),
+            "`Depot` is no type of this Endpoint",
+        ),
+        (
+            json!({ "endpoint": SLUG, "type": "User" }),
+            "comes with `detail",
+        ),
+        (json!({ "endpoint": SLUG, "detail": "all" }), "`detail` is"),
+    ] {
+        let refused = call(arguments.clone()).await;
+        assert_eq!(refused["isError"], json!(true), "{arguments}: {refused}");
+        let words = refused["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(words.contains(says), "{arguments}: {words}");
+    }
+}
+
+/// T-5642 (T-4759 item 1): the per-Endpoint server's instructions start with its card, so a
+/// client knows each served type at connect; the hub over this one Endpoint carries it too.
+#[tokio::test]
+async fn initialize_instructions_carry_the_card() {
+    let card = card_text().await;
+    let initialized = rpc(SLUG, "initialize", json!({})).await;
+    let instructions = initialized["instructions"].as_str().unwrap_or_default();
+    assert!(
+        instructions.starts_with("NGSI-LD Endpoint"),
+        "{instructions}"
+    );
+    assert!(instructions.starts_with(&card), "{instructions}");
+    for line in ["\nUser: age:integer", "\nVehicle: weight"] {
+        assert!(instructions.contains(line), "{line}: {instructions}");
+    }
+    let hub_said = hub("initialize", json!({})).await;
+    let hub_instructions = hub_said["instructions"].as_str().unwrap_or_default();
+    assert!(hub_instructions.contains(&card), "{hub_instructions}");
+    assert!(!hub_instructions.contains(HIDDEN), "{hub_instructions}");
+}
+
+/// T-5642: a sub-property the model writes as a slot (observedAt) is no attribute in the card,
+/// in get_endpoint or in list_endpoints' `attribute` filter.
+#[tokio::test]
+async fn no_tool_lists_a_sub_property_as_an_attribute() {
+    assert!(!card_text().await.contains("observedAt"));
+    let detail = hub("tools/call", json!({ "name": "get_endpoint", "arguments": { "endpoint": SLUG, "detail": "attributes" } })).await;
+    assert!(!detail.to_string().contains("observedAt"), "{detail}");
+    let listed = |attribute: &'static str| {
+        hub(
+            "tools/call",
+            json!({ "name": "list_endpoints", "arguments": { "attribute": attribute } }),
+        )
+    };
+    assert_eq!(listed("age").await["structuredContent"]["total"], json!(1));
+    let none = listed("observedAt").await;
+    assert_eq!(none["structuredContent"]["total"], json!(0), "{none}");
 }

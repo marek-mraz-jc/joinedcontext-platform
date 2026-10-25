@@ -349,6 +349,19 @@ fn query_attributes_cut_a_long_enum_and_refuse_a_broken_model() {
     assert!(query_attributes("name: empty").unwrap().is_empty());
 }
 
+/// T-5642: a model that writes a sub-property (observedAt, unitCode...) as a slot still describes
+/// no attribute of that name, so no card or tool lists it beside the measurements.
+#[test]
+fn query_attributes_leave_sub_properties_out() {
+    let model = "slots:\n  temperature: { range: float }\nclasses:\n  WeatherObserved:\n    slots: [temperature, observedAt, unitCode, datasetId]\n";
+    let classes = query_attributes(model).unwrap();
+    let slots: Vec<&str> = classes["WeatherObserved"]
+        .iter()
+        .map(|a| a.slot.as_str())
+        .collect();
+    assert_eq!(slots, ["temperature"]);
+}
+
 /// T-4779: the LinkML is the publisher's and its card reaches a model as data, so a value, a
 /// name, a range or a unit written as prose never reaches the card as a line of its own.
 #[test]

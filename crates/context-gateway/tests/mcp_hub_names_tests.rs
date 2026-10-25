@@ -180,7 +180,8 @@ async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     // describe_access does not repeat `liveUpdates` (T-5045): initialize says it (T-5148).
     // The broker's `area_overview` (T-5279, the eighth read tool), one call for every type in an
     // area where the model made one per type (18 on Helsinki's whole space), adds 1,487: 16,086
-    // so the ceiling is 16,100, and it only comes down.
+    // so the ceiling is 16,100, and it only comes down. get_endpoint naming its query card
+    // (T-5642) stays inside it.
     assert!(sizes[0] < 16_100, "{sizes:?}");
 }
 

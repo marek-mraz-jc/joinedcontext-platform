@@ -463,9 +463,14 @@ async fn the_hub_s_mcp_server_says_what_it_federates() {
     );
     // T-3819: both messages were the broker's view of the space, not the gateway's façade.
     let calls = calls.lock().expect("the call log");
+    // `initialize` also reads the view's schema for the query card (T-5642).
     assert_eq!(
         *calls,
-        vec![format!("/x/views/{HUB_SLUG}/mcp"); 2],
+        vec![
+            format!("/x/views/{HUB_SLUG}/mcp"),
+            format!("/x/views/{HUB_SLUG}/linkml/schema/index.json"),
+            format!("/x/views/{HUB_SLUG}/mcp"),
+        ],
         "{calls:?}"
     );
 }
@@ -561,7 +566,15 @@ async fn the_space_surface_of_a_federating_space_is_its_view_and_names_its_membe
         "{instructions}"
     );
     let calls = calls.lock().expect("the call log");
-    assert_eq!(*calls, vec![format!("/x/views/cs-{HUB}/mcp")], "{calls:?}");
+    // The query card reads the view's schema too (T-5642); this stub serves none.
+    assert_eq!(
+        *calls,
+        vec![
+            format!("/x/views/cs-{HUB}/mcp"),
+            format!("/x/views/{HUB}/linkml/schema/index.json"),
+        ],
+        "{calls:?}"
+    );
 }
 
 /// PF-48 on the MCP surface: a `caller` registration whose member this gateway does not serve

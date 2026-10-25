@@ -256,7 +256,13 @@ pub(crate) async fn mcp_answer(
         .is_some_and(|length| length <= MAX_BODY);
     let units = calls && fits;
     let live = method == "initialize" && endpoint.serves(Representation::WebSocket);
-    if key.is_none() && !decorated && !units && !live || !answer.status().is_success() || !json {
+    // The card leads the instructions of a caller who reads anything here (T-4759 item 1).
+    let carded =
+        method == "initialize" && mcp::tools::reads_anything(&gateway, &endpoint, &subject);
+    if key.is_none() && !decorated && !units && !live && !carded
+        || !answer.status().is_success()
+        || !json
+    {
         return answer;
     }
     let (parts, body) = answer.into_parts();
@@ -282,6 +288,14 @@ pub(crate) async fn mcp_answer(
             endpoint.base_path
         ));
         live_instructions(&mut listed, &address);
+    }
+    if carded {
+        match mcp::describe::card(&gateway, &endpoint, &subject).await {
+            Ok(card) => card_instructions(&mut listed, card),
+            Err(why) => {
+                tracing::warn!(slug = %endpoint.slug, %why, "initialize went without the query card")
+            }
+        }
     }
     if let Some(key) = key {
         let kept = match key {
@@ -336,6 +350,19 @@ fn live_instructions(answer: &mut Value, address: &str) {
              `liveUpdates`."
         ));
     }
+}
+
+/// Puts the Endpoint's query card before the broker's instructions, so a client that reads
+/// the instructions at connect knows the types and attributes before its first call (T-5642).
+fn card_instructions(answer: &mut Value, card: String) {
+    let Some(result) = answer.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let instructions = match result.get("instructions") {
+        Some(Value::String(said)) if !said.is_empty() => format!("{card}\n\n{said}"),
+        _ => card,
+    };
+    result.insert("instructions".to_owned(), Value::String(instructions));
 }
 
 /// The messages whose answer says what a federating space federates (EP-71, AG-30).
