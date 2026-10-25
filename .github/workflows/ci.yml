@@ -53,6 +53,24 @@ jobs:
           fi
           echo "base: ${base:-none}"
           sh scripts/ci/changes.sh "$base" | tee -a "$GITHUB_OUTPUT"
+  # Supersede (T-5659): with the account's job slots full, every merge queued one more main run and
+  # none finished (9 portal runs queued 10:08-11:55Z on 2026-10-25). tasks/ci closes a task once a
+  # later green main run contains its commit, so this run cancels the older main runs it contains
+  # whose jobs are only queued; scripts/ci/supersede.py says which. Its own job, because only
+  # here does a token get actions: write, and only on a push to main.
+  supersede:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: { contents: read, actions: write }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { sparse-checkout: scripts/ci }
+      - name: the selection self-test
+        run: python3 scripts/ci/supersede.py --selftest
+      - name: cancel the older main runs this run contains
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: python3 scripts/ci/supersede.py
   rust:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
