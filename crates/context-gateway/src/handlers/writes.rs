@@ -241,17 +241,9 @@ impl HeldWrite<'_> {
             types: targets.values().map(|named| named.target.clone()).collect(),
             ..Default::default()
         };
-        let Verdict::Rewrite(read) = self.gateway.pdp.decide(
-            self.subject,
-            Operation::QueryEntity,
-            &requested,
-            self.endpoint,
-        ) else {
+        let Some(read) = read_grant(self.gateway, self.subject, self.endpoint, &requested) else {
             return Ok(found);
         };
-        if read.empty {
-            return Ok(found);
-        }
         // The grant's filters narrow the read; the attributes and the time window would only
         // hide the entity, which is all this read looks for.
         let mut probe = (*read).clone();
@@ -302,6 +294,26 @@ impl HeldWrite<'_> {
         }
         Ok(found)
     }
+}
+
+/// The caller's read grant on `endpoint` over `requested`: a query by `GET /entities` or by
+/// `entityOperations/query`, which read the same entities. A Pipeline's write Policy grants only
+/// the second (upsertBatch, createBatch, queryBatch), and without it every link a pipeline wrote
+/// was refused as a missing target (T-5720).
+fn read_grant(
+    gateway: &Gateway,
+    subject: &Subject,
+    endpoint: &Endpoint,
+    requested: &evaluator::Request,
+) -> Option<Box<Constraints>> {
+    [Operation::QueryEntity, Operation::QueryBatch]
+        .into_iter()
+        .find_map(
+            |operation| match gateway.pdp.decide(subject, operation, requested, endpoint) {
+                Verdict::Rewrite(read) if !read.empty => Some(read),
+                _ => None,
+            },
+        )
 }
 
 /// The entities of `class` whose stored end `slot` names `object`: the computed end's query
@@ -657,15 +669,10 @@ impl HeldDelete<'_> {
             types: BTreeSet::from([class.to_owned()]),
             ..Default::default()
         };
-        let Verdict::Rewrite(read) = self.gateway.pdp.decide(
-            self.subject,
-            Operation::QueryEntity,
-            &requested,
-            self.endpoint,
-        ) else {
+        let Some(read) = read_grant(self.gateway, self.subject, self.endpoint, &requested) else {
             return Vec::new();
         };
-        if read.empty || conditional::state_dependent(&read) {
+        if conditional::state_dependent(&read) {
             return Vec::new();
         }
         pointing
