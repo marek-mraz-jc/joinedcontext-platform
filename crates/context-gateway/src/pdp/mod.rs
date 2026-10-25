@@ -4,6 +4,7 @@ pub mod conditional;
 pub mod evaluator;
 pub mod geo;
 pub mod grants;
+pub mod id_match;
 pub mod projection;
 pub mod reaper;
 pub mod scope_folding;

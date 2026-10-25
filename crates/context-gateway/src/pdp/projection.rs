@@ -114,25 +114,3 @@ pub fn model_type_iris<'a>(
     }
     out
 }
-
-/// Whether the entity's id falls inside the anchored id patterns of the matching grants (R24).
-///
-/// No pattern is no restriction. A pattern that does not compile matches nothing: a
-/// grant the gateway cannot evaluate must not become a grant that lets everything
-/// through. `jcctl validate` and the Portal reject an uncompilable pattern before it is
-/// committed, so this is the second line, not the first.
-pub fn id_permitted(entity: &Value, id_patterns: &BTreeSet<String>) -> bool {
-    if id_patterns.is_empty() {
-        return true;
-    }
-    let Some(id) = entity
-        .get("id")
-        .or_else(|| entity.get("@id"))
-        .and_then(Value::as_str)
-    else {
-        return false;
-    };
-    id_patterns
-        .iter()
-        .any(|pattern| regex::Regex::new(pattern).is_ok_and(|compiled| compiled.is_match(id)))
-}

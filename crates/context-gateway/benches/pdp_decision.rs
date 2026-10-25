@@ -10,11 +10,14 @@
 //! PDP_BENCH_BASELINE=prev.txt PDP_BENCH_OUT=now.txt cargo bench -p context-gateway --bench pdp_decision
 //! ```
 //!
-//! It prints one line, `pdp_decision p50_us=… p99_us=… rules=250`. Under `cargo test`
-//! (no `--bench`) it decides a hundred times and checks the verdict, so the bench cannot rot.
+//! It prints one line, `pdp_decision p50_us=… p99_us=… rules=250`, and a second, `id_batch
+//! p50_us=… ids=1000 patterns=3`: what a batch write of 1,000 members costs to check against a
+//! grant's three id selectors (T-5505), informational, gated by neither budget. Under `cargo test`
+//! (no `--bench`) it decides a hundred times and checks both verdicts, so the bench cannot rot.
 
 use context_gateway::auth::subject::Subject;
-use context_gateway::pdp::evaluator::{Request, Verdict};
+use context_gateway::pdp::evaluator::{Constraints, Request, Verdict};
+use context_gateway::pdp::write_guard::check_granted_id;
 use context_gateway::pdp::{Pdp, PolicyPdp};
 use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, Operation, PolicySpec, Representation};
@@ -108,6 +111,52 @@ fn decide(endpoint: &Endpoint, subject: &Subject, request: &Request) -> Verdict 
     PolicyPdp.decide(subject, Operation::QueryEntity, request, endpoint)
 }
 
+/// A grant's three id selectors: one exact `id`, two `idPattern` prefixes.
+fn id_selectors() -> BTreeSet<String> {
+    BTreeSet::from([
+        format!("^{}$", regex::escape("urn:ngsi-ld:T0:bb.sk:exact+1")),
+        "^urn:ngsi-ld:T0:bb\\.sk:lamps-.*$".to_owned(),
+        "^urn:ngsi-ld:T0:bb\\.sk:stations-[0-9]+$".to_owned(),
+    ])
+}
+
+/// One batch of 1,000 member ids, a third outside every selector.
+fn batch_ids() -> Vec<String> {
+    (0..1000)
+        .map(|n| match n % 3 {
+            0 => format!("urn:ngsi-ld:T0:bb.sk:lamps-{n}"),
+            1 => format!("urn:ngsi-ld:T0:bb.sk:stations-{n}"),
+            _ => format!("urn:ngsi-ld:T0:bb.sk:other-{n}"),
+        })
+        .collect()
+}
+
+/// Checks one batch the way a write does: a fresh constraint set per request, every member
+/// against it. Answers how many members the grant covers.
+fn check_batch(ids: &[String]) -> usize {
+    let constraints = Constraints {
+        types: set(&["T0"]),
+        id_patterns: id_selectors().into(),
+        ..Constraints::default()
+    };
+    ids.iter()
+        .filter(|id| check_granted_id(id, &constraints).is_ok())
+        .count()
+}
+
+/// The p50 of checking one batch, in microseconds.
+fn id_batch_p50(ids: &[String]) -> f64 {
+    let mut micros: Vec<f64> = (0..200)
+        .map(|_| {
+            let started = Instant::now();
+            std::hint::black_box(check_batch(ids));
+            started.elapsed().as_secs_f64() * 1e6
+        })
+        .collect();
+    micros.sort_by(f64::total_cmp);
+    micros[micros.len() / 2]
+}
+
 /// The p50 and p99 of one round of `SAMPLES` decisions, in microseconds.
 fn round(endpoint: &Endpoint, subject: &Subject, request: &Request) -> (f64, f64) {
     let mut micros: Vec<f64> = (0..SAMPLES)
@@ -145,6 +194,8 @@ fn main() {
         20,
         "five Policies, four grants each"
     );
+    let ids = batch_ids();
+    assert_eq!(check_batch(&ids), 667, "lamps and stations, not the others");
     if !std::env::args().any(|arg| arg == "--bench") {
         for _ in 0..100 {
             assert!(!decide(&endpoint, &subject, &request).is_deny());
@@ -176,6 +227,10 @@ fn main() {
         baseline.map_or("none".to_owned(), |b| format!("{b:.1}")),
     );
     println!("{line}");
+    println!(
+        "id_batch p50_us={:.1} ids=1000 patterns=3",
+        id_batch_p50(&ids)
+    );
     if let Ok(path) = std::env::var("PDP_BENCH_OUT") {
         let lowest = baseline.map_or(p50, |b| b.min(p50));
         std::fs::write(path, format!("p50_us={lowest:.1}\n")).expect("the baseline is written");
