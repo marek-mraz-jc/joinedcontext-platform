@@ -137,7 +137,7 @@ pub async fn probe(state: &ProxyState) -> Report {
 
 /// One GET of the provider's `path` with the key: its status and body, or nothing when the
 /// provider did not answer.
-async fn ask(state: &ProxyState, path: &str) -> Option<(u16, axum::body::Bytes)> {
+async fn ask(state: &ProxyState, path: &str) -> Option<(u16, Vec<u8>)> {
     let url = format!(
         "{}/{path}",
         state.config.model_base.as_str().trim_end_matches('/')
@@ -151,7 +151,9 @@ async fn ask(state: &ProxyState, path: &str) -> Option<(u16, axum::body::Bytes)>
         .await
         .ok()?;
     let status = response.status().as_u16();
-    Some((status, response.bytes().await.unwrap_or_default()))
+    // An answer past the cap reads as an empty one, as an answer that broke off always has.
+    let body = jc_core::outbound::read_capped(response, crate::routes::PORTAL_ANSWER_BYTES).await;
+    Some((status, body.unwrap_or_default()))
 }
 
 /// Probes the key every `JC_MODEL_PROBE_SECS` and reports each answer, for as long as the proxy

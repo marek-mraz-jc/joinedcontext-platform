@@ -22,6 +22,9 @@ const INTERVAL: Duration = Duration::from_secs(10);
 /// failed fetch does not stop every write; a Portal gone for a minute does.
 pub const MAX_AGE: Duration = Duration::from_secs(60);
 
+/// The most of the Portal's verification list the gate holds (T-5510): the gateway's body cap.
+const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
+
 /// Whether an unverified domain only shows, or also stops writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -162,7 +165,7 @@ impl DomainGate {
                         .get(reqwest::header::ETAG)
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_owned);
-                    match response.json::<List>().await {
+                    match crate::previews::json_within::<List>(response, MAX_LIST_BYTES).await {
                         Ok(list) => {
                             self.replace_at(list.items, Instant::now());
                             etag = tag;

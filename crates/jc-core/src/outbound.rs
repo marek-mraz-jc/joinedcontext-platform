@@ -244,7 +244,13 @@ pub async fn read_capped(
         return Err(BodyError::TooLarge(max));
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(BodyError::Transport)? {
+    // A transport error names the URL it was reading; an internal service address never reaches
+    // the text a caller relays.
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| BodyError::Transport(e.without_url()))?
+    {
         if body.len() + chunk.len() > max {
             return Err(BodyError::TooLarge(max));
         }
@@ -447,5 +453,20 @@ mod tests {
             read_capped(response, 1024).await.expect("the body"),
             b"hello"
         );
+    }
+
+    #[tokio::test]
+    async fn a_broken_body_names_no_url() {
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhello".to_owned();
+        let url = serve(head, false).await;
+        let at = url.join("internal-service").expect("a URL");
+        let response = guarded().get(at.clone()).send().await.expect("an answer");
+        let err = read_capped(response, 1024)
+            .await
+            .expect_err("the body breaks off");
+        assert!(matches!(err, BodyError::Transport(_)), "{err:?}");
+        let text = err.to_string();
+        assert!(!text.contains(at.as_str()), "{text}");
+        assert!(!text.contains("internal-service"), "{text}");
     }
 }

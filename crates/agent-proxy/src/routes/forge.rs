@@ -212,7 +212,17 @@ pub async fn handler(
     {
         return refusal;
     }
-    let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
+    // Past the cap the run gets the refusal, and the audit line says 502 like any other outage.
+    let (resp_bytes, refusal) = match super::upstream_body(
+        super::FORGE,
+        upstream_resp,
+        super::GATEWAY_ANSWER_BYTES,
+    )
+    .await
+    {
+        Ok(bytes) => (bytes, None),
+        Err(refusal) => (Vec::new(), Some(*refusal)),
+    };
 
     log_request(&AuditEntry {
         run_id: &run.id,
@@ -220,10 +230,17 @@ pub async fn handler(
         upstream: "gitea",
         method: method.as_str(),
         path: &rest,
-        status: status.as_u16(),
+        status: if refusal.is_some() {
+            502
+        } else {
+            status.as_u16()
+        },
         bytes: resp_bytes.len(),
         duration_ms: start.elapsed().as_millis(),
     });
+    if let Some(refusal) = refusal {
+        return refusal;
+    }
 
     Response::builder()
         .status(status)

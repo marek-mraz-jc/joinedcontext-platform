@@ -17,7 +17,7 @@ path = "src/bin/jc-assistant.rs"
 # PostgreSQL inside the mesh, which Linkerd already encrypts, and a TLS stack would bring
 # webpki-roots, whose CDLA-Permissive-2.0 licence deny.toml does not allow.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "migrate", "macros"] }
-jc-core = { path = "../jc-core", version = "0.1.0" }
+jc-core = { path = "../jc-core", version = "0.1.0", features = ["outbound"] }
 agent-proxy = { path = "../agent-proxy", version = "0.1.0" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 # The crawler's own TLS check (T-3298): webpki over the native roots, with the public

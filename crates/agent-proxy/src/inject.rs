@@ -75,7 +75,10 @@ impl CredentialManager {
             expires_in: u64,
         }
 
-        let data: TokenResp = resp.json().await.map_err(|e| e.to_string())?;
+        let body = jc_core::outbound::read_capped(resp, crate::routes::MODEL_ANSWER_BYTES)
+            .await
+            .map_err(|e| e.to_string())?;
+        let data: TokenResp = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
         let ttl = Duration::from_secs(data.expires_in.min(300));
 
         let mut cache = self.endpoint_tokens.lock().await;
