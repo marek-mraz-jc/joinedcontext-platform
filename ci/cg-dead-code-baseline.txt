@@ -1,6 +1,6 @@
 # crate | rows no production entry point reaches (dev/cg-dead-code.py); only ever lowered.
 # Each row's reason: docs/analysis/platform-dead-code.md.
-agent-proxy | 3
+agent-proxy | 2
 assistant | 1
 context-gateway | 20
 jc-core | 41

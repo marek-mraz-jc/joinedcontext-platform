@@ -135,7 +135,7 @@ Constructors, doubles and inspectors the integration tests (`crates/*/tests`) us
 does not. They are `pub` because an integration test is another crate; a `#[cfg(test)]` would
 hide them from it.
 
-- agent-proxy: `RunResolver::with_cached`, `with_cached_at`; `DataCredentials::revoke`.
+- agent-proxy: `RunResolver::with_cached`, `with_cached_at` (`DataCredentials::revoke` gained its production caller, the reaper, in T-5709).
 - assistant: `worker::sources`.
 - context-gateway: `Gateway::wait_for_writes`, `limit_anonymous_mcp_to` (the tests shorten the
   write wait and the anonymous MCP limit); `pdp::temporal::Window::admits`;
