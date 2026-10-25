@@ -18,8 +18,12 @@ use std::sync::Arc;
 /// Who is calling, as established by the PEP — never as claimed by the client (GW20).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Subject {
-    /// The authenticated user, absent for an anonymous caller.
+    /// The authenticated user's username, absent for an anonymous caller: what audit lines and
+    /// preview readers name, and what a `service-account-<client>` assignee matches.
     pub user: Option<String>,
+    /// The person's Keycloak user id, their token's `sub`: what a `user` subject, member or
+    /// assignee names (PF-126, ADR-N-061). Absent for a workload and an anonymous caller.
+    pub id: Option<String>,
     /// The service account, when a workload is calling (PF-34).
     pub service_account: Option<String>,
     /// The project that service account belongs to: a `{project}/{name}` assignee matches only
@@ -53,6 +57,16 @@ impl Subject {
         Self {
             roles: BTreeSet::from(["public".to_owned()]),
             ..Self::default()
+        }
+    }
+
+    /// What a `user` assignee or subject names this caller by: a person's Keycloak id, never a
+    /// username somebody can rename (PF-126), and a client's own `service-account-<client>` user
+    /// by that name, since no manifest can know its id (T-5358).
+    pub fn user_principal(&self) -> Option<&str> {
+        match self.user.as_deref() {
+            Some(user) if jc_core::kinds::is_service_account_user(user) => Some(user),
+            _ => self.id.as_deref(),
         }
     }
 }
@@ -229,6 +243,7 @@ fn preview_reader(
     };
     Ok(Subject {
         user: Some(user.to_owned()),
+        id: Some(claims.sub.clone()),
         service_account: None,
         service_account_project: None,
         roles: roles_on(preview.audience, claims.roles().iter().cloned()),
@@ -264,7 +279,7 @@ fn with_endpoint_roles(subject: &mut Subject, endpoint: &Endpoint, client_roles:
         .retain(|role| !role.starts_with(jc_core::kinds::ENDPOINT_ROLE_PREFIX));
     let held: Vec<String> = endpoint
         .roles
-        .held_by(subject.user.as_deref(), &subject.groups, client_roles)
+        .held_by(subject.user_principal(), &subject.groups, client_roles)
         .map(str::to_owned)
         .collect();
     subject.roles.extend(held);
@@ -399,6 +414,7 @@ pub(crate) fn subject_of(
             }
             return Ok(Subject {
                 user: None,
+                id: None,
                 service_account: Some(account.name.clone()),
                 service_account_project: Some(account.project.clone()),
                 roles: roles_on(
@@ -479,6 +495,7 @@ pub(crate) fn subject_of(
 
     Ok(Subject {
         user: Some(user),
+        id: Some(claims.sub.clone()),
         service_account: None,
         service_account_project: None,
         roles: roles_on(endpoint.audience, claims.roles().iter().cloned()),

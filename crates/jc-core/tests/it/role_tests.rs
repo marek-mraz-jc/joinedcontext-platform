@@ -150,7 +150,7 @@ fn every_operator_holds_the_way_the_portal_and_conftest_read_it() {
 #[test]
 fn a_binding_needs_subjects_a_role_and_one_scope() {
     let err = binding(
-        "subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]",
+        "subjects: [{ group: air-quality-team }, { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]",
         "subjects: []",
     )
     .expect_err("no subjects");
@@ -474,8 +474,8 @@ fn a_provider_group_is_marked_on_the_group_and_nowhere_else() {
     );
 
     let err = binding(
-        "{ user: jana.kovacova@banskabystrica.sk }",
-        "{ user: jana.kovacova@banskabystrica.sk, source: provider }",
+        "{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }",
+        "{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14, source: provider }",
     )
     .expect_err("a user has no source");
     assert!(err.to_string().contains("a user has no source"), "{err}");
@@ -488,4 +488,19 @@ fn a_provider_group_is_marked_on_the_group_and_nowhere_else() {
     let err = binding("{ group: air-quality-team }", "{ source: provider }")
         .expect_err("a mark names no one");
     assert!(err.to_string().contains("exactly one"), "{err}");
+}
+
+/// PF-126, ADR-N-061: a binding names a person by their Keycloak user id; an e-mail or a
+/// username is refused with the field named.
+#[test]
+fn a_user_subject_named_by_e_mail_or_username_is_refused() {
+    for named in ["jana.kovacova@banskabystrica.sk", "jana.kovacova"] {
+        let err = binding(
+            "{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }",
+            &format!("{{ user: \"{named}\" }}"),
+        )
+        .expect_err(named);
+        assert!(err.to_string().contains("spec.subjects[].user"), "{err}");
+        assert!(err.to_string().contains("Keycloak user id"), "{err}");
+    }
 }

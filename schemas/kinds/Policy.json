@@ -843,7 +843,7 @@
       "description": "Principal category for authorization rules.",
       "oneOf": [
         {
-          "description": "Individual human user identity.",
+          "description": "Individual human user identity: their Keycloak user id (the token's `sub`), or a client's own `service-account-<client>` user (PF-126).",
           "enum": [
             "user"
           ],

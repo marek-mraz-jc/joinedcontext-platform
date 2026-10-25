@@ -482,11 +482,23 @@ impl Principal {
     }
 }
 
+/// Whether `id` is a client's own service-account user, `service-account-<client>`: the one
+/// `user` assignee that is no person, so no Keycloak user id names it (PF-126, T-5358).
+pub fn is_service_account_user(id: &str) -> bool {
+    id.strip_prefix("service-account-").is_some_and(|client| {
+        !client.is_empty()
+            && client
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    })
+}
+
 /// Principal category for authorization rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PrincipalKind {
-    /// Individual human user identity.
+    /// Individual human user identity: their Keycloak user id (the token's `sub`), or a
+    /// client's own `service-account-<client>` user (PF-126).
     User,
     /// Group of users.
     Group,
@@ -853,6 +865,10 @@ impl PolicySpec {
                 value: self.assignee.id.clone(),
                 reason: "assignee id must not be empty",
             });
+        }
+        if self.assignee.kind == PrincipalKind::User && !is_service_account_user(&self.assignee.id)
+        {
+            crate::kinds::group::validate_person_id("spec.assignee.id", &self.assignee.id)?;
         }
 
         if self.operations.is_empty() && self.actions.is_empty() {

@@ -26,7 +26,7 @@ impl Subject {
     fn is(&self, assignee: &Principal) -> bool {
         let id = assignee.id.as_str();
         match assignee.kind {
-            PrincipalKind::User => self.user.as_deref() == Some(id),
+            PrincipalKind::User => self.user_principal() == Some(id),
             PrincipalKind::Group => self.groups.contains(id),
             PrincipalKind::Role => self.roles.contains(id),
             PrincipalKind::ServiceAccount => match id.split_once('/') {

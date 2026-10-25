@@ -56,6 +56,7 @@ operations: [queryEntity]
 fn jana() -> Subject {
     Subject {
         user: Some("jana.kovacova".to_owned()),
+        id: Some("jana.kovacova".to_owned()),
         groups: BTreeSet::from(["ovzdusie-stewards".to_owned()]),
         roles: BTreeSet::from(["portal-viewer".to_owned()]),
         service_account: Some("pipeline-runner".to_owned()),
@@ -88,6 +89,7 @@ fn no_policy_of_another_principal_is_effective() {
 fn a_principal_kind_matches_only_its_own_field() {
     let subject = Subject {
         user: Some("shared-name".to_owned()),
+        id: Some("shared-name".to_owned()),
         groups: BTreeSet::from(["shared-name".to_owned()]),
         roles: BTreeSet::new(),
         service_account: None,
@@ -325,6 +327,7 @@ fn a_platform_action_is_granted_only_by_a_policy_that_names_it() {
     };
     let steward = Subject {
         user: Some("jana".to_owned()),
+        id: Some("jana".to_owned()),
         roles: BTreeSet::from(["steward".to_owned()]),
         ..Subject::default()
     };

@@ -9,8 +9,8 @@ metadata: { name: air-quality-team, namespace: org }
 spec:
   description: The air quality domain, measurement and modelling
   members:
-    - { user: jana.kovacova@banskabystrica.sk }
-    - { user: peter.novak@banskabystrica.sk }
+    - { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }
+    - { user: 8b1d4e2f-0c3a-4f5b-9e6d-7a2c1b0e9f38 }
 "#;
 
 #[test]
@@ -27,8 +27,8 @@ fn a_group_parses_with_its_members_and_belongs_beside_the_roles() {
     assert_eq!(
         spec.members().collect::<Vec<_>>(),
         vec![
-            "jana.kovacova@banskabystrica.sk",
-            "peter.novak@banskabystrica.sk"
+            "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
+            "8b1d4e2f-0c3a-4f5b-9e6d-7a2c1b0e9f38"
         ]
     );
     assert_eq!(GroupSpec::PATH_TEMPLATE, "users/groups/{name}.yaml");
@@ -47,17 +47,37 @@ fn a_field_the_kind_does_not_have_is_refused() {
     assert!(err.to_string().contains("keycloakId"), "{err}");
 }
 
+/// PF-126, ADR-N-061: a member is a Keycloak user id; an e-mail, a username or an upper-case
+/// id is refused with the field named, so no personal data reaches Git history.
 #[test]
-fn a_member_that_is_not_an_address_is_refused_and_so_is_the_same_person_twice() {
-    let yaml = GROUP.replace("jana.kovacova@banskabystrica.sk", "jana.kovacova");
-    let err = registry::validate_yaml("Group", &yaml)
-        .expect("a known kind")
-        .expect_err("a member is an address");
-    assert!(err.to_string().contains("spec.members[].user"), "{err}");
+fn a_member_that_is_not_a_keycloak_id_is_refused_and_so_is_the_same_person_twice() {
+    for named in [
+        "jana.kovacova@banskabystrica.sk",
+        "jana.kovacova",
+        "3F2A9C1E-7B4D-4E8A-9C61-0D5E2B7F8A14",
+        " 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
+        "3f2a9c1e7b4d4e8a9c610d5e2b7f8a14",
+    ] {
+        let yaml = GROUP.replace(
+            "{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }",
+            &format!("{{ user: \"{named}\" }}"),
+        );
+        let err = registry::validate_yaml("Group", &yaml)
+            .expect("a known kind")
+            .expect_err("a member is a Keycloak user id");
+        assert!(
+            err.to_string().contains("spec.members[].user"),
+            "{named}: {err}"
+        );
+        assert!(
+            err.to_string().contains("Keycloak user id"),
+            "{named}: {err}"
+        );
+    }
 
     let twice = GROUP.replace(
-        "peter.novak@banskabystrica.sk",
-        "jana.kovacova@banskabystrica.sk",
+        "8b1d4e2f-0c3a-4f5b-9e6d-7a2c1b0e9f38",
+        "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14",
     );
     let err = registry::validate_yaml("Group", &twice)
         .expect("a known kind")

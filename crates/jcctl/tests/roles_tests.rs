@@ -34,7 +34,7 @@ const BINDING_DEVELOPERS: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: RoleBinding
 metadata: { name: ovzdusie-developers, namespace: org }
 spec:
-  subjects: [{ group: air-quality-team }, { user: jana.kovacova@banskabystrica.sk }]
+  subjects: [{ group: air-quality-team }, { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }]
   role: pipeline-developer
   scope: { project: ovzdusie }
 "#;
@@ -43,7 +43,7 @@ const BINDING_ADMINS: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: RoleBinding
 metadata: { name: admins, namespace: org }
 spec:
-  subjects: [{ user: admin }, { group: platform-admins }]
+  subjects: [{ user: 0d5e2b7f-8a14-4e8a-9c61-3f2a9c1e7b4d }, { group: platform-admins }]
   role: org-admin
   scope: { organization: banskabystrica }
 "#;
@@ -52,7 +52,7 @@ const BINDING_SPACE_REVIEWERS: &str = r#"apiVersion: joinedcontext.com/v1alpha1
 kind: RoleBinding
 metadata: { name: parking-reviewers, namespace: org }
 spec:
-  subjects: [{ user: peter }]
+  subjects: [{ group: parking-reviewers }]
   role: org-admin
   scope: { contextSpace: parking }
 "#;
@@ -91,16 +91,18 @@ fn codeowners_gives_the_rule_setting_paths_to_organization_approvers_only() {
         "/",
     ] {
         assert!(
-            owners.contains(&format!("{path} @admin @banskabystrica/platform-admins\n")),
+            owners.contains(&format!("{path} @banskabystrica/platform-admins\n")),
             "{path} is owned by the organization approvers:\n{owners}"
         );
     }
+    // A user subject is a Keycloak id, which names no forge login: it owns no path (PF-126).
+    assert!(!owners.contains("0d5e2b7f"), "{owners}");
     // A developer proposes but never approves: no line of theirs, on any path.
     assert!(!owners.contains("air-quality-team"), "{owners}");
     assert!(!owners.contains("jana"), "{owners}");
     // A context space binding that approves owns the space under whichever project holds it.
     assert!(
-        owners.contains("/projects/*/spaces/parking/ @peter\n"),
+        owners.contains("/projects/*/spaces/parking/ @banskabystrica/parking-reviewers\n"),
         "{owners}"
     );
     assert!(owners.starts_with("# Written by `jcctl roles render`"));
@@ -304,7 +306,7 @@ fn conftest_denies_a_developers_public_endpoint_and_lets_an_admin_through() {
         out.contains("Endpoint") && out.contains("Pipeline"),
         "both the public endpoint and the deletion are named:\n{out}"
     );
-    let admin = run("admin", &[]);
+    let admin = run("admin", &["platform-admins".to_owned()]);
     assert!(
         admin.status.success(),
         "{}",

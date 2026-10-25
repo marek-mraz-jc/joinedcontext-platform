@@ -171,7 +171,8 @@ fn list(headers: &HeaderMap, name: &str) -> Vec<String> {
 /// What reached the broker carries the verified caller and nothing the client wrote; groups as
 /// the gateway matches them, without the leading slash.
 fn assert_verified(headers: &HeaderMap, groups: &[&str]) {
-    assert_eq!(values(headers, "x-jc-subject"), ["jana"], "{headers:?}");
+    // The person's Keycloak id, the token's `sub`, never their username (PF-126).
+    assert_eq!(values(headers, "x-jc-subject"), ["0f5a"], "{headers:?}");
     assert_eq!(list(headers, "x-jc-groups"), groups, "{headers:?}");
     let roles = list(headers, "x-jc-roles");
     assert!(roles.contains(&"steward".to_owned()), "{headers:?}");
@@ -310,7 +311,7 @@ async fn names_beyond_plain_ascii_reach_the_broker_percent_encoded() {
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let edge = realm.mint(&json!({
         "iss": common::ISSUER,
-        "sub": "0f5b",
+        "sub": "jožo",
         "aud": "context-gateway",
         "preferred_username": "jožo",
         "groups": ["/ovzdusie", "/doprava/správa"],

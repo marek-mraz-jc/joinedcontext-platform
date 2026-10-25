@@ -608,7 +608,8 @@ fn evaluation(
     Ok(Bytes::from(Value::Object(ask).to_string()))
 }
 
-/// Whether an AuthZEN `subject` (`type` and `id`) is the caller: their user, their service
+/// Whether an AuthZEN `subject` (`type` and `id`) is the caller: their Keycloak id or username,
+/// their service
 /// account, their DID, or, for an anonymous caller, the role `public` the engine names them by.
 fn names_the_caller(subject: &Subject, named: &Value) -> bool {
     let (Some(kind), Some(id)) = (
@@ -617,6 +618,9 @@ fn names_the_caller(subject: &Subject, named: &Value) -> bool {
     ) else {
         return false;
     };
+    if kind == "user" && subject.user_principal() == Some(id) {
+        return true;
+    }
     let own = match kind {
         "user" => subject.user.as_deref(),
         "serviceAccount" => subject.service_account.as_deref(),

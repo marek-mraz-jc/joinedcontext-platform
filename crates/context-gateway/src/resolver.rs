@@ -64,8 +64,8 @@ impl EndpointRoles {
         }
     }
 
-    /// The roles this endpoint gives a caller who signed in as `user` (the token's
-    /// `preferred_username`, the e-mail in this realm) with `groups`, and whose token carries
+    /// The roles this endpoint gives a caller whose Keycloak user id is `user` (the token's
+    /// `sub`, PF-126) with `groups`, and whose token carries
     /// `client_roles` for this endpoint's App client ([`crate::auth::token::Claims::client_roles`]).
     pub fn held_by<'a>(
         &'a self,
@@ -80,9 +80,7 @@ impl EndpointRoles {
                 subjects
                     .iter()
                     .any(|subject| match (&subject.user, &subject.group) {
-                        (Some(wanted), None) => {
-                            user.is_some_and(|u| u.eq_ignore_ascii_case(wanted))
-                        }
+                        (Some(wanted), None) => user.is_some_and(|u| u == wanted),
                         (None, Some(wanted)) => groups.contains(wanted),
                         _ => false,
                     })

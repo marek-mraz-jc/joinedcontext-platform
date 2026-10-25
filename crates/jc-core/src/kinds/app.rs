@@ -428,8 +428,8 @@ pub(crate) fn validate_role_name(field: &'static str, name: &str) -> Result<()> 
     })
 }
 
-/// The people and groups a role names: each exactly one of a lower-case e-mail and a group
-/// name, none twice, at least one (AP-91).
+/// The people and groups a role names: each exactly one of a Keycloak user id (PF-126) and a
+/// group name, none twice, at least one (AP-91).
 pub(crate) fn validate_subjects(
     field: &'static str,
     subjects: &[crate::kinds::role::Subject],
@@ -457,17 +457,7 @@ pub(crate) fn validate_subjects(
         }
         let named = match (subject.user.as_deref(), subject.group.as_deref()) {
             (Some(user), None) => {
-                let ok = crate::kinds::group::is_address(user)
-                    && user.trim() == user
-                    && user.to_lowercase() == user
-                    && !user.contains('*');
-                if !ok {
-                    return Err(Error::Name {
-                        field,
-                        value: user.to_owned(),
-                        reason: "a user is a lower-case e-mail address, the name Keycloak carries (AP-91)",
-                    });
-                }
+                crate::kinds::group::validate_person_id(field, user)?;
                 ("user", user)
             }
             (None, Some(group)) => {

@@ -175,12 +175,10 @@ fn parse<T: serde::de::DeserializeOwned>(manifest: &RawManifest) -> Result<T, Ro
     })
 }
 
-/// The Gitea handle of a subject: `@login` for a user (the local part of an e-mail), and
-/// `@{org}/{group}` for a group, which is how a team is written in a CODEOWNERS line.
+/// The Gitea handle of a subject: `@{org}/{group}` for a group, which is how a team is written
+/// in a CODEOWNERS line. A user is a Keycloak id, which names no forge login (PF-126), so a
+/// person owns paths in CODEOWNERS through a group alone.
 fn handle(subject: &Subject, org: Option<&str>) -> Option<String> {
-    if let Some(user) = &subject.user {
-        return Some(format!("@{}", user.split('@').next().unwrap_or(user)));
-    }
     let group = subject.group.as_deref()?;
     Some(match org {
         Some(org) => format!("@{org}/{group}"),

@@ -980,11 +980,26 @@ mod tests {
         );
         let jana = Subject {
             user: Some("jana".to_owned()),
+            id: Some("3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14".to_owned()),
             roles: ["steward".to_owned()].into(),
             ..Subject::default()
         };
         let person = upstream_headers("helsinki", &jana).expect("headers");
-        assert_eq!(person["x-jc-subject"], "jana");
+        // The broker matches a `user` assignee against the person's Keycloak id (PF-126).
+        assert_eq!(
+            person["x-jc-subject"],
+            "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14"
+        );
+        let reconciler = Subject {
+            user: Some("service-account-portal-reconciler".to_owned()),
+            id: Some("0d5e2b7f-8a14-4e8a-9c61-3f2a9c1e7b4d".to_owned()),
+            ..Subject::default()
+        };
+        let reconciler = upstream_headers("helsinki", &reconciler).expect("headers");
+        assert_eq!(
+            reconciler["x-jc-subject"],
+            "service-account-portal-reconciler"
+        );
         assert_eq!(person["x-jc-roles"], "steward");
         // A token of the gateway's own client never makes the upstream the gateway's.
         let posing = Subject {

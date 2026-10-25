@@ -96,7 +96,7 @@ pub use feed_output::{
     feed_gaps, feed_links, FeedFilter, FeedOutput, FeedPaths, FeedPreset, FeedRole, FeedSort,
     FeedSource, FEED_FORMATS, MAX_FEED_OUTPUTS,
 };
-pub use group::{GroupSpec, Member};
+pub use group::{is_person_id, GroupSpec, Member};
 pub use ical_mapping::{
     ical_links, outputs_gaps, Accepts, DateMode, FieldRemap, FieldSource, IcalField, IcalMapping,
     IcalOutput, OutputFilter, Preset, Representations, MAX_OUTPUTS, PRESET_TYPES,
@@ -123,9 +123,9 @@ pub use pipeline_history::{AttributeHistory, History, Keep};
 pub use pipeline_lifetime::{AttributeLifetime, End, Lifetime, LifetimeMode};
 pub use pipeline_source_deletes::{SourceDeleteMode, SourceDeletes};
 pub use policy::{
-    EntitySelector, Operation, OperationGroup, OperationRef, PlatformAction, PolicyEffect,
-    PolicyRule, PolicySpec, Principal, PrincipalKind, RegistrationInfo, ScopeDefinitionSpec,
-    Validity,
+    is_service_account_user, EntitySelector, Operation, OperationGroup, OperationRef,
+    PlatformAction, PolicyEffect, PolicyRule, PolicySpec, Principal, PrincipalKind,
+    RegistrationInfo, ScopeDefinitionSpec, Validity,
 };
 pub use role::{
     BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,
