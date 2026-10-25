@@ -324,6 +324,10 @@ async fn a_malformed_simulation_is_a_bad_request() {
         json!({ "subject": {}, "action": { "name": "readEverything" } }),
         json!({ "subject": {}, "resource": { "type": "AirQualityObserved" } }),
         json!({ "action": { "name": "retrieveEntity" } }),
+        json!({ "subject": {}, "action": { "name": "retrieveEntity" },
+                "resource": { "type": "AirQualityObserved", "properties": { "attribute": "" } } }),
+        json!({ "subject": {}, "action": { "name": "retrieveEntity" },
+                "resource": { "properties": { "attribute": "NO2", "datasetId": "x" } } }),
     ];
     for body in bad {
         let (status, problem) = simulate(&app, &realm, OPEN, body.clone()).await;
@@ -474,6 +478,26 @@ async fn view_the_simulator_asks_the_engine_as_the_subjects_own_token_would() {
             "{who}: the Policy under its manifest name"
         );
     }
+}
+
+/// T-5527: the Attribute a simulation names reaches the engine's explain as `access/check` sends
+/// it, so the Portal's cell inspector asks the same per-Attribute decision.
+#[tokio::test]
+async fn view_the_attribute_asked_about_reaches_the_engine() {
+    let realm = common::Realm::new();
+    let decided = json!({ "decision": false, "context": { "reason": "not_in_grant" } });
+    let (upstream, hops) = recording_broker(StatusCode::OK, decided.clone()).await;
+    let app = view_app(&realm, upstream);
+    let mut asked = question("updateAttrs", Some("AirQualityObserved"));
+    asked["resource"]["properties"] = json!({ "attribute": "NO2" });
+    let mut simulation = asked.clone();
+    simulation["subject"] = json!({ "roles": ["data-steward"] });
+    let (status, answer) = simulate(&app, &realm, OPEN, simulation).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer, decided);
+    let simulated = taken(&hops);
+    assert_eq!(simulated.len(), 1);
+    assert_eq!(simulated[0].2, asked, "the question with its attribute");
 }
 
 /// The engine's refusals come back with the Policy that ended them, under its manifest name; an

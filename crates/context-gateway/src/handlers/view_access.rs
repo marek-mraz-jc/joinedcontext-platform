@@ -666,6 +666,16 @@ struct Action {
 struct Resource {
     #[serde(default, rename = "type")]
     entity_type: Option<String>,
+    #[serde(default)]
+    properties: Option<ResourceProperties>,
+}
+
+/// `resource.properties`: the one Attribute (a short name or an IRI) the decision is asked about,
+/// as on `access/check`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceProperties {
+    attribute: String,
 }
 
 /// The decision `access/check` would give someone else, for the Portal alone (EP-103, T-3311).
@@ -751,6 +761,16 @@ pub(crate) async fn access_simulate(
         .resource
         .as_ref()
         .and_then(|resource| resource.entity_type.as_deref());
+    let attribute = simulation
+        .resource
+        .as_ref()
+        .and_then(|resource| resource.properties.as_ref())
+        .map(|properties| properties.attribute.as_str());
+    if attribute.is_some_and(str::is_empty) {
+        return ProblemDetails::bad_request()
+            .with_detail("resource.properties.attribute is empty: name one attribute, e.g. NO2")
+            .into_response();
+    }
     if !has_view(&view_of(&endpoint)) {
         return no_view(&endpoint);
     }
@@ -761,6 +781,9 @@ pub(crate) async fn access_simulate(
             let mut query = json!({ "action": { "name": action } });
             if let Some(entity_type) = entity_type {
                 query["resource"] = json!({ "type": entity_type });
+            }
+            if let Some(attribute) = attribute {
+                query["resource"]["properties"] = json!({ "attribute": attribute });
             }
             let call = ViewCall::Explain(Bytes::from(query.to_string()));
             match from_view(&gateway, &endpoint, subject, call).await {
@@ -780,6 +803,7 @@ pub(crate) async fn access_simulate(
         simulated_roles = ?who.roles,
         action,
         entity_type = entity_type.unwrap_or_default(),
+        attribute = attribute.unwrap_or_default(),
         decision = %answer["decision"],
         reason = %answer["context"]["reason"],
         "access simulated"
