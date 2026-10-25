@@ -397,11 +397,6 @@ fn positive(
     }
 }
 
-/// Reduces the configured broker URL to `scheme://authority`, with no trailing slash.
-///
-/// The forwarded path is always built by the gateway from the route it matched, so a base
-/// that carried a path of its own would silently prefix every request; refusing it here is
-/// cheaper than debugging it later.
 /// A Linkerd workload name `{serviceaccount}.{namespace}`: two DNS labels, nothing else.
 fn mesh_name(raw: &str) -> Option<String> {
     let raw = raw.trim();
@@ -421,6 +416,11 @@ fn mesh_name(raw: &str) -> Option<String> {
     }
 }
 
+/// Reduces the configured broker URL to `scheme://authority`, with no trailing slash.
+///
+/// The forwarded path is always built by the gateway from the route it matched, so a base
+/// that carried a path of its own would silently prefix every request; refusing it here is
+/// cheaper than debugging it later.
 fn normalize_broker_url(raw: &str) -> Result<String, ConfigError> {
     let invalid = |reason: &str| ConfigError::Invalid {
         name: "JC_GATEWAY_BROKER_URL",
