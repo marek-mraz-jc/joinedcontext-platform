@@ -110,49 +110,12 @@ pub(crate) async fn mcp_answer(
             );
         }
     };
-    if reads_only && calls {
-        let name = tool.as_deref().unwrap_or_default();
-        if !mcp::tools::anonymous_may(name) {
-            note(Outcome::Refused);
-            let refusal = mcp::tools::anonymous_refusal(id, name);
-            return mcp::jsonrpc::json_response(StatusCode::OK, &refusal);
-        }
-    }
-    if calls
-        && tool
-            .as_deref()
-            .is_some_and(|tool| mcp::describe::DESCRIBE_TOOLS.contains(&tool))
+    if let Some(answer) = refuse_before_forward(
+        &gateway, &endpoint, &subject, &view, &message, reads_only, &note,
+    )
+    .await
     {
-        let answer =
-            mcp::describe::call(&gateway, &endpoint, &subject, id, &message["params"]).await;
-        note(Outcome::of(&answer));
-        return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
-    }
-    if message["method"] == "resources/read"
-        && message["params"]["uri"].as_str().is_some_and(|uri| {
-            mcp::describe::OWN_SCHEMES
-                .iter()
-                .any(|scheme| uri.starts_with(scheme))
-        })
-    {
-        let answer =
-            mcp::describe::read(&gateway, &endpoint, &subject, id, &message["params"]).await;
-        return mcp::jsonrpc::json_response(StatusCode::OK, &answer);
-    }
-    if !(1..=MAX_VIEW_ID).contains(&view.len()) {
-        // The Portal writes no view whose id the broker refuses (`[a-z0-9-]{1,63}`), so a space
-        // whose name leaves no room for `cs-` has no MCP surface to forward to.
-        tracing::info!(%view, "MCP refused: no broker view can carry this id");
-        return ProblemDetails::new(
-            503,
-            "no-view",
-            "The access surface of this endpoint is not served",
-        )
-        .with_detail(
-            "this space's name is too long for a broker view, so its MCP surface is not \
-                 served; a space name of at most 60 characters is",
-        )
-        .into_response();
+        return answer;
     }
 
     let operation = mcp_operation(calls.then_some(tool.as_deref().unwrap_or_default()));
@@ -232,37 +195,156 @@ pub(crate) async fn mcp_answer(
         )
         .await;
     }
-    let json = answer
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json"));
-    let key = OWN_LISTINGS
-        .iter()
-        .find(|(listing, _)| *listing == method)
-        .map(|(_, key)| *key);
-    let decorated = !federates.is_empty() && FEDERATED_METHODS.contains(&method.as_str());
-    // A tool list the gateway cannot read is one it cannot narrow: refused, never passed on.
-    let narrowed = reads_only && method == "tools/list" && answer.status().is_success();
-    if narrowed && !json {
-        return unreadable_tool_list(id, &endpoint);
+    let asked = Asked {
+        method: &method,
+        id,
+        calls,
+        reads_only,
+    };
+    decorate_answer(&gateway, &endpoint, &subject, asked, &federates, answer).await
+}
+
+/// What the gateway answers before any hop to the broker: an anonymous caller's write tool
+/// (T-4168), the gateway's own describe tools and documents, and a view id no broker view can
+/// carry. `None` when the message goes on to the view.
+async fn refuse_before_forward(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    view: &str,
+    message: &Value,
+    reads_only: bool,
+    note: &impl Fn(Outcome),
+) -> Option<Response<Body>> {
+    let tool = message["params"]["name"].as_str().unwrap_or_default();
+    let calls = message["method"] == "tools/call";
+    let id = message["id"].clone();
+    if reads_only && calls && !mcp::tools::anonymous_may(tool) {
+        note(Outcome::Refused);
+        let refusal = mcp::tools::anonymous_refusal(id, tool);
+        return Some(mcp::jsonrpc::json_response(StatusCode::OK, &refusal));
     }
-    // A tool result is read to name its units (T-4373), but only one whose length is declared
-    // and fits the buffer: a larger or unsized one goes on unread, never cut to nothing.
-    let fits = answer
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok()?.parse::<usize>().ok())
-        .is_some_and(|length| length <= MAX_BODY);
-    let units = calls && fits;
-    let live = method == "initialize" && endpoint.serves(Representation::WebSocket);
-    // The card leads the instructions of a caller who reads anything here (T-4759 item 1).
-    let carded =
-        method == "initialize" && mcp::tools::reads_anything(&gateway, &endpoint, &subject);
-    if key.is_none() && !decorated && !units && !live && !carded
-        || !answer.status().is_success()
-        || !json
+    if calls && mcp::describe::DESCRIBE_TOOLS.contains(&tool) {
+        let answer = mcp::describe::call(gateway, endpoint, subject, id, &message["params"]).await;
+        note(Outcome::of(&answer));
+        return Some(mcp::jsonrpc::json_response(StatusCode::OK, &answer));
+    }
+    if message["method"] == "resources/read"
+        && message["params"]["uri"].as_str().is_some_and(|uri| {
+            mcp::describe::OWN_SCHEMES
+                .iter()
+                .any(|scheme| uri.starts_with(scheme))
+        })
     {
+        let answer = mcp::describe::read(gateway, endpoint, subject, id, &message["params"]).await;
+        return Some(mcp::jsonrpc::json_response(StatusCode::OK, &answer));
+    }
+    if !(1..=MAX_VIEW_ID).contains(&view.len()) {
+        // The Portal writes no view whose id the broker refuses (`[a-z0-9-]{1,63}`), so a space
+        // whose name leaves no room for `cs-` has no MCP surface to forward to.
+        tracing::info!(%view, "MCP refused: no broker view can carry this id");
+        return Some(
+            ProblemDetails::new(
+                503,
+                "no-view",
+                "The access surface of this endpoint is not served",
+            )
+            .with_detail(
+                "this space's name is too long for a broker view, so its MCP surface is not \
+                 served; a space name of at most 60 characters is",
+            )
+            .into_response(),
+        );
+    }
+    None
+}
+
+/// What the caller asked, as the decoration of the broker's answer reads it.
+struct Asked<'a> {
+    method: &'a str,
+    id: Value,
+    calls: bool,
+    reads_only: bool,
+}
+
+/// What the gateway adds to one broker answer before it reaches the caller.
+struct Decoration {
+    /// The gateway's own listing items to add, `tools` or `resources`.
+    key: Option<&'static str>,
+    /// A federating Endpoint's member names (EP-87).
+    federated: bool,
+    /// A tool result whose units are named (T-4373).
+    units: bool,
+    /// `initialize` names the WebSocket (T-5045).
+    live: bool,
+    /// `initialize` leads with the query card (T-4759).
+    carded: bool,
+    /// An anonymous `tools/list`, narrowed to the reads (T-4168).
+    narrowed: bool,
+    /// The answer is JSON the gateway can read.
+    json: bool,
+}
+
+impl Decoration {
+    fn of(
+        gateway: &Gateway,
+        endpoint: &Endpoint,
+        subject: &Subject,
+        asked: &Asked,
+        federates: &[String],
+        answer: &Response<Body>,
+    ) -> Self {
+        let header = |name| {
+            answer
+                .headers()
+                .get(name)
+                .and_then(|value: &HeaderValue| value.to_str().ok())
+        };
+        let initialize = asked.method == "initialize";
+        // A tool result is read to name its units (T-4373), but only one whose length is
+        // declared and fits the buffer: a larger or unsized one goes on unread, never cut.
+        let fits = header(CONTENT_LENGTH)
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|length| length <= MAX_BODY);
+        Self {
+            key: OWN_LISTINGS
+                .iter()
+                .find(|(listing, _)| *listing == asked.method)
+                .map(|(_, key)| *key),
+            federated: !federates.is_empty() && FEDERATED_METHODS.contains(&asked.method),
+            units: asked.calls && fits,
+            live: initialize && endpoint.serves(Representation::WebSocket),
+            // The card leads the instructions of a caller who reads anything here (T-4759 item 1).
+            carded: initialize && mcp::tools::reads_anything(gateway, endpoint, subject),
+            narrowed: asked.reads_only
+                && asked.method == "tools/list"
+                && answer.status().is_success(),
+            json: header(CONTENT_TYPE).is_some_and(|value| value.starts_with("application/json")),
+        }
+    }
+
+    fn is_none(&self) -> bool {
+        self.key.is_none() && !self.federated && !self.units && !self.live && !self.carded
+    }
+}
+
+/// The broker's answer as the caller reads it: a federating Endpoint's members named, a tool
+/// result's units, the WebSocket and the query card in `initialize`, and the gateway's own tools
+/// and resources added to the listings. An answer that needs none of it goes on unread.
+async fn decorate_answer(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    asked: Asked<'_>,
+    federates: &[String],
+    answer: Response<Body>,
+) -> Response<Body> {
+    let decoration = Decoration::of(gateway, endpoint, subject, &asked, federates, &answer);
+    // A tool list the gateway cannot read is one it cannot narrow: refused, never passed on.
+    if decoration.narrowed && !decoration.json {
+        return unreadable_tool_list(asked.id, endpoint);
+    }
+    if decoration.is_none() || !answer.status().is_success() || !decoration.json {
         return answer;
     }
     let (parts, body) = answer.into_parts();
@@ -270,53 +352,76 @@ pub(crate) async fn mcp_answer(
         .await
         .unwrap_or_default();
     let Ok(mut listed) = serde_json::from_slice::<Value>(&held) else {
-        if narrowed {
-            return unreadable_tool_list(id, &endpoint);
+        if decoration.narrowed {
+            return unreadable_tool_list(asked.id, endpoint);
         }
         return proxy::with_body(parts, held);
     };
-    if decorated {
-        federated(&mut listed, &method, &federates);
+    decorated(
+        gateway,
+        endpoint,
+        subject,
+        &asked,
+        federates,
+        &decoration,
+        &mut listed,
+    )
+    .await;
+    proxy::with_body(parts, listed.to_string().into_bytes())
+}
+
+/// Applies the [`Decoration`] to the answer the broker sent.
+async fn decorated(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    asked: &Asked<'_>,
+    federates: &[String],
+    decoration: &Decoration,
+    listed: &mut Value,
+) {
+    if decoration.federated {
+        federated(listed, asked.method, federates);
     }
-    if units {
-        mcp::units::readable(&mut listed);
+    if decoration.units {
+        mcp::units::readable(listed);
     }
-    if live {
+    if decoration.live {
         let address = crate::handlers::ws::ws_address(&format!(
             "{}{}/ws",
             gateway.base_url(),
             endpoint.base_path
         ));
-        live_instructions(&mut listed, &address);
+        live_instructions(listed, &address);
     }
-    if carded {
-        match mcp::describe::card(&gateway, &endpoint, &subject).await {
-            Ok(card) => card_instructions(&mut listed, card),
+    if decoration.carded {
+        match mcp::describe::card(gateway, endpoint, subject).await {
+            Ok(card) => card_instructions(listed, card),
             Err(why) => {
                 tracing::warn!(slug = %endpoint.slug, %why, "initialize went without the query card")
             }
         }
     }
-    if let Some(key) = key {
-        let kept = match key {
-            "tools" => mcp::describe::tools(&gateway, &endpoint, &subject),
-            _ => mcp::describe::resources(&gateway, &endpoint, &subject).await,
-        };
-        let items = listed
-            .get_mut("result")
-            .and_then(|result| result.get_mut(key))
-            .and_then(Value::as_array_mut);
-        if let Some(items) = items {
-            items.extend(kept);
-            if narrowed {
-                mcp::tools::keep_anonymous(items);
-            }
-            if key == "tools" {
-                mcp::annotations::annotate(items);
-            }
+    let Some(key) = decoration.key else {
+        return;
+    };
+    let kept = match key {
+        "tools" => mcp::describe::tools(gateway, endpoint, subject),
+        _ => mcp::describe::resources(gateway, endpoint, subject).await,
+    };
+    let items = listed
+        .get_mut("result")
+        .and_then(|result| result.get_mut(key))
+        .and_then(Value::as_array_mut);
+    if let Some(items) = items {
+        items.extend(kept);
+        if decoration.narrowed {
+            mcp::tools::keep_anonymous(items);
+        }
+        if key == "tools" {
+            mcp::annotations::annotate(items);
         }
     }
-    proxy::with_body(parts, listed.to_string().into_bytes())
 }
 
 /// The answer to an anonymous `tools/list` whose broker answer the gateway could not read, and so
@@ -731,5 +836,91 @@ mod tests {
             answer["result"]["structuredContent"]["jc:source"],
             serde_json::json!(["transport"])
         );
+    }
+
+    fn gateway() -> Gateway {
+        Gateway::new(
+            crate::proxy::Broker::new("http://localhost:9"),
+            Box::new(crate::pdp::PolicyPdp),
+            "example.org",
+        )
+    }
+
+    /// T-5508: an anonymous `tools/call` of a write tool is refused before any hop, its
+    /// refusal noted; a view id no broker view carries is the 503; a read goes on.
+    #[tokio::test]
+    async fn refuse_before_forward_answers_an_anonymous_write_and_a_long_view() {
+        let gateway = gateway();
+        let endpoint = crate::mcp::catalog::tests::fixture();
+        let subject = Subject::anonymous();
+        let noted = std::cell::RefCell::new(Vec::new());
+        let note = |outcome| noted.borrow_mut().push(outcome);
+        let call = |tool: &str| {
+            serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {"name": tool, "arguments": {}}})
+        };
+
+        let write = call("create_entity");
+        let refused =
+            refuse_before_forward(&gateway, &endpoint, &subject, "view", &write, true, &note).await;
+        let refused = refused.map(|answer| answer.status());
+        assert_eq!(refused, Some(StatusCode::OK));
+        assert_eq!(*noted.borrow(), [Outcome::Refused]);
+
+        let read = call("query_entities");
+        let long = "v".repeat(MAX_VIEW_ID + 1);
+        let answer =
+            refuse_before_forward(&gateway, &endpoint, &subject, &long, &read, true, &note).await;
+        assert_eq!(
+            answer.map(|answer| answer.status()),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        let goes_on =
+            refuse_before_forward(&gateway, &endpoint, &subject, "view", &read, true, &note).await;
+        assert!(goes_on.is_none());
+        assert_eq!(noted.borrow().len(), 1);
+    }
+
+    /// T-4168, T-5508: an anonymous `tools/list` the gateway cannot read is refused, never
+    /// passed on unnarrowed; an answer that needs no decoration goes on as it came.
+    #[tokio::test]
+    async fn decorate_answer_refuses_an_unreadable_anonymous_tool_list() {
+        let gateway = gateway();
+        let endpoint = crate::mcp::catalog::tests::fixture();
+        let subject = Subject::anonymous();
+        let text = || {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/plain")
+                .body(Body::from("tools"))
+                .unwrap_or_default()
+        };
+        let asked = |method| Asked {
+            method,
+            id: Value::from(3),
+            calls: false,
+            reads_only: true,
+        };
+        let refused = decorate_answer(
+            &gateway,
+            &endpoint,
+            &subject,
+            asked("tools/list"),
+            &[],
+            text(),
+        )
+        .await;
+        let held = axum::body::to_bytes(refused.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        let held: Value = serde_json::from_slice(&held).unwrap_or_default();
+        assert_eq!(held["error"]["code"], -32603, "{held}");
+
+        let plain =
+            decorate_answer(&gateway, &endpoint, &subject, asked("ping"), &[], text()).await;
+        let held = axum::body::to_bytes(plain.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        assert_eq!(&held[..], b"tools");
     }
 }
