@@ -10,17 +10,19 @@
 //! operation of the closed CIM 009 vocabulary — and never by anything a caller supplies: an
 //! entity id or a token in a label is an unbounded series and a disclosure at once.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::{MatchedPath, Request};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use axum::http::Response;
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use jc_core::kinds::Operation;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+
+use crate::app::Gateway;
 
 /// The Prometheus text format, the version every scraper since 2014 reads.
 pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
@@ -143,7 +145,14 @@ tokio::task_local! {
 }
 
 /// Counts and times every request the surface answers.
-pub async fn record(request: Request, next: Next) -> axum::response::Response {
+///
+/// The `endpoint` label names only a slug or space the gateway serves: a path anyone can invent
+/// would otherwise mint one Prometheus series per guess, without a token (T-5701).
+pub async fn record(
+    State(gateway): State<Arc<Gateway>>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
     let route = request
         .extensions()
         .get::<MatchedPath>()
@@ -156,7 +165,9 @@ pub async fn record(request: Request, next: Next) -> axum::response::Response {
     }
 
     let method = request.method().as_str().to_owned();
-    let endpoint = named(request.uri().path()).unwrap_or("-").to_owned();
+    let endpoint = served(&gateway, request.uri().path())
+        .unwrap_or("-")
+        .to_owned();
     let started = Instant::now();
     let (mut response, pdp, broker) = SPLIT
         .scope(Split::default(), async {
@@ -210,6 +221,17 @@ fn named(path: &str) -> Option<&str> {
         _ => None,
     }
     .filter(|name| !name.is_empty())
+}
+
+/// The endpoint slug or space name a path belongs to, when the gateway serves it.
+fn served<'p>(gateway: &Gateway, path: &'p str) -> Option<&'p str> {
+    named(path).filter(|name| {
+        if path.starts_with("/cs/") {
+            gateway.resolver.resolve_space(name).is_some()
+        } else {
+            gateway.resolver.resolve(name).is_some()
+        }
+    })
 }
 
 #[cfg(test)]

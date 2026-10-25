@@ -60,10 +60,7 @@ struct Checkout<'a> {
 
 impl SyncRemote for Checkout<'_> {
     fn revision(&self, _origin: &SyncOrigin) -> Result<String, RemoteError> {
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        collect(self.dir, self.dir, &mut files)
-            .map_err(|error| RemoteError::Unavailable(error.to_string()))?;
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        let files = collect(self.dir)?;
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for (path, body) in files {
@@ -80,9 +77,7 @@ impl SyncRemote for Checkout<'_> {
         _revision: &str,
         into: &Path,
     ) -> Result<(), RemoteError> {
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        collect(self.dir, self.dir, &mut files)
-            .map_err(|error| RemoteError::Unavailable(error.to_string()))?;
+        let files = collect(self.dir)?;
         for (path, body) in files {
             let target = into.join(&path);
             if let Some(parent) = target.parent() {
@@ -96,29 +91,26 @@ impl SyncRemote for Checkout<'_> {
     }
 }
 
-/// Every file under `dir`, by its path relative to `root`. A symlink is read as what it points
-/// at, and a directory that climbs out of the checkout cannot be reached at all: the walk only
-/// ever descends.
-fn collect(root: &Path, dir: &Path, into: &mut Vec<(String, Vec<u8>)>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let kind = std::fs::metadata(&path)?;
-        if kind.is_dir() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
-            collect(root, &path, into)?;
-            continue;
-        }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| std::io::Error::other("path escaped the checkout"))?
-            .to_string_lossy()
-            .into_owned();
-        into.push((relative, std::fs::read(&path)?));
-    }
-    Ok(())
+/// Every file under `root`, by its path relative to it, through the loader's contained walk: a
+/// link that resolves outside the checkout is refused and a link loop is an error, so a remote
+/// checkout can neither pull a host file into the workspace nor recurse without end (CC-08,
+/// T-5701).
+fn collect(root: &Path) -> Result<Vec<(String, Vec<u8>)>, RemoteError> {
+    crate::loader::walk_files(root)
+        .map_err(|error| RemoteError::Unavailable(error.to_string()))?
+        .into_iter()
+        .map(|entry| {
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| RemoteError::Unavailable("path escaped the checkout".to_owned()))?
+                .to_string_lossy()
+                .into_owned();
+            let body = std::fs::read(entry.path())
+                .map_err(|error| RemoteError::Unavailable(error.to_string()))?;
+            Ok((relative, body))
+        })
+        .collect()
 }
 
 /// Runs one tick and answers what it decided (MF-28, MF-34).
@@ -270,5 +262,49 @@ mod tests {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("jcctl-sync-ovzdusie-regional-")));
+    }
+
+    /// T-5701: a checkout is read through the contained walk. A link to a host file outside it
+    /// is refused, not copied into the workspace, and a link back to a parent is an error
+    /// instead of a walk without end.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_link_out_of_the_tree_or_into_a_loop_is_refused() {
+        use super::{Checkout, SyncOrigin, SyncRemote};
+        let base = std::env::temp_dir().join(format!(
+            "jcctl-sync-links-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|since| since.as_nanos())
+                .unwrap_or_default()
+        ));
+        let outside = base.join("outside");
+        let escape = base.join("escape");
+        let looped = base.join("looped");
+        for dir in [&outside, &escape, &looped] {
+            std::fs::create_dir_all(dir).expect("a scratch dir");
+        }
+        std::fs::write(outside.join("host-secret"), "not yours").expect("a host file");
+        std::fs::write(escape.join("a.yaml"), "kind: Space\n").expect("a manifest");
+        std::os::unix::fs::symlink(outside.join("host-secret"), escape.join("x.yaml"))
+            .expect("a link out");
+        std::fs::write(looped.join("a.yaml"), "kind: Space\n").expect("a manifest");
+        std::os::unix::fs::symlink("..", looped.join("loop")).expect("a loop");
+
+        let origin = SyncOrigin::default();
+        let into = base.join("into");
+        let escaped = Checkout { dir: &escape }.checkout(&origin, "r", &into);
+        assert!(escaped.is_err(), "a link out of the checkout is refused");
+        assert!(
+            !into.join("x.yaml").exists(),
+            "nothing of the host is written"
+        );
+        assert!(Checkout { dir: &escape }.revision(&origin).is_err());
+        assert!(
+            Checkout { dir: &looped }.revision(&origin).is_err(),
+            "a link loop is an error, not a walk without end"
+        );
+        std::fs::remove_dir_all(&base).expect("the scratch dir goes");
     }
 }

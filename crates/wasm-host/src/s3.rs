@@ -205,6 +205,50 @@ impl Bucket {
         key: &str,
         body: Option<(Vec<u8>, Option<String>)>,
     ) -> Result<(u16, Vec<u8>), String> {
+        let response = self.send(method, key, body).await?;
+        let status = response.status().as_u16();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| format!("the object store: {err}"))?;
+        Ok((status, body.to_vec()))
+    }
+
+    /// A signed GET of `key`, its body read only up to `max` bytes: a larger object answers
+    /// `None` before it is held whole in the shard's memory (T-5701).
+    pub async fn get_capped(
+        &self,
+        key: &str,
+        max: usize,
+    ) -> Result<Option<(u16, Vec<u8>)>, String> {
+        let mut response = self.send(reqwest::Method::GET, key, None).await?;
+        let status = response.status().as_u16();
+        if response
+            .content_length()
+            .is_some_and(|length| length > max as u64)
+        {
+            return Ok(None);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|err| format!("the object store: {err}"))?
+        {
+            if body.len().saturating_add(chunk.len()) > max {
+                return Ok(None);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(Some((status, body)))
+    }
+
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        key: &str,
+        body: Option<(Vec<u8>, Option<String>)>,
+    ) -> Result<reqwest::Response, String> {
         let path = self.path(key);
         let (bytes, content_type) = body.unwrap_or_default();
         let payload = if bytes.is_empty() {
@@ -239,16 +283,10 @@ impl Bucket {
         if !bytes.is_empty() {
             request = request.body(bytes);
         }
-        let response = request
+        request
             .send()
             .await
-            .map_err(|err| format!("the object store: {err}"))?;
-        let status = response.status().as_u16();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| format!("the object store: {err}"))?;
-        Ok((status, body.to_vec()))
+            .map_err(|err| format!("the object store: {err}"))
     }
 }
 
