@@ -10,6 +10,27 @@ use time::OffsetDateTime;
 /// The SHA-256 of an empty body, which a GET or DELETE signs.
 pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+/// The object store client: no redirect, and a connect and a read timeout (F-PLT3-017). A store
+/// that accepts and never answers held a component fetch, and the admission permit with it, for
+/// ever. No total timeout: an App's file upload may take as long as its bytes do while it moves.
+pub fn client() -> Result<reqwest::Client, reqwest::Error> {
+    client_within(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn client_within(
+    connect: std::time::Duration,
+    read: std::time::Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(connect)
+        .read_timeout(read)
+        .build()
+}
+
 /// One bucket on one endpoint, with the shard's own key.
 #[derive(Clone)]
 pub struct Bucket {
@@ -379,6 +400,29 @@ impl Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-PLT3-017: a store that accepts and never answers fails the read within its timeout.
+    #[tokio::test]
+    async fn a_store_that_never_answers_fails_within_the_read_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a listener");
+        let address = listener.local_addr().expect("an address");
+        let held = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("a connection");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let client = client_within(
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(300),
+        )
+        .expect("a client");
+        let started = std::time::Instant::now();
+        let outcome = client.get(format!("http://{address}/c")).send().await;
+        assert!(outcome.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        held.abort();
+    }
 
     /// AWS's own examples ("Signature Calculations for the Authorization Header", "Authenticating
     /// Requests: Using Query Parameters"), with their published signatures.

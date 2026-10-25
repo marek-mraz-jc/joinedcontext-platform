@@ -275,9 +275,10 @@ impl Limits {
 /// elsewhere in the manifest never turns them back into the defaults; a value that does not
 /// parse is the default, and the log says so.
 pub fn limits_of(repo: &Repository) -> Limits {
+    // The installation's Organization, not the first one sorted: a second Organization (a
+    // federated peer, a department) never sets this gateway's limits (F-PLT2-020).
     let spec = repo
-        .iter()
-        .find(|(id, _)| id.kind == "Organization")
+        .installation_organization()
         .map(|(_, loaded)| &loaded.manifest.spec);
     let mut limits = match spec.and_then(|spec| spec.get("limits")) {
         None => Limits::default(),

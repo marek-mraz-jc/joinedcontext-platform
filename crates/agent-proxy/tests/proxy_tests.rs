@@ -559,6 +559,7 @@ async fn a_model_call_carries_the_profiles_reasoning_effort_upstream() {
 
     let mut run = sample_run(false, "building");
     run.reasoning_effort = Some("medium".to_string());
+    run.model_name = "google/gemini-3.8-flash".to_string();
     let app = router(test_state_with_upstreams(
         run,
         "http://context-gateway:8080",

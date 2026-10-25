@@ -519,3 +519,24 @@ fn the_organizations_dcat_profiles_are_read_and_a_broken_list_serves_the_core_al
         assert!(offered.pick("dcat-ap").is_some(), "{listed:?}");
     }
 }
+
+/// F-PLT2-020: with a second Organization beside the installation's, the installation's
+/// settings apply, whichever sorts first.
+#[test]
+fn the_installations_organization_sets_the_limits_and_no_other() {
+    let org = temp_dir("two-organizations");
+    write(&org, "org.yaml", ORG);
+    write(
+        &org,
+        "organizations/aaa-peer.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  name: aaa-peer\n  \
+         namespace: org\nspec:\n  domain: peer.example.org\n  locales: [\"sk\"]\n  defaultLocale: sk\n  \
+         dcatProfiles: [dcat-ap-sk]\n",
+    );
+    let repo = jc_manifest::loader::Repository::load(&org).expect("the repository loads");
+    let offered = store::limits_of(&repo).dcat_profiles;
+    assert!(
+        offered.pick("dcat-ap-sk").is_none(),
+        "the peer's profiles are not the installation's"
+    );
+}
