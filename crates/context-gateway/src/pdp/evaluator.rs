@@ -492,17 +492,22 @@ pub fn id_patterns(policy: &PolicySpec) -> BTreeSet<String> {
 /// travel together in one parenthesized term, so no expression can ever pair one policy's
 /// filter with another policy's area.
 fn policy_filter(policy: &PolicySpec) -> Option<String> {
+    grant_filter(policy.q.as_deref(), policy.scope_q.as_deref())
+}
+
+/// One grant's `q` and `scopeQ` as one term, what [`policy_filter`] makes of a policy.
+pub(crate) fn grant_filter(q: Option<&str>, scope_q: Option<&str>) -> Option<String> {
     let parts: Vec<String> = [
         // A filter the broker's parser refuses grants nothing: dropping it would widen the
         // policy to everything its selectors reach (T-4479).
-        policy.q.as_deref().map(|filter| {
+        q.map(|filter| {
             if parses(filter) {
                 format!("({filter})")
             } else {
                 NOTHING.to_owned()
             }
         }),
-        policy.scope_q.as_deref().and_then(scope_folding::fold),
+        scope_q.and_then(scope_folding::fold),
     ]
     .into_iter()
     .flatten()

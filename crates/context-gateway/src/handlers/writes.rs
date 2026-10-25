@@ -253,55 +253,79 @@ impl HeldWrite<'_> {
             return Ok(found);
         }
         // The grant's filters narrow the read; the attributes and the time window would only
-        // hide the entity, which is all this read looks for.
+        // hide the entity, which is all this read looks for. One read per grant, so no grant's
+        // types pass on another grant's filter (F-PLT2-004, ADR 006).
         let mut probe = (*read).clone();
         probe.attrs.clear();
         probe.temporal_q = None;
         probe.temporal_windows.clear();
-        let narrowed = query::upstream(&[], &probe, &[]);
+        let probes = if probe.grants.is_empty() {
+            vec![probe]
+        } else {
+            crate::pdp::grants::per_grant(&probe)
+        };
         let urns: Vec<&String> = targets.keys().collect();
-        for chunk in urns.chunks(TARGETS_PER_READ) {
-            let ids = chunk
-                .iter()
-                .map(|urn| query::encode(urn))
-                .collect::<Vec<_>>()
-                .join(",");
-            let answer = conditional::retrieve(
-                &self.gateway.broker,
-                // Only which ids exist is asked (`pick=id`, CIM 009 4.21): a target with a
-                // polygon or a long history is megabytes, and a chunk of them outgrew the
-                // probe's cap and answered every write 500 (praha CityDistrict, T-2971).
-                &format!(
-                    "/ngsi-ld/v1/entities?id={ids}&pick=id&limit={}&{narrowed}",
-                    chunk.len()
-                ),
-                self.headers,
-            )
-            .await?;
-            if !(200..300).contains(&answer.status) {
-                tracing::error!(
-                    status = answer.status,
-                    "the broker refused the read of a write's relationship targets"
+        for probe in &probes {
+            let narrowed = query::upstream(&[], probe, &[]);
+            for chunk in urns.chunks(TARGETS_PER_READ) {
+                let ids = chunk
+                    .iter()
+                    .map(|urn| query::encode(urn))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let answer = conditional::retrieve(
+                    &self.gateway.broker,
+                    // Only which ids exist is asked (`pick=id`, CIM 009 4.21): a target with a
+                    // polygon or a long history is megabytes, and a chunk of them outgrew the
+                    // probe's cap and answered every write 500 (praha CityDistrict, T-2971).
+                    &format!(
+                        "/ngsi-ld/v1/entities?id={ids}&pick=id&limit={}&{narrowed}",
+                        chunk.len()
+                    ),
+                    self.headers,
+                )
+                .await?;
+                if !(200..300).contains(&answer.status) {
+                    tracing::error!(
+                        status = answer.status,
+                        "the broker refused the read of a write's relationship targets"
+                    );
+                    return Err(Box::new(ProblemDetails::new(
+                        502,
+                        "upstream-unavailable",
+                        "Broker Unavailable",
+                    )));
+                }
+                found.extend(
+                    answer
+                        .body
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|entity| entity.get("id").and_then(Value::as_str))
+                        .filter(|id| write_guard::check_granted_id(id, probe).is_ok())
+                        .map(str::to_owned),
                 );
-                return Err(Box::new(ProblemDetails::new(
-                    502,
-                    "upstream-unavailable",
-                    "Broker Unavailable",
-                )));
             }
-            found.extend(
-                answer
-                    .body
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entity| entity.get("id").and_then(Value::as_str))
-                    .filter(|id| write_guard::check_granted_id(id, &probe).is_ok())
-                    .map(str::to_owned),
-            );
         }
         Ok(found)
     }
+}
+
+/// The `q` that finds the entities whose `slot` names `object`. The object comes from the
+/// writer's payload, and a quote in it would close the string and add terms of its own, so an
+/// object holding `"` or `\`, which no URI does, is refused (F-PLT2-010).
+fn object_query(slot: &str, object: &str) -> Result<String, Box<ProblemDetails>> {
+    if object.is_empty() || object.contains(['"', '\\']) {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_field(slot)
+                .with_detail(format!(
+                    "the relationship `{slot}` names an object that is no URI: it holds a quote or a backslash"
+                )),
+        ));
+    }
+    Ok(format!("{slot}==\"{object}\""))
 }
 
 /// The entities of `class` whose stored end `slot` names `object`: the computed end's query
@@ -317,7 +341,7 @@ pub(crate) async fn storing(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Value>, Box<ProblemDetails>> {
-    let q = query::encode(&format!("{slot}==\"{object}\""));
+    let q = query::encode(&object_query(slot, object)?);
     let target = format!(
         "/ngsi-ld/v1/entities?type={}&q={q}&attrs={}&limit={limit}&offset={offset}",
         query::encode(class),
@@ -1225,9 +1249,12 @@ fn refuse_entity(
     }
     // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
     if let Some(hidden) = entity.as_object().and_then(|object| {
-        object
-            .keys()
-            .find(|key| endpoint.hidden_attributes.contains(*key))
+        object.keys().find(|key| {
+            endpoint
+                .hidden_attributes
+                .iter()
+                .any(|hidden| write_guard::names_attribute(key, hidden))
+        })
     }) {
         let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden.clone());
         tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
@@ -1377,5 +1404,24 @@ pub(crate) fn empty_space(operation: Operation) -> Option<Value> {
             "attributeList": [],
         })),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod object_query_tests {
+    use super::object_query;
+
+    /// F-PLT2-010: an object that would close the string of the `q` is refused, a URN passes.
+    #[test]
+    fn only_a_urn_reaches_the_query() {
+        assert_eq!(
+            object_query("refStation", "urn:ngsi-ld:Station:a")
+                .ok()
+                .as_deref(),
+            Some("refStation==\"urn:ngsi-ld:Station:a\"")
+        );
+        for object in ["urn:ngsi-ld:X:a\"|b==\"c", "urn:ngsi-ld:X:a\\", ""] {
+            assert!(object_query("refStation", object).is_err(), "{object}");
+        }
     }
 }
