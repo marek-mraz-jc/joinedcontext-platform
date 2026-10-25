@@ -10,7 +10,10 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::accounts_of;
-use context_gateway::mqtt::{brokers_of, decide, internal_router, Brokers, Connect, Pods};
+use context_gateway::mqtt::{
+    brokers_of, decide, internal_router, publish_check, Access, Brokers, Connect, Pods,
+    PUBLISH_CACHE_MS,
+};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use serde_json::{json, Value};
@@ -30,10 +33,15 @@ fn write(dir: &Path, rel: &str, body: &str) {
 }
 
 fn account(dir: &Path, project: &str, name: &str) {
+    account_until(dir, project, name, "");
+}
+
+/// An account whose one credential carries `expires` (an `expiresAt` line, or nothing).
+fn account_until(dir: &Path, project: &str, name: &str, expires: &str) {
     write(
         dir,
         &format!("projects/{project}/access/serviceaccounts/{name}.yaml"),
-        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"a camera\"\n  roles:\n    - role: space-writer\n      scope:\n        project: {project}\n  credentials:\n    - kind: oauth-client\n      name: default\n"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"a camera\"\n  roles:\n    - role: space-writer\n      scope:\n        project: {project}\n  credentials:\n    - kind: oauth-client\n      name: default\n{expires}"),
     );
 }
 
@@ -46,7 +54,20 @@ fn repository(test: &str) -> PathBuf {
     account(&dir, "ovzdusie", "cam-north");
     account(&dir, "ovzdusie", "cam-idle");
     account(&dir, "espoo", "cam-north");
-    for (name, accounts) in [("cameras", "[cam-north]"), ("meters", "[cam-idle]")] {
+    let soon = chrono::Utc::now() + chrono::Duration::seconds(100);
+    let gone = chrono::Utc::now() - chrono::Duration::seconds(5);
+    for (name, end) in [("cam-soon", soon), ("cam-gone", gone)] {
+        account_until(
+            &dir,
+            "ovzdusie",
+            name,
+            &format!("      expiresAt: \"{}\"\n", end.to_rfc3339()),
+        );
+    }
+    for (name, accounts) in [
+        ("cameras", "[cam-north, cam-soon, cam-gone]"),
+        ("meters", "[cam-idle]"),
+    ] {
         write(
             &dir,
             &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
@@ -164,8 +185,8 @@ fn runner(ipaddr: &str) -> Connect {
     }
 }
 
-/// PL-75: a camera's token for this broker gets its role's filters, bound to its client id by
-/// the broker, until the token expires.
+/// PL-75: a camera's token for this broker gets its role's subscriptions, bound to its client id
+/// by the broker, until the token expires; its publishes are checked one by one (T-5560).
 #[test]
 fn a_camera_with_a_token_for_this_broker_gets_its_roles_topics_until_exp() {
     let f = Fixture::new("allow");
@@ -177,9 +198,178 @@ fn a_camera_with_a_token_for_this_broker_gets_its_roles_topics_until_exp() {
     assert_eq!(
         answer["acl"],
         json!([
-            {"permission": "allow", "action": "publish", "topic": "cameras/${clientid}/#", "qos": [0, 1], "retain": false},
             {"permission": "allow", "action": "subscribe", "topic": "commands/${clientid}/+", "qos": [0, 1]}
         ])
+    );
+}
+
+/// T-5560: the verifier's leeway never reaches the broker: a token one second past `exp` is
+/// refused at CONNECT rather than admitted with an `expire_at` already gone.
+#[test]
+fn a_token_past_exp_is_refused_without_leeway() {
+    let f = Fixture::new("leeway");
+    let deny = json!({"result": "deny", "superuser": false});
+    for past in [-1, -30, -59] {
+        let token = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-cameras", past);
+        assert_eq!(
+            f.decide(Some(CAMERAS), &device("ovzdusie-cam-north", token)),
+            deny,
+            "{past} s"
+        );
+    }
+}
+
+/// T-5560: a credential's `expiresAt` ends the session even when the token lives longer, and an
+/// account whose credentials have all ended neither connects nor publishes.
+#[test]
+fn a_credential_expiry_caps_the_session() {
+    let f = Fixture::new("credential");
+    let token = f.token("ovzdusie-cam-soon", "mqtt-ovzdusie-cameras", 3600);
+    let answer = f.decide(Some(CAMERAS), &device("ovzdusie-cam-soon", token));
+    assert_eq!(answer["result"], "allow", "{answer}");
+    let expire_at = answer["expire_at"].as_i64().expect("an expiry");
+    assert!(
+        (common::in_seconds(90)..=common::in_seconds(100)).contains(&expire_at),
+        "{answer}"
+    );
+    let token = f.token("ovzdusie-cam-gone", "mqtt-ovzdusie-cameras", 3600);
+    assert_eq!(
+        f.decide(Some(CAMERAS), &device("ovzdusie-cam-gone", token)),
+        json!({"result": "deny", "superuser": false})
+    );
+    assert_eq!(
+        publish(
+            &f.brokers,
+            &f.accounts,
+            "ovzdusie-cam-gone",
+            "cameras/ovzdusie-cam-gone/frame"
+        ),
+        (false, "the account's credentials have expired")
+    );
+}
+
+fn publish(
+    brokers: &Brokers,
+    accounts: &context_gateway::auth::accounts::ServiceAccounts,
+    clientid: &str,
+    topic: &str,
+) -> (bool, &'static str) {
+    publish_check(
+        brokers,
+        accounts,
+        Some(CAMERAS),
+        &Access {
+            access: "2".into(),
+            clientid: clientid.into(),
+            username: clientid.into(),
+            topic: topic.into(),
+        },
+    )
+}
+
+/// T-5560: each publish is decided against the repository as it is now, so a camera whose role
+/// or account is removed stops publishing at its next check, not at its token's `exp`.
+#[test]
+fn a_publish_is_decided_by_the_repository_as_it_is_now() {
+    let f = Fixture::new("publish");
+    let own = "cameras/ovzdusie-cam-north/frame";
+    assert_eq!(
+        publish(&f.brokers, &f.accounts, "ovzdusie-cam-north", own),
+        (true, "a device's role")
+    );
+    assert_eq!(
+        publish(
+            &f.brokers,
+            &f.accounts,
+            "ovzdusie-cam-north",
+            "cameras/ovzdusie-cam-soon/frame"
+        ),
+        (false, "no role of the account covers the topic")
+    );
+    // Another broker's caller, a subscription, a tokenless name, a username that is not the
+    // client id and an account of another project are refused whatever the topic.
+    let check = |caller, access: &str, clientid: &str, username: &str| {
+        publish_check(
+            &f.brokers,
+            &f.accounts,
+            caller,
+            &Access {
+                access: access.into(),
+                clientid: clientid.into(),
+                username: username.into(),
+                topic: format!("cameras/{clientid}/frame"),
+            },
+        )
+        .0
+    };
+    assert!(check(
+        Some(CAMERAS),
+        "2",
+        "ovzdusie-cam-north",
+        "ovzdusie-cam-north"
+    ));
+    assert!(!check(
+        Some(METERS),
+        "2",
+        "ovzdusie-cam-north",
+        "ovzdusie-cam-north"
+    ));
+    assert!(!check(
+        None,
+        "2",
+        "ovzdusie-cam-north",
+        "ovzdusie-cam-north"
+    ));
+    assert!(!check(
+        Some(CAMERAS),
+        "1",
+        "ovzdusie-cam-north",
+        "ovzdusie-cam-north"
+    ));
+    assert!(!check(
+        Some(CAMERAS),
+        "2",
+        "pipeline-runner",
+        "pipeline-runner"
+    ));
+    assert!(!check(
+        Some(CAMERAS),
+        "2",
+        "ovzdusie-cam-north",
+        "pipeline-runner"
+    ));
+    assert!(!check(
+        Some(CAMERAS),
+        "2",
+        "espoo-cam-north",
+        "espoo-cam-north"
+    ));
+
+    // The role taken away, then the account deleted: the same publish is refused.
+    write(
+        &f.dir,
+        "projects/ovzdusie/mqttbrokers/cameras.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: cameras\n  namespace: ovzdusie\nspec:\n  mode: relay\n  roles:\n    - name: camera\n      serviceAccounts: [cam-soon]\n      publish: [\"cameras/${clientid}/#\"]\n",
+    );
+    let repo = jc_manifest::loader::Repository::load(&f.dir).expect("the repository loads");
+    assert_eq!(
+        publish(
+            &brokers_of(&repo),
+            &accounts_of(&repo),
+            "ovzdusie-cam-north",
+            own
+        ),
+        (false, "no role of the account covers the topic")
+    );
+    std::fs::remove_file(
+        f.dir
+            .join("projects/ovzdusie/access/serviceaccounts/cam-north.yaml"),
+    )
+    .expect("removed");
+    let repo = jc_manifest::loader::Repository::load(&f.dir).expect("the repository loads");
+    assert_eq!(
+        publish(&f.brokers, &accounts_of(&repo), "ovzdusie-cam-north", own),
+        (false, "the client is no ServiceAccount")
     );
 }
 
@@ -414,6 +604,58 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
         StatusCode::OK,
         "the public surface serves no CONNECT check"
     );
+}
+
+/// T-5560: the publish check answers on the internal router with the broker's cache time on an
+/// allow and none on a deny.
+#[tokio::test]
+async fn the_publish_check_answers_on_the_internal_router_with_its_cache_time() {
+    let f = Fixture::new("acl-router");
+    let gateway = Gateway::new(
+        Broker::new("http://broker.invalid:1026"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
+    gateway.replace_brokers(f.brokers.clone());
+    let gateway = Arc::new(gateway);
+    for (topic, result, cache) in [
+        (
+            "cameras/ovzdusie-cam-north/frame",
+            "allow",
+            Some(PUBLISH_CACHE_MS.to_string()),
+        ),
+        ("cameras/ovzdusie-cam-soon/frame", "deny", None),
+    ] {
+        let body = json!({
+            "access": "2", "clientid": "ovzdusie-cam-north",
+            "username": "ovzdusie-cam-north", "topic": topic
+        })
+        .to_string();
+        let request = Request::post("/internal/mqtt/acl")
+            .header("content-type", "application/json")
+            .header("l5d-client-id", CAMERAS)
+            .body(Body::from(body))
+            .expect("a request");
+        let response = internal_router(Arc::clone(&gateway), None, None, None)
+            .oneshot(request)
+            .await
+            .expect("answers");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-cache")
+                .map(|v| v.to_str().expect("ascii").to_owned()),
+            cache,
+            "{topic}"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("a body");
+        let answer: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(answer, json!({"result": result}), "{topic}");
+    }
 }
 
 /// T-4004: on the internal router, the tokenless runner is admitted from what the configured
