@@ -582,6 +582,31 @@ async fn run_limits(
     Ok(Caller::Run(run))
 }
 
+/// Who calls: the assistant or an App (each at the completion endpoints alone, refused before the
+/// realm is asked about its token, AG-111), else a run, authenticated first so a refused path
+/// tells nobody without a ticket anything.
+async fn caller_of(
+    state: &ProxyState,
+    headers: &HeaderMap,
+    completion: bool,
+) -> Result<Caller, Refusal> {
+    let door = headers.contains_key(ASSISTANT_DEPLOYMENT) || headers.contains_key(APP);
+    if door && !completion {
+        return Err(Box::new(
+            jc_core::ProblemDetails::forbidden()
+                .with_detail("only chat/messages completion endpoints permitted")
+                .into_response(),
+        ));
+    }
+    if headers.contains_key(ASSISTANT_DEPLOYMENT) {
+        assistant_caller(state, headers).await
+    } else if headers.contains_key(APP) {
+        app_caller(state, headers).await
+    } else {
+        run_caller_or_path(state, headers, completion).await
+    }
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
@@ -594,28 +619,7 @@ pub async fn handler(
         rest.as_str(),
         "v1/chat/completions" | "v1/messages" | "chat/completions" | "messages"
     );
-    let caller = if headers.contains_key(ASSISTANT_DEPLOYMENT) {
-        // The assistant's door is the completion endpoints alone, refused before the realm is
-        // asked about its token (AG-111).
-        if !completion {
-            return jc_core::ProblemDetails::forbidden()
-                .with_detail("only chat/messages completion endpoints permitted")
-                .into_response();
-        }
-        assistant_caller(&state, &headers).await
-    } else if headers.contains_key(APP) {
-        // An App's door is the completion endpoints alone, refused before the realm is asked.
-        if !completion {
-            return jc_core::ProblemDetails::forbidden()
-                .with_detail("only chat/messages completion endpoints permitted")
-                .into_response();
-        }
-        app_caller(&state, &headers).await
-    } else {
-        // A run is authenticated first: a refused path tells nobody without a ticket anything.
-        run_caller_or_path(&state, &headers, completion).await
-    };
-    let caller = match caller {
+    let caller = match caller_of(&state, &headers, completion).await {
         Ok(caller) => caller,
         Err(refusal) => return *refusal,
     };
