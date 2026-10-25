@@ -7,14 +7,14 @@ repository.workspace = true
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 serde_norway = "0.9"
 schemars = { version = "0.8", features = ["chrono"] }
-thiserror = "2"
-regex = "1"
+thiserror.workspace = true
+regex.workspace = true
 # The broker's own `q`, `scopeQ` and geo-query parser: an output filter is refused at save exactly
 # where the broker would refuse it at serve (API/11 EP-157, T-5217); the gateway and the Portal lock it.
-antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-ql.workspace = true
 sha2 = "0.10"
 # Folds diacritics out of the NGSI-LD catalogue's searchText (T-4500); already in the graph.
 unicode-normalization = "0.1.25"
@@ -32,18 +32,18 @@ tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter
 # `auth` (T-4605): the realm's token verifier and its JWKS refresh, the gateway's and the
 # functions runtime's; the versions the gateway already locks.
 arc-swap = { version = "1", optional = true }
-jsonwebtoken = { version = "9", optional = true }
+jsonwebtoken = { workspace = true, optional = true }
 hyper-util = { version = "0.1", optional = true, features = ["client-legacy", "http1", "tokio"] }
 tokio = { version = "1", optional = true, features = ["time"] }
 # `outbound` (T-4776): the guarded client for URLs from outside the installation; the version and
 # TLS stack every reqwest of the workspace already locks.
-reqwest = { version = "0.12", optional = true, default-features = false }
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 
 [build-dependencies]
-serde_json = "1"
+serde_json.workspace = true
 
 [features]
 default = []

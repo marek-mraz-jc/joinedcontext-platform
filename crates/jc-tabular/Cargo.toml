@@ -8,5 +8,5 @@ description = "NGSI-LD entities as one flat CSV table, the gateway's file.csv (E
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
-serde_json = "1"
-thiserror = "2"
+serde_json.workspace = true
+thiserror.workspace = true

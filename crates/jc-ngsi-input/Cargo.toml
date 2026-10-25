@@ -9,4 +9,4 @@ description = "What an NGSI-LD write must carry before it reaches the broker: th
 [dependencies]
 http = "1"
 jc-core = { path = "../jc-core", version = "0.1.0" }
-serde_json = "1"
+serde_json.workspace = true

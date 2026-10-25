@@ -8,7 +8,7 @@ description = "The DCAT-AP record of an Endpoint, with national profiles behind 
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
-serde_json = "1"
+serde_json.workspace = true
 
 [features]
 default = []

@@ -8,4 +8,4 @@ description = "The relationship rules of a space's model, decided before a write
 
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0" }
-serde_json = "1"
+serde_json.workspace = true

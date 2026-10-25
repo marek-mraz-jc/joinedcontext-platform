@@ -12,7 +12,7 @@ aes-gcm = "0.10"
 age = { version = "0.12", default-features = false, features = ["armor"] }
 # A seed entity is checked offline the way the broker checks it on create: NGSI-LD expansion with
 # the pinned core @context (T-3913). The same tag as context-gateway's, so one copy builds.
-antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-jsonld.workspace = true
 base64 = "0.22"
 # The export index stamps when it was taken; jc-core already carries the same clock.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -24,14 +24,14 @@ minijinja = { version = "2", default-features = false, features = ["builtins", "
 # own plaintext client (`model::http`) does not speak. `ring`, as the gateway's TLS stack
 # already links it, and the platform's root store rather than a bundled one: a withdrawn
 # root then leaves with the next base image, not with a crate release.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+reqwest = { workspace = true, features = ["blocking", "json", "rustls-tls-native-roots"] }
 # Escaping a domain into an `idPattern` the same way jc-core's `Urn::id_pattern_prefix` does.
-regex = "1"
+regex.workspace = true
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 serde_norway = "0.9"
 sha2 = "0.10"
-thiserror = "2"
+thiserror.workspace = true
 walkdir = "2"
 zeroize = "1"
 

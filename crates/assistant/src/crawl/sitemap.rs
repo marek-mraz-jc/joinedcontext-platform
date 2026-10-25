@@ -43,15 +43,15 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn open(&mut self, name: &str) {
+    fn open(&mut self, name: &[u8]) {
         match name {
-            "url" => {
+            b"url" => {
                 self.inside_url = true;
                 self.loc.clear();
                 self.lastmod.clear();
             }
-            "sitemap" => self.inside_sitemap = true,
-            "loc" | "lastmod" => {
+            b"sitemap" => self.inside_sitemap = true,
+            b"loc" | b"lastmod" => {
                 self.reading = true;
                 self.text.clear();
             }
@@ -59,10 +59,10 @@ impl Cursor {
         }
     }
 
-    fn close(&mut self, name: &str, into: &mut ParsedSitemap) {
+    fn close(&mut self, name: &[u8], into: &mut ParsedSitemap) {
         let text = std::mem::take(&mut self.text).trim().to_string();
         match name {
-            "url" => {
+            b"url" => {
                 self.inside_url = false;
                 if !self.loc.is_empty() && !self.lastmod.is_empty() {
                     into.lastmod.insert(
@@ -71,12 +71,12 @@ impl Cursor {
                     );
                 }
             }
-            "sitemap" => self.inside_sitemap = false,
-            "lastmod" => {
+            b"sitemap" => self.inside_sitemap = false,
+            b"lastmod" => {
                 self.reading = false;
                 self.lastmod = text;
             }
-            "loc" => {
+            b"loc" => {
                 self.reading = false;
                 if text.is_empty() {
                     return;
@@ -104,12 +104,19 @@ pub fn parse_sitemap_xml(xml: &str) -> ParsedSitemap {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => at.open(e.local_name().as_ref()),
-            Ok(Event::Text(ref e)) if at.reading => at.text.push_str(&e.xml10_content()),
-            // quick-xml 0.42 reports `&amp;` and the other references as events of their own;
+            Ok(Event::Text(ref e)) if at.reading => {
+                if let Ok(text) = e.xml10_content() {
+                    at.text.push_str(&text);
+                }
+            }
+            // quick-xml reports `&amp;` and the other references as events of their own;
             // a sitemap URL with a query string is full of them.
             Ok(Event::GeneralRef(ref e)) if at.reading => {
-                if let Ok(text) = quick_xml::escape::unescape(&format!("&{};", e.as_ref() as &str))
-                {
+                if let Some(text) = e.decode().ok().and_then(|name| {
+                    quick_xml::escape::unescape(&format!("&{name};"))
+                        .ok()
+                        .map(|text| text.into_owned())
+                }) {
                     at.text.push_str(&text);
                 }
             }

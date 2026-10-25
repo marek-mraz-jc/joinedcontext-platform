@@ -8,7 +8,19 @@ license = "EUPL-1.2"
 repository = "https://github.com/marek-mraz-jc/joinedcontext-platform"
 
 [workspace.dependencies]
-# pinned per crate when the first code lands; see docs_new/Architecture/14-components.md
+# One line per crate several members share, so a bump moves every member at once (the ngsild tag
+# above all: two tags link two ngsild-ql). Members add their own `features`; reqwest stays without
+# its default TLS stack here and each member names the one it needs.
+antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+base64 = "0.22"
+jsonwebtoken = "9"
+regex = "1"
+reqwest = { version = "0.12", default-features = false }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
 
 # ponytail: line tables only, no full debuginfo — several agents compile on one machine
 [profile.dev]
