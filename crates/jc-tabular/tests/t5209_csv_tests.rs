@@ -1,7 +1,10 @@
 //! T-5209: formula injection, stable columns, BOM and delimiter, repeated rows, attribute kinds.
 
-use jc_tabular::{csv, humanize, table, Dialect, Limits, Slot, Table};
+mod support;
+
+use jc_tabular::{csv, humanize, Dialect, Limits, Slot, Table};
 use serde_json::{json, Value};
+use support::table;
 
 fn text_of(table: &Table, dialect: Dialect) -> String {
     csv(table, &Limits::default(), dialect).expect("within the limits")

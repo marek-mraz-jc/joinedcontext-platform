@@ -150,20 +150,6 @@ impl Slot {
     }
 }
 
-/// The table of one broker answer, refused when it holds more rows than allowed (EP-44).
-///
-/// `entities` is what the broker returned and the projection narrowed: an array, a single
-/// entity, or nothing at all. An empty answer is an empty table with no columns, which is
-/// a header-only CSV: nothing to show is not an error.
-pub fn table(entities: &Value, limits: &Limits) -> Result<Table, TooLarge> {
-    if entities_of(entities).len() as u64 > u64::from(limits.max_rows) {
-        return Err(TooLarge);
-    }
-    let mut table = Table::default();
-    table.append(entities);
-    Ok(table)
-}
-
 /// The entities of an answer: an array, a single entity, or nothing at all.
 fn entities_of(entities: &Value) -> Vec<&Value> {
     match entities {
@@ -174,7 +160,7 @@ fn entities_of(entities: &Value) -> Vec<&Value> {
 }
 
 impl Table {
-    /// Adds the rows of `entities` (as [`table`] reads them), widening every row for a new column.
+    /// Adds the rows of `entities` (an array, a single entity, or nothing), widening every row for a new column.
     /// A download appends each page and drops it: its parsed entities, about fifteen times their
     /// JSON, held whole put the gateway past its 1 Gi limit (T-4782).
     pub fn append(&mut self, entities: &Value) {
