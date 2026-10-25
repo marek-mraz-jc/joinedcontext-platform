@@ -892,18 +892,24 @@ mod tests {
             .set_body_json(json!({"access_token": "tok-123", "expires_in": 300}))
     }
 
-    /// A free port nobody listens on yet.
-    fn a_free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|l| l.local_addr())
-            .expect("a port")
-            .port()
+    /// A port held by a bound socket that does not listen yet: a connect is refused, and no
+    /// parallel test's mock server can be given the port in the meantime.
+    fn a_closed_port() -> (tokio::net::TcpSocket, u16) {
+        let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
+        socket
+            .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("a port");
+        let port = socket.local_addr().expect("the port").port();
+        (socket, port)
     }
 
-    /// A mock server that starts listening on `port` 150 ms from now, inside a retry's wait.
-    async fn listening_soon(port: u16) -> wiremock::MockServer {
+    /// A mock server that starts listening on `socket` 150 ms from now, inside a retry's wait.
+    async fn listening_soon(socket: tokio::net::TcpSocket) -> wiremock::MockServer {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the port");
+        let listener = socket
+            .listen(1024)
+            .and_then(|l| l.into_std())
+            .expect("the port");
         wiremock::MockServer::builder()
             .listener(listener)
             .start()
@@ -915,10 +921,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_token_request_whose_send_fails_once_is_asked_again() {
         use wiremock::{matchers::method, Mock};
-        let port = a_free_port();
+        let (socket, port) = a_closed_port();
         let model = a_model(&format!("http://127.0.0.1:{port}"), "http://127.0.0.1:9");
         let realm = tokio::spawn(async move {
-            let realm = listening_soon(port).await;
+            let realm = listening_soon(socket).await;
             Mock::given(method("POST"))
                 .respond_with(token_answer())
                 .mount(&realm)
@@ -1004,10 +1010,10 @@ mod tests {
             .mount(&realm)
             .await;
         // The proxy comes up during the retry's wait.
-        let port = a_free_port();
+        let (socket, port) = a_closed_port();
         let model = a_model(&realm.uri(), &format!("http://127.0.0.1:{port}"));
         let proxy = tokio::spawn(async move {
-            let proxy = listening_soon(port).await;
+            let proxy = listening_soon(socket).await;
             Mock::given(method("POST"))
                 .and(path("/v1/llm/chat/completions"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
