@@ -242,3 +242,22 @@ async fn an_undecided_answer_names_no_decision_time() {
     assert_eq!(duration(&timing, "pdp"), 0.0, "{timing}");
     assert_eq!(duration(&timing, "broker"), 0.0, "{timing}");
 }
+
+/// A slug nobody serves is labelled "-": a scanner guessing paths, without a token, mints no
+/// series of its own (T-5701).
+#[tokio::test]
+async fn a_slug_the_gateway_does_not_serve_mints_no_series() {
+    for guess in 0..50 {
+        call(&format!(
+            "/api/endpoint/guess-{guess}-zz/ngsi-ld/v1/entities"
+        ))
+        .await;
+        call(&format!("/cs/guess-space-{guess}/ngsi-ld/v1/entities")).await;
+    }
+    let (_, _, body) = call("/metrics").await;
+    assert!(
+        !body.contains("guess-"),
+        "an unknown slug became a label:\n{body}"
+    );
+    assert!(body.contains("endpoint=\"-\""), "{body}");
+}
