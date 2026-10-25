@@ -28,6 +28,10 @@ pub struct Account {
     /// Whether a person's token its client exchanged is decided as that person (ADR-N-038,
     /// AG-95).
     pub delegates: bool,
+    /// When the account's last credential ends: the latest `expiresAt` of its credentials, or
+    /// `None` while one of them has none (PF-36). A derived account has no credential of its own
+    /// and never ends here.
+    pub credentials_end: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// One role and where it applies.
@@ -131,6 +135,18 @@ impl ServiceAccounts {
     }
 }
 
+/// The latest `expiresAt` of `credentials`, `None` when one never expires.
+fn credentials_end(
+    credentials: &[jc_core::kinds::service_account::Credential],
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    credentials
+        .iter()
+        .map(|credential| credential.expires_at)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()
+}
+
 /// Builds the table from a loaded repository.
 ///
 /// The hyphen that joins project and name is also a character of both, so two accounts can derive
@@ -183,6 +199,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                     .collect(),
                 delegates: spec.delegation
                     == Some(jc_core::kinds::service_account::Delegation::TokenExchange),
+                credentials_end: credentials_end(&spec.credentials),
             },
         );
     }
@@ -219,6 +236,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                 project,
                 roles,
                 delegates: false,
+                credentials_end: None,
             },
         );
     }
@@ -242,6 +260,7 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
                 project,
                 roles: Vec::new(),
                 delegates: false,
+                credentials_end: None,
             },
         );
     }
