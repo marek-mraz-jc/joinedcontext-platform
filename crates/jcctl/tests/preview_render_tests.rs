@@ -138,12 +138,12 @@ fn a_preview_endpoint_answers_on_a_minted_slug_of_its_own() {
     assert_ne!(slug, origin);
     assert_eq!(
         slug,
-        jcctl::loader::preview_slug("ws-demo-", origin),
+        jcctl::loader::preview_slug_salted("ws-demo-", "", origin),
         "the same on every render"
     );
     assert_ne!(
         slug,
-        jcctl::loader::preview_slug("ws-other-", origin),
+        jcctl::loader::preview_slug_salted("ws-other-", "", origin),
         "one per workspace"
     );
     jc_core::kinds::EndpointSlug::new(&slug).expect("opaque base32 like every slug (EP-02)");
