@@ -11,7 +11,6 @@ use crate::handlers::respond::broker_speaks_json;
 use crate::handlers::schema;
 use crate::handlers::schema_routes::revalidated_text;
 use crate::middleware::response::RESULTS_RESTRICTED;
-use crate::translators::tabular;
 use crate::{middleware::tenancy, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -21,6 +20,7 @@ use axum::routing::get;
 use axum::Router;
 use jc_core::kinds::Representation;
 use jc_core::ProblemDetails;
+use jc_tabular as tabular;
 use std::sync::Arc;
 
 /// `file.csv`: the whole answer as one flat table (EP-08, EP-44, EP-45).

@@ -17,8 +17,12 @@
 //! keeps the header; the same answer gives the same bytes, which is what the download's `ETag`
 //! (EP-43) relies on. A text cell a spreadsheet would run as a formula is made inert ([`csv`]).
 //!
-//! The gateway's own `translators/tabular.rs` re-exports this crate: format code lives outside
-//! the policy edge (ADR-N-051), as the relationship rules do in `jc-relationships` (T-4771).
+//! A download reads the broker one page at a time into a [`Collector`] (T-5507). The gateway
+//! imports this crate: format code lives outside the policy edge (ADR-N-051), as the relationship
+//! rules do in `jc-relationships` (T-4771).
+
+mod collector;
+pub use collector::{page_entities, BadWindow, Collect, Collector, Window};
 
 use serde_json::{Map, Value};
 use std::cmp::Ordering;

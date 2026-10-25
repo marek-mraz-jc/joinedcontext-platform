@@ -38,7 +38,6 @@ pub use jc_relationships as relationships;
 pub mod resolver;
 pub mod store;
 pub mod telemetry;
-pub mod translators;
 pub use jc_ngsi_input::units;
 pub mod usage;
 pub mod view_mapping;

@@ -8,7 +8,7 @@ The only way into context data (R1, ADR-N-003): an axum service with an in-proce
 - `app.rs`: the router and the NGSI-LD pipeline.
 - `pdp/`: the verdicts.
 - `auth/`: tokens and ServiceAccounts.
-- `handlers/`, `translators/`: the other representations.
+- `handlers/`: the other representations; their formats live in `jc-tabular` (ADR-N-051).
 - `mcp/`: the data MCP.
 - `store.rs`: the endpoint table, loaded from the configuration repository.
 
