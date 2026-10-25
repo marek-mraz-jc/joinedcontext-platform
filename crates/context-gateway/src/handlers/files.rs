@@ -4,15 +4,17 @@
 //! endpoint does not serve, and the data leaves through the APIs.
 
 use crate::app::Gateway;
-use crate::auth::subject::admit;
+use crate::auth::subject::{admit, Subject};
+use crate::handlers::download_cache::Key;
 use crate::handlers::reads::paged_entities;
 use crate::handlers::reads::too_large;
 use crate::handlers::respond::broker_speaks_json;
 use crate::handlers::schema;
 use crate::handlers::schema_routes::revalidated_text;
 use crate::middleware::response::RESULTS_RESTRICTED;
+use crate::resolver::Endpoint;
 use crate::{middleware::tenancy, query};
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderValue, Response};
 use axum::response::IntoResponse;
@@ -40,23 +42,15 @@ pub(crate) async fn file_csv(
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
-
-    // Admitted first, so a refused caller learns nothing from a 503 (T-4782).
-    let Some(_slot) = gateway.in_flight.download() else {
-        return crate::middleware::in_flight::busy(
-            "the gateway builds as many downloads as it may at once",
-        );
-    };
     // Normalized NGSI-LD whatever the caller asked, so `options` cannot rename columns (T-5209).
     let params: Vec<(String, String)> = query::parse(request.uri().query().unwrap_or_default())
         .into_iter()
         .filter(|(name, _)| name != "options" && name != "format")
         .collect();
-    let human = query::first(&params, "humanHeaders") == Some("true");
     let dialect = match tabular::Dialect::of(
         query::first(&params, "delimiter"),
         query::first(&params, "bom"),
-        human,
+        query::first(&params, "humanHeaders") == Some("true"),
     ) {
         Ok(dialect) => dialect,
         Err(bad) => {
@@ -64,35 +58,22 @@ pub(crate) async fn file_csv(
             return problem.with_detail(bad.to_string()).into_response();
         }
     };
-    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
-    // The table is built page by page as the broker answers (T-4782).
-    let (mut table, restricted) = match paged_entities(
+    let key = Key::of(&endpoint, &subject, &request);
+    let build = build(
         &gateway,
         &endpoint,
         &subject,
-        (&params, &endpoint.slug),
+        &params,
         &mut request,
-        &limits,
-    )
-    .await
-    {
-        Ok(answer) => answer,
+        dialect,
+    );
+    // An anonymous answer is built once for every caller asking within FRESH_FOR (T-5629).
+    let (bytes, restricted) = match gateway.downloads.get_or_build(key, build).await {
+        Ok(built) => built,
         Err(problem) => return *problem,
     };
-    let types: Vec<String> = query::first(&params, "type")
-        .map(|types| types.split(',').map(str::to_owned).collect())
-        .unwrap_or_default();
-    let visible = schema::visible(&subject, &endpoint, crate::pdp::now());
-    table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
-    if human {
-        tabular::humanize(&mut table);
-    }
-    let bytes = match tabular::csv(&table, &limits, dialect) {
-        Ok(text) => text.into_bytes(),
-        Err(_) => return too_large(),
-    };
     // A strong ETag over the bytes and a 304 when they still match (EP-43, T-5209).
-    let mut response = revalidated_text(bytes, tabular::CSV_MEDIA_TYPE, request.headers());
+    let mut response = revalidated_text(bytes.to_vec(), tabular::CSV_MEDIA_TYPE, request.headers());
     let headers = response.headers_mut();
     // The slug is base32 and the extension a literal, so the filename needs no quoting beyond
     // the quotes themselves (EP-43).
@@ -105,6 +86,45 @@ pub(crate) async fn file_csv(
         headers.insert(RESULTS_RESTRICTED, HeaderValue::from_static("true"));
     }
     response
+}
+
+/// The file `file_csv` answers with, in one of the bounded build slots (T-4782), and whether
+/// the view narrowed it.
+async fn build(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    params: &[(String, String)],
+    request: &mut Request,
+    dialect: tabular::Dialect,
+) -> Result<(Bytes, bool), Box<Response<Body>>> {
+    // Admitted first, so a refused caller learns nothing from a 503 (T-4782).
+    let Some(_slot) = gateway.in_flight.download() else {
+        return Err(Box::new(crate::middleware::in_flight::busy(
+            "the gateway builds as many downloads as it may at once",
+        )));
+    };
+    let limits = tabular::Limits::of(endpoint.file_limits.as_ref());
+    // The table is built page by page as the broker answers (T-4782).
+    let (mut table, restricted) = paged_entities(
+        gateway,
+        endpoint,
+        subject,
+        (params, &endpoint.slug),
+        request,
+        &limits,
+    )
+    .await?;
+    let types: Vec<String> = query::first(params, "type")
+        .map(|types| types.split(',').map(str::to_owned).collect())
+        .unwrap_or_default();
+    let visible = schema::visible(subject, endpoint, crate::pdp::now());
+    table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
+    if query::first(params, "humanHeaders") == Some("true") {
+        tabular::humanize(&mut table);
+    }
+    let text = tabular::csv(&table, &limits, dialect).map_err(|_| Box::new(too_large()))?;
+    Ok((Bytes::from(text), restricted))
 }
 
 /// This surface's routes; `app::router` merges them under its guards.

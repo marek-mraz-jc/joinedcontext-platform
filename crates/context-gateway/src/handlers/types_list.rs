@@ -84,6 +84,14 @@ pub(super) async fn dataset_types(
     let mut headers = headers.clone();
     tenancy::as_gateway(&mut headers);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    // The broker took 3-5 s for this list on dev's helsinki space (T-5629): held for a while.
+    let space = headers
+        .get(tenancy::TENANT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if let Some(held) = space.as_deref().and_then(|s| gateway.held_types.get(s)) {
+        return Ok(held.to_vec());
+    }
     let answer = gateway
         .broker
         .send(
@@ -109,7 +117,7 @@ pub(super) async fn dataset_types(
     let list: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
 
-    Ok(list["typeList"]
+    let types: Vec<String> = list["typeList"]
         .as_array()
         .map(|types| {
             types
@@ -117,5 +125,9 @@ pub(super) async fn dataset_types(
                 .filter_map(|entry| entry.as_str().map(str::to_owned))
                 .collect()
         })
-        .unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(space) = &space {
+        gateway.held_types.put(space, types.clone());
+    }
+    Ok(types)
 }
