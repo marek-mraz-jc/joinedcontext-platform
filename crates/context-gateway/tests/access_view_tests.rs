@@ -915,3 +915,123 @@ async fn an_evaluation_over_its_size_caps_never_reaches_the_broker() {
         assert!(hops.lock().expect("the hop log").is_empty(), "{path}");
     }
 }
+
+/// An Endpoint of the model `air` with one class, `AirQualityObserved`, of `count` attributes
+/// `a0`, `a1`, … beside `pm10` and the hidden `stationOwner`.
+fn modelled(count: usize) -> Endpoint {
+    use context_gateway::resolver::DeclaredTypes;
+    use jc_manifest::model_schema::ModelSchema;
+    let mut properties = serde_json::Map::new();
+    for name in ["id", "pm10", "stationOwner"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain((0..count).map(|i| format!("a{i}")))
+    {
+        properties.insert(name, json!({ "type": "string" }));
+    }
+    let model = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": { "AirQualityObserved": { "type": "object", "properties": properties } }
+    });
+    let mut modelled = endpoint();
+    modelled.hidden_attributes = ["stationOwner".to_owned()].into();
+    modelled.declared_types = Some(Arc::new(DeclaredTypes {
+        model: "air".into(),
+        classes: ["AirQualityObserved".to_owned()].into(),
+        units: Default::default(),
+        relationships: Default::default(),
+        quality: Vec::new(),
+        schema: Some(Arc::new(ModelSchema::compile(
+            "air",
+            "1.0.0",
+            &model,
+            &["AirQualityObserved".to_owned()],
+            true,
+        ))),
+    }));
+    modelled
+}
+
+fn attributes(query: &str) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/api/endpoint/{SLUG}/access/attributes{query}"))
+        .body(Body::empty())
+        .expect("a request")
+}
+
+/// T-5527: `access/attributes` asks the view once with the served slots of the type (a hidden
+/// one left out) under the pinned caller, a forged one stripped, and passes the table on.
+#[tokio::test]
+async fn the_attribute_table_is_one_ask_of_the_view_with_the_served_slots() {
+    let table = json!({"type": "AirQualityObserved", "attributes": [
+        {"name": "pm10", "read": true, "write": false, "delete": false, "reason": "grant"}]});
+    let (upstream, hops) = json_broker(StatusCode::OK, table.clone()).await;
+    let mut request = attributes("?type=AirQualityObserved");
+    request
+        .headers_mut()
+        .insert("x-jc-roles", "admin".parse().expect("a header value"));
+    let (status, _, body) = call(app(upstream, modelled(1)), request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(serde_json::from_str::<Value>(&body).expect("JSON"), table);
+    let hop = one_hop(&hops);
+    assert_eq!(hop.method, Method::POST);
+    assert_eq!(hop.path, format!("/x/views/{SLUG}/access/attributes"));
+    assert_eq!(hop.headers["x-jc-roles"], "public");
+    assert_eq!(hop.headers["ngsild-tenant"], SPACE);
+    let asked: Value = serde_json::from_slice(&hop.body).expect("a JSON ask");
+    assert_eq!(
+        asked,
+        json!({"type": "AirQualityObserved", "attributes": ["a0", "pm10"]})
+    );
+}
+
+/// T-5527: a type the model lacks, no type, an Endpoint without a model and a class of more than
+/// 200 served attributes are a 400 naming the field, and nobody is asked; a members-only Endpoint
+/// answers an anonymous caller 401 first.
+#[tokio::test]
+async fn an_attribute_table_the_gateway_cannot_answer_never_reaches_the_broker() {
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({})).await;
+    for (endpoint, query, detail) in [
+        (modelled(1), "", "type is required"),
+        (modelled(1), "?type=", "type is required"),
+        (modelled(1), "?type=Nosuch", "not a class"),
+        (endpoint(), "?type=AirQualityObserved", "not a class"),
+        (
+            modelled(200),
+            "?type=AirQualityObserved",
+            "201 served attributes",
+        ),
+    ] {
+        let (status, _, body) = call(app(upstream.clone(), endpoint), attributes(query)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        assert!(body.contains(detail), "{query}: {body}");
+    }
+    let mut members = modelled(1);
+    members.audience = Audience::Organization;
+    let (status, _, _) = call(
+        app(upstream, members),
+        attributes("?type=AirQualityObserved"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
+/// T-5527: the table pays the rate limit one request per 100 decisions, three per attribute: 101
+/// attributes are 303 decisions, four requests.
+#[tokio::test]
+async fn the_attribute_table_pays_the_rate_limit_per_hundred_decisions() {
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({"attributes": []})).await;
+    let mut limited = modelled(100);
+    limited.rate_limit = Some(RateLimits {
+        requests_per_minute: 1,
+        burst: Some(6),
+    });
+    let app = app(upstream, limited);
+    let (status, headers, body) = call(app.clone(), attributes("?type=AirQualityObserved")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(headers["ratelimit-remaining"], "2");
+    let (status, _, _) = call(app, attributes("?type=AirQualityObserved")).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(hops.lock().expect("the hop log").len(), 1);
+}

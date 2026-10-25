@@ -137,6 +137,9 @@ enum ViewCall {
     /// `POST access/explain` with this AuthZEN request: the decision with the policy that made
     /// it, for the simulator alone (EP-103, T-3881).
     Explain(Bytes),
+    /// `POST access/attributes` with `{type, attributes}`: the caller's decisions per Attribute
+    /// (T-5527).
+    Attributes(Bytes),
 }
 
 /// The view's answer as JSON, or the answer the caller gets instead: the broker's own refusal
@@ -167,6 +170,12 @@ async fn from_view(
         ViewCall::Explain(bytes) => (
             Method::POST,
             format!("/x/views/{}/access/explain", view_of(endpoint)),
+            "application/json",
+            Body::from(bytes),
+        ),
+        ViewCall::Attributes(bytes) => (
+            Method::POST,
+            format!("/x/views/{}/access/attributes", view_of(endpoint)),
             "application/json",
             Body::from(bytes),
         ),
@@ -391,6 +400,88 @@ pub(crate) async fn access_evaluations(
     answer
 }
 
+/// The most Attributes `access/attributes` answers for one type: what the view reads in one ask.
+pub(crate) const MAX_ATTRIBUTES: usize = 200;
+
+/// Decisions one rate-limit request pays for in `access/attributes` (three per Attribute).
+const DECISIONS_PER_CHARGE: usize = 100;
+
+/// `type` of `GET access/attributes`.
+#[derive(Deserialize)]
+struct AttributesQuery {
+    #[serde(rename = "type")]
+    entity_type: Option<String>,
+}
+
+/// `GET access/attributes?type=T`: the caller's read, write and delete per Attribute the Endpoint
+/// serves of the model class `T` (T-5527, API/02 7b), decided by the broker's engine through the
+/// view in one ask, each cell as `access/check` with `resource.properties.attribute` decides it.
+pub(crate) async fn access_attributes(
+    State(gateway): State<Arc<Gateway>>,
+    Path(slug): Path<String>,
+    mut request: Request,
+) -> Response<Body> {
+    tenancy::strip_client_headers(&mut request);
+    let caller = rate_limit::caller_of(&gateway, &request);
+    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+        Ok(admitted) => admitted,
+        Err(problem) => return *problem,
+    };
+    let refused = |detail: String| {
+        ProblemDetails::bad_request()
+            .with_detail(detail)
+            .into_response()
+    };
+    let asked = axum::extract::Query::<AttributesQuery>::try_from_uri(request.uri())
+        .ok()
+        .and_then(|query| query.0.entity_type)
+        .filter(|entity_type| !entity_type.is_empty());
+    let Some(entity_type) = asked else {
+        return refused("type is required: the entity type whose attributes to answer, e.g. ?type=AirQualityObserved".to_owned());
+    };
+    let Some(attributes) = endpoint.served_attributes(&entity_type) else {
+        return refused(format!(
+            "type {entity_type:?} is not a class of the model this endpoint serves"
+        ));
+    };
+    if attributes.is_empty() || attributes.len() > MAX_ATTRIBUTES {
+        return refused(format!(
+            "type {entity_type:?} has {} served attributes; 1 to {MAX_ATTRIBUTES} are answered",
+            attributes.len()
+        ));
+    }
+    if !has_view(&view_of(&endpoint)) {
+        return no_view(&endpoint);
+    }
+    // The rate limit layer spent one request; it pays for 100 decisions, each further 100 one more.
+    let charges = attributes
+        .len()
+        .saturating_mul(3)
+        .div_ceil(DECISIONS_PER_CHARGE);
+    let extra = u32::try_from(charges.saturating_sub(1)).unwrap_or(u32::MAX);
+    let charged = match rate_limit::charge(&gateway, &endpoint, &caller, extra) {
+        Ok(charged) => charged,
+        Err(refused) => return *refused,
+    };
+    let names: Vec<&str> = attributes.iter().map(|a| a.name.as_str()).collect();
+    let ask = json!({"type": entity_type, "attributes": names}).to_string();
+    let mut answer = match from_view(
+        &gateway,
+        &endpoint,
+        &subject,
+        ViewCall::Attributes(Bytes::from(ask)),
+    )
+    .await
+    {
+        Ok(table) => json_response(&table),
+        Err(answer) => *answer,
+    };
+    if let Some(charged) = charged {
+        rate_limit::set_headers(answer.headers_mut(), &charged);
+    }
+    answer
+}
+
 /// The evaluations of a batch request, each as the view's `access/check` reads it, or the `400`
 /// (or `403`) that refuses the whole request.
 fn batch(subject: &Subject, asked: &Value) -> Result<Vec<Bytes>, Box<Response<Body>>> {
@@ -575,6 +666,16 @@ struct Action {
 struct Resource {
     #[serde(default, rename = "type")]
     entity_type: Option<String>,
+    #[serde(default)]
+    properties: Option<ResourceProperties>,
+}
+
+/// `resource.properties`: the one Attribute (a short name or an IRI) the decision is asked about,
+/// as on `access/check`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceProperties {
+    attribute: String,
 }
 
 /// The decision `access/check` would give someone else, for the Portal alone (EP-103, T-3311).
@@ -660,6 +761,16 @@ pub(crate) async fn access_simulate(
         .resource
         .as_ref()
         .and_then(|resource| resource.entity_type.as_deref());
+    let attribute = simulation
+        .resource
+        .as_ref()
+        .and_then(|resource| resource.properties.as_ref())
+        .map(|properties| properties.attribute.as_str());
+    if attribute.is_some_and(str::is_empty) {
+        return ProblemDetails::bad_request()
+            .with_detail("resource.properties.attribute is empty: name one attribute, e.g. NO2")
+            .into_response();
+    }
     if !has_view(&view_of(&endpoint)) {
         return no_view(&endpoint);
     }
@@ -670,6 +781,9 @@ pub(crate) async fn access_simulate(
             let mut query = json!({ "action": { "name": action } });
             if let Some(entity_type) = entity_type {
                 query["resource"] = json!({ "type": entity_type });
+            }
+            if let Some(attribute) = attribute {
+                query["resource"]["properties"] = json!({ "attribute": attribute });
             }
             let call = ViewCall::Explain(Bytes::from(query.to_string()));
             match from_view(&gateway, &endpoint, subject, call).await {
@@ -689,6 +803,7 @@ pub(crate) async fn access_simulate(
         simulated_roles = ?who.roles,
         action,
         entity_type = entity_type.unwrap_or_default(),
+        attribute = attribute.unwrap_or_default(),
         decision = %answer["decision"],
         reason = %answer["context"]["reason"],
         "access simulated"
@@ -809,6 +924,10 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
         .route("/api/endpoint/{slug}/access", get(access))
         .route("/api/endpoint/{slug}/access/check", post(access_check))
+        .route(
+            "/api/endpoint/{slug}/access/attributes",
+            get(access_attributes),
+        )
         .route(
             "/api/endpoint/{slug}/access/v1/evaluation",
             post(access_evaluation),

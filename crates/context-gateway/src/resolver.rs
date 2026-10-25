@@ -282,6 +282,34 @@ impl Endpoint {
         served
     }
 
+    /// The generated schema of the model this Endpoint serves as it is: none for a view of
+    /// another model or a space with no generated schema.
+    fn own_schema(&self) -> Option<&jc_manifest::model_schema::ModelSchema> {
+        self.declared_types
+            .as_ref()
+            .and_then(|d| d.schema.as_deref())
+            .filter(|_| self.view_mapping.is_none())
+    }
+
+    /// The model's attributes of `class` this Endpoint serves: less the ones its projection
+    /// leaves out or `hiddenAttributes` hides. `None` when the Endpoint serves no such class of
+    /// its own model ([`Self::own_schema`]).
+    pub(crate) fn served_attributes(
+        &self,
+        class: &str,
+    ) -> Option<Vec<jc_manifest::model_schema::Attribute>> {
+        let kept = match &self.projection {
+            None => None,
+            Some(projection) => Some(&projection.classes.iter().find(|c| c.name == class)?.slots),
+        };
+        let mut attributes = self.own_schema()?.attributes(class)?.attributes;
+        attributes.retain(|a| {
+            !self.hidden_attributes.contains(&a.name)
+                && kept.is_none_or(|kept| kept.contains(&a.name))
+        });
+        Some(attributes)
+    }
+
     /// The model's slots `file.csv` always has columns for (T-5209): of `types`, or of every
     /// class when the caller named none, narrowed by the projection and `hiddenAttributes` as
     /// the answer is, and to what `shows(class, attribute)` grants the caller (EP-06). None for
@@ -291,11 +319,7 @@ impl Endpoint {
         types: &[String],
         shows: impl Fn(&str, &str) -> bool,
     ) -> Vec<jc_tabular::Slot> {
-        let schema = self
-            .declared_types
-            .as_ref()
-            .and_then(|d| d.schema.as_deref());
-        let Some(schema) = schema.filter(|_| self.view_mapping.is_none()) else {
+        let Some(schema) = self.own_schema() else {
             return Vec::new();
         };
         let mut slots: Vec<jc_tabular::Slot> = Vec::new();
@@ -303,18 +327,8 @@ impl Endpoint {
             if !types.is_empty() && !types.contains(class) {
                 continue;
             }
-            let kept = match &self.projection {
-                None => None,
-                Some(projection) => match projection.classes.iter().find(|c| &c.name == class) {
-                    Some(projected) => Some(&projected.slots),
-                    None => continue,
-                },
-            };
-            let attributes = schema.attributes(class).map(|c| c.attributes);
-            for attribute in attributes.unwrap_or_default() {
-                let hidden = self.hidden_attributes.contains(&attribute.name)
-                    || kept.is_some_and(|kept| !kept.contains(&attribute.name))
-                    || slots.iter().any(|slot| slot.name == attribute.name)
+            for attribute in self.served_attributes(class).unwrap_or_default() {
+                let hidden = slots.iter().any(|slot| slot.name == attribute.name)
                     || !shows(class, &attribute.name);
                 if hidden {
                     continue;
