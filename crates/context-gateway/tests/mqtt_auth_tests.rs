@@ -99,8 +99,13 @@ impl Fixture {
     }
 
     fn decide(&self, caller: Option<&str>, connect: &Connect) -> Value {
+        self.decide_why(caller, connect).0
+    }
+
+    /// The answer and the reason code a refusal is recorded with (T-5534).
+    fn decide_why(&self, caller: Option<&str>, connect: &Connect) -> (Value, Option<&'static str>) {
         let verifier = self.realm.verifier();
-        let (answer, _) = decide(
+        let (answer, why) = decide(
             &self.brokers,
             Some(&verifier),
             &self.accounts,
@@ -113,7 +118,10 @@ impl Fixture {
             },
             connect,
         );
-        serde_json::to_value(answer).expect("serializes")
+        (
+            serde_json::to_value(answer).expect("serializes"),
+            why.refused.map(|reason| reason.code()),
+        )
     }
 }
 
@@ -180,7 +188,7 @@ fn a_camera_with_a_token_for_this_broker_gets_its_roles_topics_until_exp() {
 fn every_way_a_camera_is_refused() {
     let f = Fixture::new("refused");
     let good = |f: &Fixture| f.token("ovzdusie-cam-north", "mqtt-ovzdusie-cameras", 300);
-    let cases: Vec<(&str, Option<&str>, Connect)> = vec![
+    let cases: Vec<(&str, Option<&str>, Connect, Option<&str>)> = vec![
         (
             "a token for another broker",
             Some(CAMERAS),
@@ -188,6 +196,7 @@ fn every_way_a_camera_is_refused() {
                 "ovzdusie-cam-north",
                 f.token("ovzdusie-cam-north", "mqtt-ovzdusie-meters", 300),
             ),
+            Some("wrong_audience"),
         ),
         (
             "an expired token",
@@ -196,6 +205,7 @@ fn every_way_a_camera_is_refused() {
                 "ovzdusie-cam-north",
                 f.token("ovzdusie-cam-north", "mqtt-ovzdusie-cameras", -120),
             ),
+            Some("expired"),
         ),
         (
             "another client id than the token's",
@@ -204,6 +214,7 @@ fn every_way_a_camera_is_refused() {
                 clientid: "ovzdusie-cam-south".to_owned(),
                 ..device("ovzdusie-cam-north", good(&f))
             },
+            Some("wrong_client"),
         ),
         (
             "another username than the token's",
@@ -212,6 +223,7 @@ fn every_way_a_camera_is_refused() {
                 username: "ovzdusie-cam-south".to_owned(),
                 ..device("ovzdusie-cam-north", good(&f))
             },
+            Some("wrong_client"),
         ),
         (
             "an account of another project, same name",
@@ -220,6 +232,7 @@ fn every_way_a_camera_is_refused() {
                 "espoo-cam-north",
                 f.token("espoo-cam-north", "mqtt-ovzdusie-cameras", 300),
             ),
+            Some("other_project"),
         ),
         (
             "an account with no role on this broker",
@@ -228,6 +241,7 @@ fn every_way_a_camera_is_refused() {
                 "ovzdusie-cam-idle",
                 f.token("ovzdusie-cam-idle", "mqtt-ovzdusie-cameras", 300),
             ),
+            Some("no_role"),
         ),
         (
             "a token signed by nobody the realm publishes",
@@ -239,26 +253,35 @@ fn every_way_a_camera_is_refused() {
                     &json!({"iss": common::ISSUER, "sub": "x", "aud": "mqtt-ovzdusie-cameras", "azp": "ovzdusie-cam-north", "exp": common::in_seconds(300)}),
                 ),
             ),
+            Some("invalid_token"),
         ),
-        ("no mesh identity", None, device("ovzdusie-cam-north", good(&f))),
+        (
+            "no mesh identity",
+            None,
+            device("ovzdusie-cam-north", good(&f)),
+            None,
+        ),
         (
             "a broker asking with another broker's token audience",
             Some(METERS),
             device("ovzdusie-cam-north", good(&f)),
+            Some("wrong_audience"),
         ),
         (
             "a caller that is no broker",
             Some("context-gateway.jc.serviceaccount.identity.linkerd.cluster.local"),
             device("ovzdusie-cam-north", good(&f)),
+            None,
         ),
     ];
-    for (why, caller, connect) in cases {
-        let answer = f.decide(caller, &connect);
+    for (why, caller, connect, reason) in cases {
+        let (answer, recorded) = f.decide_why(caller, &connect);
         assert_eq!(
             answer,
             json!({"result": "deny", "superuser": false}),
             "{why}"
         );
+        assert_eq!(recorded, reason, "{why}");
     }
 }
 
@@ -370,7 +393,7 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
     };
 
     for (with_identity, result) in [(true, "allow"), (false, "deny")] {
-        let response = internal_router(Arc::clone(&gateway), None, None)
+        let response = internal_router(Arc::clone(&gateway), None, None, None)
             .oneshot(request(with_identity))
             .await
             .expect("answers");
@@ -407,7 +430,7 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
     gateway.replace_brokers(f.brokers.clone());
     let gateway = Arc::new(gateway);
     let ask = |host: Option<&str>, ipaddr: &str| {
-        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned), None);
+        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned), None, None);
         let body = json!({
             "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner",
             "password": "", "ipaddr": ipaddr
@@ -433,4 +456,76 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
         ask(Some("no-such-runner.invalid"), "127.0.0.1").await,
         "deny"
     );
+}
+
+/// T-5534: a refused CONNECT is kept for its broker with its reason and the broker's own account,
+/// never the token or the client id, and only the Portal's mesh identity reads it.
+#[tokio::test]
+async fn a_refusal_is_kept_without_its_token_and_read_by_the_portal_alone() {
+    let f = Fixture::new("refusals");
+    let gateway = Gateway::new(
+        Broker::new("http://broker.invalid:1026"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
+    gateway.replace_brokers(f.brokers.clone());
+    let app = internal_router(
+        Arc::new(gateway),
+        None,
+        None,
+        Some("portal.portal".to_owned()),
+    );
+    let expired = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-cameras", -120);
+    let connect = json!({
+        "clientid": "ovzdusie-cam-north-7f3a", "username": "ovzdusie-cam-north",
+        "password": expired, "ipaddr": "203.0.113.7"
+    })
+    .to_string();
+    let refused = app
+        .clone()
+        .oneshot(
+            Request::post("/internal/mqtt/auth")
+                .header("content-type", "application/json")
+                .header("l5d-client-id", CAMERAS)
+                .body(Body::from(connect))
+                .expect("a request"),
+        )
+        .await
+        .expect("answers");
+    assert_eq!(refused.status(), StatusCode::OK);
+
+    let read = |identity: Option<&str>| {
+        let mut builder = Request::get("/internal/mqtt/refusals/mqtt-ovzdusie-cameras");
+        if let Some(identity) = identity {
+            builder = builder.header("l5d-client-id", identity);
+        }
+        app.clone()
+            .oneshot(builder.body(Body::empty()).expect("a request"))
+    };
+    let answer = read(Some(
+        "portal.portal.serviceaccount.identity.linkerd.cluster.local",
+    ))
+    .await
+    .expect("answers");
+    assert_eq!(answer.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(answer.into_body(), 1 << 20)
+        .await
+        .expect("a body");
+    let text = String::from_utf8(bytes.to_vec()).expect("text");
+    let kept: Value = serde_json::from_str(&text).expect("json");
+    assert_eq!(kept["refusals"].as_array().map(Vec::len), Some(1), "{kept}");
+    assert_eq!(kept["refusals"][0]["reason"], "expired");
+    assert_eq!(
+        kept["refusals"][0]["account"],
+        "ovzdusie-cam-north".replace("ovzdusie-", "")
+    );
+    for secret in [expired.as_str(), "ovzdusie-cam-north-7f3a", "203.0.113.7"] {
+        assert!(!text.contains(secret), "{text}");
+    }
+
+    for other in [Some(CAMERAS), None] {
+        let answer = read(other).await.expect("answers");
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN, "{other:?}");
+    }
 }
