@@ -106,7 +106,13 @@ pub(crate) async fn mcp_answer(
         }
     };
     if let Some(answer) = refuse_before_forward(
-        &gateway, &endpoint, &subject, &view, &message, reads_only, &note,
+        &gateway,
+        &endpoint,
+        &subject,
+        &view,
+        &mut message,
+        reads_only,
+        &note,
     )
     .await
     {
@@ -201,23 +207,42 @@ pub(crate) async fn mcp_answer(
 
 /// What the gateway answers before any hop to the broker: an anonymous caller's write tool
 /// (T-4168), the gateway's own describe tools and documents, and a view id no broker view can
-/// carry. `None` when the message goes on to the view.
+/// carry. `None` when the message goes on to the view. An anonymous read's arguments are bounded
+/// as on the hub (window, lastN, aggregation period) and go on bounded, or the read is refused
+/// in the hub's words.
 async fn refuse_before_forward(
     gateway: &Gateway,
     endpoint: &Endpoint,
     subject: &Subject,
     view: &str,
-    message: &Value,
+    message: &mut Value,
     reads_only: bool,
     note: &impl Fn(Outcome),
 ) -> Option<Response<Body>> {
-    let tool = message["params"]["name"].as_str().unwrap_or_default();
+    let tool = message["params"]["name"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let tool = tool.as_str();
     let calls = message["method"] == "tools/call";
     let id = message["id"].clone();
     if reads_only && calls && !mcp::tools::anonymous_may(tool) {
         note(Outcome::Refused);
         let refusal = mcp::tools::anonymous_refusal(id, tool);
         return Some(mcp::jsonrpc::json_response(StatusCode::OK, &refusal));
+    }
+    if reads_only && calls {
+        let arguments = &mut message["params"]["arguments"];
+        if arguments.is_null() {
+            *arguments = Value::Object(serde_json::Map::new());
+        }
+        if let Value::Object(arguments) = arguments {
+            if let Err(why) = mcp::tools::anonymous_bounds(tool, arguments) {
+                note(Outcome::Refused);
+                let refusal = mcp::jsonrpc::result(id, mcp::jsonrpc::refused(&why, &Value::Null));
+                return Some(mcp::jsonrpc::json_response(StatusCode::OK, &refusal));
+            }
+        }
     }
     if calls && mcp::describe::DESCRIBE_TOOLS.contains(&tool) {
         let answer = mcp::describe::call(gateway, endpoint, subject, id, &message["params"]).await;
@@ -850,25 +875,108 @@ mod tests {
                 "params": {"name": tool, "arguments": {}}})
         };
 
-        let write = call("create_entity");
-        let refused =
-            refuse_before_forward(&gateway, &endpoint, &subject, "view", &write, true, &note).await;
+        let mut write = call("create_entity");
+        let refused = refuse_before_forward(
+            &gateway, &endpoint, &subject, "view", &mut write, true, &note,
+        )
+        .await;
         let refused = refused.map(|answer| answer.status());
         assert_eq!(refused, Some(StatusCode::OK));
         assert_eq!(*noted.borrow(), [Outcome::Refused]);
 
-        let read = call("query_entities");
+        let mut read = call("query_entities");
         let long = "v".repeat(MAX_VIEW_ID + 1);
         let answer =
-            refuse_before_forward(&gateway, &endpoint, &subject, &long, &read, true, &note).await;
+            refuse_before_forward(&gateway, &endpoint, &subject, &long, &mut read, true, &note)
+                .await;
         assert_eq!(
             answer.map(|answer| answer.status()),
             Some(StatusCode::SERVICE_UNAVAILABLE)
         );
-        let goes_on =
-            refuse_before_forward(&gateway, &endpoint, &subject, "view", &read, true, &note).await;
+        let goes_on = refuse_before_forward(
+            &gateway, &endpoint, &subject, "view", &mut read, true, &note,
+        )
+        .await;
         assert!(goes_on.is_none());
         assert_eq!(noted.borrow().len(), 1);
+    }
+
+    /// T-5699, F-PLT2-006: an anonymous history read on an Endpoint's own MCP is bounded as on
+    /// the hub: ten years are refused in the hub's words, a missing `arguments` too, and a
+    /// read inside the window goes on with its page bounded.
+    #[tokio::test]
+    async fn refuse_before_forward_bounds_an_anonymous_history_read() {
+        let gateway = gateway();
+        let endpoint = crate::mcp::catalog::tests::fixture();
+        let subject = Subject::anonymous();
+        let note = |_| {};
+        let temporal = |arguments: Value| {
+            serde_json::json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                "params": {"name": "query_temporal", "arguments": arguments}})
+        };
+        let text = |answer: Option<Response<Body>>| async move {
+            let body = answer.map(|answer| answer.into_body());
+            match body {
+                Some(body) => {
+                    let bytes = axum::body::to_bytes(body, 1 << 16)
+                        .await
+                        .unwrap_or_default();
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or_default()["result"]["content"]
+                        [0]["text"]
+                        .as_str()
+                        .map(str::to_owned)
+                }
+                None => None,
+            }
+        };
+        let mut decade = temporal(serde_json::json!({"type": "T", "timerel": "between",
+            "timeAt": "2016-01-01T00:00:00Z", "endTimeAt": "2026-01-01T00:00:00Z"}));
+        let mut hub_arguments = decade["params"]["arguments"]
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let hub_words = mcp::tools::anonymous_bounds("query_temporal", &mut hub_arguments).err();
+        let refused = refuse_before_forward(
+            &gateway,
+            &endpoint,
+            &subject,
+            "view",
+            &mut decade,
+            true,
+            &note,
+        )
+        .await;
+        assert!(hub_words.is_some());
+        assert_eq!(text(refused).await, hub_words);
+
+        let mut bare = serde_json::json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "query_temporal"}});
+        let refused = refuse_before_forward(
+            &gateway, &endpoint, &subject, "view", &mut bare, true, &note,
+        )
+        .await;
+        assert!(text(refused).await.is_some());
+
+        let mut week = temporal(serde_json::json!({"type": "T", "timerel": "between",
+            "timeAt": "2026-01-01T00:00:00Z", "endTimeAt": "2026-01-08T00:00:00Z"}));
+        let goes_on = refuse_before_forward(
+            &gateway, &endpoint, &subject, "view", &mut week, true, &note,
+        )
+        .await;
+        assert!(goes_on.is_none());
+        // A signed-in caller's read is the broker's to bound.
+        let mut signed = temporal(serde_json::json!({"type": "T"}));
+        let goes_on = refuse_before_forward(
+            &gateway,
+            &endpoint,
+            &subject,
+            "view",
+            &mut signed,
+            false,
+            &note,
+        )
+        .await;
+        assert!(goes_on.is_none());
     }
 
     /// T-4168, T-5508: an anonymous `tools/list` the gateway cannot read is refused, never
