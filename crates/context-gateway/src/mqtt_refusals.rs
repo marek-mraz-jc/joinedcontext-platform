@@ -191,6 +191,7 @@ mod tests {
             }],
             runner_topics: Vec::new(),
             capture_topics: Vec::new(),
+            messages_per_second: 10,
         }
     }
 
