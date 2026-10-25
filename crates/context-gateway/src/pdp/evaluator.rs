@@ -204,12 +204,18 @@ pub fn evaluate(
         .filter(|policy| applies(policy, subject, operation, now))
         .collect();
 
-    // GW4: any matching prohibition ends the evaluation, whatever the permissions say.
-    if applicable
+    // GW4: a matching prohibition ends the evaluation, whatever the permissions say, unless it
+    // names attributes: then it takes back only those, from the answer, the filters and the
+    // write body alike, as the schema and the access document describe it (GW8, EP-47).
+    let mut withheld = BTreeSet::new();
+    for policy in applicable
         .iter()
-        .any(|policy| policy.effect.is_prohibition() && covers_request(policy, request))
+        .filter(|policy| policy.effect.is_prohibition())
     {
-        return Verdict::Deny;
+        match withheld_by(policy, request) {
+            Some(names) => withheld.extend(names),
+            None => return Verdict::Deny,
+        }
     }
 
     let grants: Vec<&PolicySpec> = applicable
@@ -223,9 +229,11 @@ pub fn evaluate(
         return Verdict::Deny;
     }
 
-    Verdict::Rewrite(Box::new(intersect(
-        operation, request, tenant, &grants, now,
-    )))
+    let constraints = intersect(operation, request, tenant, &grants, now);
+    match withhold(constraints, operation, request, withheld) {
+        Some(constraints) => Verdict::Rewrite(Box::new(constraints)),
+        None => Verdict::Deny,
+    }
 }
 
 /// Whether a policy speaks about this caller and this operation at all (GW7).
@@ -273,14 +281,67 @@ fn in_force(policy: &PolicySpec, now: DateTime<Utc>) -> bool {
     })
 }
 
-/// Whether a prohibition speaks about what this request touches.
+/// What a prohibition takes back from this request: `None` refuses it whole, a set takes back
+/// those attributes (empty when the prohibition does not speak about the request).
 ///
-/// A prohibition with no entity selector covers the whole operation; one that names types
-/// covers the request when the caller asked for a type it names, or asked for no type at
-/// all, in which case the caller's result set would include the prohibited type.
-fn covers_request(policy: &PolicySpec, request: &Request) -> bool {
-    let prohibited = granted_types(&policy.information);
-    prohibited.is_empty() || request.types.is_empty() || !prohibited.is_disjoint(&request.types)
+/// Judged per registration entry, so one entry naming `status` of `Sensor` never turns another
+/// entry's whole-type prohibition into an attribute one. An entry with no entity selector covers
+/// every type; one that names types covers the request when the caller asked for a type it
+/// names, or asked for no type at all, in which case the result set would include it. An entry
+/// naming no attribute, or a prohibition with no entry, refuses the request. ponytail: the named
+/// attributes are withheld from every type of the request and every entity, not only the
+/// selector's own; a per-type `hidden` is the upgrade if a mixed-type read misses them.
+fn withheld_by(policy: &PolicySpec, request: &Request) -> Option<BTreeSet<String>> {
+    if policy.information.is_empty() {
+        return None;
+    }
+    let mut names = BTreeSet::new();
+    for info in &policy.information {
+        let types = granted_types(std::slice::from_ref(info));
+        if !(types.is_empty() || request.types.is_empty() || !types.is_disjoint(&request.types)) {
+            continue;
+        }
+        let attrs = granted_attrs(std::slice::from_ref(info));
+        if attrs.is_empty() {
+            return None;
+        }
+        names.extend(attrs);
+    }
+    Some(names)
+}
+
+/// Takes the attributes a prohibition names out of a rewrite (GW4, T-5586). `None` when they
+/// were every attribute the grants give: an empty whitelist downstream reads as the whole entity.
+///
+/// A withheld attribute is a denial over every entity, the same as one the endpoint hides
+/// (EP-61): the answer is stripped of it, a filter or order on it selects nothing (T-1862), and a
+/// write naming it is refused whole (GW17).
+fn withhold(
+    mut constraints: Constraints,
+    operation: Operation,
+    request: &Request,
+    withheld: BTreeSet<String>,
+) -> Option<Constraints> {
+    if withheld.is_empty() {
+        return Some(constraints);
+    }
+    let named = !constraints.served.is_empty();
+    constraints.served.retain(|name| !withheld.contains(name));
+    if named && constraints.served.is_empty() {
+        return None;
+    }
+    constraints.attrs.retain(|name| !withheld.contains(name));
+    constraints
+        .attrs_asked
+        .retain(|name| !withheld.contains(name));
+    // A caller asking only for withheld attributes gets nothing: `attrs` selects the entities
+    // that carry one, which would say which carry the withheld one.
+    if !operation.is_write() && !request.attrs.is_empty() && constraints.attrs.is_empty() {
+        constraints.empty = true;
+    }
+    constraints.restricted = true;
+    constraints.hidden = withheld;
+    Some(constraints)
 }
 
 /// Intersects the request with the union of the grants (GW10, GW11).
@@ -382,6 +443,7 @@ fn intersect(
         // the decision point reads the endpoint's models into this (T-3473)
         type_iris: BTreeSet::new(),
         served: granted_attrs.clone(),
+        // Filled by `withhold` from the prohibitions, then by the endpoint (GW4, EP-61).
         hidden: BTreeSet::new(),
         q: conjoin(request.q.as_deref(), &filters),
         granted_scopes: union(grants.iter().filter_map(|policy| policy.scope_q.as_deref())),
