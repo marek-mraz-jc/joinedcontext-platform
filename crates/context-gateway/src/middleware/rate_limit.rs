@@ -427,6 +427,39 @@ pub(crate) fn spend_anonymous_mcp(
     )))
 }
 
+/// The bucket a signed-in caller spends on every Endpoint's and Context Space's MCP together
+/// (T-5559, AG-25): one per verified subject, at the hub's quota, so fifty Endpoints and their
+/// spaces are one allowance. The hub and the named servers keep their own.
+const SUBJECT_MCP_BUCKET: &str = "mcp subject";
+
+/// Spends the MCP bucket of the subject `request`'s token names; the `Err` is the 429 to answer.
+///
+/// Keyed on the verified `sub` only ([`caller_of`], T-5290). A token the realm did not sign
+/// opens no bucket: the handler answers it 401 before anything reaches the broker.
+pub(crate) fn spend_subject_mcp(
+    gateway: &Gateway,
+    request: &Request,
+) -> Result<(), Box<Response<Body>>> {
+    let caller = caller_of(gateway, request);
+    if !caller.starts_with("subject:") {
+        return Ok(());
+    }
+    let decision = gateway.rate_limiter.check(
+        SUBJECT_MCP_BUCKET,
+        &caller,
+        &gateway.hub_rate_limit,
+        Instant::now(),
+    );
+    if decision.allowed {
+        return Ok(());
+    }
+    tracing::info!(%caller, "per-subject MCP rate limit reached");
+    Err(Box::new(too_many(
+        &decision,
+        "your MCP rate limit is spent; retry after the seconds the RateLimit-Reset header names",
+    )))
+}
+
 /// The three standard fields of the answer (EP-20, MIM0-R7).
 pub(crate) fn set_headers(headers: &mut axum::http::HeaderMap, decision: &Decision) {
     for (name, value) in [
