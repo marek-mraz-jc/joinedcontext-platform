@@ -229,6 +229,20 @@ async fn main() -> ExitCode {
     if let Some(url) = config.usage_url.clone() {
         tokio::spawn(context_gateway::usage::follow(url, token.clone()));
     }
+    // A disabled person or a removed ServiceAccount is refused within one poll, not at their
+    // token's expiry (T-5568, TR-03187 AR-6).
+    if let (Some(url), Some(verifier)) = (config.revocations_url.clone(), gateway.verifier.clone())
+    {
+        match context_gateway::revocations::Revocations::new(url, token.clone(), verifier) {
+            Ok(poller) => {
+                tokio::spawn(poller.follow());
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot follow the revoked subjects");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     // Who called which MCP tool, on each project's Activity (T-5322).
     if let Some(url) = config.activity_url.clone() {
         tokio::spawn(context_gateway::activity::follow(url));
