@@ -75,4 +75,4 @@ pub use kinds::{
 };
 pub use registry::{by_kind, by_plural, KindInfo, KINDS};
 pub use secret::{ClientCredential, Secret};
-pub use urn::{apply_render_prefix, type_of_id, EntityRef, Prefixed, Urn};
+pub use urn::{apply_render_prefix, type_of_id, types_of, EntityRef, Prefixed, Urn};

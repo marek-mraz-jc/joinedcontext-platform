@@ -438,6 +438,20 @@ pub(crate) fn spend_anonymous_mcp(
 /// spaces are one allowance. The hub and the named servers keep their own.
 const SUBJECT_MCP_BUCKET: &str = "mcp subject";
 
+/// Spends the MCP bucket of the caller: the address's for an `anonymous` request, else the
+/// subject's. The `Err` is the 429 to answer.
+pub(crate) fn spend_mcp(
+    gateway: &Gateway,
+    request: &Request,
+    anonymous: bool,
+) -> Result<(), Box<Response<Body>>> {
+    if anonymous {
+        spend_anonymous_mcp(gateway, request.headers())
+    } else {
+        spend_subject_mcp(gateway, request)
+    }
+}
+
 /// Spends the MCP bucket of the subject `request`'s token names; the `Err` is the 429 to answer.
 ///
 /// Keyed on the verified `sub` only ([`caller_of`], T-5290). A token the realm did not sign

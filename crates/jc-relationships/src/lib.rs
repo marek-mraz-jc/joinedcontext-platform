@@ -25,7 +25,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use jc_core::type_of_id;
+use jc_core::{type_of_id, types_of};
 use std::collections::{BTreeMap, BTreeSet};
 
 use jc_core::ProblemDetails;
@@ -342,24 +342,6 @@ fn objects(value: &Value) -> Option<Vec<String>> {
         // A bare string in the concise form is a Property's value, not a Relationship: the
         // write is the model's other checks' to judge.
         _ => Some(Vec::new()),
-    }
-}
-
-fn types_of<'a>(
-    entity: &'a serde_json::Map<String, Value>,
-    addressed: Option<&'a str>,
-) -> Vec<&'a str> {
-    match entity.get("type").or_else(|| entity.get("@type")) {
-        Some(Value::String(one)) => vec![one.as_str()],
-        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
-        _ => entity
-            .get("id")
-            .or_else(|| entity.get("@id"))
-            .and_then(Value::as_str)
-            .or(addressed)
-            .and_then(type_of_id)
-            .into_iter()
-            .collect(),
     }
 }
 

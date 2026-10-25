@@ -10,12 +10,13 @@
 //! the value; a flag or a quarantine is written into the payload before it is forwarded. Every
 //! check is counted in `jc_quality_checks_total`. Nothing here reads the network or the store.
 
-use crate::units::{types_of, Shape};
+use crate::units::Shape;
 use chrono::{DateTime, Utc};
 use jc_core::error::ProblemDetails;
 use jc_core::kinds::{QualityOutcome, QualityRule};
 use jc_core::quality::{mark, on_write, rejection, QUARANTINED_AT, QUARANTINE_RULES};
 use jc_core::system_members::{is_entity_system_member, INSTANT_MEMBERS};
+use jc_core::types_of;
 use jc_manifest::model_schema::{ModelSchema, Problem};
 use serde_json::{json, Map, Value};
 

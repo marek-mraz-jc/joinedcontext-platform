@@ -8,7 +8,8 @@
 //! the reconciler mounts as the file `{JC_GATEWAY_PERSONAL_KEYS}/{space}`; a write that needs a
 //! key the gateway does not hold is refused, never stored as sent.
 
-use crate::units::{types_of, Shape};
+use crate::units::Shape;
+use jc_core::types_of;
 use jc_manifest::model_schema::ModelSchema;
 use ring::hmac;
 use serde_json::Value;

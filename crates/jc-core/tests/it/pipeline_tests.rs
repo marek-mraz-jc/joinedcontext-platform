@@ -413,3 +413,16 @@ fn a_replace_meets_the_outputs_whose_ids_can_be_its_own() {
         "a replace alone is valid"
     );
 }
+
+/// A schedule is held to the same cron rule as KnowledgeSource and App jobs: five fields is not
+/// enough when one is out of its range.
+#[test]
+fn a_schedule_with_a_field_out_of_range_is_refused() {
+    let mut pipeline = Pipeline::from_yaml(GOLDEN_DERIVED).expect("golden");
+    for refused in ["99 * * * *", "0 25 * * *", "*/0 * * * *", "a b c d e"] {
+        pipeline.spec.schedule = Some(refused.to_string());
+        assert!(pipeline.validate().is_err(), "'{refused}' passed");
+    }
+    pipeline.spec.schedule = Some("*/15 6-22 * * 1-5".to_string());
+    pipeline.validate().expect("a valid cron passes");
+}

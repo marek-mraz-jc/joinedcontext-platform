@@ -501,6 +501,27 @@ fn deployment_of(state: &ChatState, public_id: &str) -> Option<Deployment> {
     snapshot.public(public_id).cloned()
 }
 
+/// The deployment published under `public_id` and the origin a browser's answer names, or the
+/// refusal: `404` for an id nobody published, `403` for a page elsewhere than its origins.
+fn placed(
+    state: &ChatState,
+    public_id: &str,
+    headers: &HeaderMap,
+) -> Result<(Deployment, Option<HeaderValue>), Box<Response>> {
+    let Some(deployment) = deployment_of(state, public_id) else {
+        return Err(Box::new(problem(
+            404,
+            "No assistant is published under this id.",
+        )));
+    };
+    let origin = match origin(headers, &deployment, state.public_origin.as_deref()) {
+        Placed::Nowhere => None,
+        Placed::Allowed(origin) => Some(origin),
+        Placed::Refused => return Err(Box::new(not_placed_here())),
+    };
+    Ok((deployment, origin))
+}
+
 /// Where a request comes from, judged against the deployment's `allowedOrigins` (AG-100).
 enum Placed {
     /// No `Origin`: not a browser's request.
@@ -1218,13 +1239,9 @@ async fn chat(
     headers: HeaderMap,
     body: Result<Json<Question>, JsonRejection>,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     // A question carries a visitor token (T-4653); its id only adds a minute of its own beside
     // the address's windows, so minting tokens never buys a fresh month or cost share.
@@ -1302,13 +1319,9 @@ async fn configuration(
     Path(public_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     let mut response = Json(widget::configuration(&state, &deployment)).into_response();
     response.headers_mut().insert(
@@ -1323,13 +1336,9 @@ async fn challenge(
     Path(public_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     // A challenge is a signed string and keeps no state, so the edge's per-address limit (Class 1)
     // is all it needs; redeeming one is counted per address below.
@@ -1375,13 +1384,9 @@ async fn token(
     headers: HeaderMap,
     body: Result<Json<Proof>, JsonRejection>,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     let response = match body {
         Err(rejection) => body_refused(&rejection),
@@ -1431,13 +1436,9 @@ async fn resume(
     query: Result<Query<After>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     let response = match query {
         Err(_) => problem(400, "after: the number of events already read, 0 or more"),
@@ -1513,13 +1514,9 @@ async fn feedback(
     headers: HeaderMap,
     body: Result<Json<Feedback>, JsonRejection>,
 ) -> Response {
-    let Some(deployment) = deployment_of(&state, &public_id) else {
-        return problem(404, "No assistant is published under this id.");
-    };
-    let origin = match origin(&headers, &deployment, state.public_origin.as_deref()) {
-        Placed::Nowhere => None,
-        Placed::Allowed(origin) => Some(origin),
-        Placed::Refused => return not_placed_here(),
+    let (deployment, origin) = match placed(&state, &public_id, &headers) {
+        Ok(placed) => placed,
+        Err(refused) => return *refused,
     };
     // A deployment with `feedback: false` takes no verdict (MF-52, T-4281).
     let response = if deployment.spec.feedback {

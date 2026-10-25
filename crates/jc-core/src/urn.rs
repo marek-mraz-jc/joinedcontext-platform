@@ -205,6 +205,27 @@ pub fn type_of_id(id: &str) -> Option<&str> {
     }
 }
 
+/// The types an entity of a write names: its `type` (one or a list), else the type of its id, else
+/// of the id the request addressed.
+pub fn types_of<'a>(
+    entity: &'a serde_json::Map<String, serde_json::Value>,
+    addressed: Option<&'a str>,
+) -> Vec<&'a str> {
+    use serde_json::Value;
+    match entity.get("type").or_else(|| entity.get("@type")) {
+        Some(Value::String(one)) => vec![one.as_str()],
+        Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+        _ => entity
+            .get("id")
+            .or_else(|| entity.get("@id"))
+            .and_then(Value::as_str)
+            .or(addressed)
+            .and_then(type_of_id)
+            .into_iter()
+            .collect(),
+    }
+}
+
 impl fmt::Display for Urn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "urn:ngsi-ld:{}:{}", self.entity_type, self.id)
