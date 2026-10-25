@@ -16,6 +16,8 @@ antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mr
 base64 = "0.22"
 # The export index stamps when it was taken; jc-core already carries the same clock.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# The proof key of `jcctl login` (RFC 7636): the OS random source, already in the tree.
+getrandom = "0.3"
 jsonschema = { version = "0.54", default-features = false }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 # The CKAN Action API and the gateway's DCAT record are reached over TLS, which the crate's
