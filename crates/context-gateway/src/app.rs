@@ -140,6 +140,9 @@ pub struct Gateway {
     write_wait: std::time::Duration,
     /// The requests and `file.csv` downloads in flight, in total and per caller (T-4782).
     pub(crate) in_flight: crate::middleware::in_flight::InFlight,
+    /// The anonymous `file.csv` answers and the space type lists a download reuses (T-5629).
+    pub(crate) downloads: crate::handlers::download_cache::Downloads,
+    pub(crate) held_types: crate::handlers::download_cache::HeldTypes,
 }
 
 /// The MiB of write bodies in the gateway at once unless the deployment names another
@@ -219,6 +222,8 @@ impl Gateway {
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
             write_wait: WRITE_WAIT,
             in_flight: Default::default(),
+            downloads: Default::default(),
+            held_types: Default::default(),
         }
     }
 

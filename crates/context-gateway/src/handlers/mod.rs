@@ -1,6 +1,7 @@
 //! The endpoint surfaces the gateway serves beside the ETSI resource tree.
 
 pub mod catalog;
+pub(crate) mod download_cache;
 pub mod endpoint_surface;
 pub mod files;
 pub mod mappings;

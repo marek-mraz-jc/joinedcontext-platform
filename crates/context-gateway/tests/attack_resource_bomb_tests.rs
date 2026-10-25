@@ -367,9 +367,10 @@ async fn many_downloads_at_once_spend_one_anonymous_callers_burst_and_stop() {
         ],
         "the burst was not the ceiling on what one caller can start"
     );
+    // The second download is the first's held answer (T-5629), so one download's page alone.
     assert_eq!(
         hops.lock().expect("the hop log").len(),
-        2,
+        1,
         "a refused download still cost the broker a page"
     );
 }
