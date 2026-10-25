@@ -139,7 +139,7 @@ fn an_endpoint_without_policy_ref_evaluates_every_policy_of_its_space() {
         policy.assignee
             == Principal {
                 kind: PrincipalKind::ServiceAccount,
-                id: "pipelines".to_owned(),
+                id: "helsinki/pipelines".to_owned(),
             }
             && policy.operations.iter().any(|op| {
                 matches!(

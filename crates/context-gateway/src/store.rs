@@ -1150,7 +1150,8 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
                 let space = spec.context_space_ref.name().to_owned();
                 let rules = rules
                     .into_iter()
-                    .map(|(name, rule)| (name, of_own_project(rule, &project)));
+                    .map(|(name, rule)| (name, of_own_project(rule, &project)))
+                    .collect::<Vec<_>>();
                 policies.entry((project, space)).or_default().extend(rules);
             }
             Err(error) => tracing::warn!(
