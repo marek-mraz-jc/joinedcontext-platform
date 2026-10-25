@@ -709,11 +709,6 @@ pub(crate) fn document(
     }
 }
 
-/// The slug a preview Endpoint answers on, without a salt: [`preview_slug_salted`] with none.
-pub fn preview_slug(prefix: &str, slug: &str) -> String {
-    preview_slug_salted(prefix, "", slug)
-}
-
 /// The slug a preview Endpoint answers on: the first 160 bits of SHA-256 over the prefix, the
 /// preview's salt and the origin's slug, in lowercase base32, so it is opaque like every slug
 /// (EP-02), the same on every render and never the origin's (Architecture/06 §7.2). The prefix
