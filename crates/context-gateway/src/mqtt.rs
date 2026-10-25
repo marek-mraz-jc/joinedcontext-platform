@@ -156,6 +156,11 @@ impl std::fmt::Debug for Connect {
     }
 }
 
+/// How long, in milliseconds, the broker keeps an allowed publish before it asks again
+/// (`X-Cache`): the bound on how long a device keeps publishing after its role, account or
+/// credential ends (T-5560).
+pub const PUBLISH_CACHE_MS: u32 = 10_000;
+
 /// RMQTT's answer format (`docs/en_US/auth-http.md`, `perm-list.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Answer {
@@ -163,12 +168,15 @@ pub struct Answer {
     pub result: &'static str,
     /// Always false: no client bypasses its ACL.
     pub superuser: bool,
-    /// When the broker drops the connection: the token's `exp`.
+    /// When the broker drops the connection: the token's `exp`, or the account's credential
+    /// end when that comes first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expire_at: Option<i64>,
-    /// The client's ACL, evaluated by the broker on every publish and subscribe.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub acl: Vec<Rule>,
+    /// The client's subscriptions, fixed at CONNECT. An allow always carries the list, empty
+    /// too: without one the broker forgets `expire_at`. A publish matches none of these rules,
+    /// so the broker asks [`publish_check`] for each topic (T-5560).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl: Option<Vec<Rule>>,
 }
 
 /// One ACL rule of the answer.
@@ -176,15 +184,12 @@ pub struct Answer {
 pub struct Rule {
     /// Always `allow`: the broker's own last rule denies the rest.
     pub permission: &'static str,
-    /// `publish` or `subscribe`.
+    /// Always `subscribe`: a publish is checked per topic (T-5560).
     pub action: &'static str,
     /// A topic filter, `${clientid}` left for the broker to bind.
     pub topic: String,
     /// QoS 0 and 1; the listener refuses 2 anyway.
     pub qos: [u8; 2],
-    /// Publish only: a retained message is never allowed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retain: Option<bool>,
 }
 
 impl Answer {
@@ -193,7 +198,7 @@ impl Answer {
             result: "deny",
             superuser: false,
             expire_at: None,
-            acl: Vec::new(),
+            acl: None,
         }
     }
 
@@ -202,18 +207,17 @@ impl Answer {
             result: "allow",
             superuser: false,
             expire_at,
-            acl,
+            acl: Some(acl),
         }
     }
 }
 
-fn rule(action: &'static str, topic: &str) -> Rule {
+fn rule(topic: &str) -> Rule {
     Rule {
         permission: "allow",
-        action,
+        action: "subscribe",
         topic: topic.to_owned(),
         qos: [0, 1],
-        retain: (action == "publish").then_some(false),
     }
 }
 
@@ -261,6 +265,12 @@ pub fn decide(
     let Ok(claims) = verifier.verify(&connect.password, &[release.to_owned()]) else {
         return (Answer::deny(), "the token does not verify for this broker");
     };
+    // The verifier's leeway is for clocks between services; the broker would only refuse a past
+    // `expire_at` itself, so the gateway does it here without one.
+    let now = chrono::Utc::now();
+    if claims.exp <= now.timestamp() {
+        return (Answer::deny(), "the token has expired");
+    }
     let Some(azp) = claims.azp.as_deref() else {
         return (Answer::deny(), "the token names no client");
     };
@@ -270,25 +280,144 @@ pub fn decide(
             "the username or client id is not the token's client",
         );
     }
-    let Some(account) = accounts.resolve(azp) else {
-        return (Answer::deny(), "the client is no ServiceAccount");
-    };
-    if account.project != broker.project {
-        return (Answer::deny(), "the account belongs to another project");
+    match accounts.resolve(azp) {
+        Some(account) => device(broker, account, claims.exp, now),
+        None => (Answer::deny(), "the client is no ServiceAccount"),
     }
-    let mut acl = Vec::new();
-    for role in broker
+}
+
+/// Why `account` is no device of `broker` at `now`: another project's, or every credential ended.
+fn refused(
+    broker: &Broker,
+    account: &crate::auth::accounts::Account,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<&'static str> {
+    if account.project != broker.project {
+        return Some("the account belongs to another project");
+    }
+    account
+        .credentials_end
+        .is_some_and(|end| end <= now)
+        .then_some("the account's credentials have expired")
+}
+
+/// The CONNECT answer for a device whose token, valid until `exp`, named `account`.
+fn device(
+    broker: &Broker,
+    account: &crate::auth::accounts::Account,
+    exp: i64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Answer, &'static str) {
+    if let Some(why) = refused(broker, account, now) {
+        return (Answer::deny(), why);
+    }
+    let roles = || {
+        broker
+            .roles
+            .iter()
+            .filter(|role| role.service_accounts.contains(&account.name))
+    };
+    if roles().next().is_none() {
+        return (Answer::deny(), "the account holds no role of this broker");
+    }
+    let acl = roles()
+        .flat_map(|role| &role.subscribe)
+        .map(|topic| rule(topic))
+        .collect();
+    let expire_at = account
+        .credentials_end
+        .map_or(exp, |end| exp.min(end.timestamp()));
+    (Answer::allow(acl, Some(expire_at)), "a device")
+}
+
+/// What `rmqtt-auth-http` posts for a publish its CONNECT rules do not cover
+/// (`http_acl_req.params`, JSON).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Access {
+    /// `1` subscribe, `2` publish.
+    #[serde(default)]
+    pub access: String,
+    /// The MQTT client id, the token's `azp` the CONNECT check held it to.
+    #[serde(default)]
+    pub clientid: String,
+    /// The MQTT username, equal to the client id for a device.
+    #[serde(default)]
+    pub username: String,
+    /// The topic of the publish.
+    #[serde(default)]
+    pub topic: String,
+}
+
+/// Whether the topic `topic` is under the filter `filter`, `${clientid}` standing for the level
+/// `clientid` (MQTT 3.1.1 §4.7). A wildcard never reaches a `$` topic.
+pub fn filter_matches(filter: &str, topic: &str, clientid: &str) -> bool {
+    if topic.starts_with('$') || topic.contains(['+', '#']) {
+        return false;
+    }
+    let mut topic = topic.split('/');
+    for level in filter.split('/') {
+        if level == "#" {
+            return true;
+        }
+        let Some(part) = topic.next() else {
+            return false;
+        };
+        let hit = match level {
+            "+" => true,
+            jc_core::kinds::mqtt_broker::CLIENT_ID => part == clientid,
+            _ => part == level,
+        };
+        if !hit {
+            return false;
+        }
+    }
+    topic.next().is_none()
+}
+
+/// Decides one publish (T-5560) against the repository as it is now: the account must still
+/// exist, still belong to the broker's project, still hold a role whose publish filter covers
+/// the topic and still have a credential in force. The broker keeps an allow for
+/// [`PUBLISH_CACHE_MS`] and disconnects a client whose publish is refused, so a device the
+/// repository no longer admits stops within that time instead of at its token's `exp`.
+pub fn publish_check(
+    brokers: &Brokers,
+    accounts: &ServiceAccounts,
+    caller: Option<&str>,
+    access: &Access,
+) -> (bool, &'static str) {
+    let Some(broker) = caller
+        .map(broker_of)
+        .and_then(|release| brokers.get(release))
+    else {
+        return (false, "the caller is no broker this repository declares");
+    };
+    if access.access != "2" {
+        return (false, "a subscription not in the CONNECT answer");
+    }
+    // The tokenless subscribers never publish; their name is no device's even if an account
+    // derived it.
+    if access.username != access.clientid
+        || [RUNNER_USERNAME, CAPTURE_USERNAME].contains(&access.username.as_str())
+    {
+        return (false, "no device");
+    }
+    let Some(account) = accounts.resolve(&access.clientid) else {
+        return (false, "the client is no ServiceAccount");
+    };
+    if let Some(why) = refused(broker, account, chrono::Utc::now()) {
+        return (false, why);
+    }
+    let allowed = broker
         .roles
         .iter()
         .filter(|role| role.service_accounts.contains(&account.name))
-    {
-        acl.extend(role.publish.iter().map(|topic| rule("publish", topic)));
-        acl.extend(role.subscribe.iter().map(|topic| rule("subscribe", topic)));
+        .flat_map(|role| &role.publish)
+        .any(|filter| filter_matches(filter, &access.topic, &access.clientid));
+    if allowed {
+        (true, "a device's role")
+    } else {
+        (false, "no role of the account covers the topic")
     }
-    if acl.is_empty() {
-        return (Answer::deny(), "the account holds no role of this broker");
-    }
-    (Answer::allow(acl, Some(claims.exp)), "a device")
 }
 
 /// A CONNECT without a token: the runner or the Portal's capture subscriber, each by its name
@@ -316,10 +445,7 @@ fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, &'stat
     if topics.is_empty() {
         return (Answer::deny(), none);
     }
-    let acl = topics
-        .iter()
-        .map(|topic| rule("subscribe", topic))
-        .collect();
+    let acl = topics.iter().map(|topic| rule(topic)).collect();
     (Answer::allow(acl, None), who)
 }
 
@@ -390,7 +516,38 @@ async fn auth(
     Json(answer)
 }
 
-/// The internal listener's router: the CONNECT check and nothing else. `runner_host` and
+/// `POST /internal/mqtt/acl`, on the internal listener only: 200 with `allow`, kept by the broker
+/// for [`PUBLISH_CACHE_MS`], or `deny`, which disconnects the client.
+async fn acl(
+    State(Internal { gateway, .. }): State<Internal>,
+    headers: HeaderMap,
+    Json(access): Json<Access>,
+) -> (HeaderMap, Json<serde_json::Value>) {
+    let caller = headers
+        .get(MESH_IDENTITY)
+        .and_then(|value| value.to_str().ok());
+    let (allowed, why) = publish_check(
+        &gateway.brokers(),
+        &gateway.service_accounts(),
+        caller,
+        &access,
+    );
+    let mut answer = HeaderMap::new();
+    if allowed {
+        answer.insert("x-cache", axum::http::HeaderValue::from(PUBLISH_CACHE_MS));
+    } else {
+        tracing::info!(
+            broker = caller.map(broker_of).unwrap_or_default(),
+            clientid = %access.clientid,
+            why,
+            "mqtt publish refused"
+        );
+    }
+    let result = if allowed { "allow" } else { "deny" };
+    (answer, Json(serde_json::json!({ "result": result })))
+}
+
+/// The internal listener's router: the CONNECT check, the publish check and nothing else. `runner_host` and
 /// `portal_host` name the headless Services of the pipeline runner and of the Portal; without
 /// one, nobody connects under that name without a token.
 pub fn internal_router(
@@ -400,6 +557,7 @@ pub fn internal_router(
 ) -> axum::Router {
     axum::Router::new()
         .route("/internal/mqtt/auth", axum::routing::post(auth))
+        .route("/internal/mqtt/acl", axum::routing::post(acl))
         .with_state(Internal {
             gateway,
             runner_host: runner_host.map(Arc::from),
@@ -445,6 +603,65 @@ mod tests {
     }
 
     #[test]
+    fn a_publish_is_refused_for_a_subscription_a_tokenless_name_or_an_unknown_client() {
+        let brokers = Brokers::from([(
+            "mqtt-p-b".to_owned(),
+            Broker {
+                project: "p".into(),
+                roles: Vec::new(),
+                runner_topics: Vec::new(),
+                capture_topics: Vec::new(),
+            },
+        )]);
+        let accounts = ServiceAccounts::new();
+        let ask = |caller, access: &str, clientid: &str| {
+            let access = Access {
+                access: access.into(),
+                clientid: clientid.into(),
+                username: clientid.into(),
+                topic: "t".into(),
+            };
+            publish_check(&brokers, &accounts, caller, &access).1
+        };
+        assert_eq!(
+            ask(Some("mqtt-q-b.ns"), "2", "p-cam"),
+            "the caller is no broker this repository declares"
+        );
+        assert_eq!(
+            ask(Some("mqtt-p-b.ns"), "1", "p-cam"),
+            "a subscription not in the CONNECT answer"
+        );
+        assert_eq!(ask(Some("mqtt-p-b.ns"), "2", CAPTURE_USERNAME), "no device");
+        assert_eq!(
+            ask(Some("mqtt-p-b.ns"), "2", "p-cam"),
+            "the client is no ServiceAccount"
+        );
+    }
+
+    #[test]
+    fn a_filter_covers_a_topic_level_by_level() {
+        for (filter, topic) in [
+            ("cameras/${clientid}/#", "cameras/cam-1/frame/0"),
+            ("cameras/${clientid}/#", "cameras/cam-1"),
+            ("air/+/pm", "air/x/pm"),
+            ("air/status", "air/status"),
+        ] {
+            assert!(filter_matches(filter, topic, "cam-1"), "{filter} {topic}");
+        }
+        for (filter, topic) in [
+            ("cameras/${clientid}/#", "cameras/cam-2/frame"),
+            ("cameras/${clientid}/#", "cameras"),
+            ("air/+/pm", "air/x/pm/y"),
+            ("air/+/pm", "air/pm"),
+            ("air/status", "air/status/x"),
+            ("+/status", "$SYS/status"),
+            ("air/+", "air/#"),
+        ] {
+            assert!(!filter_matches(filter, topic, "cam-1"), "{filter} {topic}");
+        }
+    }
+
+    #[test]
     fn a_mesh_identity_names_its_broker_by_its_first_label() {
         assert_eq!(
             broker_of(
@@ -465,19 +682,12 @@ mod tests {
 
     #[test]
     fn the_answer_reads_as_rmqtt_expects_it() {
-        let answer = Answer::allow(
-            vec![
-                rule("publish", "cameras/${clientid}/#"),
-                rule("subscribe", "x/${clientid}"),
-            ],
-            Some(1_900_000_000),
-        );
+        let answer = Answer::allow(vec![rule("x/${clientid}")], Some(1_900_000_000));
         assert_eq!(
             serde_json::to_value(&answer).expect("serializes"),
             serde_json::json!({
                 "result": "allow", "superuser": false, "expire_at": 1_900_000_000,
                 "acl": [
-                    {"permission": "allow", "action": "publish", "topic": "cameras/${clientid}/#", "qos": [0, 1], "retain": false},
                     {"permission": "allow", "action": "subscribe", "topic": "x/${clientid}", "qos": [0, 1]}
                 ]
             })
