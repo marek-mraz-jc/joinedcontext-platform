@@ -25,6 +25,7 @@ pub mod ingest;
 pub mod mcp;
 pub mod middleware;
 pub mod mqtt;
+pub mod mqtt_refusals;
 pub(crate) mod notification_target;
 pub mod oauth;
 pub mod operations;

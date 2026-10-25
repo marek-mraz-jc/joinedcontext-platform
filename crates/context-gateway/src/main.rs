@@ -291,6 +291,7 @@ async fn main() -> ExitCode {
             Arc::clone(&gateway),
             config.mqtt_runner_host.clone(),
             config.mqtt_portal_host.clone(),
+            config.mqtt_portal_identity.clone(),
         );
         tracing::info!(bind = %internal, "internal listener for the MQTT brokers");
         tokio::spawn(async move {
