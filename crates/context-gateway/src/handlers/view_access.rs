@@ -824,7 +824,7 @@ async fn granted(
     subject: &Subject,
 ) -> Result<Value, Box<Response<Body>>> {
     let mut answer = document(gateway, endpoint, subject, AccessFormat::AuthZen).await?;
-    let names: Vec<&str> =
+    let names = manifest_names(
         crate::pdp::evaluator::effective(subject, &endpoint.policies, crate::pdp::now())
             .into_iter()
             .filter_map(|policy| {
@@ -833,11 +833,23 @@ async fn granted(
                     .iter()
                     .position(|candidate| std::ptr::eq(candidate, policy))?;
                 endpoint.policy_names.get(index).map(String::as_str)
-            })
-            .collect();
+            }),
+    );
     answer["admitted"] = json!(true);
     answer["policies"] = json!(names);
     Ok(answer)
+}
+
+/// The manifest names of the rules in force, each once: a Policy with `rules[]` is held as one
+/// policy per rule (`kiosks#1`, `kiosks#2`), and the person wrote `kiosks` (F-PLT2-023).
+fn manifest_names<'a>(rules: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut names: Vec<&str> = Vec::new();
+    for name in rules.map(jc_core::kinds::PolicySpec::policy_of) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// The engine's explanation with the deciding policy under the name the Portal knows it by: the
@@ -949,6 +961,15 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-PLT2-023: a two-rule Policy is listed once, under the name its manifest carries.
+    #[test]
+    fn a_policy_of_two_rules_is_listed_once() {
+        assert_eq!(
+            manifest_names(["kiosks#1", "kiosks#2", "air", "air"].into_iter()),
+            ["kiosks", "air"]
+        );
+    }
 
     /// ADR-N-057 decision 3: an evaluation names the caller or nobody; the caller's own name in
     /// any other kind, or anyone else's, is not theirs.

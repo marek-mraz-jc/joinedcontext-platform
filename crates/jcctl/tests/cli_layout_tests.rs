@@ -147,3 +147,20 @@ fn the_ci_workflow_of_a_project_repository_is_not_a_manifest() {
         String::from_utf8_lossy(&organization.stderr)
     );
 }
+
+/// F-PLT3-015: without a platform, `plan` of an unchanged repository plans nothing, exits 0 and
+/// says configuration is read from the repository; `--json` keeps its shape with zero counts.
+#[test]
+fn plan_without_a_platform_reports_no_configuration_change() {
+    let repo = common::demo_repo("cli-plan-nothing");
+    let plain = jcctl(&["plan", "--repo-dir", &text(&repo)]);
+    let printed = String::from_utf8_lossy(&plain.stdout);
+    assert_eq!(plain.status.code(), Some(0), "{printed}");
+    assert!(!printed.contains("create"), "{printed}");
+    assert!(printed.contains("read from the repository"), "{printed}");
+    let json = jcctl(&["plan", "--repo-dir", &text(&repo), "--json"]);
+    let plan: serde_json::Value = serde_json::from_slice(&json.stdout).expect("JSON");
+    assert_eq!(plan["summary"]["to_add"], 0);
+    assert_eq!(plan["changes"], serde_json::json!([]));
+    assert!(plan["flags"].is_array());
+}

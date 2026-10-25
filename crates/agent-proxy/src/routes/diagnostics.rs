@@ -92,6 +92,21 @@ pub fn redact(text: &str) -> String {
         })
 }
 
+/// The text redacted, then cut to the profile's response cap in bytes on a character boundary
+/// (AG-41). Redacting first means a cut through the middle of a secret cannot leave a fragment
+/// the patterns no longer recognise (F-PLT1-009).
+fn redacted_within(text: &str, max_bytes: u64) -> String {
+    let mut out = redact(text);
+    let mut cut = usize::try_from(max_bytes)
+        .unwrap_or(usize::MAX)
+        .min(out.len());
+    while !out.is_char_boundary(cut) {
+        cut = cut.saturating_sub(1);
+    }
+    out.truncate(cut);
+    out
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     headers: HeaderMap,
@@ -157,12 +172,7 @@ pub async fn handler(
     let (status, body) = match read {
         Ok((s, bytes)) => {
             let text = String::from_utf8_lossy(&bytes);
-            // The profile's response cap holds here as on every other door (AG-41).
-            let cut = text
-                .char_indices()
-                .nth(usize::try_from(run.max_response_bytes).unwrap_or(usize::MAX))
-                .map_or(text.len(), |(i, _)| i);
-            (s, redact(&text[..cut]))
+            (s, redacted_within(&text, run.max_response_bytes))
         }
         Err(refusal) => {
             log_request(&AuditEntry {
@@ -195,7 +205,25 @@ pub async fn handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_name, redact};
+    use super::{is_name, redact, redacted_within};
+
+    /// F-PLT1-009: a cap that falls inside a token leaves no part of it, and the cap counts
+    /// bytes, so a multibyte body stays under it.
+    #[test]
+    fn the_cap_cuts_after_redaction_and_by_bytes() {
+        let jwt = [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxIn0",
+            "abcdefghijklmnop",
+        ]
+        .join(".");
+        let body = format!(r#"{{"token":"{jwt}"}}"#);
+        let out = redacted_within(&body, 30);
+        assert!(!out.contains("eyJ"), "{out}");
+        assert!(out.len() <= 30, "{out}");
+        let wide = redacted_within(&"č".repeat(10), 5);
+        assert_eq!(wide, "čč");
+    }
 
     #[test]
     fn names_and_change_ids_pass_and_paths_do_not() {

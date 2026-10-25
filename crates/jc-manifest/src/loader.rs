@@ -479,6 +479,19 @@ fn resolve_endpoint_refs(
             ))
         })
         .collect();
+    // The Organization each Project names: an `organization` audience is that Organization's
+    // projects, not every project the repository holds (F-PLT3-011).
+    let organizations: BTreeMap<String, String> = resources
+        .iter()
+        .filter(|(id, _)| id.kind == "Project")
+        .filter_map(|(id, loaded)| {
+            let reference = loaded.manifest.spec.get("organizationRef")?;
+            let name = reference
+                .as_str()
+                .or_else(|| reference.get("name").and_then(Value::as_str))?;
+            Some((id.name.clone(), name.to_owned()))
+        })
+        .collect();
     let mut unresolved = Vec::new();
     for (id, loaded) in resources.iter_mut() {
         if id.kind != "SharedSpaceReference" {
@@ -508,7 +521,8 @@ fn resolve_endpoint_refs(
             continue;
         };
         let admitted = match endpoint.get("audience").and_then(Value::as_str) {
-            Some("public" | "organization") => true,
+            Some("public") => true,
+            Some("organization") => organizations.get(&referrer) == organizations.get(&project),
             _ => {
                 referrer == project
                     || endpoint

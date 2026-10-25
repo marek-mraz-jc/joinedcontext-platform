@@ -234,11 +234,67 @@ impl LimitManager {
         let mut map = self.runs.lock().await;
         map.entry(run_id.to_string()).or_default().tokens_consumed += count;
     }
+
+    /// Drops the usage of every counted run the Portal no longer holds as active, and the ticket
+    /// the resolver held for it (F-PLT1-013): without it the map grows with every run the proxy
+    /// ever served. A Portal that cannot be reached drops nothing.
+    pub async fn end_finished(&self, runs: &crate::runs::RunResolver) {
+        let counted: Vec<String> = self.runs.lock().await.keys().cloned().collect();
+        for run_id in counted {
+            match runs.resolve_fresh(&run_id).await {
+                Err(crate::runs::RunError::NotFound(_) | crate::runs::RunError::NotActive(_)) => {
+                    self.runs.lock().await.remove(&run_id);
+                    runs.tickets.forget(&run_id);
+                }
+                Err(crate::runs::RunError::Transport(_)) | Ok(_) => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-PLT1-013: the usage of a run the Portal no longer holds is dropped, an active run keeps
+    /// its counts.
+    #[tokio::test]
+    async fn a_finished_runs_usage_is_dropped() {
+        use wiremock::matchers::path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let portal = MockServer::start().await;
+        Mock::given(path("/internal/agent-runs/live"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "live", "project": "p", "appName": "a", "endpointSlug": "e",
+                "allowsWrite": false, "branch": "b", "pathPrefix": "", "status": "building",
+                "ticketHash": "h", "maxTokens": 1, "allowedHosts": [], "requestsPerMinute": 1,
+                "maxResponseBytes": 1, "createdBy": "u", "modelName": "m"
+            })))
+            .mount(&portal)
+            .await;
+        Mock::given(path("/internal/agent-runs/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&portal)
+            .await;
+        let base = url::Url::parse(&portal.uri()).expect("a URL");
+        let runs = crate::runs::RunResolver::with_cached_at(
+            base,
+            serde_json::from_value(serde_json::json!({
+                "id": "cached", "project": "p", "appName": "a", "endpointSlug": "e",
+                "allowsWrite": false, "branch": "b", "pathPrefix": "", "status": "building",
+                "ticketHash": "h", "maxTokens": 1, "allowedHosts": [], "requestsPerMinute": 1,
+                "maxResponseBytes": 1, "createdBy": "u", "modelName": "m"
+            }))
+            .expect("a run"),
+        );
+        let limits = LimitManager::default();
+        limits.record_tokens("live", 5).await;
+        limits.record_tokens("gone", 7).await;
+        limits.end_finished(&runs).await;
+        let held = limits.runs.lock().await;
+        assert_eq!(held.get("live").map(|u| u.tokens_consumed), Some(5));
+        assert!(!held.contains_key("gone"));
+    }
 
     /// AG-110: one deployment's day is its own, it is refused once spent, and the next day starts
     /// from zero.
