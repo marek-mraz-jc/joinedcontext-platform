@@ -61,8 +61,9 @@ impl Conflict {
 pub struct Options {
     /// The project every project-scoped resource lands in (MF-22).
     pub namespace: Option<String>,
-    /// The `{orgDomain}` segment every entity URN is rewritten to (MF-22, PF-22).
-    pub org_domain: Option<String>,
+    /// `(from, to)`: the `{orgDomain}` segment `from` is rewritten to `to` in every entity URN
+    /// that names it; a URN of another organization keeps its domain (MF-22, PF-22).
+    pub org_domain: Option<(String, String)>,
     /// What to do when the repository already has the resource (MF-23).
     pub conflict: Conflict,
 }
@@ -410,8 +411,8 @@ fn rewrite(manifest: &mut RawManifest, options: &Options, origin: &str) {
         }
     }
 
-    if let Some(domain) = &options.org_domain {
-        rewrite_urns(&mut manifest.spec, domain);
+    if let Some((from, to)) = &options.org_domain {
+        rewrite_urns(&mut manifest.spec, from, to);
     }
 
     // MF-20: an imported object says where it came from, so a reviewer reading the merge
@@ -445,35 +446,36 @@ fn retarget_namespaces(value: &mut Value, from: &str, to: &str) {
     }
 }
 
-/// Rewrites the `{orgDomain}` segment of every entity URN (PF-22).
+/// Rewrites the `{orgDomain}` segment `from` to `to` in every entity URN (PF-22).
 ///
 /// `urn:ngsi-ld:{Type}:{orgDomain}:{space}:{localId}`: the fourth segment and nothing else, so
-/// a local id that happens to contain the old domain is left alone.
-fn rewrite_urns(value: &mut Value, domain: &str) {
+/// a local id that happens to contain the old domain is left alone, and a URN naming another
+/// organization's domain (a federation reference) keeps it.
+fn rewrite_urns(value: &mut Value, from: &str, to: &str) {
     match value {
         Value::String(text) => {
-            if let Some(rewritten) = with_domain(text, domain) {
+            if let Some(rewritten) = with_domain(text, from, to) {
                 *text = rewritten;
             }
         }
         Value::Object(members) => members
             .values_mut()
-            .for_each(|member| rewrite_urns(member, domain)),
+            .for_each(|member| rewrite_urns(member, from, to)),
         Value::Array(values) => values
             .iter_mut()
-            .for_each(|value| rewrite_urns(value, domain)),
+            .for_each(|value| rewrite_urns(value, from, to)),
         _ => {}
     }
 }
 
-/// One URN, or one anchored `idPattern`, with its organisation domain replaced; `None` when
-/// the string is neither, or its second segment is no domain.
+/// One URN, or one anchored `idPattern`, with its organisation domain `from` replaced by `to`;
+/// `None` when the string is neither, or its second segment is not `from`.
 ///
 /// A Policy and a registration anchor their coverage with a pattern rather than an id
 /// (`^urn:ngsi-ld:AirQualityObserved:hel\.fi:air-quality:.*$`, R33), which is the same scheme
 /// behind a `^` with the domain's dots escaped. Left alone, an imported registration keeps
 /// routing at the organisation the bundle came from (MF-22, T-0826).
-fn with_domain(urn: &str, domain: &str) -> Option<String> {
+fn with_domain(urn: &str, from: &str, to: &str) -> Option<String> {
     let pattern = urn.starts_with('^');
     let rest = urn
         .strip_prefix('^')
@@ -485,17 +487,18 @@ fn with_domain(urn: &str, domain: &str) -> Option<String> {
     if segments.len() < 4 {
         return None;
     }
-    // An organisation domain is a DNS name; a segment without a dot is the NSS's own
-    // (`urn:ngsi-ld:Vehicle:sk:ba:123`, ADR-N-041) and rewriting it would corrupt the id
-    // (T-4591). A pattern escapes its dots, `hel\.fi`.
-    if !segments[1].contains('.') {
+    // Only the domain the mapping names: a segment without a dot is the NSS's own
+    // (`urn:ngsi-ld:Vehicle:sk:ba:123`, ADR-N-041, T-4591), and another domain is another
+    // organization's Entity. A pattern escapes its dots, `hel\.fi`.
+    let (from, to) = if pattern {
+        (regex::escape(from), regex::escape(to))
+    } else {
+        (from.to_owned(), to.to_owned())
+    };
+    if segments[1] != from {
         return None;
     }
-    segments[1] = if pattern {
-        regex::escape(domain)
-    } else {
-        domain.to_owned()
-    };
+    segments[1] = to;
     let joined = segments.join(":");
     Some(if pattern {
         format!("^urn:ngsi-ld:{joined}")
@@ -605,12 +608,18 @@ mod tests {
     #[test]
     fn only_a_domain_in_the_second_segment_is_rewritten() {
         assert_eq!(
-            with_domain("urn:ngsi-ld:Vehicle:hel.fi:mobility:7", "praha.eu").as_deref(),
+            with_domain(
+                "urn:ngsi-ld:Vehicle:hel.fi:mobility:7",
+                "hel.fi",
+                "praha.eu"
+            )
+            .as_deref(),
             Some("urn:ngsi-ld:Vehicle:praha.eu:mobility:7")
         );
         assert_eq!(
             with_domain(
                 r"^urn:ngsi-ld:AirQualityObserved:hel\.fi:air:.*$",
+                "hel.fi",
                 "praha.eu"
             )
             .as_deref(),
@@ -618,10 +627,35 @@ mod tests {
         );
         // T-4591: an NSS of its own keeps every segment.
         assert_eq!(
-            with_domain("urn:ngsi-ld:Vehicle:sk:ba:123", "praha.eu"),
+            with_domain("urn:ngsi-ld:Vehicle:sk:ba:123", "sk", "praha.eu"),
+            Some("urn:ngsi-ld:Vehicle:praha.eu:ba:123".to_owned()),
+            "only when the mapping names it"
+        );
+        assert_eq!(
+            with_domain("urn:ngsi-ld:Vehicle:sk:ba:123", "hel.fi", "praha.eu"),
             None
         );
-        assert_eq!(with_domain("urn:ngsi-ld:Vehicle:42", "praha.eu"), None);
-        assert_eq!(with_domain("not a urn", "praha.eu"), None);
+        assert_eq!(
+            with_domain("urn:ngsi-ld:Vehicle:42", "hel.fi", "praha.eu"),
+            None
+        );
+        assert_eq!(with_domain("not a urn", "hel.fi", "praha.eu"), None);
+    }
+
+    /// F-PLT3-019: a reference to another organization's Entity keeps its domain.
+    #[test]
+    fn another_organizations_urn_keeps_its_domain() {
+        assert_eq!(
+            with_domain("urn:ngsi-ld:X:other.org:s:1", "hel.fi", "bb.sk"),
+            None
+        );
+        assert_eq!(
+            with_domain(r"^urn:ngsi-ld:X:other\.org:s:.*$", "hel.fi", "bb.sk"),
+            None
+        );
+        assert_eq!(
+            with_domain("urn:ngsi-ld:X:hel.fi:s:1", "hel.fi", "bb.sk").as_deref(),
+            Some("urn:ngsi-ld:X:bb.sk:s:1")
+        );
     }
 }
