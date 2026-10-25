@@ -34,10 +34,7 @@ fn unavailable(what: &str) -> Response {
 async fn portal_only(state: &ProxyState, headers: &HeaderMap, what: &str) -> Option<Response> {
     let bearer = headers
         .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
+        .and_then(|v| jc_core::http::bearer(v.to_str().ok()));
     let refused = || {
         jc_core::ProblemDetails::unauthorized()
             .with_detail(what.to_owned())

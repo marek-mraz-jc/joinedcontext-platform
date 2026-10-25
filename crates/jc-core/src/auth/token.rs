@@ -415,11 +415,7 @@ pub fn presents(headers: &axum::http::HeaderMap) -> bool {
 /// The token in an `Authorization: Bearer` header. The platform has no other bearer
 /// credential: a static API key is no token and fails verification like any other (PF-37).
 pub fn bearer(header: Option<&str>) -> Result<&str, Rejected> {
-    header
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .ok_or(Rejected::NoToken)
+    crate::http::bearer(header).ok_or(Rejected::NoToken)
 }
 
 #[cfg(test)]
