@@ -1148,6 +1148,9 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
             Ok(rules) => {
                 let project = id.namespace.clone().unwrap_or_default();
                 let space = spec.context_space_ref.name().to_owned();
+                let rules = rules
+                    .into_iter()
+                    .map(|(name, rule)| (name, of_own_project(rule, &project)));
                 policies.entry((project, space)).or_default().extend(rules);
             }
             Err(error) => tracing::warn!(
@@ -1163,10 +1166,20 @@ fn policies_by_space(repo: &Repository) -> BTreeMap<(String, String), Vec<(Strin
             policies
                 .entry((project.clone(), spec.context_space_ref.name().to_owned()))
                 .or_default()
-                .push((name, spec));
+                .push((name, of_own_project(spec, &project)));
         }
     }
     policies
+}
+
+/// `spec` with a bare `serviceAccount` assignee named `{project}/{name}`: a bare name means the
+/// account of the Policy's own project, never a same-named account of another project the
+/// Endpoint admits (PL-92, T-5698).
+fn of_own_project(mut spec: PolicySpec, project: &str) -> PolicySpec {
+    if spec.assignee.kind == PrincipalKind::ServiceAccount && !spec.assignee.id.contains('/') {
+        spec.assignee.id = format!("{project}/{}", spec.assignee.id);
+    }
+    spec
 }
 
 /// The Policies an endpoint with `spec.policyRefs` (or `policyRef`) evaluates, every rule of each
@@ -1420,7 +1433,9 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{language_map, normalize, portal_personal_data_read, PORTAL_RECONCILER_USER};
+    use super::{
+        language_map, normalize, of_own_project, portal_personal_data_read, PORTAL_RECONCILER_USER,
+    };
     use crate::auth::subject::Subject;
     use crate::pdp::evaluator::{evaluate, Request};
     use crate::resolver::DeclaredTypes;
@@ -1502,6 +1517,44 @@ mod tests {
             chrono::Utc::now(),
         )
         .is_deny()
+    }
+
+    /// PL-92, T-5698: a bare `serviceAccount` assignee is the account of the Policy's own
+    /// project; the same-named account of another project the Endpoint admits is not granted.
+    #[test]
+    fn a_bare_service_account_assignee_grants_its_own_projects_account_alone() {
+        let grant = |id: &str| -> jc_core::kinds::PolicySpec {
+            serde_norway::from_str(&format!(
+                "contextSpaceRef: air\nassigner: did:web:hel.fi\n\
+                 assignee: {{ kind: serviceAccount, id: \"{id}\" }}\noperations: [queryEntity]\n"
+            ))
+            .expect("a policy spec")
+        };
+        let loaded = of_own_project(grant("ingest"), "city-a");
+        assert_eq!(loaded.assignee.id, "city-a/ingest");
+        assert_eq!(
+            of_own_project(grant("city-b/ingest"), "city-a").assignee.id,
+            "city-b/ingest",
+            "a qualified name is kept"
+        );
+        let ingest_of = |project: &str| Subject {
+            service_account: Some("ingest".to_owned()),
+            service_account_project: Some(project.to_owned()),
+            ..Subject::default()
+        };
+        let decided = |subject: &Subject| {
+            !evaluate(
+                subject,
+                Operation::QueryEntity,
+                &Request::default(),
+                "t",
+                std::slice::from_ref(&loaded),
+                chrono::Utc::now(),
+            )
+            .is_deny()
+        };
+        assert!(decided(&ingest_of("city-a")));
+        assert!(!decided(&ingest_of("city-b")));
     }
 
     /// T-5168: a space whose model marks personal data lets the Portal's own account find and
