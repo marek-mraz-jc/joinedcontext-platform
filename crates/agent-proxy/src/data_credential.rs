@@ -16,6 +16,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
+use crate::runs::{RunError, RunResolver};
+
 /// How a data credential is told apart from a run ticket in `Authorization: Bearer`.
 pub const PREFIX: &str = "jcd_";
 /// How long one lives: long enough for a function call, short enough to be worth nothing later.
@@ -92,6 +94,25 @@ impl DataCredentials {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         live.remove(run_id);
+    }
+
+    /// Revokes the credentials of every run the Portal no longer holds as active: finished,
+    /// cancelled, expired or reaped. A Portal that cannot be reached revokes nothing.
+    pub async fn end_finished(&self, runs: &RunResolver) {
+        let held: Vec<String> = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        for run_id in held {
+            if let Err(RunError::NotFound(_) | RunError::NotActive(_)) =
+                runs.resolve_fresh(&run_id).await
+            {
+                self.revoke(&run_id);
+            }
+        }
     }
 }
 

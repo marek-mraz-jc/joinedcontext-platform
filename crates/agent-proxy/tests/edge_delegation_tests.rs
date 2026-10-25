@@ -344,6 +344,33 @@ async fn a_finished_runs_grant_is_revoked() {
     ));
 }
 
+/// ADR-N-038 decision 6: a run's data credentials end with the run, not only with their TTL.
+#[tokio::test]
+async fn a_finished_runs_data_credentials_are_revoked() {
+    let live = portal("building").await;
+    let state = state(
+        sample_run(false),
+        Bases {
+            portal: live.uri(),
+            ..Bases::default()
+        },
+    );
+    let token = state.data_credentials.mint(RUN_ID);
+    let secret = token.rsplit_once('.').expect("run.secret").1.to_owned();
+
+    // A live run keeps its credentials.
+    state.data_credentials.end_finished(&state.runs).await;
+    assert!(state.data_credentials.verify(RUN_ID, &secret));
+
+    live.reset().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&live)
+        .await;
+    state.data_credentials.end_finished(&state.runs).await;
+    assert!(!state.data_credentials.verify(RUN_ID, &secret));
+}
+
 /// AG-52: a workspace, a person's own Portal login and a stranger cannot hand over an identity;
 /// the realm is asked about the caller before anything about the run.
 #[tokio::test]
