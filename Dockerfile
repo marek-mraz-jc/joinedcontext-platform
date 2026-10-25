@@ -74,11 +74,14 @@ FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d
 # APT_REFRESH: the UTC day, set by image.yml, so the apt layer below leaves the build cache once a
 # day and picks up the Debian security fixes released since (vulnerabilities lane, T-3834).
 ARG APT_REFRESH
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends git ca-certificates tini \
  && rm -rf /var/lib/apt/lists/* && useradd --uid 65532 --no-create-home --shell /usr/sbin/nologin nonroot
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 USER 65532:65532
-ENTRYPOINT ["/usr/local/bin/jcctl", "checkouts"]
+# tini as PID 1 reaps the processes git leaves behind (a detached `gc --auto`): jcctl waits only on
+# its own children, and 18,673 orphaned zombies per pod once filled the PID cap (T-5638).
+# scripts/ci/checkouts-reaps-orphans.sh checks the built image.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jcctl", "checkouts"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gateway

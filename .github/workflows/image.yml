@@ -208,6 +208,12 @@ jobs:
         run: cosign sign --yes ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
       - if: steps.has.outputs.df != ''
         run: echo "checkouts digest ${{ steps.checkouts.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      # tini is PID 1 and reaps the orphans git leaves behind (T-5638: 18,673 zombies per pod).
+      - if: steps.has.outputs.df != ''
+        name: the checkouts image reaps orphaned processes
+        run: |
+          docker pull -q "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
+          scripts/ci/checkouts-reaps-orphans.sh "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
       - if: steps.has.outputs.df != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
