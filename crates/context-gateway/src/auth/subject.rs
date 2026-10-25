@@ -287,6 +287,15 @@ pub(crate) fn subject_of(
                 );
                 return Err(Box::new(ProblemDetails::forbidden()));
             }
+            if !of_its_organization(gateway, endpoint, &account.project) {
+                tracing::warn!(
+                    azp,
+                    slug = %endpoint.slug,
+                    project = %account.project,
+                    "the account's project is of another organization"
+                );
+                return Err(Box::new(ProblemDetails::not_found()));
+            }
             return Ok(Subject {
                 user: None,
                 service_account: Some(account.name.clone()),
@@ -331,8 +340,29 @@ pub(crate) fn subject_of(
     let project = std::iter::once(&endpoint.project)
         .chain(endpoint.allowed_projects.iter())
         .find(|project| groups.contains(*project))
+        .or_else(|| {
+            // An `organization` audience admits a member of any project of the Endpoint's
+            // Organization (ADR-N-058 2.4): the first group that is one.
+            (endpoint.audience == Audience::Organization)
+                .then(|| {
+                    groups
+                        .iter()
+                        .find(|group| of_its_organization(gateway, endpoint, group))
+                })
+                .flatten()
+        })
         .cloned()
         .unwrap_or_default();
+    if !of_its_organization(gateway, endpoint, &project) {
+        // Another Organization's Endpoint is answered as a slug nobody created (PF-32, R20).
+        tracing::warn!(
+            user = %user,
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "the token names no project of this endpoint's organization"
+        );
+        return Err(Box::new(ProblemDetails::not_found()));
+    }
     if !endpoint.admits(Some(&project)) {
         // T-3033: an App's client minted tokens with no `groups` claim, and every project-bound
         // read was a 403 with no line anywhere. The person, the client, the endpoint; never the
@@ -358,6 +388,21 @@ pub(crate) fn subject_of(
         client: claims.azp.clone(),
         organization: gateway.organization_of(&project),
     })
+}
+
+/// Whether `project` is of the Endpoint's own Organization, which an `organization` audience
+/// asks of every caller (EP-14, ADR-N-058 2.4): one realm serves several Organizations, so a
+/// valid token says nothing about which one its holder belongs to. Each project's Organization
+/// comes from its Project manifest; while the gateway holds none for the Endpoint's project, the
+/// installation is one Organization and every member passes, as before ADR-N-058.
+fn of_its_organization(gateway: &Gateway, endpoint: &Endpoint, project: &str) -> bool {
+    if endpoint.audience != Audience::Organization {
+        return true;
+    }
+    match gateway.organization_of(&endpoint.project) {
+        None => true,
+        Some(theirs) => gateway.organization_of(project).as_deref() == Some(theirs.as_str()),
+    }
 }
 
 /// Whether `user` may be decided under its own name: any person's username, and a
