@@ -42,6 +42,26 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
         .unwrap_or_else(|_| body.clone())
 }
 
+/// The body with `model` set to the run's profile model (F-PLT1-006): the profile's model and
+/// its cost hold whatever model the workspace names, and a harness that names a side model of its
+/// own (titles, summaries) keeps working on the run's. A body that is not a JSON object, or a
+/// profile naming no model, is sent as is.
+fn with_model(body: &Bytes, model: &str) -> Bytes {
+    if model.is_empty() {
+        return body.clone();
+    }
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(body) else {
+        return body.clone();
+    };
+    if map.get("model").and_then(Value::as_str) == Some(model) {
+        return body.clone();
+    }
+    map.insert("model".into(), json!(model));
+    serde_json::to_vec(&map)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
+}
+
 /// Why the body's OpenRouter `provider` field is refused, or `None` when it is absent or holds
 /// only `order` (1 to 8 provider slugs), `sort` (`latency`, `throughput` or `price`; T-4360), at
 /// least one of the two, and `allow_fallbacks` (a boolean); it is sent as is otherwise (T-4292,
@@ -634,6 +654,10 @@ pub async fn handler(
             .into_response();
     }
 
+    let body_bytes = match &caller {
+        Caller::Run(run) => with_model(&body_bytes, &run.model_name),
+        Caller::Assistant { .. } | Caller::App { .. } => body_bytes,
+    };
     let effort_setting = match &caller {
         Caller::Run(run) => run.reasoning_effort.as_deref(),
         Caller::Assistant { .. } | Caller::App { .. } => None,
@@ -852,6 +876,23 @@ fn stream_through(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_runs_model_replaces_the_one_the_body_names() {
+        let sent = |body: &str, model: &str| {
+            String::from_utf8(with_model(&Bytes::from(body.to_owned()), model).to_vec())
+                .unwrap_or_default()
+        };
+        let replaced: Value =
+            serde_json::from_str(&sent(r#"{"model":"openai/o3-pro","messages":[]}"#, "m/run"))
+                .unwrap_or_default();
+        assert_eq!(replaced["model"], "m/run");
+        assert_eq!(replaced["messages"], json!([]));
+        let added: Value = serde_json::from_str(&sent("{}", "m/run")).unwrap_or_default();
+        assert_eq!(added["model"], "m/run");
+        assert_eq!(sent("not json", "m/run"), "not json");
+        assert_eq!(sent(r#"{"model":"x"}"#, ""), r#"{"model":"x"}"#);
+    }
 
     fn sent(body: &str, rest: &str, effort: &str) -> Value {
         serde_json::from_slice(&with_reasoning(&Bytes::from(body.to_owned()), rest, effort))
