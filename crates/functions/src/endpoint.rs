@@ -12,6 +12,12 @@ use serde_json::{json, Value};
 /// is lower, this only keeps the runtime from buffering an unbounded body for it.
 pub const ANSWER_LIMIT: usize = 8 * 1024 * 1024;
 
+/// The most the gateway answers of one invocation may add up to, and how many of its requests
+/// are in flight at once: the answers are buffered here, outside the function's memory limit, so
+/// a `Promise.all` over many requests is held to these (F-PLT2-013).
+pub const INVOCATION_ANSWER_BUDGET: usize = 32 * 1024 * 1024;
+pub const IN_FLIGHT: usize = 4;
+
 /// Where a function's requests go and whose grants they carry.
 #[derive(Clone)]
 pub struct Endpoint {
@@ -86,15 +92,34 @@ fn problem(status: u16, title: &str) -> Value {
 /// Performs one request of the function and answers `{status, body}`: the endpoint's answer, a
 /// 403 for a request this runtime does not send, or status 0 when the gateway did not answer.
 pub async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option<String>) -> Value {
+    request_within(endpoint, method, path, body, ANSWER_LIMIT)
+        .await
+        .0
+}
+
+/// [`request`] reading at most `limit` bytes of the answer; also answers how many it read.
+pub async fn request_within(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    limit: usize,
+) -> (Value, usize) {
+    let answer = |value: Value| (value, 0);
     let method = match method {
         "GET" => reqwest::Method::GET,
         "POST" => reqwest::Method::POST,
         "PATCH" => reqwest::Method::PATCH,
         "DELETE" => reqwest::Method::DELETE,
-        _ => return problem(403, "a function may send GET, POST, PATCH or DELETE only"),
+        _ => {
+            return answer(problem(
+                403,
+                "a function may send GET, POST, PATCH or DELETE only",
+            ))
+        }
     };
     if !allowed(&endpoint.slug, path) {
-        return problem(403, "a function may call its own endpoint only");
+        return answer(problem(403, "a function may call its own endpoint only"));
     }
     // Checked above: the path is under `/api/endpoint/{slug}/`, so the rest is the endpoint's own.
     let url = match &endpoint.proxy {
@@ -124,20 +149,39 @@ pub async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(%error, "the gateway did not answer a function");
-            return json!({ "status": 0, "body": { "title": "the gateway did not answer" } });
+            return answer(
+                json!({ "status": 0, "body": { "title": "the gateway did not answer" } }),
+            );
         }
     };
     let status = response.status().as_u16();
     let mut bytes = Vec::new();
     loop {
         match response.chunk().await {
-            Ok(Some(chunk)) if bytes.len() + chunk.len() <= ANSWER_LIMIT => {
+            Ok(Some(chunk)) if bytes.len() + chunk.len() <= limit => {
                 bytes.extend_from_slice(&chunk)
             }
-            Ok(Some(_)) => return problem(502, "the endpoint answered more than 8 MiB"),
+            Ok(Some(_)) if limit < ANSWER_LIMIT => {
+                return (
+                    problem(
+                        502,
+                        "the function's endpoint answers passed 32 MiB in total",
+                    ),
+                    bytes.len(),
+                )
+            }
+            Ok(Some(_)) => {
+                return (
+                    problem(502, "the endpoint answered more than 8 MiB"),
+                    bytes.len(),
+                )
+            }
             Ok(None) => break,
             Err(_) => {
-                return json!({ "status": 0, "body": { "title": "the gateway answer was cut off" } })
+                return (
+                    json!({ "status": 0, "body": { "title": "the gateway answer was cut off" } }),
+                    bytes.len(),
+                )
             }
         }
     }
@@ -147,7 +191,7 @@ pub async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option
         serde_json::from_slice(&bytes)
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
     };
-    json!({ "status": status, "body": body })
+    (json!({ "status": status, "body": body }), bytes.len())
 }
 
 #[cfg(test)]

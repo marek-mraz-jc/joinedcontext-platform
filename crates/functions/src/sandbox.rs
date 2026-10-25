@@ -228,6 +228,8 @@ async fn execute(invocation: Invocation, logs: Arc<Mutex<Vec<String>>>) -> Resul
         None => glue_without_network(&entry),
     };
     let endpoint = endpoint.map(Arc::new);
+    let in_flight = Arc::new(tokio::sync::Semaphore::new(endpoint::IN_FLIGHT));
+    let budget = Arc::new(Mutex::new(endpoint::INVOCATION_ANSWER_BUDGET));
 
     let work = context.async_with(async move |ctx| -> Result<String, Failure> {
         let globals = ctx.globals();
@@ -239,11 +241,25 @@ async fn execute(invocation: Invocation, logs: Arc<Mutex<Vec<String>>>) -> Resul
                     Function::new(
                         ctx.clone(),
                         Async(move |method: String, path: String, body: Option<String>| {
-                            let host = host.clone();
+                            let (host, in_flight, budget) =
+                                (host.clone(), in_flight.clone(), budget.clone());
                             async move {
-                                rquickjs::Result::Ok(Json(
-                                    endpoint::request(&host, &method, &path, body).await,
-                                ))
+                                // ponytail: the budget is read before and charged after, so four
+                                // requests in flight may overshoot it by their own answers; the
+                                // memory bound is IN_FLIGHT x ANSWER_LIMIT either way.
+                                let _permit = in_flight.acquire_owned().await;
+                                let left = *budget.lock().unwrap_or_else(|p| p.into_inner());
+                                let (answer, read) = endpoint::request_within(
+                                    &host,
+                                    &method,
+                                    &path,
+                                    body,
+                                    left.min(endpoint::ANSWER_LIMIT),
+                                )
+                                .await;
+                                let mut left = budget.lock().unwrap_or_else(|p| p.into_inner());
+                                *left = left.saturating_sub(read);
+                                rquickjs::Result::Ok(Json(answer))
                             }
                         }),
                     )?,

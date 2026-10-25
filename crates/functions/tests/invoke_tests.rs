@@ -642,3 +642,84 @@ async fn a_script_cannot_loop_hoard_flood_or_reach_out() {
         (StatusCode::OK, json!(42))
     );
 }
+
+/// A gateway that answers every request with `body` after a short wait, counting how many
+/// requests it holds at once and the most it ever held.
+async fn counting_gateway(body: String) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (now, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let seen = most.clone();
+    let app = axum::Router::new().fallback(move || {
+        let (now, most, body) = (now.clone(), most.clone(), body.clone());
+        async move {
+            let held = now.fetch_add(1, Ordering::SeqCst) + 1;
+            most.fetch_max(held, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            now.fetch_sub(1, Ordering::SeqCst);
+            ([("content-type", "application/json")], body)
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    (format!("http://{address}"), seen)
+}
+
+/// A function that sends `count` requests to its endpoint, `parallel` ones through Promise.all,
+/// and answers each one's status.
+fn calling_many(count: usize, parallel: bool) -> Value {
+    let code = if parallel {
+        format!("export default async (request, ctx) => ({{ body: (await Promise.all(Array.from({{ length: {count} }}, () => ctx.jc.get('/api/endpoint/{SLUG}/access')))).map((r) => r.status) }});")
+    } else {
+        format!("export default async (request, ctx) => {{ const s = []; for (let i = 0; i < {count}; i++) {{ s.push((await ctx.jc.get('/api/endpoint/{SLUG}/access')).status); }} return {{ body: s }}; }};")
+    };
+    json!({
+        "files": {
+            "@app/functions/call.ts": code,
+            "@joinedcontext/sdk/server": "export const createClient = (config, transport) => ({ get: (path) => transport({ method: 'GET', path }) });",
+        },
+        "entry": "@app/functions/call.ts",
+        "request": { "method": "GET" },
+        "config": { "slug": SLUG },
+        "token": "caller-token",
+    })
+}
+
+/// F-PLT2-013: one invocation holds at most `IN_FLIGHT` requests to its endpoint at once, however
+/// many it starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_promise_all_over_many_requests_holds_four_in_flight() {
+    let (gateway, most) = counting_gateway("{\"ok\":true}".into()).await;
+    let realm = Realm::new();
+    let (status, answer) = send(
+        realm.app_with(16, &gateway),
+        Some(&portal_token(&realm)),
+        calling_many(50, true).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["body"], json!(vec![200; 50]), "{answer}");
+    assert_eq!(
+        most.load(std::sync::atomic::Ordering::SeqCst),
+        functions::endpoint::IN_FLIGHT
+    );
+}
+
+/// F-PLT2-013: the answers of one invocation add up to at most 32 MiB; the request past the
+/// budget is a 502 that says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn answers_past_the_invocation_budget_are_refused_by_name() {
+    let three_mib = format!("\"{}\"", "a".repeat(3 * 1024 * 1024));
+    let (gateway, _) = counting_gateway(three_mib).await;
+    let realm = Realm::new();
+    let (status, answer) = send(
+        realm.app_with(16, &gateway),
+        Some(&portal_token(&realm)),
+        calling_many(12, false).to_string().into_bytes(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let mut expected = vec![200; 10];
+    expected.extend([502, 502]);
+    assert_eq!(answer["body"], json!(expected), "{answer}");
+}

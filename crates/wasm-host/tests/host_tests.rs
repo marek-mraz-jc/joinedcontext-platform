@@ -729,6 +729,24 @@ async fn the_cache_counts_its_hits_and_misses() {
     assert_eq!((stats.cached, stats.hits, stats.misses), (2, 2, 2));
 }
 
+/// F-PLT3-022: a burst of first requests to a cold App fetches and compiles its component once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_on_a_cold_app_compiles_its_component_once() {
+    let world = Arc::new(World::new("cache-burst", Limits::default(), None));
+    let one = Arc::new(world.place("one", &variant(1)));
+    let burst: Vec<_> = (0..16)
+        .map(|_| {
+            let (world, one) = (world.clone(), one.clone());
+            tokio::spawn(async move { world.get(&one, "/api/hello", None).await })
+        })
+        .collect();
+    for call in burst {
+        assert_eq!(call.await.expect("joins").expect("answers").0, 200);
+    }
+    let stats = world.host.cache_stats();
+    assert_eq!((stats.cached, stats.hits, stats.misses), (1, 15, 1));
+}
+
 /// A Portal that answers `GET …/me`, `email/send` and `ai/complete` of App `desk` with the given
 /// answers, recording what reached it.
 async fn portal(
