@@ -58,13 +58,18 @@ pub async fn handler(
     };
     let resp = state.http.get(url).bearer_auth(&bearer).send().await;
 
-    let (status, bytes) = match resp {
+    let read = match resp {
         Ok(r) => {
             let s = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let b = r.bytes().await.unwrap_or_default();
-            (s, b)
+            super::upstream_body(super::PORTAL, r, super::GATEWAY_ANSWER_BYTES)
+                .await
+                .map(|b| (s, b))
         }
-        Err(e) => {
+        Err(e) => Err(Box::new(super::upstream_unavailable(super::PORTAL, &e))),
+    };
+    let (status, bytes) = match read {
+        Ok(read) => read,
+        Err(refusal) => {
             log_request(&AuditEntry {
                 run_id: &run.id,
                 user: &run.created_by,
@@ -75,7 +80,7 @@ pub async fn handler(
                 bytes: 0,
                 duration_ms: start.elapsed().as_millis(),
             });
-            return super::upstream_unavailable(super::PORTAL, &e);
+            return *refusal;
         }
     };
 

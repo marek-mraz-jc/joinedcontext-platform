@@ -125,6 +125,47 @@ pub(crate) fn upstream_unavailable(
         .into_response()
 }
 
+/// The most the proxy holds of the gateway's or the forge's answer: the gateway's own `MAX_BODY`.
+pub(crate) const GATEWAY_ANSWER_BYTES: usize = 8 * 1024 * 1024;
+/// The most the proxy holds of a model provider's whole (unstreamed) answer or a token answer.
+pub(crate) const MODEL_ANSWER_BYTES: usize = 1024 * 1024;
+/// The most the proxy holds of a small answer (a run event's ack, a key probe), as `mcp` caps one
+/// message.
+pub(crate) const PORTAL_ANSWER_BYTES: usize = 256 * 1024;
+
+/// An upstream's answer read whole, but never past `max` bytes (T-5510): a provider, a forge blob
+/// or a callback that answers without end is cut off at the cap instead of filling the proxy's
+/// memory. Over the cap the run gets a `502` naming the cap; a body that breaks off is the same
+/// outage [`upstream_unavailable`] answers.
+pub(crate) async fn upstream_body(
+    upstream: &str,
+    response: reqwest::Response,
+    max: usize,
+) -> Result<Vec<u8>, Box<axum::response::Response>> {
+    use axum::response::IntoResponse;
+    jc_core::outbound::read_capped(response, max)
+        .await
+        .map_err(|error| {
+            Box::new(match error {
+                jc_core::outbound::BodyError::TooLarge(_) => {
+                    tracing::warn!(%upstream, max, "an upstream answer passed the proxy's cap");
+                    jc_core::ProblemDetails::new(
+                        502,
+                        "upstream-unavailable",
+                        "Upstream Unavailable",
+                    )
+                    .with_detail(format!(
+                        "{upstream} answered with more than {max} bytes, the most this proxy relays"
+                    ))
+                    .into_response()
+                }
+                jc_core::outbound::BodyError::Transport(e) => {
+                    upstream_unavailable(upstream, &e.without_url())
+                }
+            })
+        })
+}
+
 /// Whether a path a workspace sends would leave the base it is appended to once the outbound URL
 /// is parsed. axum has decoded the path once; the URL parser follows WHATWG, which reads `%2e%2e`
 /// as a `..` segment and a backslash as a slash in an http(s) URL, so nothing still encoded, no

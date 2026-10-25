@@ -145,10 +145,18 @@ pub async fn handler(
     };
     let resp = state.http.get(url).bearer_auth(&bearer).send().await;
 
-    let (status, body) = match resp {
+    let read = match resp {
         Ok(r) => {
             let s = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let text = r.text().await.unwrap_or_default();
+            super::upstream_body(super::PORTAL, r, super::GATEWAY_ANSWER_BYTES)
+                .await
+                .map(|b| (s, b))
+        }
+        Err(e) => Err(Box::new(super::upstream_unavailable(super::PORTAL, &e))),
+    };
+    let (status, body) = match read {
+        Ok((s, bytes)) => {
+            let text = String::from_utf8_lossy(&bytes);
             // The profile's response cap holds here as on every other door (AG-41).
             let cut = text
                 .char_indices()
@@ -156,7 +164,7 @@ pub async fn handler(
                 .map_or(text.len(), |(i, _)| i);
             (s, redact(&text[..cut]))
         }
-        Err(e) => {
+        Err(refusal) => {
             log_request(&AuditEntry {
                 run_id: &run.id,
                 user: &run.created_by,
@@ -167,7 +175,7 @@ pub async fn handler(
                 bytes: 0,
                 duration_ms: start.elapsed().as_millis(),
             });
-            return super::upstream_unavailable(super::PORTAL, &e);
+            return *refusal;
         }
     };
 

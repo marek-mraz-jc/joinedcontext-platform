@@ -4,6 +4,9 @@
 
 use serde_json::{json, Value};
 
+/// The most of the sandbox's answer the assistant holds (T-5510): the gateway's own body cap.
+const MAX_OUTCOME_BYTES: usize = 8 * 1024 * 1024;
+
 /// The longest script the model may write, in characters.
 pub const MAX_CODE_CHARS: usize = 4_000;
 
@@ -45,7 +48,10 @@ pub async fn run(
         .await
         .map_err(|err| format!("the sandbox could not be reached: {}", err.without_url()))?;
     let status = answer.status();
-    let outcome: Value = answer.json().await.unwrap_or(Value::Null);
+    let body = jc_core::outbound::read_capped(answer, MAX_OUTCOME_BYTES)
+        .await
+        .map_err(|err| format!("the sandbox's answer was refused: {err}"))?;
+    let outcome: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     if !status.is_success() {
         let detail = outcome
             .get("detail")

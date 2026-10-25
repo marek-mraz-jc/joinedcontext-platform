@@ -1,4 +1,4 @@
-# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 2b3bee0, portal 593a0859 + T-4965, antares 53ab566e + T-4965
+# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 2b3bee0, portal 593a0859 + T-4965, antares 53ab566e + T-4965; platform memory-uncapped-read 1 since T-5510: camera-sim, a simulator, left uncapped on purpose
 antares | links-unmatched | 0
 antares | memory-body-copy | 18
 antares | memory-per-request-build | 0
@@ -13,7 +13,7 @@ platform | links-unmatched | 0
 platform | memory-body-copy | 19
 platform | memory-per-request-build | 0
 platform | memory-unbounded-global | 6
-platform | memory-uncapped-read | 18
+platform | memory-uncapped-read | 1
 platform | modularity-file-cycle | 23
 platform | modularity-server-as-library | 1
 platform | security-fetch-from-route | 23

@@ -32,6 +32,24 @@ struct List {
     items: Vec<Preview>,
 }
 
+/// The most of the Portal's preview list the gateway holds (T-5510): every open workspace
+/// branch's manifests, so well above the gateway's own 8 MiB body cap.
+const MAX_LIST_BYTES: usize = 32 * 1024 * 1024;
+/// The most of the realm's token answer the gateway holds (T-5510): a token is a few KiB.
+const MAX_TOKEN_BYTES: usize = 1024 * 1024;
+
+/// An answer's JSON, read only up to `max` bytes, so a Portal or a realm that answers without
+/// end cannot fill the gateway's memory (T-5510).
+pub(crate) async fn json_within<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max: usize,
+) -> Result<T, String> {
+    let body = jc_core::outbound::read_capped(response, max)
+        .await
+        .map_err(|error| error.to_string())?;
+    serde_json::from_slice(&body).map_err(|error| error.to_string())
+}
+
 /// A prefix the loader renders: `ws-{name}-`, lowercase letters, digits and hyphens.
 pub fn valid_prefix(prefix: &str) -> bool {
     (5..=64).contains(&prefix.len())
@@ -176,7 +194,7 @@ impl Mirror {
                         .get(reqwest::header::ETAG)
                         .and_then(|value| value.to_str().ok())
                         .map(str::to_owned);
-                    (response.json::<List>().await, tag)
+                    (json_within::<List>(response, MAX_LIST_BYTES).await, tag)
                 }
                 Ok(response) => {
                     tracing::warn!(status = %response.status(), "the Portal did not list the previews");
@@ -287,7 +305,7 @@ impl WorkloadToken {
             // back, and this line is read by whoever holds the logs.
             return Err(format!("the realm refused the grant: {}", answer.status()));
         }
-        let granted: Granted = answer.json().await.map_err(|error| error.to_string())?;
+        let granted: Granted = json_within(answer, MAX_TOKEN_BYTES).await?;
         // Exactly the lifetime the realm named, and nothing invented on top of it: a token held
         // past its expiry is a poll the Portal refuses. A realm that names none leaves the held
         // token stale at once, so the next poll asks again.
@@ -302,4 +320,36 @@ fn digest(files: &BTreeMap<String, String>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     files.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-5510: a Portal that lists without end is cut off at the cap, never held whole.
+    #[tokio::test]
+    async fn an_endless_list_is_refused_at_the_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("an address");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.expect("a connection");
+            let _ = socket.read(&mut [0u8; 4096]).await;
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = format!("10000\r\n{}\r\n", "x".repeat(0x10000));
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        });
+        let answer = reqwest::get(format!("http://{addr}/"))
+            .await
+            .expect("an answer");
+        let refused = json_within::<List>(answer, 1024 * 1024)
+            .await
+            .expect_err("a list past the cap is refused");
+        assert!(refused.contains("1048576"), "{refused}");
+    }
 }

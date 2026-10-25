@@ -20,6 +20,9 @@ pub const WALL_TIME: Duration = Duration::from_secs(60);
 /// After this many failed runs in a row the App's owners hear of it (AP-155).
 pub const FAILURES_BEFORE_NOTICE: u32 = 3;
 
+/// The most of the token service's answer a job holds (T-5510): a token answer is a few KiB.
+pub const TOKEN_ANSWER_BYTES: usize = 1024 * 1024;
+
 /// One job of one App, as the scheduler keys it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JobKey {
@@ -255,7 +258,9 @@ impl JobTokens {
                 )
             })?;
         let status = answer.status();
-        let body = answer.bytes().await.unwrap_or_default();
+        let body = jc_core::outbound::read_capped(answer, TOKEN_ANSWER_BYTES)
+            .await
+            .map_err(|err| format!("the token service's answer was refused: {err}"))?;
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         if !status.is_success() {
             // The service's own description names the account and why, never a token.
@@ -556,5 +561,35 @@ mod tests {
         assert_eq!(json["jobs"][1]["durationMs"], 1250);
         assert_eq!(json["jobs"][1]["failuresInARow"], 2);
         assert_eq!(json["jobs"][1]["lastRun"], "2026-10-10T14:00:00Z");
+    }
+
+    /// T-5510: a token service that answers without end is cut off at the cap, and the run is
+    /// told why instead of the host holding the answer.
+    #[tokio::test]
+    async fn an_endless_token_answer_is_refused_at_the_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("an address");
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("a connection");
+            let _ = socket.read(&mut [0u8; 4096]).await;
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let chunk = format!("10000\r\n{}\r\n", "x".repeat(0x10000));
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        });
+        let tokens = JobTokens::new(format!("http://{addr}/token")).expect("a client");
+        let refused = tokens
+            .token(&app("0 * * * *"))
+            .await
+            .expect_err("an answer past the cap is refused");
+        assert!(
+            refused.contains(&TOKEN_ANSWER_BYTES.to_string()),
+            "{refused}"
+        );
     }
 }
