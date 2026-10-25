@@ -62,12 +62,8 @@ fn problem(status: u16, title: &str, detail: &str) -> http::Response<Body> {
 
 /// The caller's bearer token, which only the host carries on to the gateway.
 fn bearer(headers: &http::HeaderMap) -> Option<String> {
-    let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
-    let token = value
-        .strip_prefix("Bearer ")
-        .or_else(|| value.strip_prefix("bearer "))?
-        .trim();
-    (!token.is_empty()).then(|| token.to_owned())
+    let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok();
+    jc_core::http::bearer(value).map(str::to_owned)
 }
 
 /// Which of the shard's listeners a request came in on (T-3857).
