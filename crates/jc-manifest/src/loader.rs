@@ -709,13 +709,27 @@ pub(crate) fn document(
     }
 }
 
-/// The slug a preview Endpoint answers on: the first 160 bits of SHA-256 over the prefix and
-/// the origin's slug, in lowercase base32, so it is opaque like every slug (EP-02), the same on
-/// every render and never the origin's (Architecture/06 §7.2).
+/// The slug a preview Endpoint answers on, without a salt: [`preview_slug_salted`] with none.
 pub fn preview_slug(prefix: &str, slug: &str) -> String {
+    preview_slug_salted(prefix, "", slug)
+}
+
+/// The slug a preview Endpoint answers on: the first 160 bits of SHA-256 over the prefix, the
+/// preview's salt and the origin's slug, in lowercase base32, so it is opaque like every slug
+/// (EP-02), the same on every render and never the origin's (Architecture/06 §7.2). The prefix
+/// is a workspace name a person chose and a public Endpoint publishes its slug, so only the salt
+/// the Portal mints per preview keeps the address from being worked out (T-5569, CC-98). An
+/// empty salt is the unsalted digest of earlier renders.
+pub fn preview_slug_salted(prefix: &str, salt: &str, slug: &str) -> String {
     use sha2::{Digest, Sha256};
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let digest = Sha256::digest(format!("{prefix}{slug}").as_bytes());
+    let input = if salt.is_empty() {
+        format!("{prefix}{slug}")
+    } else {
+        // The newline is in neither a prefix, a salt nor a slug, so no two triples meet.
+        format!("{prefix}{salt}\n{slug}")
+    };
+    let digest = Sha256::digest(input.as_bytes());
     let mut bits = 0u32;
     let mut held = 0u32;
     let mut out = String::with_capacity(32);
@@ -755,6 +769,17 @@ impl Repository {
         environment: Option<&str>,
         prefix: &str,
     ) -> Result<Self, LoadError> {
+        Self::load_preview_salted(root, environment, prefix, "")
+    }
+
+    /// [`Self::load_preview`] with the preview's slugs minted under `salt`
+    /// ([`preview_slug_salted`]).
+    pub fn load_preview_salted(
+        root: &Path,
+        environment: Option<&str>,
+        prefix: &str,
+        salt: &str,
+    ) -> Result<Self, LoadError> {
         let mut repo = Self::load_for(root, environment)?;
         if prefix.is_empty() {
             return Ok(repo);
@@ -783,7 +808,7 @@ impl Repository {
             if id.kind == "Endpoint" {
                 if let Some(slug) = loaded.manifest.spec.get_mut("slug") {
                     if let Some(text) = slug.as_str() {
-                        *slug = serde_json::Value::String(preview_slug(prefix, text));
+                        *slug = serde_json::Value::String(preview_slug_salted(prefix, salt, text));
                     }
                 }
             }

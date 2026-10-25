@@ -68,6 +68,7 @@ fn previews_of(test: &str, of: BTreeMap<String, String>) -> PathBuf {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: of,
+            ..Default::default()
         }])
         .unwrap();
     dir
@@ -107,6 +108,7 @@ fn a_running_preview_answers_on_its_own_slug_beside_main() {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: files(),
+            ..Default::default()
         }])
         .unwrap();
 
@@ -145,6 +147,7 @@ fn the_reaper_picks_up_a_preview_and_drops_it_when_it_stops() {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: files(),
+            ..Default::default()
         }])
         .unwrap();
     assert!(reaper.tick(), "a new preview is a change");
@@ -176,10 +179,12 @@ fn a_preview_never_writes_outside_its_directory_and_a_bad_one_is_left_out() {
             Preview {
                 prefix: "ws-air-".to_owned(),
                 files: hostile,
+                ..Default::default()
             },
             Preview {
                 prefix: "../".to_owned(),
                 files: files(),
+                ..Default::default()
             },
         ])
         .unwrap();
@@ -207,6 +212,7 @@ fn a_preview_that_does_not_render_leaves_main_serving() {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: broken,
+            ..Default::default()
         }])
         .unwrap();
     let (endpoints, ..) = store::load_with_previews(&main, None, Some(&previews)).unwrap();

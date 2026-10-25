@@ -7,7 +7,7 @@
 //! prefix is the isolation: every space, id and slug of a preview is its own, so a preview
 //! cannot answer for, or write into, anything of `main`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
@@ -17,13 +17,60 @@ use std::time::Duration;
 pub const INTERVAL: Duration = Duration::from_secs(10);
 
 /// One running preview as the Portal lists it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Preview {
     /// `ws-{name}-`, what the loader puts in front of every organization-unique name.
     pub prefix: String,
     /// The branch's files by their path in the repository.
     pub files: BTreeMap<String, String>,
+    /// The Keycloak usernames that may read the preview: the workspace's author and the
+    /// reviewers of its Change (CC-91). None listed is a preview nobody reads.
+    #[serde(default)]
+    pub readers: BTreeSet<String>,
+    /// The random salt the Portal minted for the preview, which its slugs are minted with
+    /// (CC-92); empty from a Portal that mints none.
+    #[serde(default)]
+    pub salt: String,
+}
+
+/// Who reads a preview and the salt of its slugs (CC-91, CC-92), kept beside its files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Access {
+    /// The Keycloak usernames the preview answers.
+    pub readers: BTreeSet<String>,
+    /// The salt of [`jc_manifest::loader::preview_slug_salted`].
+    pub salt: String,
+}
+
+/// The file in a preview's directory that holds its [`Access`]. It is written after the branch's
+/// files, so a branch file of the same name is replaced, and the loader reads no JSON; it is no
+/// dot file, so the reaper's fingerprint sees a change of readers (CC-91).
+const ACCESS_FILE: &str = "access.json";
+
+/// The [`Access`] of the preview at `root`: one that is missing or unreadable reads as no
+/// reader at all, so the preview answers nobody rather than everyone (CC-91).
+pub fn access_of(root: &Path) -> Access {
+    std::fs::read(root.join(ACCESS_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// A salt as the Portal mints it: empty, or 22 to 128 URL-safe characters (128 bits and up in
+/// base64url), so nothing but the salt reaches the slug's digest.
+pub fn valid_salt(salt: &str) -> bool {
+    salt.is_empty()
+        || ((22..=128).contains(&salt.len())
+            && salt
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// A Keycloak username: 1 to 255 characters, none of them a control character.
+fn valid_reader(user: &str) -> bool {
+    (1..=255).contains(&user.len()) && !user.chars().any(char::is_control)
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,8 +159,20 @@ impl Mirror {
                 tracing::warn!(prefix = %preview.prefix, "a preview with no valid prefix is left out");
                 continue;
             }
+            if !valid_salt(&preview.salt) {
+                tracing::warn!(prefix = %preview.prefix, "a preview with no valid salt is left out");
+                continue;
+            }
             wanted.insert(preview.prefix.clone());
-            let digest = digest(&preview.files);
+            let access = Access {
+                readers: preview
+                    .readers
+                    .into_iter()
+                    .filter(|user| valid_reader(user))
+                    .collect(),
+                salt: preview.salt,
+            };
+            let digest = digest(&preview.files, &access);
             let target = self.dir.join(&preview.prefix);
             if self.seen.get(&preview.prefix) == Some(&digest) && target.is_dir() {
                 continue;
@@ -131,6 +190,10 @@ impl Mirror {
                 std::fs::write(path, text)?;
             }
             std::fs::create_dir_all(&staging)?;
+            std::fs::write(
+                staging.join(ACCESS_FILE),
+                serde_json::to_vec(&access).map_err(std::io::Error::other)?,
+            )?;
             let _ = std::fs::remove_dir_all(&target);
             std::fs::rename(&staging, &target)?;
             self.seen.insert(preview.prefix, digest);
@@ -316,9 +379,11 @@ impl WorkloadToken {
     }
 }
 
-fn digest(files: &BTreeMap<String, String>) -> u64 {
+fn digest(files: &BTreeMap<String, String>, access: &Access) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     files.hash(&mut hasher);
+    access.readers.hash(&mut hasher);
+    access.salt.hash(&mut hasher);
     hasher.finish()
 }
 
