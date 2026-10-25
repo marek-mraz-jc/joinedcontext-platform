@@ -61,10 +61,7 @@ fn bucket() -> Result<Option<Bucket>, String> {
     let Some(endpoint) = var("JC_WASM_S3_ENDPOINT") else {
         return Ok(None);
     };
-    let http = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|err| format!("the object store client: {err}"))?;
+    let http = wasm_host::s3::client().map_err(|err| format!("the object store client: {err}"))?;
     Ok(Some(Bucket {
         endpoint,
         bucket: var("JC_WASM_S3_BUCKET").ok_or("JC_WASM_S3_BUCKET is not set")?,
