@@ -12,6 +12,11 @@
 //! outcome: a signed-in caller's every [`INTERVAL`], an anonymous caller's once a minute, so a
 //! public server answering thousands of calls writes a handful of rows. A post the collector
 //! does not take is dropped: the Activity is a projection, the log lines keep the calls.
+//!
+//! The same tally holds the requests an Endpoint's rate limit refused (T-5624): one
+//! `endpoint.rate-limited` row per Endpoint and caller with the count of 429s, so an operator
+//! finds who floods an Endpoint on its project's Activity (runbook 3). The caller is the one
+//! the Endpoint admits the token as, or `anonymous`; never the client's address.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, OnceLock, RwLock};
@@ -32,6 +37,25 @@ pub const ANONYMOUS_EVERY: u32 = 4;
 const MAX_KEYS: usize = 10_000;
 /// The caller of a call without a token, as [`principal_of`] names it.
 const ANONYMOUS: &str = "anonymous";
+
+/// What a row counts, as the Activity's `kind` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Kind {
+    /// MCP `tools/call`s.
+    McpTool,
+    /// Requests the Endpoint's rate limit answered 429.
+    RateLimited,
+}
+
+impl Kind {
+    /// The name the Activity's vocabulary gives it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::McpTool => "mcp.tool",
+            Self::RateLimited => "endpoint.rate-limited",
+        }
+    }
+}
 
 /// How a call ended, as the Activity's `details.outcome` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -72,6 +96,8 @@ impl Outcome {
 /// One row of the Activity: the calls one caller made of one tool on one Endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Call {
+    /// What the row counts.
+    pub kind: Kind,
     /// The Endpoint's project, whose Activity shows the row.
     pub project: String,
     /// The space's own name, as the Portal's bindings name it.
@@ -80,7 +106,7 @@ pub struct Call {
     pub endpoint: String,
     /// The caller as the audit line names it: `user:ana`, `serviceAccount:x`, `anonymous`.
     pub caller: String,
-    /// The tool's name, or `unknown`.
+    /// The tool's name, or `unknown`; empty on a rate-limited row.
     pub tool: String,
     /// How the calls ended.
     pub outcome: Outcome,
@@ -137,18 +163,32 @@ pub fn record(endpoint: &Endpoint, subject: &Subject, tool: &str, outcome: Outco
         &endpoint.space,
         &endpoint.slug,
         caller,
-        tool,
+        Some(tool),
         outcome,
     );
 }
 
-/// [`record`] of a call on the space of tenant `segment`.
+/// Records one request on `endpoint` its rate limit refused, from `caller`: the principal the
+/// Endpoint admits the token as, or `anonymous` (T-5624).
+pub fn rate_limited(endpoint: &Endpoint, caller: String) {
+    note(
+        &endpoint.project,
+        &endpoint.space,
+        &endpoint.slug,
+        caller,
+        None,
+        Outcome::Refused,
+    );
+}
+
+/// [`record`] of a call on the space of tenant `segment`: a `tools/call` of `tool`, or a
+/// rate-limited request when there is none.
 fn note(
     project: &str,
     segment: &str,
     endpoint: &str,
     caller: String,
-    tool: &str,
+    tool: Option<&str>,
     outcome: Outcome,
 ) {
     let names = spaces().read().unwrap_or_else(|e| e.into_inner());
@@ -157,11 +197,12 @@ fn note(
     };
     drop(names);
     let call = Call {
+        kind: tool.map_or(Kind::RateLimited, |_| Kind::McpTool),
         project: project.to_owned(),
         space,
         endpoint: endpoint.to_owned(),
         caller,
-        tool: tool_name(tool).to_owned(),
+        tool: tool.map(tool_name).unwrap_or_default().to_owned(),
         outcome,
     };
     let mut tally = tally().lock().unwrap_or_else(|e| e.into_inner());
@@ -208,11 +249,19 @@ fn text(key: &str, value: &str) -> Value {
 
 /// One OTLP log record per row, in the vocabulary the Portal's ingest reads.
 pub fn log_record(call: &Call, held: &Held) -> Value {
-    let summary = match held.count {
-        1 => format!("{} called {} on {}", call.caller, call.tool, call.endpoint),
-        n => format!(
+    let summary = match (call.kind, held.count) {
+        (Kind::McpTool, 1) => format!("{} called {} on {}", call.caller, call.tool, call.endpoint),
+        (Kind::McpTool, n) => format!(
             "{} called {} on {} {n} times",
             call.caller, call.tool, call.endpoint
+        ),
+        (Kind::RateLimited, 1) => format!(
+            "{} was refused once on {}: its rate limit was spent",
+            call.caller, call.endpoint
+        ),
+        (Kind::RateLimited, n) => format!(
+            "{} was refused {n} times on {}: its rate limit was spent",
+            call.caller, call.endpoint
         ),
     };
     let nanos = held
@@ -220,27 +269,33 @@ pub fn log_record(call: &Call, held: &Held) -> Value {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|since| since.as_nanos())
         .unwrap_or_default();
-    let (severity, number) = match call.outcome {
-        Outcome::Failed => ("warning", 13),
+    let (severity, number) = match (call.kind, call.outcome) {
+        (Kind::RateLimited, _) | (_, Outcome::Failed) => ("warning", 13),
         _ => ("info", 9),
     };
+    let mut attributes = vec![
+        text("project", &call.project),
+        text("space", &call.space),
+        text("kind", call.kind.as_str()),
+        text("source", "gateway"),
+        text("severity", severity),
+        text("summary", &summary),
+        text("endpoint", &call.endpoint),
+    ];
+    if call.kind == Kind::McpTool {
+        attributes.push(text("tool", &call.tool));
+        attributes.push(text("outcome", call.outcome.as_str()));
+    }
+    attributes.push(attribute(
+        "count",
+        json!({ "intValue": held.count.to_string() }),
+    ));
     json!({
         "timeUnixNano": nanos.to_string(),
         "severityNumber": number,
         "severityText": severity.to_uppercase(),
         "body": { "stringValue": summary },
-        "attributes": [
-            text("project", &call.project),
-            text("space", &call.space),
-            text("kind", "mcp.tool"),
-            text("source", "gateway"),
-            text("severity", severity),
-            text("summary", &summary),
-            text("endpoint", &call.endpoint),
-            text("tool", &call.tool),
-            text("outcome", call.outcome.as_str()),
-            attribute("count", json!({ "intValue": held.count.to_string() })),
-        ],
+        "attributes": attributes,
     })
 }
 
@@ -306,6 +361,7 @@ mod tests {
 
     fn call(caller: &str, tool: &str) -> Call {
         Call {
+            kind: Kind::McpTool,
             project: "helsinki".to_owned(),
             space: "otvorene-data".to_owned(),
             endpoint: "public-air".to_owned(),
@@ -370,6 +426,51 @@ mod tests {
     }
 
     #[test]
+    fn refused_requests_of_one_caller_are_one_rate_limited_row_that_counts_them() {
+        let refused = |caller: &str| Call {
+            kind: Kind::RateLimited,
+            tool: String::new(),
+            outcome: Outcome::Refused,
+            ..call(caller, "")
+        };
+        let mut tally = Tally::new();
+        let now = SystemTime::now();
+        for _ in 0..7 {
+            add(&mut tally, refused("serviceAccount:walk-caller"), now);
+        }
+        add(&mut tally, refused(ANONYMOUS), now);
+        add(
+            &mut tally,
+            call("serviceAccount:walk-caller", "get_entity"),
+            now,
+        );
+        assert_eq!(tally.len(), 3);
+        let held = tally[&refused("serviceAccount:walk-caller")];
+        assert_eq!(held.count, 7);
+        let named = attributes(&log_record(&refused("serviceAccount:walk-caller"), &held));
+        let keys: Vec<&str> = named.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["count", "endpoint", "kind", "project", "severity", "source", "space", "summary"]
+        );
+        assert_eq!(
+            named["kind"],
+            json!({ "stringValue": "endpoint.rate-limited" })
+        );
+        assert_eq!(named["severity"], json!({ "stringValue": "warning" }));
+        assert_eq!(named["count"], json!({ "intValue": "7" }));
+        assert_eq!(
+            named["summary"],
+            json!({ "stringValue": "serviceAccount:walk-caller was refused 7 times on public-air: its rate limit was spent" })
+        );
+        let once = log_record(&refused(ANONYMOUS), &tally[&refused(ANONYMOUS)]);
+        assert_eq!(
+            once["body"]["stringValue"],
+            json!("anonymous was refused once on public-air: its rate limit was spent")
+        );
+    }
+
+    #[test]
     fn the_tally_stops_at_its_cap() {
         let mut tally = Tally::new();
         let now = SystemTime::now();
@@ -391,7 +492,7 @@ mod tests {
             "helsinki-air",
             "public-air",
             ana(),
-            "query_entities",
+            Some("query_entities"),
             Outcome::ToolError,
         );
         note(
@@ -399,7 +500,7 @@ mod tests {
             "helsinki-air",
             "public-air",
             ANONYMOUS.to_owned(),
-            "query_entities",
+            Some("query_entities"),
             Outcome::Answered,
         );
         note(
@@ -407,7 +508,7 @@ mod tests {
             "nowhere",
             "public-air",
             ana(),
-            "query_entities",
+            Some("query_entities"),
             Outcome::Answered,
         );
         let due = take(false);
