@@ -12,17 +12,17 @@ path = "src/main.rs"
 [dependencies]
 jc-core = { path = "../jc-core", version = "0.1.0", features = ["auth", "axum", "logs"] }
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { workspace = true, features = ["json", "rustls-tls-native-roots"] }
 rquickjs = { version = "0.13", features = ["futures", "loader"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
 # a throwaway realm per test run, as in the gateway's tests: no signing key in the repository
 base64 = "0.22"
-jsonwebtoken = "9"
+jsonwebtoken.workspace = true
 ring = "0.17"
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"

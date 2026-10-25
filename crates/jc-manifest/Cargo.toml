@@ -12,10 +12,10 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 jsonschema = { version = "0.54", default-features = false }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 serde_norway = "0.9"
 sha2 = "0.10"
-thiserror = "2"
+thiserror.workspace = true
 tracing = "0.1"
 walkdir = "2"
 # The Portal renders `model_schema`'s problems and attributes into its OpenAPI document.

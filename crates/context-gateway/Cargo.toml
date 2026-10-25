@@ -23,25 +23,25 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
-regex = "1"
+regex.workspace = true
 # The broker's own q/scopeQ evaluator, so a grant's condition is judged per entity exactly as the
 # broker judges it (T-3530, EP-16); the NGSI-LD crates' release repository at a tag (T-3913).
-antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
-antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-ql.workspace = true
+antares-jsonld.workspace = true
 # The broker's own subscription predicates against one in-memory entity, so the WebSocket fan-out
 # (ADR-N-049) decides a client filter exactly as the broker would.
-antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+antares-matcher.workspace = true
 # The preview list from the Portal (Architecture/06 §7.2).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { workspace = true, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json.workspace = true
 strsim = "0.11"
-thiserror = "2"
+thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
-jsonwebtoken = "9"
+jsonwebtoken.workspace = true
 # sha256 for the schema surface's strong ETags; jsonwebtoken already links it
 ring = "0.17"
 
