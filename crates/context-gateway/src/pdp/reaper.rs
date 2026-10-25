@@ -126,6 +126,9 @@ impl Reaper {
                 // can be served at all, so a registration that changed identity mode takes
                 // effect with the rest and not one reload later (PF-48); the agreement table
                 // is what a transfer token is checked against (DS-12).
+                // The preview readers first (CC-91): a reader withdrawn is refused before the
+                // tables that still name the preview are swapped, never after.
+                self.gateway.replace_provenance(provenance);
                 self.gateway.resolver.replace(endpoints);
                 self.gateway.resolver.replace_spaces(spaces);
                 self.gateway.replace_accounts(accounts);
@@ -145,7 +148,6 @@ impl Reaper {
                 self.gateway.replace_mappings(mappings);
                 // EP-127: a publisher's catalogue follows its Project's spec.catalog.
                 self.gateway.replace_publishers(publishers);
-                self.gateway.replace_provenance(provenance);
                 // ADR-N-047: a space follows its broker from the next request on.
                 self.gateway.broker.route(&homes);
                 // ADR-N-048: a broker's roles and its pipelines' topics hold from the next

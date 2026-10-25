@@ -86,6 +86,10 @@ pub(crate) fn authenticate_on(
         Ok(raw) => raw,
         // No token at all: the anonymous caller, which only a public endpoint admits
         // (EP-16, GW22).
+        // A preview is nobody's but its readers', and to anyone else it does not exist (CC-91).
+        Err(token::Rejected::NoToken) if gateway.preview(&endpoint.slug).is_some() => {
+            return Err(Box::new(ProblemDetails::not_found()));
+        }
         Err(token::Rejected::NoToken) if endpoint.admits(None) => {
             return Ok(anonymous_on(endpoint));
         }
@@ -182,9 +186,52 @@ pub(crate) fn subject_from(
         .as_deref()
         .map(|client| claims.client_roles(client))
         .unwrap_or_default();
-    let mut subject = subject_of(claims, endpoint, gateway)?;
+    let mut subject = match gateway.preview(&endpoint.slug) {
+        Some(preview) => preview_reader(gateway, endpoint, claims, &preview)?,
+        None => subject_of(claims, endpoint, gateway)?,
+    };
     with_endpoint_roles(&mut subject, endpoint, &client_roles);
     Ok(subject)
+}
+
+/// A person on a preview surface (CC-91, AP-19, AP-50): one of the readers the Portal lists, the
+/// workspace's author or a reviewer, decided with the roles the branch's own audience gives, so
+/// they see what the published Endpoint would serve. Anyone else, a workload and a data space
+/// consumer included, gets the 404 of a slug nobody created.
+fn preview_reader(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+    preview: &crate::store::PreviewReaders,
+) -> Result<Subject, Box<ProblemDetails>> {
+    let workload = dataspace_token::presented(claims)
+        || claims
+            .azp
+            .as_deref()
+            .is_some_and(|azp| gateway.accounts.load().resolve(azp).is_some());
+    let reader = claims.preferred_username.as_deref().filter(|user| {
+        !workload && owns_its_name(user, claims.azp.as_deref()) && preview.readers.contains(*user)
+    });
+    let Some(user) = reader else {
+        tracing::info!(slug = %endpoint.slug, "a preview asked by someone who does not review it");
+        return Err(Box::new(ProblemDetails::not_found()));
+    };
+    Ok(Subject {
+        user: Some(user.to_owned()),
+        service_account: None,
+        service_account_project: None,
+        roles: roles_on(preview.audience, claims.roles().iter().cloned()),
+        groups: claims
+            .groups
+            .iter()
+            .map(|group| group.trim_start_matches('/').to_owned())
+            .collect(),
+        did: None,
+        agreement: None,
+        via: None,
+        client: claims.azp.clone(),
+        organization: None,
+    })
 }
 
 /// The roles an Endpoint gives exist on requests through it alone (AP-97). One that a token or

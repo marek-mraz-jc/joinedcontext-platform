@@ -12,7 +12,9 @@
 //! These are the shapes around them: a crashed run's leftovers, a directory that is not a
 //! preview, the digest short circuit, and every way the poll can fail.
 
-use context_gateway::previews::{valid_prefix, Mirror, Preview, WorkloadToken};
+mod common;
+
+use context_gateway::previews::{valid_prefix, valid_salt, Mirror, Preview, WorkloadToken};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +42,7 @@ fn one(prefix: &str, of: &[(&str, &str)]) -> Vec<Preview> {
     vec![Preview {
         prefix: prefix.to_owned(),
         files: files(of),
+        ..Default::default()
     }]
 }
 
@@ -51,6 +54,13 @@ fn names(dir: &Path) -> Vec<String> {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     found.sort();
+    found
+}
+
+/// The files of the branch in a preview directory: [`names`] without the readers' file.
+fn branch_names(dir: &Path) -> Vec<String> {
+    let mut found = names(dir);
+    found.retain(|name| name != "access.json");
     found
 }
 
@@ -122,7 +132,10 @@ fn a_path_that_climbs_back_inside_is_still_refused() {
             ],
         ))
         .expect("the rest is written");
-    assert_eq!(names(&dir.join("ws-air-")), vec!["kept.yaml".to_owned()]);
+    assert_eq!(
+        branch_names(&dir.join("ws-air-")),
+        vec!["kept.yaml".to_owned()]
+    );
 }
 
 #[test]
@@ -137,7 +150,10 @@ fn what_a_crashed_run_left_staged_is_never_served() {
     Mirror::new(&dir)
         .apply(one("ws-air-", &[("space.yaml", "kind: ContextSpace\n")]))
         .expect("the preview is written");
-    assert_eq!(names(&dir.join("ws-air-")), vec!["space.yaml".to_owned()]);
+    assert_eq!(
+        branch_names(&dir.join("ws-air-")),
+        vec!["space.yaml".to_owned()]
+    );
     assert_eq!(names(&dir), vec!["ws-air-".to_owned()], "nothing is staged");
 }
 
@@ -199,7 +215,10 @@ fn a_file_the_branch_deleted_is_gone_rather_than_left_behind() {
     mirror
         .apply(one("ws-air-", &[("a.yaml", "x")]))
         .expect("rewritten");
-    assert_eq!(names(&dir.join("ws-air-")), vec!["a.yaml".to_owned()]);
+    assert_eq!(
+        branch_names(&dir.join("ws-air-")),
+        vec!["a.yaml".to_owned()]
+    );
 }
 
 #[test]
@@ -232,14 +251,17 @@ fn a_preview_whose_prefix_is_no_prefix_writes_nothing_at_all() {
             Preview {
                 prefix: "../escape".to_owned(),
                 files: files(&[("space.yaml", "x")]),
+                ..Default::default()
             },
             Preview {
                 prefix: "ws-Air-".to_owned(),
                 files: files(&[("space.yaml", "x")]),
+                ..Default::default()
             },
             Preview {
                 prefix: "ws-air-".to_owned(),
                 files: files(&[("space.yaml", "x")]),
+                ..Default::default()
             },
         ])
         .expect("the good one is written");
@@ -256,14 +278,19 @@ fn the_same_prefix_listed_twice_ends_as_the_last_one_and_not_as_both() {
             Preview {
                 prefix: "ws-air-".to_owned(),
                 files: files(&[("first.yaml", "1")]),
+                ..Default::default()
             },
             Preview {
                 prefix: "ws-air-".to_owned(),
                 files: files(&[("second.yaml", "2")]),
+                ..Default::default()
             },
         ])
         .expect("written");
-    assert_eq!(names(&dir.join("ws-air-")), vec!["second.yaml".to_owned()]);
+    assert_eq!(
+        branch_names(&dir.join("ws-air-")),
+        vec!["second.yaml".to_owned()]
+    );
 }
 
 #[test]
@@ -275,15 +302,23 @@ fn two_previews_never_see_each_others_files() {
             Preview {
                 prefix: "ws-air-".to_owned(),
                 files: files(&[("air.yaml", "1")]),
+                ..Default::default()
             },
             Preview {
                 prefix: "ws-voda-".to_owned(),
                 files: files(&[("voda.yaml", "2")]),
+                ..Default::default()
             },
         ])
         .expect("written");
-    assert_eq!(names(&dir.join("ws-air-")), vec!["air.yaml".to_owned()]);
-    assert_eq!(names(&dir.join("ws-voda-")), vec!["voda.yaml".to_owned()]);
+    assert_eq!(
+        branch_names(&dir.join("ws-air-")),
+        vec!["air.yaml".to_owned()]
+    );
+    assert_eq!(
+        branch_names(&dir.join("ws-voda-")),
+        vec!["voda.yaml".to_owned()]
+    );
 }
 
 #[test]
@@ -558,4 +593,268 @@ async fn realm(lifetime: u64) -> (String, Arc<AtomicUsize>) {
         let _ = axum::serve(listener, app).await;
     });
     (format!("http://{address}/token"), asked)
+}
+
+// --- who reaches a preview (T-5569, CC-91..CC-93, AP-19, AP-50) --------------------------------
+
+/// The origin's public Endpoint, which publishes its slug.
+const PUBLIC_SLUG: &str = "zt4qm7ge2xdv6ksb3ncf5arw2y";
+/// The salt the Portal minted for the preview.
+const SALT: &str = "Q3vR8kM2pL9xT4nW7yB1cZ";
+const AUTHOR: &str = "demo.author";
+const REVIEWER: &str = "demo.reviewer";
+
+/// A branch of `helsinki` whose space `air` everyone may read and write through the public
+/// Endpoint `public-air`.
+fn public_branch() -> BTreeMap<String, String> {
+    files(&[
+        (
+            "space.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: air\n  namespace: helsinki\nspec:\n  isSandbox: false\n",
+        ),
+        (
+            "endpoints/public-air.yaml",
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: public-air\n  namespace: helsinki\nspec:\n  contextSpaceRef: air\n  slug: {PUBLIC_SLUG}\n  audience: public\n  enabledRepresentations: [\"ngsi-ld\"]\n"),
+        ),
+        (
+            "policies/everyone.yaml",
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  name: everyone\n  namespace: helsinki\nspec:\n  contextSpaceRef: air\n  assigner: did:web:hel.fi\n  assignee: { kind: role, id: public }\n  operations: [queryEntity, createEntity]\n  information:\n    - entities:\n        - type: AirQualityObserved\n",
+        ),
+    ])
+}
+
+struct Served {
+    realm: common::Realm,
+    app: axum::Router,
+    broker: common::BrokerStub,
+    slug: String,
+}
+
+/// The gateway serving an empty `main` and the preview `ws-air-` of [`public_branch`], read by
+/// its author and one reviewer.
+async fn served(test: &str) -> Served {
+    let main = scratch(&format!("{test}-main"));
+    let previews = scratch(&format!("{test}-previews"));
+    Mirror::new(&previews)
+        .apply(vec![Preview {
+            prefix: "ws-air-".to_owned(),
+            files: public_branch(),
+            readers: [AUTHOR, REVIEWER].map(str::to_owned).into(),
+            salt: SALT.to_owned(),
+        }])
+        .expect("the preview is written");
+    let (endpoints, spaces, accounts, .., provenance) =
+        context_gateway::store::load_with_previews(&main, None, Some(&previews))
+            .expect("main and the preview load");
+    let slug = jc_manifest::loader::preview_slug_salted("ws-air-", SALT, PUBLIC_SLUG);
+    assert!(
+        endpoints.iter().any(|e| e.slug == slug),
+        "the preview serves"
+    );
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let gateway = context_gateway::app::Gateway::new(
+        context_gateway::proxy::Broker::new(broker.url.clone()),
+        Box::new(context_gateway::pdp::PolicyPdp),
+        "hel.fi",
+    )
+    .serve(endpoints)
+    .authenticate(Arc::new(realm.verifier()), accounts, None);
+    gateway.resolver.replace_spaces(spaces);
+    gateway.replace_provenance(provenance);
+    Served {
+        realm,
+        app: context_gateway::app::router(Arc::new(gateway)),
+        broker,
+        slug,
+    }
+}
+
+fn person(realm: &common::Realm, user: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": format!("f:1:{user}"),
+        "aud": "context-gateway",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+        "preferred_username": user,
+        "groups": ["/helsinki"],
+    }))
+}
+
+/// `method` on `path` with `token`: the status and the body.
+async fn call(
+    served: &Served,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {token}"));
+    }
+    let body = match body {
+        Some(body) => {
+            request = request.header("content-type", "application/json");
+            axum::body::Body::from(body.to_string())
+        }
+        None => axum::body::Body::empty(),
+    };
+    let response = served
+        .app
+        .clone()
+        .oneshot(request.body(body).expect("a request"))
+        .await
+        .expect("the gateway answers");
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a readable body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn entities(slug: &str) -> String {
+    format!("/api/endpoint/{slug}/ngsi-ld/v1/entities?type=AirQualityObserved")
+}
+
+/// CC-91: a preview of a public Endpoint answers its author and its reviewer; the public, a
+/// signed-in person who reviews nothing and the preview's space surface asked by either get the
+/// 404 a slug nobody created gets, and the broker is never asked for them.
+#[tokio::test]
+async fn a_preview_of_a_public_endpoint_answers_its_author_and_reviewers_only() {
+    let served = served("readers").await;
+    let nobodys = call(
+        &served,
+        "GET",
+        &entities("n0bodysq2mzt6vhx3nbwrs5cjd"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(nobodys.0, 404, "{nobodys:?}");
+
+    let stranger = person(&served.realm, "demo.stranger");
+    for (who, token) in [("anonymous", None), ("a stranger", Some(stranger.as_str()))] {
+        for path in [
+            entities(&served.slug),
+            "/cs/ws-air-helsinki-air/ngsi-ld/v1/entities?type=AirQualityObserved".to_owned(),
+        ] {
+            let answer = call(&served, "GET", &path, token, None).await;
+            assert_eq!(answer, nobodys, "{who} on {path}");
+        }
+    }
+    assert!(
+        served.broker.hops().is_empty(),
+        "the broker was never asked"
+    );
+
+    for reader in [AUTHOR, REVIEWER] {
+        let token = person(&served.realm, reader);
+        let (status, body) =
+            call(&served, "GET", &entities(&served.slug), Some(&token), None).await;
+        assert_eq!(status, 200, "{reader}: {body}");
+    }
+    assert_eq!(
+        served.broker.hops().len(),
+        2,
+        "both reads reached the broker"
+    );
+}
+
+/// CC-92: the slug is not the digest of the prefix and the published slug, so the workspace
+/// name and the origin's slug do not find it; the salt is the Portal's 128 bits and nothing else.
+#[tokio::test]
+async fn a_preview_slug_cannot_be_derived_from_public_inputs() {
+    let served = served("salt").await;
+    let guessed = jc_manifest::loader::preview_slug("ws-air-", PUBLIC_SLUG);
+    assert_ne!(served.slug, guessed);
+    let author = person(&served.realm, AUTHOR);
+    let (status, body) = call(&served, "GET", &entities(&guessed), Some(&author), None).await;
+    assert_eq!(status, 404, "the unsalted slug serves nothing: {body}");
+    assert_ne!(
+        jc_manifest::loader::preview_slug_salted("ws-air-", "R3vR8kM2pL9xT4nW7yB1cZ", PUBLIC_SLUG),
+        served.slug,
+        "another salt, another slug"
+    );
+    assert!(valid_salt("") && valid_salt(SALT));
+    for bad in [
+        "short",
+        "Q3vR8kM2pL9xT4nW7yB1c\n",
+        &"a".repeat(129),
+        "Q3vR8kM2pL9xT4nW7yB1c/",
+    ] {
+        assert!(!valid_salt(bad), "{bad:?}");
+    }
+    let dir = scratch("salt-refused");
+    Mirror::new(&dir)
+        .apply(vec![Preview {
+            prefix: "ws-air-".to_owned(),
+            files: public_branch(),
+            salt: "Q3vR8kM2pL9xT4nW7yB1c\n".to_owned(),
+            ..Default::default()
+        }])
+        .expect("the mirror runs");
+    assert!(
+        names(&dir).is_empty(),
+        "a preview with a bad salt is left out"
+    );
+}
+
+/// CC-93: a reader's write through a preview reaches the broker as theirs and is kept.
+#[tokio::test]
+async fn a_write_through_a_preview_is_attributed() {
+    let served = served("write").await;
+    let author = person(&served.realm, AUTHOR);
+    let entity =
+        json!({ "id": "urn:ngsi-ld:AirQualityObserved:ws-air-1", "type": "AirQualityObserved" });
+    let path = format!("/api/endpoint/{}/ngsi-ld/v1/entities", served.slug);
+    let (status, body) = call(&served, "POST", &path, None, Some(entity.clone())).await;
+    assert_eq!(status, 404, "the public writes nothing: {body}");
+    let (status, body) = call(&served, "POST", &path, Some(&author), Some(entity)).await;
+    assert!(status < 300, "{status}: {body}");
+    let hops = served.broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    let value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        value("jc-provenance-actor").as_deref(),
+        Some("user%3Ademo.author"),
+        "{headers:?}"
+    );
+    assert_eq!(
+        value("jc-provenance-audit").as_deref(),
+        Some("changes"),
+        "{headers:?}"
+    );
+}
+
+/// CC-91: a branch that carries its own `access.json` does not name its readers: the Portal's
+/// list does, and a mirror that cannot read the file reads nobody.
+#[test]
+fn a_branch_file_cannot_stand_in_for_the_readers() {
+    let dir = scratch("forged-readers");
+    Mirror::new(&dir)
+        .apply(vec![Preview {
+            prefix: "ws-air-".to_owned(),
+            files: files(&[("access.json", r#"{"readers":["mallory"],"salt":""}"#)]),
+            readers: [AUTHOR.to_owned()].into(),
+            ..Default::default()
+        }])
+        .expect("written");
+    let access = context_gateway::previews::access_of(&dir.join("ws-air-"));
+    assert_eq!(access.readers, [AUTHOR.to_owned()].into());
+    std::fs::write(dir.join("ws-air-/access.json"), "not json").expect("overwritten");
+    assert!(context_gateway::previews::access_of(&dir.join("ws-air-"))
+        .readers
+        .is_empty());
 }

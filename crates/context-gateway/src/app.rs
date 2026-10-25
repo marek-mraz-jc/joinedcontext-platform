@@ -407,6 +407,11 @@ impl Gateway {
         self.provenance.load().organizations.get(project).cloned()
     }
 
+    /// The readers of the preview surface `slug`, when it is one (CC-91).
+    pub(crate) fn preview(&self, slug: &str) -> Option<crate::store::PreviewReaders> {
+        self.provenance.load().previews.get(slug).cloned()
+    }
+
     /// Whether the Endpoint `slug` keeps an audit trail of its writes (DM-136).
     pub(crate) fn audited(&self, slug: &str) -> bool {
         self.provenance.load().audited.contains(slug)

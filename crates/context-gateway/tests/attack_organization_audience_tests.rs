@@ -124,7 +124,7 @@ async fn fixture(name: &str) -> Fixture {
             .into_iter()
             .map(|(project, organization)| (project.to_owned(), organization.to_owned()))
             .collect(),
-        audited: Default::default(),
+        ..Default::default()
     });
     Fixture {
         realm,
