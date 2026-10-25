@@ -409,3 +409,109 @@ fn an_instance_following_the_library_gets_it_as_one_reviewable_proposal() {
     expected.sort();
     assert_eq!(paths, expected);
 }
+
+/// `components/pipeline-runner/images.yaml` of joinedcontext-deployment.
+const BENTO: &str = "ghcr.io/warpstreamlabs/bento:1.22.0@sha256:ef674bebae45793c982c350d8f37c2c7661133c1dc65a5517fb977b36dc09841";
+
+/// Runs `mapping` in the runner's Bento over each payload, one MQTT message per payload on the
+/// camera's topic, in order; returns what each message that was not dropped became.
+fn run_camera_mapping(mapping: &str, payloads: &[Value]) -> Vec<Value> {
+    let lines: Vec<String> = payloads.iter().map(Value::to_string).collect();
+    let config = json!({
+        "input": {"generate": {"count": 1, "interval": "", "mapping": format!("root = {}", json!(lines.join("\n")))}},
+        "pipeline": {"threads": 1, "processors": [
+            {"unarchive": {"format": "lines"}},
+            {"mapping": "root = content().parse_json()\nmeta mqtt_topic = \"cameras/cam-north/frame\""},
+            {"mapping": mapping}
+        ]},
+        "output": {"stdout": {}},
+        "logger": {"level": "none"}
+    });
+    let run = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-e",
+            "JC_ORG_DOMAIN=hel.fi",
+            "-e",
+            "JC_SPACE=mobility",
+            "-e",
+        ])
+        .arg(format!("CONFIG={config}"))
+        .args([
+            "--entrypoint",
+            "sh",
+            BENTO,
+            "-c",
+            r#"printf "%s" "$CONFIG" > /tmp/c.json && exec /bento -c /tmp/c.json"#,
+        ])
+        .output()
+        .expect("this test runs the runner's Bento in Docker; install Docker to run it");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    String::from_utf8(run.stdout)
+        .expect("utf-8")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|_| panic!("not a row: {line:.300}")))
+        .collect()
+}
+
+fn time_of(value: &Value) -> chrono::DateTime<chrono::FixedOffset> {
+    chrono::DateTime::parse_from_rfc3339(value.as_str().expect("a time")).expect("RFC 3339")
+}
+
+/// T-5562: a message timed an hour back or ahead, or with a time that does not parse, writes
+/// nothing; the Device takes the arrival time, so a replay of the newest frame moves it forward
+/// only, and rewrites that frame's DeviceMeasurement with the values it already holds.
+#[test]
+fn a_replayed_or_backdated_frame_does_not_overwrite_current_state() {
+    let rendered =
+        expand(&blueprint("camera-over-mqtt"), &full("camera-over-mqtt")).expect("expands");
+    let pipeline = rendered
+        .iter()
+        .find(|e| e.template == "pipeline")
+        .expect("a pipeline");
+    let pipeline = assert_valid("camera-over-mqtt", "pipeline", &pipeline.manifest);
+    let mapping = pipeline.spec["compute"]["bloblang"]
+        .as_str()
+        .expect("a mapping");
+    let started = chrono::Utc::now();
+    let at = |minutes: i64| (started + chrono::Duration::minutes(minutes)).to_rfc3339();
+    let frame = |n: u32, observed: String| json!({ "measurementType": "temperature", "value": 21.5, "frame": n, "observedAt": observed });
+    let fresh = frame(7, at(-1));
+    let written = run_camera_mapping(
+        mapping,
+        &[
+            fresh.clone(),
+            frame(8, at(-60)),
+            frame(9, at(60)),
+            frame(10, "yesterday".into()),
+            fresh,
+        ],
+    );
+    assert_eq!(
+        written.len(),
+        2,
+        "only the fresh frame and its replay: {written:?}"
+    );
+    let (first, replay) = (&written[0], &written[1]);
+    assert_eq!(first[1], replay[1], "the replay rewrites frame 7 as it was");
+    assert_eq!(first[1]["numValue"]["observedAt"], json!(at(-1)));
+    for attribute in [
+        &first[0]["deviceState"]["observedAt"],
+        &first[0]["dateLastValueReported"]["value"],
+    ] {
+        assert!(
+            time_of(attribute) >= started,
+            "the Device takes the arrival time: {attribute}"
+        );
+    }
+    assert!(
+        time_of(&replay[0]["deviceState"]["observedAt"])
+            >= time_of(&first[0]["deviceState"]["observedAt"]),
+        "a replay never moves the Device back"
+    );
+}

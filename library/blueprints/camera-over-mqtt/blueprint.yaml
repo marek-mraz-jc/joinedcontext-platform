@@ -5,6 +5,11 @@
 # Smart Data Models Device and DeviceMeasurement written through the Endpoint and its Policy.
 # More cameras are one ServiceAccount each, named in the broker's role: revoking one is removing
 # its name.
+# A message whose `observedAt` lies more than five minutes from the time it arrives, in the past
+# or the future, or does not parse as a time, is dropped: a captured or backdated message cannot
+# roll the Device back (T-5562). The Device's own times are the arrival time, so they only move
+# forward; a frame replayed within the five minutes rewrites its DeviceMeasurement, keyed by the
+# frame number, with the values it already holds.
 apiVersion: joinedcontext.com/v1alpha1
 kind: Blueprint
 metadata:
@@ -17,7 +22,7 @@ metadata:
     cs: "Připojí kameru, která se přihlašuje vlastním klíčem a posílá svá data přes MQTT."
     de: "Bindet eine Kamera an, die sich mit eigenem Schlüssel anmeldet und ihre Messwerte über MQTT sendet."
 spec:
-  version: 1.0.0
+  version: 1.1.0
   category: ingestion
   riskClass: yellow
   allowedRoles: [portal-approver]
@@ -91,7 +96,9 @@ spec:
           source:
             dataSourceRef: { kind: DataSource, name: "{{ name }}" }
           # The camera is the client id in the topic, which the broker's ACL binds to the camera's
-          # verified token (ADR-N-048 §3), so a camera can only ever write its own Device.
+          # verified token (ADR-N-048 §3), so a camera can only ever write its own Device. A message
+          # timed more than PT5M from its arrival, or with a time that does not parse, is dropped
+          # (T-5562); the Device takes the arrival time, so a replay never moves it back.
           compute:
             kind: bloblang
             bloblang: |
@@ -99,7 +106,9 @@ spec:
               let space = env("JC_SPACE")
               let camera = meta("mqtt_topic").split("/").index(1)
               let kind = this.measurementType.string()
-              let seen = this.observedAt.or(now()).string()
+              let received = now()
+              let seen = this.observedAt.or($received).string()
+              let skew = ($seen.ts_unix_milli() - $received.ts_unix_milli()).catch(null)
               let device = "urn:ngsi-ld:Device:%v:%v:%v".format($domain, $space, $camera)
               root = [
                 {
@@ -107,8 +116,8 @@ spec:
                   "type": "Device",
                   "category": { "type": "Property", "value": ["multimedia"] },
                   "controlledProperty": { "type": "Property", "value": [$kind] },
-                  "deviceState": { "type": "Property", "value": "ok", "observedAt": $seen },
-                  "dateLastValueReported": { "type": "Property", "value": $seen }
+                  "deviceState": { "type": "Property", "value": "ok", "observedAt": $received },
+                  "dateLastValueReported": { "type": "Property", "value": $received }
                 },
                 {
                   "id": "urn:ngsi-ld:DeviceMeasurement:%v:%v:%v-%v".format($domain, $space, $camera, this.frame.number()),
@@ -119,6 +128,7 @@ spec:
                   "dateObserved": { "type": "Property", "value": $seen }
                 }
               ]
+              root = if $skew == null || $skew > 300000 || $skew < -300000 { deleted() }
           targetEndpoint: "urn:ngsi-ld:Endpoint:{orgDomain}:{{ space }}:{{ name }}"
           quotas:
             maxMemoryMb: 64
