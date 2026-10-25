@@ -379,6 +379,47 @@ async fn one_address_without_a_token_has_one_allowance_over_every_surface() {
     assert_eq!(status, StatusCode::OK, "{answer}");
 }
 
+/// T-5559, AG-25: a signed-in caller has one bucket over every Endpoint's and Context Space's
+/// MCP, keyed on the verified `sub`, at the hub's quota; another subject and the hub keep theirs.
+#[tokio::test]
+async fn a_signed_in_caller_has_a_bucket_on_the_space_mcp_too() {
+    let realm = common::Realm::new();
+    let (url, _) = broker().await;
+    let app = router(Arc::new(gateway(&url, &realm).limit_hub_to(RateLimits {
+        requests_per_minute: 4,
+        burst: Some(4),
+    })));
+    let token = |sub: &str| {
+        realm.mint(&json!({
+            "iss": common::ISSUER,
+            "sub": sub,
+            "aud": ["mcp-hub", OPEN, SPACE],
+            "scope": "openid endpoint:*",
+            "azp": "mcp-hub",
+            "preferred_username": sub,
+            "groups": ["/mesto"],
+            "realm_access": { "roles": ["steward"] },
+            "exp": common::in_seconds(300),
+            "iat": common::in_seconds(-10),
+        }))
+    };
+    let (jana, peter) = (token("5e1d"), token("7a2b"));
+    let space = format!("/cs/{SPACE}/mcp");
+    let endpoint = format!("/api/endpoint/{OPEN}/mcp");
+    for path in [&space, &endpoint, &space, &endpoint] {
+        let (status, answer) = send(&app, rpc(path, Some(&jana), None, &list())).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {answer}");
+    }
+    for path in [&space, &endpoint] {
+        let (status, answer) = send(&app, rpc(path, Some(&jana), None, &list())).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{path}: {answer}");
+    }
+    let (status, answer) = send(&app, rpc(&space, Some(&peter), None, &list())).await;
+    assert_eq!(status, StatusCode::OK, "another subject: {answer}");
+    let (status, answer) = send(&app, rpc("/api/mcp", Some(&jana), None, &list())).await;
+    assert_eq!(status, StatusCode::OK, "the hub's own bucket: {answer}");
+}
+
 #[tokio::test]
 async fn an_in_cluster_caller_without_the_edge_header_spends_no_anonymous_allowance() {
     let realm = common::Realm::new();
