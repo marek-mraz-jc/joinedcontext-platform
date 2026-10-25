@@ -53,6 +53,7 @@ pub struct S3Blob {
     bucket: Bucket,
     shard: String,
     quota_bytes: u64,
+    read_limit: usize,
     sizes: Mutex<HashMap<String, (Instant, u64)>>,
 }
 
@@ -67,8 +68,15 @@ impl S3Blob {
             bucket,
             shard: shard.to_owned(),
             quota_bytes,
+            read_limit: crate::limits::Limits::default().response_bytes,
             sizes: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The most one `get` reads from the store; the default is the largest answer a guest gives.
+    pub fn with_read_limit(mut self, bytes: usize) -> Self {
+        self.read_limit = bytes;
+        self
     }
 
     /// `apps/<shard>/<id>/`.
@@ -115,13 +123,24 @@ impl S3Blob {
         }
     }
 
+    /// One object, read only up to the read limit: a presigned PUT can leave an object of any
+    /// size under the prefix, and the shard never holds more than one answer's worth of it.
     pub async fn get(&self, app: &Placed, key: &str) -> Result<Vec<u8>, BlobError> {
         let key = self.key(app, key)?;
-        let (status, bytes) = self
+        let Some((status, bytes)) = self
             .bucket
-            .object(reqwest::Method::GET, &key, None)
+            .get_capped(&key, self.read_limit)
             .await
-            .map_err(BlobError::Unavailable)?;
+            .map_err(BlobError::Unavailable)?
+        else {
+            return Err(refused(
+                app,
+                format!(
+                    "the object passes {} bytes, the read limit",
+                    self.read_limit
+                ),
+            ));
+        };
         Self::answer(status).map(|()| bytes)
     }
 
@@ -182,8 +201,11 @@ impl S3Blob {
         Self::answer(status)
     }
 
-    /// A URL for one key and one method, for at most [`MAX_PRESIGN_SECONDS`].
-    pub fn presign(
+    /// A URL for one key and one method, for at most [`MAX_PRESIGN_SECONDS`]. A PUT is refused
+    /// once the application's files are at their quota, as [`Self::put`] refuses a write.
+    // ponytail: the URL signs no length yet, so one PUT below the quota can still pass it;
+    // a signed content-length needs a size in the WIT presign (later/T-later-wasm-storage-presign-signed-length).
+    pub async fn presign(
         &self,
         app: &Placed,
         key: &str,
@@ -193,7 +215,16 @@ impl S3Blob {
         let key = self.key(app, key)?;
         let method = match method {
             Method::Get => "GET",
-            Method::Put => "PUT",
+            Method::Put => {
+                if self.used(app).await? >= self.quota_bytes {
+                    tracing::warn!(app = %app.id, kind = "blob", "refused: quota");
+                    return Err(BlobError::Quota(format!(
+                        "the application's files are at {} bytes, its quota",
+                        self.quota_bytes
+                    )));
+                }
+                "PUT"
+            }
         };
         Ok(self.bucket.presign(
             method,
