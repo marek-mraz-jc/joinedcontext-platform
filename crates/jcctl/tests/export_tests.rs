@@ -540,3 +540,41 @@ fn a_credential_named_field_holding_null_is_not_redacted() {
     let spec = serde_json::json!({ "password": null, "token": { "secretRef": { "name": "t" } } });
     assert!(export::literal_credentials(&spec).is_empty());
 }
+
+/// T-5702 (F-PLT3-013): the project's SOPS file and a dot-file travelled byte for byte.
+#[test]
+fn an_encrypted_secrets_file_and_a_dot_file_stay_out_of_the_bundle() {
+    let repo = demo_repo("export-bundle-sops");
+    common::write(
+        &repo,
+        "projects/ovzdusie/secrets.enc.yaml",
+        "token: ENC[AES256_GCM,data:x]\n",
+    );
+    common::write(&repo, "projects/ovzdusie/pipelines/aq/.env", "TOKEN=x\n");
+    let bundle = export::collect_project(&repo, "ovzdusie").expect("the checkout is read");
+    let natives: Vec<String> = bundle
+        .natives
+        .iter()
+        .map(|(path, _)| path.display().to_string())
+        .collect();
+    assert!(
+        !natives
+            .iter()
+            .any(|p| p.ends_with("secrets.enc.yaml") || p.ends_with(".env")),
+        "{natives:?}"
+    );
+    assert!(
+        bundle.redactions.contains(
+            &"projects/ovzdusie/secrets.enc.yaml: encrypted secrets file not exported".to_owned()
+        ),
+        "{:?}",
+        bundle.redactions
+    );
+    assert!(
+        bundle
+            .redactions
+            .contains(&"projects/ovzdusie/pipelines/aq/.env: hidden file not exported".to_owned()),
+        "{:?}",
+        bundle.redactions
+    );
+}

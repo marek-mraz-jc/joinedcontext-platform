@@ -13,6 +13,52 @@ use std::sync::LazyLock;
 static SECRET_KEY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[-._a-zA-Z0-9]+$").expect("valid regex"));
 
+/// An environment variable a secret may be injected under: upper case, digits and `_`.
+static ENV_VAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Z][A-Z0-9_]{0,63}$").expect("valid regex"));
+
+/// The variables that steer the runner process rather than carry a pipeline's value (T-5702):
+/// one project's secret under one of these names would change how the runner every project's
+/// streams share loads code, trusts certificates or routes its calls.
+const PROCESS_ENV_VARS: [&str; 11] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "SHELL",
+    "GODEBUG",
+    "GOMAXPROCS",
+    "GOGC",
+    "GOMEMLIMIT",
+    "GOTRACEBACK",
+    "GOFLAGS",
+    "SSLKEYLOGFILE",
+];
+const PROCESS_ENV_PREFIXES: [&str; 2] = ["LD_", "SSL_CERT_"];
+
+/// Why `name` cannot carry a pipeline's secret, or `None` when it can.
+fn env_var_refusal(name: &str) -> Option<&'static str> {
+    if name.starts_with("JC_") {
+        return Some("`JC_` is the runner's own prefix; name the variable without it (PL-16)");
+    }
+    if !ENV_VAR_RE.is_match(name) {
+        return Some(
+            "must be an environment variable name: ^[A-Z][A-Z0-9_]{0,63}$, e.g. CKAN_API_TOKEN",
+        );
+    }
+    if PROCESS_ENV_VARS.contains(&name)
+        || PROCESS_ENV_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        || name.ends_with("_PROXY")
+    {
+        return Some(
+            "names a variable that steers the runner process (a loader, proxy, certificate or Go \
+             runtime setting); name it after the value, e.g. CKAN_API_TOKEN (T-5702)",
+        );
+    }
+    None
+}
+
 /// The canonical API version for joinedcontext resources (MF-01).
 pub const API_VERSION: &str = "joinedcontext.com/v1alpha1";
 
@@ -477,16 +523,10 @@ impl SecretRef {
         }
         // The deployment sets the runner's own variables under `JC_`, each project's pipeline
         // client secret among them, and a Secret the reconciler writes under one of those names
-        // would hand that value to whoever declared it (PL-16, T-3163).
-        if self
-            .env_var
-            .as_deref()
-            .is_some_and(|name| name.starts_with("JC_"))
-        {
-            return Err(refuse(
-                "envVar",
-                "`JC_` is the runner's own prefix; name the variable without it (PL-16)",
-            ));
+        // would hand that value to whoever declared it (PL-16, T-3163). The process variables
+        // are refused for the same runner (T-5702).
+        if let Some(reason) = self.env_var.as_deref().and_then(env_var_refusal) {
+            return Err(refuse("envVar", reason));
         }
         Ok(())
     }

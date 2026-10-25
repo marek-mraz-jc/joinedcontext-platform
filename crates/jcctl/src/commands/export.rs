@@ -290,6 +290,26 @@ pub fn collect_project(repo_dir: &Path, project: &str) -> std::io::Result<Bundle
             .strip_prefix(repo_dir)
             .map_err(|_| std::io::Error::other("path escaped the repository"))?
             .to_path_buf();
+        // A SOPS file holds the project's secrets and a dot-file is a tool's own state (an
+        // editor swap file, a `.env`): neither travels (MF-17, T-5702). The report names each.
+        let file_name = relative.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let hidden = relative.components().any(|part| {
+            part.as_os_str()
+                .to_str()
+                .is_some_and(|p| p.starts_with('.'))
+        });
+        if hidden || jc_manifest::loader::is_encrypted_file(file_name) {
+            bundle.redactions.push(format!(
+                "{}: {} not exported",
+                relative.display(),
+                if hidden {
+                    "hidden file"
+                } else {
+                    "encrypted secrets file"
+                }
+            ));
+            continue;
+        }
         let body = std::fs::read(&path)?;
         let manifest = match relative.extension().and_then(|e| e.to_str()) {
             Some("yaml") | Some("yml") => std::str::from_utf8(&body)
