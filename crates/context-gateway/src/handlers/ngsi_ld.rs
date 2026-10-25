@@ -27,7 +27,7 @@ use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Constraints;
 use crate::pdp::write_guard;
 use crate::proxy::{self};
-use crate::resolver::Endpoint;
+use crate::resolver::{DeclaredTypes, Endpoint};
 use crate::{middleware::tenancy, operations, query};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -421,26 +421,18 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
     let view = view(&endpoint);
-    if !has_view(&view) {
-        return crate::handlers::view_access::no_view(&endpoint);
-    }
-    if operation == Operation::QueryEntity {
-        if let Some(refusal) = query_shape_refusal(&params) {
-            return refusal;
-        }
-    }
     let mut request = request;
-    // The Endpoint's type list as its reads show the caller (T-4080); a caller without a read
-    // grant, and the details form, are the view's to answer.
-    if operation == Operation::RetrieveEntityTypes && method == Method::GET && view == endpoint.slug
+    if let Err(answer) = answered_here(
+        gateway,
+        (&endpoint, &subject),
+        operation,
+        &view,
+        &params,
+        &mut request,
+    )
+    .await
     {
-        match crate::handlers::types_list::listed_types(gateway, &endpoint, &subject, &mut request)
-            .await
-        {
-            Ok(Some(list)) => return typed_json_response(&list, "application/json"),
-            Ok(None) => {}
-            Err(answer) => return *answer,
-        }
+        return *answer;
     }
     let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
         Ok(share) => share,
@@ -489,65 +481,17 @@ pub(crate) async fn serve_ngsi_ld_view(
         Err(answer) => return *answer,
     };
 
-    // After `pin_caller` the token is gone from the headers: a signed-in caller is keyed by
-    // who they are, not by the address they share (T-4590).
-    let caller = create_key(&subject, &parts.headers);
-    let reserved = match reserve_create(gateway, &endpoint, &caller, operation) {
-        Ok(reserved) => reserved,
+    let target = view_target(&view, &path, uri.query());
+    let request = Request::from_parts(parts, Body::from(sent));
+    let answer =
+        match send_reserved(gateway, &endpoint, &subject, operation, &target, request).await {
+            Ok(answer) => answer,
+            Err(answer) => return *answer,
+        };
+    let answer = match map_view_answer(answer, operation).await {
+        Ok(answer) => answer,
         Err(answer) => return *answer,
     };
-    let target = match uri.query() {
-        Some(query) if !query.is_empty() => {
-            format!("/x/views/{view}/ngsi-ld/v1{path}?{}", capped_query(query))
-        }
-        _ => format!("/x/views/{view}/ngsi-ld/v1{path}"),
-    };
-    let answer = match gateway
-        .broker
-        .send(method, &target, parts.headers, Body::from(sent))
-        .await
-    {
-        Ok(answer) => answer,
-        Err(error) => {
-            if let Some(now) = reserved {
-                gateway.creates.release(&endpoint.slug, &caller, now);
-            }
-            return ProblemDetails::from(error).into_response();
-        }
-    };
-    if let Some(now) = reserved {
-        if !answer.status().is_success() {
-            gateway.creates.release(&endpoint.slug, &caller, now);
-        }
-    }
-    if answer.status().is_server_error() {
-        let (parts, body) = answer.into_parts();
-        return broker_failure(
-            parts.status,
-            parts.headers.get("retry-after").cloned(),
-            body,
-        )
-        .await;
-    }
-    if answer.status() == StatusCode::FORBIDDEN {
-        return with_platform_slug(answer).await;
-    }
-    // A space nobody has written to yet has no tenant at the broker, and the caller was
-    // admitted to it: a listing answers with nothing, a read of one thing with the plain miss,
-    // and the broker's wording, which names the tenant, never reaches the caller (EP-22, R20).
-    if answer.status() == StatusCode::NOT_FOUND && !operation.is_write() {
-        let (parts, body) = answer.into_parts();
-        let held = axum::body::to_bytes(body, MAX_BODY)
-            .await
-            .unwrap_or_default();
-        if !names_no_tenant(&held) {
-            return proxy::with_body(parts, held);
-        }
-        return match empty_space(operation) {
-            Some(empty) => json_response(&empty),
-            None => ProblemDetails::not_found().into_response(),
-        };
-    }
     let mut answer = match divided {
         Some((forwarded, refused)) => merged_batch(answer, forwarded, refused).await,
         None => answer,
@@ -557,6 +501,50 @@ pub(crate) async fn serve_ngsi_ld_view(
         &format!("/x/views/{view}/ngsi-ld/v1"),
         prefix,
     );
+    caller_answer(answer, (&endpoint, &subject), operation, &units_filled).await
+}
+
+/// What the gateway answers itself before a view request is judged: an Endpoint without a
+/// view (`503 no-view`), a query of a shape no view answers, and the Endpoint's type list as
+/// its reads show the caller (T-4080). `Ok` goes on to the view.
+async fn answered_here(
+    gateway: &Gateway,
+    (endpoint, subject): (&Endpoint, &Subject),
+    operation: Operation,
+    view: &str,
+    params: &[(String, String)],
+    request: &mut Request,
+) -> Result<(), Box<Response<Body>>> {
+    if !has_view(view) {
+        return Err(Box::new(crate::handlers::view_access::no_view(endpoint)));
+    }
+    if operation == Operation::QueryEntity {
+        if let Some(refusal) = query_shape_refusal(params) {
+            return Err(Box::new(refusal));
+        }
+    }
+    // A caller without a read grant, and the details form, are the view's to answer.
+    if operation != Operation::RetrieveEntityTypes
+        || request.method() != Method::GET
+        || view != endpoint.slug
+    {
+        return Ok(());
+    }
+    match crate::handlers::types_list::listed_types(gateway, endpoint, subject, request).await? {
+        Some(list) => Err(Box::new(typed_json_response(&list, "application/json"))),
+        None => Ok(()),
+    }
+}
+
+/// The view's answer as the caller reads it: the restriction header under the name the
+/// specification gives, a read logged where the Endpoint serves personal attributes (DM-128),
+/// and the units the gateway filled in.
+async fn caller_answer(
+    mut answer: Response<Body>,
+    (endpoint, subject): (&Endpoint, &Subject),
+    operation: Operation,
+    units_filled: &[String],
+) -> Response<Body> {
     // The broker marks a narrowed answer in its own header, and only when the caller opted in
     // (`x-jc-restricted`); the caller reads it under the name the specification gives (R22).
     let headers = answer.headers_mut();
@@ -564,9 +552,81 @@ pub(crate) async fn serve_ngsi_ld_view(
         headers.insert(RESULTS_RESTRICTED, restricted);
     }
     if !operation.is_write() && answer.status().is_success() {
-        answer = logged_read(answer, &endpoint, &subject).await;
+        answer = logged_read(answer, endpoint, subject).await;
     }
-    with_filled_units(answer, &units_filled)
+    with_filled_units(answer, units_filled)
+}
+
+/// The broker's address of one view request, with the caller's query, its length capped.
+fn view_target(view: &str, path: &str, query: Option<&str>) -> String {
+    match query {
+        Some(query) if !query.is_empty() => {
+            format!("/x/views/{view}/ngsi-ld/v1{path}?{}", capped_query(query))
+        }
+        _ => format!("/x/views/{view}/ngsi-ld/v1{path}"),
+    }
+}
+
+/// Sends one view request to the broker under a create reservation of the caller's daily
+/// creates (EP-97): a create the broker did not answer with success gives its reservation back.
+async fn send_reserved(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    subject: &Subject,
+    operation: Operation,
+    target: &str,
+    request: Request,
+) -> Result<Response<Body>, Box<Response<Body>>> {
+    let (parts, body) = request.into_parts();
+    // After `pin_caller` the token is gone from the headers: a signed-in caller is keyed by
+    // who they are, not by the address they share (T-4590).
+    let caller = create_key(subject, &parts.headers);
+    let reserved = reserve_create(gateway, endpoint, &caller, operation)?;
+    let sent = gateway
+        .broker
+        .send(parts.method, target, parts.headers, body)
+        .await;
+    let succeeded = sent
+        .as_ref()
+        .is_ok_and(|answer| answer.status().is_success());
+    if let Some(now) = reserved.filter(|_| !succeeded) {
+        gateway.creates.release(&endpoint.slug, &caller, now);
+    }
+    sent.map_err(|error| Box::new(ProblemDetails::from(error).into_response()))
+}
+
+/// The broker's answer to a view request, mapped where the caller must not read it as sent: a
+/// failure of the broker, a refusal naming the platform's slug, and the miss of a space with no
+/// tenant yet. `Err` is the final answer; `Ok` goes on to the caller's decoration.
+async fn map_view_answer(
+    answer: Response<Body>,
+    operation: Operation,
+) -> Result<Response<Body>, Box<Response<Body>>> {
+    if answer.status().is_server_error() {
+        let (parts, body) = answer.into_parts();
+        let retry = parts.headers.get("retry-after").cloned();
+        return Err(Box::new(broker_failure(parts.status, retry, body).await));
+    }
+    if answer.status() == StatusCode::FORBIDDEN {
+        return Err(Box::new(with_platform_slug(answer).await));
+    }
+    // A space nobody has written to yet has no tenant at the broker, and the caller was
+    // admitted to it: a listing answers with nothing, a read of one thing with the plain miss,
+    // and the broker's wording, which names the tenant, never reaches the caller (EP-22, R20).
+    if answer.status() != StatusCode::NOT_FOUND || operation.is_write() {
+        return Ok(answer);
+    }
+    let (parts, body) = answer.into_parts();
+    let held = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .unwrap_or_default();
+    if !names_no_tenant(&held) {
+        return Err(Box::new(proxy::with_body(parts, held)));
+    }
+    Err(Box::new(match empty_space(operation) {
+        Some(empty) => json_response(&empty),
+        None => ProblemDetails::not_found().into_response(),
+    }))
 }
 
 /// DM-128: a read through an Endpoint that serves personal attributes leaves one line with the
@@ -889,109 +949,42 @@ pub(crate) async fn view_payload(
         };
     }
     let before = sent.len();
-    if let Some(creates) = &endpoint.creates {
-        match operation {
-            Operation::CreateEntity if creates.mint_ids && !sent.is_empty() => {
-                *sent = crate::creates::minted(sent).map_err(|problem| answer(*problem))?;
-            }
-            Operation::CreateBatch | Operation::UpsertBatch | Operation::UpsertTemporal => {
-                return Err(answer(ProblemDetails::bad_request().with_detail(
-                    "this endpoint takes one entity per create, at POST /entities",
-                )));
-            }
-            _ => {}
-        }
-    }
+    one_entity_per_create(endpoint, operation, sent)?;
     // What the Endpoint asks of a write whatever the grants are: an id that is an NGSI-LD URN
     // of its type (PF-43), the entity of the path (PF-44), a type of the space's model (DM-61),
     // no access control inside the data (GW29). With no constraint the grant checks pass; the
     // broker's view and its engine decide the grants. A batch keeps what passes (GW18).
     if operation.is_write() && !sent.is_empty() {
-        let unconstrained = Constraints::default();
-        match judge_write(sent, path, operation, &unconstrained, endpoint) {
-            Err(problem) => return Err(answer(*problem)),
-            Ok(Judged::Whole) => {}
-            Ok(Judged::Divided { permitted, refused }) => {
-                if permitted.is_empty() {
-                    return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
-                }
-                let ids = permitted.iter().filter_map(batch_entry_id).collect();
-                *sent = serde_json::to_vec(&permitted).map_err(|error| {
-                    tracing::error!(%error, "the permitted part of a batch does not serialize");
-                    answer(ProblemDetails::internal())
-                })?;
-                *divided = Some((ids, refused));
-            }
-        }
+        judged_write(endpoint, path, operation, sent, divided)?;
     }
     if operation.is_write() {
         owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
     }
     let declared = endpoint.declared_types.as_ref();
     let mut filled = Vec::new();
-    if operation.is_write() && !sent.is_empty() {
-        if let Some(declared) = declared {
-            filled = filled_units(sent, path, &declared.units).map_err(|problem| {
-                tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
-                Box::new(problem.into_response())
-            })?;
-            // The broker decides a view's grants after this; a caller the Endpoint's Policy
-            // refuses learns that, never a rule's name or bound (DM-88), which a refusal or a
-            // 207's member names.
-            let earlier = divided.as_ref().map_or(0, |(_, refused)| refused.len());
-            let judged = quality_judged(sent, path, operation, endpoint, divided);
-            let refused_here = judged.is_err()
-                || divided.as_ref().map_or(0, |(_, refused)| refused.len()) > earlier;
-            if refused_here
-                && gateway
-                    .pdp
-                    .decide(subject, operation, &query::requested(params), endpoint)
-                    .is_deny()
-            {
-                return Err(Box::new(refused(operation, path)));
-            }
-            judged?;
-        }
+    if let Some(declared) = declared.filter(|_| operation.is_write() && !sent.is_empty()) {
+        filled = model_judged(
+            gateway,
+            (endpoint, subject),
+            (path, params, operation),
+            declared,
+            sent,
+            divided,
+        )?;
     }
     if let Some(rules) = declared
         .map(|declared| &declared.relationships)
         .filter(|rules| !rules.is_empty())
     {
-        if operation.is_write() {
-            let held = HeldWrite {
-                gateway,
-                subject,
-                endpoint,
-                headers,
-                path,
-                params,
-                operation,
-                rules,
-            };
-            held.check(sent, divided).await.inspect_err(|_| {
-                tracing::info!(slug = %endpoint.slug, "write refused: it breaks a relationship of the space's model");
-            })?;
-        }
-        if matches!(operation, Operation::DeleteEntity | Operation::DeleteBatch) {
-            let held = HeldDelete {
-                gateway,
-                subject,
-                endpoint,
-                headers,
-                rules,
-            };
-            let refused = if operation == Operation::DeleteEntity {
-                match operations::addressed_entity(path).map(query::decode) {
-                    Some(id) => held.entity(&id).await,
-                    None => Ok(()),
-                }
-            } else {
-                held.batch(sent, divided).await.map(|_| ())
-            };
-            refused.inspect_err(|_| {
-                tracing::info!(slug = %endpoint.slug, "delete refused: a relationship keeps it");
-            })?;
-        }
+        relationships_held(
+            gateway,
+            (endpoint, subject),
+            (path, params, operation),
+            (&*headers, rules),
+            sent,
+            divided,
+        )
+        .await?;
     }
     // Last, so every check above judged the value the caller sent and only the broker sees it
     // minimised (DM-121): MCP writes pass here too.
@@ -1009,6 +1002,143 @@ pub(crate) async fn view_payload(
     Ok(filled)
 }
 
+/// A form's minted id on a create, and one entity per create on an Endpoint that counts its
+/// creates (EP-97): the batch forms are refused there.
+fn one_entity_per_create(
+    endpoint: &Endpoint,
+    operation: Operation,
+    sent: &mut Vec<u8>,
+) -> Result<(), Box<Response<Body>>> {
+    let Some(creates) = &endpoint.creates else {
+        return Ok(());
+    };
+    match operation {
+        Operation::CreateEntity if creates.mint_ids && !sent.is_empty() => {
+            *sent = crate::creates::minted(sent)
+                .map_err(|problem| Box::new(problem.into_response()))?;
+        }
+        Operation::CreateBatch | Operation::UpsertBatch | Operation::UpsertTemporal => {
+            return Err(Box::new(
+                ProblemDetails::bad_request()
+                    .with_detail("this endpoint takes one entity per create, at POST /entities")
+                    .into_response(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The Endpoint's own judgement of a write body (PF-43, PF-44, DM-61, GW29): a batch keeps the
+/// members that pass, and its refused members wait in `divided` for the merged answer (GW18).
+fn judged_write(
+    endpoint: &Endpoint,
+    path: &str,
+    operation: Operation,
+    sent: &mut Vec<u8>,
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<(), Box<Response<Body>>> {
+    let unconstrained = Constraints::default();
+    match judge_write(sent, path, operation, &unconstrained, endpoint) {
+        Err(problem) => Err(Box::new(problem.into_response())),
+        Ok(Judged::Whole) => Ok(()),
+        Ok(Judged::Divided { permitted, refused }) => {
+            if permitted.is_empty() {
+                return Err(Box::new(batch_result(Vec::new(), refusal_entries(refused))));
+            }
+            let ids = permitted.iter().filter_map(batch_entry_id).collect();
+            *sent = serde_json::to_vec(&permitted).map_err(|error| {
+                tracing::error!(%error, "the permitted part of a batch does not serialize");
+                Box::new(ProblemDetails::internal().into_response())
+            })?;
+            *divided = Some((ids, refused));
+            Ok(())
+        }
+    }
+}
+
+/// A write body judged against the space's model: each quantity in its model's unit (DM-06),
+/// returned as the units it filled, and the model's quality rules (DM-88). A caller the
+/// Endpoint's Policy refuses learns that alone, never a rule's name or bound.
+fn model_judged(
+    gateway: &Gateway,
+    (endpoint, subject): (&Endpoint, &Subject),
+    (path, params, operation): (&str, &[(String, String)], Operation),
+    declared: &DeclaredTypes,
+    sent: &mut Vec<u8>,
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<Vec<String>, Box<Response<Body>>> {
+    let filled = filled_units(sent, path, &declared.units).map_err(|problem| {
+        tracing::info!(slug = %endpoint.slug, "write refused: a quantity is not in its model's unit");
+        Box::new(problem.into_response())
+    })?;
+    // The broker decides a view's grants after this; a caller the Endpoint's Policy
+    // refuses learns that, never a rule's name or bound (DM-88), which a refusal or a
+    // 207's member names.
+    let earlier = divided.as_ref().map_or(0, |(_, refused)| refused.len());
+    let judged = quality_judged(sent, path, operation, endpoint, divided);
+    let refused_here =
+        judged.is_err() || divided.as_ref().map_or(0, |(_, refused)| refused.len()) > earlier;
+    if refused_here
+        && gateway
+            .pdp
+            .decide(subject, operation, &query::requested(params), endpoint)
+            .is_deny()
+    {
+        return Err(Box::new(refused(operation, path)));
+    }
+    judged?;
+    Ok(filled)
+}
+
+/// A write or a delete held against the relationships of the space's model (DM-70, DM-71): a
+/// write that breaks one is refused, and so is a delete of an entity a relationship keeps.
+async fn relationships_held(
+    gateway: &Gateway,
+    (endpoint, subject): (&Endpoint, &Subject),
+    (path, params, operation): (&str, &[(String, String)], Operation),
+    (headers, rules): (&HeaderMap, &crate::relationships::RelationshipRules),
+    sent: &mut Vec<u8>,
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<(), Box<Response<Body>>> {
+    if operation.is_write() {
+        let held = HeldWrite {
+            gateway,
+            subject,
+            endpoint,
+            headers,
+            path,
+            params,
+            operation,
+            rules,
+        };
+        held.check(sent, divided).await.inspect_err(|_| {
+            tracing::info!(slug = %endpoint.slug, "write refused: it breaks a relationship of the space's model");
+        })?;
+    }
+    if !matches!(operation, Operation::DeleteEntity | Operation::DeleteBatch) {
+        return Ok(());
+    }
+    let held = HeldDelete {
+        gateway,
+        subject,
+        endpoint,
+        headers,
+        rules,
+    };
+    let refused = if operation == Operation::DeleteEntity {
+        match operations::addressed_entity(path).map(query::decode) {
+            Some(id) => held.entity(&id).await,
+            None => Ok(()),
+        }
+    } else {
+        held.batch(sent, divided).await.map(|_| ())
+    };
+    refused.inspect_err(|_| {
+        tracing::info!(slug = %endpoint.slug, "delete refused: a relationship keeps it");
+    })
+}
+
 /// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
     Router::new()
@@ -1021,7 +1151,7 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_entities;
+    use super::*;
 
     /// DM-128: the URNs of one Entity, a list and a FeatureCollection; nothing from what is none.
     #[test]
@@ -1038,5 +1168,194 @@ mod tests {
         );
         assert!(ids("not json").is_empty());
         assert!(ids("7").is_empty());
+    }
+
+    fn answered(status: StatusCode, body: &'static str) -> Response<Body> {
+        let mut answer = Response::new(Body::from(body));
+        *answer.status_mut() = status;
+        answer
+    }
+
+    async fn text(answer: Response<Body>) -> String {
+        let held = axum::body::to_bytes(answer.into_body(), MAX_BODY)
+            .await
+            .unwrap_or_default();
+        String::from_utf8_lossy(&held).into_owned()
+    }
+
+    /// T-5508: a broker failure, a refusal and a tenant's miss are final answers the broker's
+    /// wording never reaches the caller through; a success and a write's miss go on.
+    #[tokio::test]
+    async fn map_view_answer_keeps_the_broker_wording_from_the_caller() {
+        let read = Operation::RetrieveEntity;
+        let failed = map_view_answer(answered(StatusCode::BAD_GATEWAY, "tenant t1"), read).await;
+        let failed = failed.err().map(|answer| answer.status());
+        assert!(failed.is_some_and(|status| status.is_server_error()));
+        let refused = map_view_answer(answered(StatusCode::FORBIDDEN, "{}"), read).await;
+        assert_eq!(
+            refused.err().map(|answer| answer.status()),
+            Some(StatusCode::FORBIDDEN)
+        );
+
+        let tenant =
+            r#"{"type":"https://uri.etsi.org/ngsi-ld/errors/NonexistentTenant","detail":"t1"}"#;
+        let missed = map_view_answer(answered(StatusCode::NOT_FOUND, tenant), read).await;
+        let missed = missed.err().map(|answer| *answer);
+        assert_eq!(
+            missed.as_ref().map(Response::status),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert!(!text(missed.unwrap_or_default()).await.contains("t1"));
+        let listed = map_view_answer(
+            answered(StatusCode::NOT_FOUND, tenant),
+            Operation::QueryEntity,
+        )
+        .await;
+        assert_eq!(
+            listed.err().map(|answer| answer.status()),
+            Some(StatusCode::OK)
+        );
+        let plain = map_view_answer(answered(StatusCode::NOT_FOUND, "gone"), read).await;
+        let plain = plain.err().map(|answer| answer.status());
+        assert_eq!(plain, Some(StatusCode::NOT_FOUND));
+
+        let written = map_view_answer(
+            answered(StatusCode::NOT_FOUND, tenant),
+            Operation::UpdateAttrs,
+        )
+        .await;
+        assert!(written.is_ok());
+        assert!(map_view_answer(answered(StatusCode::OK, "{}"), read)
+            .await
+            .is_ok());
+    }
+
+    /// T-5508, EP-97: an Endpoint counting its creates refuses the batch forms and mints the
+    /// id a form names; one without creates leaves the body alone.
+    #[test]
+    fn one_entity_per_create_refuses_a_batch_where_creates_count() {
+        let mut endpoint = crate::mcp::catalog::tests::fixture();
+        let mut sent = br#"[{"id":"urn:ngsi-ld:T:1","type":"T"}]"#.to_vec();
+        assert!(one_entity_per_create(&endpoint, Operation::CreateBatch, &mut sent).is_ok());
+        endpoint.creates = Some(jc_core::kinds::Creates {
+            mint_ids: true,
+            ..Default::default()
+        });
+        let refused = one_entity_per_create(&endpoint, Operation::UpsertBatch, &mut sent);
+        let refused = refused.err().map(|answer| answer.status());
+        assert_eq!(refused, Some(StatusCode::BAD_REQUEST));
+
+        let mut one = br#"{"id":"urn:ngsi-ld:T:mine","type":"T"}"#.to_vec();
+        assert!(one_entity_per_create(&endpoint, Operation::CreateEntity, &mut one).is_ok());
+        assert!(!String::from_utf8_lossy(&one).contains("mine"));
+    }
+
+    /// T-5508, PF-43, EP-61: a write whose id is no NGSI-LD URN is refused whole; a batch keeps
+    /// its passing members and holds the one writing a hidden attribute in `divided`.
+    #[test]
+    fn judged_write_refuses_a_foreign_id_and_divides_a_batch() {
+        let mut endpoint = crate::mcp::catalog::tests::fixture();
+        endpoint.hidden_attributes.insert("secret".to_owned());
+        let mut divided = None;
+        let mut sent = br#"{"id":"not-a-urn","type":"T"}"#.to_vec();
+        let refused = judged_write(
+            &endpoint,
+            "/entities",
+            Operation::CreateEntity,
+            &mut sent,
+            &mut divided,
+        );
+        let refused = refused.err().map(|answer| answer.status());
+        assert_eq!(refused, Some(StatusCode::BAD_REQUEST));
+
+        let mut batch =
+            br#"[{"id":"urn:ngsi-ld:Thing:one","type":"Thing"},{"id":"urn:ngsi-ld:Thing:two","type":"Thing","secret":{"value":1}}]"#.to_vec();
+        let path = "/entityOperations/create";
+        let kept = judged_write(
+            &endpoint,
+            path,
+            Operation::CreateBatch,
+            &mut batch,
+            &mut divided,
+        );
+        assert!(kept.is_ok());
+        assert_eq!(
+            divided.as_ref().map(|(ids, _)| ids.clone()),
+            Some(vec!["urn:ngsi-ld:Thing:one".to_owned()])
+        );
+        assert!(!String::from_utf8_lossy(&batch).contains("secret"));
+    }
+
+    /// T-5508: the broker's address keeps the caller's query and no empty `?`.
+    #[test]
+    fn view_target_keeps_the_query() {
+        assert_eq!(
+            view_target("v", "/entities", None),
+            "/x/views/v/ngsi-ld/v1/entities"
+        );
+        assert_eq!(
+            view_target("v", "/entities", Some("")),
+            "/x/views/v/ngsi-ld/v1/entities"
+        );
+        assert_eq!(
+            view_target("v", "/entities", Some("type=T")),
+            "/x/views/v/ngsi-ld/v1/entities?type=T"
+        );
+    }
+
+    /// T-5508: an Endpoint whose view id no broker view carries is the `503 no-view` before any
+    /// hop; a read of entities goes on to the view.
+    #[tokio::test]
+    async fn answered_here_refuses_an_endpoint_without_a_view() {
+        let gateway = Gateway::new(
+            crate::proxy::Broker::new("http://localhost:9"),
+            Box::new(crate::pdp::PolicyPdp),
+            "example.org",
+        );
+        let endpoint = crate::mcp::catalog::tests::fixture();
+        let subject = Subject::anonymous();
+        let mut request = Request::new(Body::empty());
+        let read = Operation::RetrieveEntity;
+        let long = "v".repeat(MAX_VIEW_ID + 1);
+        let refused = answered_here(
+            &gateway,
+            (&endpoint, &subject),
+            read,
+            &long,
+            &[],
+            &mut request,
+        )
+        .await;
+        let refused = refused.err().map(|answer| answer.status());
+        assert_eq!(refused, Some(StatusCode::SERVICE_UNAVAILABLE));
+        let goes_on = answered_here(
+            &gateway,
+            (&endpoint, &subject),
+            read,
+            "view",
+            &[],
+            &mut request,
+        )
+        .await;
+        assert!(goes_on.is_ok());
+    }
+
+    /// T-5508, R22: the broker's restriction header reaches the caller under the name the
+    /// specification gives, and never under the broker's own.
+    #[tokio::test]
+    async fn caller_answer_renames_the_restriction_header() {
+        let endpoint = crate::mcp::catalog::tests::fixture();
+        let subject = Subject::anonymous();
+        let mut answer = answered(StatusCode::OK, "{}");
+        answer
+            .headers_mut()
+            .insert(ANTARES_RESTRICTED, HeaderValue::from_static("true"));
+        let write = Operation::UpdateAttrs;
+        let answer = caller_answer(answer, (&endpoint, &subject), write, &[]).await;
+        assert!(answer.headers().get(ANTARES_RESTRICTED).is_none());
+        assert_eq!(
+            answer.headers().get(RESULTS_RESTRICTED),
+            Some(&HeaderValue::from_static("true"))
+        );
     }
 }
