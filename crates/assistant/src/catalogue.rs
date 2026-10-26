@@ -8,8 +8,10 @@
 //! entity count, read anonymously through the gateway as any visitor could read it. A `public`
 //! source holds public Endpoints alone, so nothing of a private space reaches a public channel.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use jc_core::kinds::data_model::{DataModelLifecycle, DataModelSpec};
 use jc_core::kinds::EndpointSpec;
@@ -430,6 +432,99 @@ pub struct Reader {
     /// `JC_ASSISTANT_PORTAL_URL`, scheme and authority without a trailing slash: the Portal a
     /// `guide` source's sections link into; a guide source is not read without it (AG-118).
     pub portal: Option<String>,
+    /// Each public Endpoint's last counts, kept between catalogue syncs (T-5795).
+    pub held: Held,
+}
+
+/// How long an Endpoint's counts stand before a sync asks the gateway again, while the Endpoint
+/// itself is unchanged (T-5795: every sync counted every type of every Endpoint again).
+pub const COUNT_FRESH: Duration = Duration::from_secs(3600);
+
+/// The refusals one catalogue sync takes before it asks no further Endpoint: the rest keep their
+/// last counts until the next sync (T-5795: 11,053 refused counts in 30 min on dev).
+const SHED_LIMIT: usize = 3;
+
+/// The counts of each public Endpoint a sync last asked for, by slug, in this process.
+#[derive(Debug, Clone)]
+pub struct Held {
+    fresh: Duration,
+    by_slug: Arc<Mutex<HashMap<String, Counted>>>,
+}
+
+#[derive(Debug, Clone)]
+struct Counted {
+    /// The types the counts were asked for: a change to them asks again at once.
+    classes: Vec<String>,
+    asked: Instant,
+    counts: BTreeMap<String, u64>,
+    counted_at: Option<String>,
+}
+
+impl Default for Held {
+    fn default() -> Self {
+        Self::new(COUNT_FRESH)
+    }
+}
+
+impl Held {
+    /// Counts that stand for `fresh` after they were asked for.
+    pub fn new(fresh: Duration) -> Self {
+        Self {
+            fresh,
+            by_slug: Arc::default(),
+        }
+    }
+
+    /// `page`'s counts and when they were counted: the held ones while fresh and the page is
+    /// unchanged, else the gateway's. Past [`SHED_LIMIT`] refusals in this sync (`sheds`), or
+    /// when the gateway sheds this one, the last good counts stand and the gateway is not asked.
+    async fn count(
+        &self,
+        http: &reqwest::Client,
+        gateway: &Url,
+        page: &EndpointPage,
+        now: &str,
+        sheds: &mut usize,
+    ) -> (BTreeMap<String, u64>, Option<String>) {
+        let classes: Vec<String> = page.types.iter().map(|t| t.class.clone()).collect();
+        let last = self
+            .by_slug
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&page.slug).cloned())
+            .filter(|last| last.classes == classes);
+        let kept = |last: Option<Counted>| {
+            last.map(|last| (last.counts, last.counted_at))
+                .unwrap_or_default()
+        };
+        if last
+            .as_ref()
+            .is_some_and(|l| l.asked.elapsed() < self.fresh)
+            || *sheds >= SHED_LIMIT
+        {
+            return kept(last);
+        }
+        let (counts, counted_at) = match counts(http, gateway, page).await {
+            Some(counts) => (counts, Some(now.to_owned())),
+            None => {
+                *sheds += 1;
+                tokio::time::sleep(SHED_WAIT).await;
+                kept(last)
+            }
+        };
+        if let Ok(mut held) = self.by_slug.lock() {
+            held.insert(
+                page.slug.clone(),
+                Counted {
+                    classes,
+                    asked: Instant::now(),
+                    counts: counts.clone(),
+                    counted_at: counted_at.clone(),
+                },
+            );
+        }
+        (counts, counted_at)
+    }
 }
 
 /// The entities of each type a public Endpoint serves, as an anonymous caller counts them. A
@@ -486,8 +581,8 @@ fn sheds(status: reqwest::StatusCode) -> bool {
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
-/// How long a catalogue sync waits before it asks a shedding gateway once more.
-const SHED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a catalogue sync waits after a refusal before it asks for the next Endpoint.
+const SHED_WAIT: Duration = Duration::from_secs(2);
 
 /// What one run did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -514,7 +609,7 @@ pub async fn sync_catalogue(
         ));
     };
     let now = time::OffsetDateTime::now_utc();
-    let counted_at = Some(format!(
+    let stamp = format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         now.year(),
         u8::from(now.month()),
@@ -522,26 +617,24 @@ pub async fn sync_catalogue(
         now.hour(),
         now.minute(),
         now.second()
-    ));
+    );
+    let mut sheds = 0;
     let mut listed: BTreeSet<String> = BTreeSet::new();
     for page in pages {
         let address = endpoint_base
             .join(&format!("api/endpoint/{}", page.slug))
             .map(String::from)
             .unwrap_or_default();
-        // One Endpoint at a time; a shedding gateway gets one more ask after a pause, then the
-        // page is indexed uncounted, every type kept.
-        let counts = match &reader.gateway {
-            Some(gateway) => match counts(&reader.http, gateway, page).await {
-                Some(counts) => counts,
-                None => {
-                    tokio::time::sleep(SHED_WAIT).await;
-                    counts(&reader.http, gateway, page)
-                        .await
-                        .unwrap_or_default()
-                }
-            },
-            None => BTreeMap::new(),
+        // One Endpoint at a time. A refused count is not asked again: the Endpoint keeps its last
+        // good counts, and after a few refusals no further Endpoint is asked this sync (T-5795).
+        let (counts, counted_at) = match &reader.gateway {
+            Some(gateway) if page.is_public() => {
+                reader
+                    .held
+                    .count(&reader.http, gateway, page, &stamp, &mut sheds)
+                    .await
+            }
+            _ => (BTreeMap::new(), None),
         };
         // A public Endpoint shows a visitor the types its Policy grants them: where the counts came
         // back, the page names the types a visitor finds entities of and no other. With no count

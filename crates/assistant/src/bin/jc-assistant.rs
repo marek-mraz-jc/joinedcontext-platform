@@ -171,6 +171,7 @@ fn chat_state(
             .map_err(fail("the public Endpoint address is not usable"))?,
         portal: optional_base(env, "JC_ASSISTANT_PORTAL_URL")
             .map_err(fail("the Portal address is not usable"))?,
+        held: Default::default(),
     };
     let chat_state = Arc::new(ChatState {
         pool: pool.clone(),
