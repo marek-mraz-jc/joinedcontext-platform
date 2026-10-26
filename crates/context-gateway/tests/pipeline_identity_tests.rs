@@ -128,7 +128,7 @@ fn the_written_spaces_endpoint_carries_the_pipelines_write_grant_and_no_other_do
             .iter()
             .filter(|policy| {
                 policy.assignee.kind == PrincipalKind::ServiceAccount
-                    && policy.assignee.id == "pl-linked-events"
+                    && policy.assignee.id == "helsinki/pl-linked-events"
             })
             .cloned()
             .collect::<Vec<_>>()

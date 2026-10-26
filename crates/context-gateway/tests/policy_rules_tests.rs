@@ -123,6 +123,7 @@ fn endpoint(dir: &Path, slug: &str) -> Endpoint {
 fn editor() -> Subject {
     Subject {
         service_account: Some("kiosk-editor".to_owned()),
+        service_account_project: Some("bbsk".to_owned()),
         ..Subject::default()
     }
 }

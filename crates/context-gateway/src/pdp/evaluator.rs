@@ -637,7 +637,9 @@ pub const NOTHING: &str = "(jcUnreadablePolicyQ==0;jcUnreadablePolicyQ!=0)";
 mod tests {
     use super::*;
 
-    /// PL-92: `{project}/{name}` names one project's account; a bare name any admitted project's.
+    /// PL-92: `{project}/{name}` names one project's account. A bare name here matches any
+    /// project's, which no loaded Policy carries: the store names every bare assignee with the
+    /// Policy's own project (store.rs `of_own_project`, T-5698).
     #[test]
     fn a_qualified_service_account_assignee_matches_only_that_projects_account() {
         let account = |project: &str| Subject {
