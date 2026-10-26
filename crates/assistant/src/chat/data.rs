@@ -38,7 +38,7 @@ const DATA_RULES: &str = "\n\nYou may read more live data before you answer, wit
 - For history use query_temporal: `type`, `timerel` (`after`, `before`, `between`) with `timeAt` (and `endTimeAt`), or `lastN`; `aggrMethods` (`avg`, `min`, `max`, `sum`) with `aggrPeriodDuration` such as P1D. At most 31 days, at most 100 values.\n\
 - A question about history, the last days or weeks or a trend is answered with the values themselves: call query_temporal for the entities the tables and the earlier turns name (their `idPattern` or a `q` on their names), with `aggrMethods` avg,min,max and `aggrPeriodDuration` P1D, and give the numbers per place and day, briefly. Never tell the person to call an API, an address or a query themselves. When the history cannot be read, say in one sentence that it is not available right now.\n\
 - When the place asked for has no figure but the same indicator is there for a wider area that holds it (the whole country, `refArea` SK0), read that one, say in one sentence that the place itself has no figure and give the wider area's value with its [n]; never present it as the place's own.\n\
-- get_type, list_attributes and describe_schema tell you a type's attributes when you do not know which one holds what you need.\n\
+- get_type and list_attributes tell you a type's attributes when you do not know which one holds what you need.\n\
 - Every data tool takes `endpoint`: one Endpoint of the list you are given, by its name. The same tools read every Endpoint.\n\
 - A query_entities without `q`, `id`, `idPattern`, `georel` or `scopeQ` answers 5 rows and the total: enough to see what one row holds. For a list, filter with `q`; then `limit` is as you ask.\n\
 - When a tool refuses, correct the arguments once; when it still refuses, answer from what you have and say which data you could not find.\n\
@@ -50,17 +50,25 @@ pub fn data_rules(steps: usize) -> String {
 }
 
 /// The Endpoints the data tools read, for the rules (T-4748): the router's [`catalogue`] under a
-/// heading that says to name one as `endpoint`. Only the Endpoints `tables` were read from list
-/// their attributes (T-5783): the 80 names of each other Endpoint made most of an 11.8k-token
-/// data call on prod, and list_attributes gives them when a further read needs them. With no
-/// table every Endpoint lists them.
+/// heading that says to name one as `endpoint`. With rows in hand (T-5783) it lists only the
+/// Endpoints the tables were read from, with their attributes, and the others serving one of
+/// their types, without: all 67 Endpoints of prod's catalogue assistant with their attribute
+/// names were most of an 11.8k-token data call. With no rows every Endpoint is listed whole.
 ///
 /// [`catalogue`]: super::routed::catalogue
 pub fn endpoints(live: &[super::routed::Shown], tables: &[Table]) -> String {
-    let full = |endpoint: &str| tables.is_empty() || tables.iter().any(|t| t.endpoint == endpoint);
+    let rows = tables.iter().any(|t| !t.rows.is_empty());
+    let read = |endpoint: &str| tables.iter().any(|t| t.endpoint == endpoint);
+    let listed: Vec<super::routed::Shown> = live
+        .iter()
+        .filter(|s| {
+            !rows || read(&s.endpoint) || tables.iter().any(|t| s.types.contains(&t.entity_type))
+        })
+        .cloned()
+        .collect();
     format!(
         "\n\nThe Endpoints you may read, one per line (endpoint (what it holds): types; the attributes a q may test; list_attributes gives those of a line that lists none). Give its name as `endpoint`:\n{}",
-        super::routed::catalogue_with(live, full).trim_end()
+        super::routed::catalogue_with(&listed, |endpoint| !rows || read(endpoint)).trim_end()
     )
 }
 
@@ -78,9 +86,26 @@ pub fn budget(left: usize, most: usize, secs: u64) -> String {
 /// What the last call is told when a bound is reached.
 const ANSWER_NOW: &str = "No more tool calls: answer the question now from the tables and tool results above, citing them as [n]. Say plainly which data you could not find.";
 
-/// What the model is offered: the standard data tools, and the chart tool beside them.
-fn tool_specs(connectors: &[Connected], viz: bool) -> Vec<Value> {
+/// The standard tools the data loop leaves out (T-5783): each repeats another it keeps
+/// (retrieve_temporal is query_temporal of one id, get_attribute_value a get_entity with `attrs`,
+/// describe_schema what get_type and list_attributes say) or answers no data question
+/// (describe_access). Their definitions were a third of the loop's 2.4k tool tokens.
+const LEFT_OUT: &[&str] = &[
+    "retrieve_temporal",
+    "get_attribute_value",
+    "describe_schema",
+    "describe_access",
+];
+
+/// What the model is offered: the standard data tools but [`LEFT_OUT`], and the chart tool
+/// beside them.
+pub(super) fn tool_specs(connectors: &[Connected], viz: bool) -> Vec<Value> {
     let mut tools = standard(connectors);
+    tools.retain(|t| {
+        t.pointer("/function/name")
+            .and_then(Value::as_str)
+            .is_none_or(|name| !LEFT_OUT.contains(&name))
+    });
     // A chart or a map of a table, drawn by code (T-4657): offered beside the connectors' tools.
     if viz && !tools.is_empty() {
         tools.push(super::viz::tool());
@@ -763,7 +788,12 @@ mod tests {
             .iter()
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
-        assert_eq!(names, READ_ONLY_TOOLS);
+        let kept: Vec<&str> = READ_ONLY_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| !LEFT_OUT.contains(name))
+            .collect();
+        assert_eq!(names, kept);
         for tool in &tools {
             let f = &tool["function"];
             assert_eq!(f["parameters"]["required"][0], ENDPOINT, "{}", f["name"]);
