@@ -124,7 +124,7 @@ const ROUTER_RULES: &str = "You prepare the searches of a city's assistant. Repl
 - When the question names several places (two cities, a city and a region), each with its own endpoint of the type, take one data item per place, the endpoint of that place, so every place asked about is answered (\"Kvalita ovzdušia v Žiline a B. Bystrici?\" reads the Žilina endpoint and the Banská Bystrica one).\n\
 - When several endpoints hold the type a question needs, choose by what the endpoint holds, the same way every time: first the one whose title and attributes name the asked quantity at the asked level (a region, a district, a town); then the newest period; then indicators, one row per territory with a name and a current value, before raw statistical data whose rows are cube cells (dataSet, refArea, refPeriod). Read raw data only with a q naming its dataset, area and period, never all its rows.\n\
 - A question about some rows of a type (one place, one kind, like the schools of one district) reads an endpoint whose listed attributes let a q keep only those rows, like organizationCategory==\"school\";address.addressLocality==\"Zvolen\"; never an endpoint shown with no attributes, which only reads all rows of a type.\n\
-- q: optional in a data item, an NGSI-LD query over the attributes shown for its endpoint that keeps only the rows the question is about, like okresPoskytovania==\"Brezno\" or druhZariadenia~=\"(?i).*nemocnic.*\"; leave it out when the question is about all rows of the type or you are not sure which attribute holds it. When the question refers to places or things of the earlier turns (there, those, them, the same), keep only those: build q from the names or codes the earlier turns give, like name~=\"(?i).*(Žilina|Banská Bystrica).*\".\n\
+- q: optional in a data item, an NGSI-LD query over the attributes shown for its endpoint that keeps only the rows the question is about, like okresPoskytovania==\"Brezno\" or druhZariadenia~=\"(?i).*nemocnic.*\"; leave it out when the question is about all rows of the type or you are not sure which attribute holds it. A question how many rows meet a condition (built before 1900, in one district) names the condition as q, like yearBuilt<1900, so the endpoint counts them exactly; one asking how many there are in all and how many of them meet it takes two data items of the same endpoint and type, the first without q and the second with it. When the question refers to places or things of the earlier turns (there, those, them, the same), keep only those: build q from the names or codes the earlier turns give, like name~=\"(?i).*(Žilina|Banská Bystrica).*\".\n\
 - order: optional in a data item, for a question about the most or the least of something (the oldest, the newest, the largest, the longest): the attribute shown for its endpoint that ranks the rows, ascending, like yearBuilt for the oldest, or with ;desc for the newest or the largest, like yearBuilt;desc. Leave it out otherwise.\n\
 - followups: short questions the resident may want to ask next about the same topic, in the question's language, each under 120 characters, and each one the sources and types you are shown can answer: never about an app, a service or a body outside them; [] when none fits. Offer up to 5; each names in attrs the attributes shown for the endpoints in data (or, with no data item, for any endpoint shown) that hold its answer (one about a place or thing the rows name gives the attribute that names it, like name); [] only when the pages alone answer it. A question about something no attribute shown holds (a condition or state, a rating, a price, an owner) is no follow-up. Each is neutral or positive: what exists, where, how many, how old, how to use or visit it; never about failures, damage, danger, accidents, crime, complaints or blame, and never ranking people or places as bad.\n\
 - Words like today, tomorrow, this week or now mean the local date of the Now line beside the question: name that date in the queries, and bound a q over a date attribute by it, like startDate>=\"2026-10-16T00:00:00Z\";startDate<\"2026-10-17T00:00:00Z\" for today.\n\
@@ -150,7 +150,8 @@ const ANSWER_RULES: &str = "You answer the questions of a city's residents from 
 - Name datasets and things in plain words of the question's language, like mosty or železničné zastávky: never a type name such as `Bridge`, an attribute name, a URN, an Endpoint name or the words NGSI-LD.\n\
 - Point only to the catalogue's publishers and their dataset pages; never send the person to other offices, ministries or portals.\n\
 - When some data could not be read in time, say so at most once, and never list what could not be read as if it were a finding.\n\
-- A data table may carry a `profile`: the data server's statistics of the type (count, and per attribute min, max, mean, median, the most common values, the area). Quote a statistic from the profile, never one you compute from the rows; when its `basis` covers fewer entities than all, say over how many, like \"podľa 1 000 z 10 000 záznamov\".\n\
+- A data table may carry a `profile`: the data server's statistics of the type (count, and per attribute min, max, mean, median, the most common values, the area). Quote a statistic from the profile, never one you compute from the rows; when its `basis` covers fewer entities than all, it is a sample: say over how many, like \"podľa 1 000 z 10 000 záznamov\", and never give a number from it as an exact count.\n\
+- A data table with a `q` holds only the entities that q keeps, and its `total` is their exact count: answer how many meet that condition from that `total`, never from a profile or from another table of the same type.\n\
 - A question about which data or datasets there are on a topic is answered with a short list of the matching datasets from the passages, grouped by publisher: each dataset's title, what it holds in a few words, and its link, citing it [n]; never rows of one dataset, never an Endpoint name.\n\
 - When the passages do not answer the question, say so in one sentence and point to the city's official contact; never describe or list the passages, datasets or Endpoint names you were given instead. Never guess a number, a date, a phone number, opening hours or a name.\n\
 - Keep the answer short: at most about 150 words, a few sentences or a short list, unless the question asks for more.\n\
@@ -390,14 +391,17 @@ pub fn routing(reply: &str, question: &str, live: &[Shown]) -> Routing {
             .iter()
             .find(|s| s.endpoint == endpoint && s.types.iter().any(|t| t == kind));
         let listed = shown.is_some();
+        // The same type read twice only by another `q`: "how many in all and how many before
+        // 1900" reads the whole count and the filtered one (T-5784).
+        let q = query_of(read);
         let twice = reads
             .iter()
-            .any(|r| r.endpoint == endpoint && r.kind == kind);
+            .any(|r| r.endpoint == endpoint && r.kind == kind && r.q == q);
         if listed && !twice && reads.len() < MAX_READS {
             reads.push(Read {
                 endpoint: endpoint.to_owned(),
                 kind: kind.to_owned(),
-                q: query_of(read),
+                q,
                 order: shown.and_then(|s| order_of(read, &s.attributes)),
             });
         }
@@ -2165,6 +2169,7 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
         .await
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())?;
     table.profile = profile;
+    table.filter = wanted.q.clone();
     Ok(table)
 }
 
@@ -2364,6 +2369,7 @@ pub(super) async fn table(
         map: None,
         geometries: super::viz::geometries(text, READ_ROWS),
         profile: None,
+        filter: None,
     };
     placeholders_last(&mut table);
     // Polygon rows read their area and perimeter and draw a simpler outline (T-4697).
@@ -3891,6 +3897,9 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
         if let Some(profile) = &table.profile {
             read["profile"] = json!(profile);
         }
+        if let Some(q) = &table.filter {
+            read["q"] = json!(q);
+        }
         if !placeholders.is_empty() {
             read["placeholders"] = json!(&placeholders[..placeholders.len().min(MODEL_ROWS)]);
         }
@@ -4450,6 +4459,7 @@ mod tests {
             map: None,
             geometries: Vec::new(),
             profile: None,
+            filter: None,
         };
         let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table));
         let numbered: Vec<_> = citations
@@ -4497,6 +4507,7 @@ mod tests {
             map: None,
             geometries: Vec::new(),
             profile: Some("type=AirQualityObserved count=900".into()),
+            filter: None,
         };
         let (_, _, data) = evidence(&[], std::slice::from_ref(&table));
         assert_eq!(data[0]["rows"].as_array().map(Vec::len), Some(PROFILE_ROWS));
@@ -5284,6 +5295,57 @@ mod tests {
             let r = routing(&reply.to_string(), "x", &live);
             assert_eq!(r.reads[0].q.as_deref(), kept, "{q}");
         }
+    }
+
+    /// T-5784: "how many in all and how many before 1900" read the type once, unfiltered, and the
+    /// answer took the filtered count from a 1,000-row profile sample. The type is read again by
+    /// another `q`, the same read twice is not, and the answer call sees which `q` a total counts.
+    #[test]
+    fn a_filtered_count_reads_the_type_again_with_its_q() {
+        let live = vec![shown("bbsk-registre", &["Bridge"], &["yearBuilt"])];
+        let item = |q: Option<&str>| match q {
+            Some(q) => json!({"endpoint": "bbsk-registre", "type": "Bridge", "q": q}),
+            None => json!({"endpoint": "bbsk-registre", "type": "Bridge"}),
+        };
+        let reply = |items: Vec<Value>| {
+            json!({"route": "data", "queries": ["mosty"], "data": items}).to_string()
+        };
+        let r = routing(
+            &reply(vec![item(None), item(Some("yearBuilt<1900"))]),
+            "x",
+            &live,
+        );
+        let qs: Vec<Option<&str>> = r.reads.iter().map(|r| r.q.as_deref()).collect();
+        assert_eq!(qs, [None, Some("yearBuilt<1900")]);
+        let r = routing(
+            &reply(vec![
+                item(Some("yearBuilt<1900")),
+                item(Some(" yearBuilt<1900 ")),
+            ]),
+            "x",
+            &live,
+        );
+        assert_eq!(r.reads.len(), 1);
+        assert!(ROUTER_RULES.contains("names the condition as q, like yearBuilt<1900"));
+        assert!(ANSWER_RULES.contains("its `total` is their exact count"));
+        assert!(ANSWER_RULES.contains("never give a number from it as an exact count"));
+
+        let table = |filter: Option<&str>, total: u64| Table {
+            endpoint: "bbsk-registre".into(),
+            entity_type: "Bridge".into(),
+            columns: vec!["id".into()],
+            rows: vec![vec![json!("urn:ngsi-ld:Bridge:1")]],
+            units: vec![None],
+            total: Some(total),
+            filter: filter.map(str::to_owned),
+            ..Table::default()
+        };
+        let (_, _, data) = evidence(&[], &[table(None, 1651), table(Some("yearBuilt<1900"), 37)]);
+        assert!(data[0].get("q").is_none());
+        assert_eq!(
+            (&data[1]["q"], &data[1]["total"]),
+            (&json!("yearBuilt<1900"), &json!(37))
+        );
     }
 
     const BOTH: f64 = 2.0 / 61.0;

@@ -1177,6 +1177,7 @@ mod tests {
             map: None,
             geometries: vec![None, None, None],
             profile: None,
+            filter: None,
         };
         let tables = [(2, table)];
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);

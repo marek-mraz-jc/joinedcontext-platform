@@ -2311,6 +2311,7 @@ mod tests {
             map: None,
             geometries: Vec::new(),
             profile: None,
+            filter: None,
         });
         for event in [&tool, &table] {
             let shown = |anonymous| format!("{:?}", sse(event, anonymous));

@@ -343,6 +343,7 @@ mod tests {
             download: None,
             geojson: None,
             profile: None,
+            filter: None,
             map: None,
             geometries,
         }
