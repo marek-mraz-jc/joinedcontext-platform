@@ -194,36 +194,61 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 /// reciprocal rank. The question is parsed with every configuration the store indexes with, so
 /// it matches a chunk in whatever language that chunk is. Its words are OR-ed: a question asked
 /// in a person's words never has all of them in the passage that answers it (AND-ed, the lexical
-/// ranking found nothing for any of the forty eval questions, T-3053), and `ts_rank_cd` puts the
-/// passages with more of them first. A page under a news path (`/aktuality/`, `/novinky/`,
+/// ranking found nothing for any of the forty eval questions, T-3053), and the passages where
+/// they stand more often go first: the sum of their positions, which is `ts_rank_cd` of the
+/// query over 0.1 (every lexeme of weight D, every cover one lexeme long). A page under a news path (`/aktuality/`, `/novinky/`,
 /// `/news/`, …) counts 0.9 of its score and loses a tie: opening hours, prices and contacts are
 /// kept on the pages beside the news, and a news item about them goes stale (a COVID-19 notice
 /// answered a pool's hours, T-4370).
 ///
-/// Speed (T-4663, T-5773): under the forced row-level security `@@` is not leakproof, so it is a
-/// filter after the policy and no GIN lookup; `question` is materialized, else its four
-/// `to_tsvector` calls ran once per chunk of the scope (3.9 s of a 4.1 s search over 35k chunks).
+/// Speed (T-4663, T-5773, T-5799): under the forced row-level security `@@` is not leakproof, so
+/// chunks_fts can only filter after the policy, a read of every chunk of the project (2.6 s at
+/// 101k). The lexical arm looks the question's lexemes up in `chunk_terms` instead (text `=` is
+/// leakproof, so the policy and the lookup are one btree condition) and ranks by the `hits` the
+/// index holds; it reads a chunk only to check the scope of the best ones, by id, and the
+/// `OFFSET 0` keeps that a loop over the found ids that stops at the limit. A chunk the worker
+/// has not given its terms yet ([`fill_terms`]) is read whole, as before.
+/// Each arm's `LIMIT` is [`CANDIDATES`] written out (a bound limit is 10 % of the table to the
+/// generic plan), and the fused ids are materialized before they meet `chunks`: under the
+/// row-level security a join on `COALESCE(lexical.id, semantic.id)` is no index condition, and
+/// it was planned as a hash over every chunk of the project (86 ms of 131 at 100k chunks).
 /// The semantic arm is a plain `ORDER BY embedding <=> $2 LIMIT` over `chunks`, its sites an
 /// array and not a join, so the HNSW index serves it and filters as it walks ([`KNN_SETTINGS`]);
 /// a window over the whole scope sorted every chunk of the project by distance, 23.5 s on prod
 /// once one crawl stored 100k chunks.
 const HYBRID: &str = r#"
-WITH scope AS NOT MATERIALIZED (
-    SELECT c.id, c.fts
-    FROM chunks c JOIN sites s ON s.id = c.site_id
-    WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
-      AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
+WITH question AS MATERIALIZED (
+    SELECT jc_query_terms(jc_any_word('english', $1) || jc_any_word('finnish', $1)
+        || jc_any_word('german', $1) || jc_any_word('jc_simple_unaccent', $1)) AS terms
 ),
-question AS MATERIALIZED (
-    SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
-        || jc_any_word('german', $1) || jc_any_word('jc_simple_unaccent', $1) AS q
+found AS (
+    SELECT t.chunk_id AS id, sum(t.hits) AS hits
+    FROM chunk_terms t
+    WHERE t.term = ANY ((SELECT terms FROM question)::text[])
+    GROUP BY t.chunk_id
+    UNION ALL
+    SELECT c.id, h.hits
+    FROM chunks c CROSS JOIN LATERAL (
+        SELECT sum(t.hits) AS hits FROM jc_chunk_terms(c.fts) t
+        WHERE t.term = ANY ((SELECT terms FROM question)::text[])
+    ) h
+    WHERE c.terms_pending AND h.hits > 0
 ),
 lexical AS (
-    SELECT scope.id, row_number() OVER (ORDER BY ts_rank_cd(scope.fts, question.q) DESC, scope.id) AS rank
-    FROM scope, question
-    WHERE scope.fts @@ question.q
-    ORDER BY rank
-    LIMIT $5
+    SELECT best.id, row_number() OVER (ORDER BY best.hits DESC, best.id) AS rank
+    FROM (
+        SELECT found.id, found.hits
+        FROM found CROSS JOIN LATERAL (
+            SELECT FROM chunks c
+            WHERE c.id = found.id
+              AND c.site_id = ANY (ARRAY(SELECT s.id FROM sites s WHERE s.source = ANY($3)))
+              AND (NOT $4 OR c.visibility = 'public')
+              AND ($7::text IS NULL OR c.lang IS NULL OR c.lang = $7)
+            OFFSET 0
+        ) scoped
+        ORDER BY found.hits DESC, found.id
+        LIMIT 50
+    ) best
 ),
 semantic AS (
     SELECT near.id, row_number() OVER (ORDER BY near.distance, near.id) AS rank
@@ -232,26 +257,30 @@ semantic AS (
         FROM chunks c
         WHERE c.site_id = ANY (ARRAY(SELECT s.id FROM sites s WHERE s.source = ANY($3)))
           AND (NOT $4 OR c.visibility = 'public')
-          AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
+          AND ($7::text IS NULL OR c.lang IS NULL OR c.lang = $7)
         ORDER BY c.embedding <=> $2::vector
-        LIMIT $5
+        LIMIT 50
     ) near
+),
+fused AS MATERIALIZED (
+    SELECT COALESCE(lexical.id, semantic.id) AS id, lexical.rank AS by_words, semantic.rank AS by_meaning
+    FROM lexical FULL OUTER JOIN semantic USING (id)
 )
 SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
        to_char(COALESCE(p.published, d.published) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS published,
        to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
        to_char(COALESCE(p.fetched_at, d.fetched_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS crawled,
-       ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
+       ((COALESCE(1.0 / ($5 + fused.by_words), 0) + COALESCE(1.0 / ($5 + fused.by_meaning), 0))
         * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score,
-       lexical.rank IS NOT NULL AS by_words, semantic.rank IS NOT NULL AS by_meaning
-FROM lexical FULL OUTER JOIN semantic USING (id)
-JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
+       fused.by_words IS NOT NULL AS by_words, fused.by_meaning IS NOT NULL AS by_meaning
+FROM fused
+JOIN chunks c ON c.id = fused.id
 JOIN sites site ON site.id = c.site_id
 LEFT JOIN pages p ON p.id = c.page_id
 LEFT JOIN documents d ON d.id = c.document_id
 CROSS JOIN LATERAL (SELECT c.url ~* '/(aktuality|aktualita|aktualne|novinky|spravy|tlacove-spravy|clanky|news|uutiset|tiedotteet|blog)(/|$|\?|#)' AS item) news
 ORDER BY score DESC, news.item, c.id
-LIMIT $7
+LIMIT $6
 "#;
 
 /// The HNSW walk of the semantic arm, for the transaction it runs in: an iterative scan goes on
@@ -261,6 +290,29 @@ LIMIT $7
 /// the walk for a scope that holds few of the chunks.
 const KNN_SETTINGS: &str = "SET LOCAL hnsw.ef_search = 100; \
     SET LOCAL hnsw.iterative_scan = relaxed_order; SET LOCAL hnsw.max_scan_tuples = 20000";
+
+/// Gives up to `limit` chunks of `project` stored before `chunk_terms` existed their terms, and
+/// returns how many (T-5799); the trigger on `chunks` keeps every chunk stored since. Until then
+/// the lexical arm reads such a chunk by its `terms_pending` flag.
+pub async fn fill_terms(pool: &sqlx::PgPool, project: &str, limit: i64) -> Result<u64, Error> {
+    let mut tx = project_scope(pool, project).await?;
+    let filled = sqlx::query(
+        "WITH todo AS ( \
+             SELECT id, project, fts FROM chunks WHERE terms_pending ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED \
+         ), terms AS ( \
+             INSERT INTO chunk_terms (project, term, chunk_id, hits) \
+             SELECT todo.project, t.term, todo.id, t.hits FROM todo, jc_chunk_terms(todo.fts) AS t \
+             ON CONFLICT DO NOTHING \
+         ) \
+         UPDATE chunks c SET terms_pending = false FROM todo WHERE c.id = todo.id",
+    )
+    .bind(limit)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(filled)
+}
 
 /// The passages that answer `search`, best first, read in the transaction's project scope.
 pub async fn hybrid_search(
@@ -278,7 +330,6 @@ pub async fn hybrid_search(
         .bind(vector)
         .bind(search.sources)
         .bind(search.public_only)
-        .bind(CANDIDATES)
         .bind(RRF_K)
         .bind(search.limit)
         .bind(search.lang)
@@ -786,10 +837,10 @@ mod tests {
         assert_eq!(dataset_pattern(&[], "Organization"), None);
     }
 
-    /// T-4663: the scope of a search is inlined into both rankings, never materialized.
+    /// T-5799: both arms' limit is CANDIDATES, written into the statement for the planner.
     #[test]
-    fn the_search_scope_is_not_materialized() {
-        assert!(HYBRID.contains("WITH scope AS NOT MATERIALIZED ("));
+    fn each_arm_returns_the_candidates() {
+        assert_eq!(HYBRID.matches(&format!("LIMIT {CANDIDATES}\n")).count(), 2);
     }
 
     #[test]
