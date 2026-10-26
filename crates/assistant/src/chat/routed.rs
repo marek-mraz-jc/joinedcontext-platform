@@ -65,24 +65,26 @@ pub(super) const READ_ROWS: usize = 50;
 /// Rows of a table the answer call reads (Architecture/23 §4: data rows of about 600 tokens).
 const MODEL_ROWS: usize = 15;
 
-/// Rows the answer call reads beside a type's profile (T-4680): the profile holds the statistics.
-const PROFILE_ROWS: usize = 5;
+/// Rows the answer call reads beside a type's profile (T-4680, three since T-5783): the profile
+/// holds the statistics.
+const PROFILE_ROWS: usize = 3;
 
 /// The longest profile the answer call reads; the broker renders at most 6,000 characters, so a
 /// longer answer is no profile and is left out.
 const PROFILE_CHARS: usize = 8_000;
 
 /// The statistics of one attribute of a profile the answer call reads (T-5783); the histogram,
-/// spread, outliers, centroid and samples stay out: they were half of a 5.7k-character profile.
+/// spread, outliers, centroid, samples and the kind the statistics show stay out: they were half
+/// of a 5.7k-character profile.
 const PROFILE_STATS: &[&str] = &[
-    "kind", "n", "nulls", "min", "max", "mean", "median", "p10", "p90", "unit", "distinct",
-    "other", "top5", "top3",
+    "n", "nulls", "min", "max", "mean", "median", "p10", "p90", "unit", "distinct", "other",
+    "top5", "top3",
 ];
 
 /// The passages a data answer reads beside its tables, each cut to [`DATA_PASSAGE_CHARS`]
 /// (T-5783): the rows answer, the passages add a dataset's description.
-const DATA_PASSAGES: usize = 3;
-const DATA_PASSAGE_CHARS: usize = 600;
+const DATA_PASSAGES: usize = 2;
+const DATA_PASSAGE_CHARS: usize = 500;
 
 /// Columns of a table: the name first, then the entity's values in the order they come.
 const MAX_COLUMNS: usize = 8;
@@ -4184,10 +4186,10 @@ fn worth_text(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The most tokens (by [`tokens_of`]) of a data answer's messages for one broad 50-row read with
-    /// its profile and passages, the tool definitions apart (T-5783: prod's data call read 11.8k
-    /// tokens in 23.1 s).
-    const DATA_PROMPT_TOKENS: u64 = 4_000;
+    /// The most tokens (by [`tokens_of`]) of a data answer's first call, messages and tool
+    /// definitions, for one broad 50-row read with its profile and passages (T-5783: prod's data call
+    /// read 11.8k tokens in 23.1 s).
+    const DATA_CALL_TOKENS: u64 = 5_000;
 
     /// A message's text: its string content, or its parts' texts one after the other.
     fn text(message: &Value) -> String {
@@ -4633,7 +4635,7 @@ mod tests {
         assert!(citations.is_empty() && passages.is_empty() && data.is_empty());
     }
 
-    /// T-4680: with the type's profile the answer reads it and the first five rows, the row count
+    /// T-4680: with the type's profile the answer reads it and the first rows, the row count
     /// still whole; a profile past its bound or empty is left out.
     #[test]
     fn a_profile_goes_to_the_answer_with_five_rows() {
@@ -4669,7 +4671,7 @@ mod tests {
     }
 
     /// T-5783: the data answer of a broad 50-row read with its profile, five passages and a
-    /// deployment of 30 Endpoints stays under [`DATA_PROMPT_TOKENS`]; prod's read 11.8k tokens.
+    /// deployment of 67 Endpoints stays under [`DATA_CALL_TOKENS`]; prod's read 11.8k tokens.
     /// The profile keeps the table's columns and their statistics, the other Endpoints their types.
     #[test]
     fn a_data_answer_s_prompt_stays_within_its_token_budget() {
@@ -4724,7 +4726,8 @@ mod tests {
         let attributes: Vec<String> = (0..MAX_ATTRIBUTES)
             .map(|i| format!("attribute{i}"))
             .collect();
-        let live: Vec<Shown> = (0..30)
+        // Prod's catalogue assistant reads 67 Endpoints; one other serves Bridge too.
+        let live: Vec<Shown> = (0..67)
             .map(|i| Shown {
                 endpoint: if i == 0 {
                     "bbsk/bbsk-registre".into()
@@ -4732,7 +4735,11 @@ mod tests {
                     format!("bbsk/endpoint-{i}")
                 },
                 title: Some(format!("Registre kraja {i}")),
-                types: vec!["Bridge".into(), "School".into(), "PointOfInterest".into()],
+                types: if i < 2 {
+                    vec!["Bridge".into(), "School".into(), "PointOfInterest".into()]
+                } else {
+                    vec![format!("Kind{i}"), "PointOfInterest".into()]
+                },
                 attributes: attributes.clone(),
             })
             .collect();
@@ -4750,8 +4757,35 @@ mod tests {
         let more = routed_rules(&routing, 6, false, &[], &live, &tables);
         let question = "Koľko mostov v Banskej Bystrici bolo postavených pred rokom 1900?";
         let messages = messages_with(None, &more, &[], question, NOW, &passages, &data);
-        let used = tokens_of(&messages);
-        assert!(used <= DATA_PROMPT_TOKENS, "{used} tokens: {messages:#?}");
+        let listed: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mcp/tools-list-bbsk-otvorene-data.json"
+        ))
+        .expect("the recorded tools");
+        let allowed: Vec<String> = super::super::mcp::READ_ONLY_TOOLS
+            .iter()
+            .map(|t| (*t).to_owned())
+            .collect();
+        let connector = Connected {
+            titles: Default::default(),
+            endpoint: "bbsk/bbsk-registre".into(),
+            title: None,
+            surface: super::super::mcp::Surface {
+                gateway: "http://gateway".into(),
+                slug: "bbsk-registre".into(),
+                timeout: Duration::from_secs(1),
+                token: None,
+            },
+            tools: super::super::mcp::picked(&listed, &allowed),
+            label: None,
+            siblings: Vec::new(),
+        };
+        let tools = super::super::data::tool_specs(&[connector], false);
+        let used = tokens_of(&messages) + tokens_of(&tools);
+        assert!(
+            used <= DATA_CALL_TOKENS,
+            "{used} tokens, {} of them tools: {messages:#?}",
+            tokens_of(&tools)
+        );
         assert_eq!(passages.len(), DATA_PASSAGES);
         let profile = &data[0]["profile"];
         assert_eq!(
@@ -4770,8 +4804,13 @@ mod tests {
         assert!(more.contains(
             "- bbsk/bbsk-registre (Registre kraja 0): Bridge, School, PointOfInterest; attribute0"
         ));
-        assert!(more
-            .contains("- bbsk/endpoint-1 (Registre kraja 1): Bridge, School, PointOfInterest\n"));
+        assert!(
+            more.ends_with("- bbsk/endpoint-1 (Registre kraja 1): Bridge, School, PointOfInterest")
+        );
+        assert!(
+            !more.contains("bbsk/endpoint-2 "),
+            "an Endpoint of no read type is left out"
+        );
     }
 
     const NOW: &str = "Now: Friday 2026-10-16 12:05 UTC (2026-10-16T12:05Z).";
