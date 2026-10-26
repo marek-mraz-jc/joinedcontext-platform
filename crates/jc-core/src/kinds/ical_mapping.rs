@@ -1080,6 +1080,8 @@ pub(super) struct Slot {
     pub(super) range: String,
     pub(super) kind: Option<String>,
     required: bool,
+    /// The slot's LinkML `pattern`, if any.
+    pattern: Option<String>,
 }
 
 impl Slot {
@@ -1088,6 +1090,7 @@ impl Slot {
             range: range.to_owned(),
             kind: kind.map(str::to_owned),
             required,
+            pattern: None,
         }
     }
 }
@@ -1176,10 +1179,12 @@ impl Model<'_> {
                             .map(str::to_owned),
                     });
                 let required = pick("required").and_then(|v| v.as_bool()) == Some(true);
+                let pattern = pick("pattern").and_then(|v| v.as_str().map(str::to_owned));
                 return Some(Slot {
                     range,
                     kind,
                     required,
+                    pattern,
                 });
             }
             current = declared.get("is_a")?.as_str()?.to_owned();
@@ -1226,7 +1231,10 @@ pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
     let text =
         kind == Some("LanguageProperty") || range == "string" || model.enum_values(range).is_some();
     match accepts {
-        Accepts::Date => matches!(range, "date" | "datetime") && kind != Some("LanguageProperty"),
+        Accepts::Date => {
+            kind != Some("LanguageProperty")
+                && (matches!(range, "date" | "datetime") || dated_text(slot))
+        }
         Accepts::Text | Accepts::Duration => text,
         Accepts::Place => text || model.class(range).is_some(),
         Accepts::Geo => kind == Some("GeoProperty"),
@@ -1239,6 +1247,35 @@ pub(super) fn fits(model: &Model, slot: &Slot, accepts: Accepts) -> bool {
         }
         Accepts::Constant | Accepts::Fixed => false,
     }
+}
+
+/// Whether a `string` slot holds ISO 8601 dates as text: its `pattern` admits a date or a
+/// date-time with its offset and refuses free text, as a model of sources that mix whole-day
+/// and timed events writes it (`^[0-9]{4}-[0-9]{2}-[0-9]{2}(T…)?$`). The broker reads either
+/// form (T-5208).
+fn dated_text(slot: &Slot) -> bool {
+    let Some(pattern) = slot.pattern.as_deref().filter(|_| slot.range == "string") else {
+        return false;
+    };
+    // the pattern is the model author's text: bound what compiling it may cost
+    let Ok(re) = regex::RegexBuilder::new(pattern)
+        .size_limit(1 << 20)
+        .build()
+    else {
+        return false;
+    };
+    ["2026-11-14", "2026-11-14T19:00:00+01:00"]
+        .iter()
+        .any(|s| re.is_match(s))
+        && ![
+            "",
+            "tomorrow",
+            "14.11.2026",
+            "2026-11-14 at noon",
+            "2026-11-14T19:00:00+01:00 CET",
+        ]
+        .iter()
+        .any(|s| re.is_match(s))
 }
 
 fn uri(range: &str) -> bool {
