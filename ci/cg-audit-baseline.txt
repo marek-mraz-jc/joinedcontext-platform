@@ -26,6 +26,6 @@ portal | memory-unbounded-global | 15
 portal | memory-uncapped-read | 38
 portal | modularity-file-cycle | 69
 portal | modularity-server-as-library | 0
-portal | security-fetch-from-route | 98
+portal | security-fetch-from-route | 99
 portal | security-log-secret-field | 0
 portal | security-mcp-write-unguarded | 4
