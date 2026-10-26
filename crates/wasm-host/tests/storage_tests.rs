@@ -512,3 +512,25 @@ async fn a_presigned_put_stops_at_the_quota_and_a_read_at_its_limit() {
     let roomy = store.blob("s1", 4).with_read_limit(4);
     assert_eq!(roomy.get(&a, "full").await.expect("at the limit"), b"abcd");
 }
+
+/// F-PLT3-007: a session advisory lock one statement took is gone when the connection comes
+/// back from the pool, so the next App on that connection holds nothing of the last one's.
+#[tokio::test]
+async fn a_pooled_connection_comes_back_without_the_last_users_locks() {
+    let db = Db::new().await;
+    let pool = db.pool("s1", 1).await;
+    let mut first = pool.acquire().await.expect("a connection");
+    sqlx::query("select pg_advisory_lock(42)")
+        .execute(&mut *first)
+        .await
+        .expect("the lock");
+    drop(first);
+    let mut next = pool.acquire().await.expect("the same connection");
+    let held: i64 = sqlx::query_scalar(
+        "select count(*) from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+    )
+    .fetch_one(&mut *next)
+    .await
+    .expect("the locks");
+    assert_eq!(held, 0);
+}

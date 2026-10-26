@@ -556,3 +556,25 @@ fn an_asked_for_run_of_an_unmoved_source_is_one_call_and_no_checkout() {
     assert_eq!(outcome.state.last_run_at, Some(HOUR));
     assert_eq!(remote.calls(), vec!["revision".to_owned()]);
 }
+
+/// F-PLT3-005: a revision the remote answers is a directory name of the workspace, so a path in
+/// it is refused before anything is created or checked out.
+#[test]
+fn a_revision_that_is_a_path_is_refused_before_any_checkout() {
+    for revision in ["../escape", "/abs", "..", "a/b", ""] {
+        let dirs = dirs("revision-path");
+        let remote = Fake::at(revision, &[]);
+        let outcome = sync::poll(
+            &source(json!({})),
+            &State::default(),
+            HOUR,
+            &dirs.0,
+            &dirs.1,
+            &remote,
+        );
+        assert!(outcome.is_err(), "{revision:?}");
+        assert_eq!(remote.calls(), ["revision"], "{revision:?}");
+        let parent = dirs.1.parent().expect("a root");
+        assert!(!parent.join("escape").exists(), "{revision:?}");
+    }
+}

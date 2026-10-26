@@ -82,7 +82,10 @@ pub fn sync(org_dir: &Path, projects: &Path, options: &Options) -> Result<Vec<Li
             .checkout(slug, &entry.spec)
             .and_then(|tree| link(projects, slug, &tree).map(|moved| (tree, moved)))
         {
-            Ok((tree, moved)) => (Ok(tree), moved),
+            Ok((tree, moved)) => {
+                resolver.prune(slug, &tree);
+                (Ok(tree), moved)
+            }
             Err(err) => (Err(err), false),
         };
         linked.push(Linked {

@@ -92,9 +92,17 @@ async fn public_records(
     profile: Profile,
     project: Option<&str>,
 ) -> Vec<serde_json::Value> {
+    let table = gateway.resolver.table();
+    let key = format!("{profile:?}/{}", project.unwrap_or_default());
+    if let Some(records) = gateway.catalog_records.get(&key, &table) {
+        return records.as_ref().clone();
+    }
     let anonymous = Subject::anonymous();
     let mut records = Vec::new();
-    for endpoint in gateway.resolver.endpoints() {
+    // Sorted by slug, so the feed a harvester reads twice reads the same way twice.
+    let mut endpoints: Vec<_> = table.values().cloned().collect();
+    endpoints.sort_by(|left, right| left.slug.cmp(&right.slug));
+    for endpoint in endpoints {
         // An App's own door re-serves a space for that App and carries no catalogue block: it
         // is no dataset of the publisher, and a national catalogue would harvest it as one.
         // A door over data other datasets already publish (EP-139): its record stays, the
@@ -116,7 +124,11 @@ async fn public_records(
             endpoint.catalog.as_deref(),
         ));
     }
-    records
+    gateway
+        .catalog_records
+        .put(&key, table, records)
+        .as_ref()
+        .clone()
 }
 
 async fn catalog_feed(gateway: &Gateway, profile: Profile) -> serde_json::Value {

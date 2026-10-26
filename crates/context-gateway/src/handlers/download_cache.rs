@@ -169,6 +169,48 @@ impl HeldTypes {
     }
 }
 
+/// The public catalogue records per profile and project (F-PLT1-012): rendering them asks the
+/// broker for each public Endpoint's schema index, so a harvester polling the feed cost one hop
+/// per dataset per request. A record is reused for [`FRESH_FOR`] while the Endpoint table it was
+/// rendered from is the one the resolver holds; a reload renders afresh.
+#[derive(Default)]
+pub(crate) struct CatalogRecords {
+    held: Mutex<HashMap<String, HeldRecords>>,
+}
+
+type EndpointTable = Arc<HashMap<String, Arc<Endpoint>>>;
+type HeldRecords = (Instant, EndpointTable, Arc<Vec<serde_json::Value>>);
+
+impl CatalogRecords {
+    /// The records held under `key`, rendered from `table` less than [`FRESH_FOR`] ago.
+    pub(crate) fn get(
+        &self,
+        key: &str,
+        table: &EndpointTable,
+    ) -> Option<Arc<Vec<serde_json::Value>>> {
+        let held = lock(&self.held);
+        let (at, from, records) = held.get(key)?;
+        (at.elapsed() < FRESH_FOR && Arc::ptr_eq(from, table)).then(|| Arc::clone(records))
+    }
+
+    /// Holds `records`, rendered from `table`, under `key` from now on.
+    pub(crate) fn put(
+        &self,
+        key: &str,
+        table: EndpointTable,
+        records: Vec<serde_json::Value>,
+    ) -> Arc<Vec<serde_json::Value>> {
+        let records = Arc::new(records);
+        let mut held = lock(&self.held);
+        held.retain(|_, (at, _, _)| at.elapsed() < FRESH_FOR);
+        held.insert(
+            key.to_owned(),
+            (Instant::now(), table, Arc::clone(&records)),
+        );
+        records
+    }
+}
+
 /// A poisoned lock still holds a consistent map: every write to it is one insert or remove.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -280,6 +322,22 @@ mod tests {
 
     #[test]
     fn a_type_list_is_held_per_space() {
+        let records = CatalogRecords::default();
+        let table: EndpointTable = Arc::default();
+        assert_eq!(records.get("dcat/", &table), None);
+        records.put(
+            "dcat/",
+            Arc::clone(&table),
+            vec![serde_json::json!({"a": 1})],
+        );
+        assert_eq!(records.get("dcat/", &table).map(|r| r.len()), Some(1));
+        let reloaded: EndpointTable = Arc::default();
+        assert_eq!(
+            records.get("dcat/", &reloaded),
+            None,
+            "a reload renders afresh"
+        );
+
         let types = HeldTypes::default();
         assert_eq!(types.get("a"), None);
         types.put("a", vec!["T".to_owned()]);

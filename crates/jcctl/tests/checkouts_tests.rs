@@ -138,3 +138,44 @@ fn a_mounted_secret_is_read_by_name_only() {
     let empty = mounted_secret(Some(&dir), &secret("absent")).expect_err("no such Secret");
     assert!(!empty.contains("s3cr3t"), "{empty}");
 }
+
+/// F-PLT3-003: a pass whose link cannot be moved keeps the tree the link resolves to, and the
+/// next pass that links prunes the trees nothing names.
+#[cfg(unix)]
+#[test]
+fn a_link_that_cannot_move_keeps_resolving() {
+    use std::os::unix::fs::PermissionsExt;
+    let (forge, work, org, options) = setup("checkouts-prune");
+    let projects = temp_dir("checkouts-prune-projects");
+    sync(&org, &projects, &options).expect("a pass");
+    let link = projects.join("ovzdusie");
+
+    write(&work, "spaces/ovzdusie/endpoints/public-air.yaml", ENDPOINT);
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "-m", "the endpoint"]);
+    push(&forge, &work);
+    let mode = |m| std::fs::Permissions::from_mode(m);
+    std::fs::set_permissions(&projects, mode(0o555)).expect("read-only");
+    let failed = sync(&org, &projects, &options);
+    std::fs::set_permissions(&projects, mode(0o755)).expect("writable again");
+    assert!(
+        failed.is_ok_and(|passes| passes[0].result.is_err()),
+        "the link could not move"
+    );
+    assert!(
+        link.join("project.yaml").is_file(),
+        "the link still resolves to the tree it named"
+    );
+
+    assert!(sync(&org, &projects, &options).expect("a pass")[0].moved);
+    let trees = std::fs::read_dir(projects.join(".cache"))
+        .expect("the cache")
+        .flatten()
+        .filter(|item| {
+            item.file_name()
+                .to_string_lossy()
+                .starts_with("ovzdusie.tree-")
+        })
+        .count();
+    assert_eq!(trees, 1, "the old tree is pruned once the link moved");
+}

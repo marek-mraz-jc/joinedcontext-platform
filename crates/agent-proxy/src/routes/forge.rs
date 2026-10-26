@@ -41,6 +41,24 @@ fn object_body(bytes: &[u8]) -> Result<serde_json::Map<String, serde_json::Value
     }
 }
 
+/// The run's application directory with its closing `/`, or `None` for a run that names none.
+///
+/// An empty prefix (an assistant conversation, an application the Portal writes in its own
+/// repository) is no directory at all: such a run writes nothing through this door, since the
+/// configuration repository is what the door would otherwise reach whole (F-PLT1-003). The
+/// closing `/` makes the comparison one of whole segments, so `apps/foo` never admits
+/// `apps/foobar/` (F-PLT1-004).
+fn directory_of(prefix: &str) -> Option<String> {
+    let trimmed = prefix.trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| format!("{trimmed}/"))
+}
+
+fn no_directory() -> Response {
+    jc_core::ProblemDetails::forbidden()
+        .with_detail("this run has no application directory, so it writes nothing to the forge")
+        .into_response()
+}
+
 pub async fn handler(
     State(state): State<ProxyState>,
     method: Method,
@@ -62,22 +80,35 @@ pub async fn handler(
     // The body is only read where an operation rewrites or checks it; a read forwards what
     // arrived, untouched.
     let mut pinned: Option<serde_json::Map<String, serde_json::Value>> = None;
+    let directory = directory_of(&run.path_prefix);
+    let writes = CONTENT_WRITES.contains(&method);
 
     if let Some(file_path) = rest.strip_prefix("contents/") {
+        if writes && directory.is_none() {
+            return no_directory();
+        }
         // Nothing encoded, no backslash, no dot or empty segment (T-0817, `super::escapes`).
-        if super::escapes(file_path) || !file_path.starts_with(&run.path_prefix) {
+        if super::escapes(file_path)
+            || !file_path.starts_with(directory.as_deref().unwrap_or_default())
+        {
             return jc_core::ProblemDetails::forbidden()
                 .with_detail("file path outside assigned application directory")
                 .into_response();
         }
         // A workflow is the Portal's, never a run's: a run that wrote one could rewrite what the
         // forge runs and reach the lane's secret before anybody reviewed it (AP-100, ADR-N-028).
-        if file_path.split('/').any(|segment| segment == ".gitea") {
+        // `.github/` too: Gitea Actions also runs the workflows it finds there.
+        if file_path
+            .split('/')
+            .any(|segment| segment == ".gitea" || segment == ".github")
+        {
             return jc_core::ProblemDetails::forbidden()
-                .with_detail("a run never writes under .gitea/: the build is the Portal's (AP-100)")
+                .with_detail(
+                    "a run never writes under .gitea/ or .github/: the build is the Portal's (AP-100)",
+                )
                 .into_response();
         }
-        if CONTENT_WRITES.contains(&method) {
+        if writes {
             let mut map = match object_body(&body_bytes) {
                 Ok(map) => map,
                 Err(refusal) => return *refusal,
@@ -109,6 +140,9 @@ pub async fn handler(
             pinned = Some(map);
         }
     } else if rest == "branches" && method == Method::POST {
+        if directory.is_none() {
+            return no_directory();
+        }
         let map = match object_body(&body_bytes) {
             Ok(map) => map,
             Err(refusal) => return *refusal,
@@ -120,6 +154,9 @@ pub async fn handler(
         }
         pinned = Some(map);
     } else if rest == "pulls" && method == Method::POST {
+        if directory.is_none() {
+            return no_directory();
+        }
         let mut map = match object_body(&body_bytes) {
             Ok(map) => map,
             Err(refusal) => return *refusal,
@@ -179,7 +216,10 @@ pub async fn handler(
     // The URL the forge will see, after its parser had its say, is inside the application
     // directory or the request stops here (T-0817).
     if rest.starts_with("contents/") {
-        let inside = format!("/api/v1/repos/{repository}/contents/{}", run.path_prefix);
+        let inside = format!(
+            "/api/v1/repos/{repository}/contents/{}",
+            directory.as_deref().unwrap_or_default()
+        );
         if !reqwest::Url::parse(&target_url).is_ok_and(|url| url.path().starts_with(&inside)) {
             return jc_core::ProblemDetails::forbidden()
                 .with_detail("file path outside assigned application directory")

@@ -1236,6 +1236,24 @@ pub fn refused_target(text: &str) -> Option<&'static str> {
     None
 }
 
+/// Why a `host:port` field of an input reaches the runner's own pod or a private address, if it
+/// does (F-PLT2-008). Kafka `addresses`, `seed_brokers`, a socket `address`, Cassandra and NSQ
+/// `*_addresses` name hosts without a scheme, so [`refused_target`], which reads what follows a
+/// `://`, never saw them. A field may list several, comma-separated.
+fn refused_address(path: &str, text: &str) -> Option<&'static str> {
+    let key = path.rsplit('.').next().unwrap_or_default();
+    let key = key.split('[').next().unwrap_or_default();
+    let names_hosts = matches!(key, "address" | "addresses" | "seed_brokers" | "hosts")
+        || key.ends_with("_addresses");
+    if !names_hosts {
+        return None;
+    }
+    text.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.contains("://"))
+        .find_map(refused_host)
+}
+
 /// The cluster Services of the token sidecars (deployment `components/pipeline-runner` and
 /// `components/wasm-host`, `values/tokens`: fullnameOverride and nameOverride).
 const TOKEN_SERVICES: &[&str] = &[
@@ -1252,7 +1270,7 @@ fn validate_input_strings(input_val: &serde_json::Value) -> Result<()> {
         // An input's Bloblang (`generate.mapping`, a `${! … }` in any field) runs in the same
         // runner as a step's, so it is held to the same host rule (T-3833).
         super::pipeline::validate_author_bloblang("spec.input", text)?;
-        if let Some(reason) = refused_target(text) {
+        if let Some(reason) = refused_target(text).or_else(|| refused_address(&path, text)) {
             return Err(Error::Invalid {
                 field: path,
                 reason: reason.to_owned(),
@@ -1406,5 +1424,32 @@ fn verb(value: Option<&str>) -> Result<()> {
             value: other.to_owned(),
             reason: "a polled feed is read with GET or POST",
         }),
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::validate_input_strings;
+    use serde_json::json;
+
+    /// F-PLT2-008: a scheme-less `host:port` field is held to the host rule as a URL is.
+    #[test]
+    fn a_private_host_port_is_refused_and_a_public_one_passes() {
+        for refused in [
+            json!({ "kafka": { "addresses": ["127.0.0.1:4195"] } }),
+            json!({ "kafka": { "addresses": ["broker.example.org:9092,10.0.0.5:9092"] } }),
+            json!({ "socket": { "address": "10.0.0.1:9000" } }),
+            json!({ "kafka_franz": { "seed_brokers": ["localhost:9092"] } }),
+            json!({ "nsq": { "lookupd_http_addresses": ["192.168.1.2:4161"] } }),
+            json!({ "cassandra": { "addresses": ["[::1]:9042"] } }),
+        ] {
+            assert!(validate_input_strings(&refused).is_err(), "{refused}");
+        }
+        for allowed in [
+            json!({ "kafka": { "addresses": ["broker.example.org:9092"] } }),
+            json!({ "socket": { "address": "203.0.113.7:9000" } }),
+        ] {
+            assert!(validate_input_strings(&allowed).is_ok(), "{allowed}");
+        }
     }
 }

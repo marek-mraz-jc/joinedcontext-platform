@@ -365,6 +365,9 @@ pub struct TokenSource<'a> {
     pub age_key_file: Option<&'a Path>,
 }
 
+/// The prefix of every environment variable `apiTokenRef.envVar` may name.
+const CKAN_ENV_PREFIX: &str = "CKAN_";
+
 /// The API token behind `spec.apiTokenRef`, resolved the way the reconciler resolves a
 /// secret reference (CC-06, EP-67).
 ///
@@ -387,8 +390,19 @@ pub fn token(
         return SecretValue::from_env(variable)
             .ok_or_else(|| fail(format!("{variable} is not set or empty")));
     }
-    if let Some(value) = reference.env_var.as_deref().and_then(SecretValue::from_env) {
-        return Ok(value);
+    // The manifest names the variable and its own `baseUrl` receives the value, so a manifest
+    // naming `HOME` or another project's secret would send that out; only a `CKAN_` variable
+    // is a CKAN token (F-PLT3-009).
+    if let Some(variable) = reference.env_var.as_deref() {
+        if !variable.starts_with(CKAN_ENV_PREFIX) {
+            return Err(fail(format!(
+                "apiTokenRef.envVar names {variable}, and only a {CKAN_ENV_PREFIX}… variable \
+                 holds a CKAN token: rename it, or pass --api-token-env <VAR>"
+            )));
+        }
+        if let Some(value) = SecretValue::from_env(variable) {
+            return Ok(value);
+        }
     }
 
     let key_file = match source.age_key_file {

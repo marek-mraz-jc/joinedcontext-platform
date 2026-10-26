@@ -233,10 +233,8 @@ fn space_of(manifest: &RawManifest) -> Option<&str> {
 /// The organization the repository declares, whose domain names every prefix.
 fn organization_of(repository: &Repository) -> Option<String> {
     repository
-        .iter()
-        .map(|(_, loaded)| &loaded.manifest)
-        .find(|manifest| manifest.kind == "Organization")
-        .map(|manifest| manifest.metadata.name.clone())
+        .installation_organization()
+        .map(|(_, loaded)| loaded.manifest.metadata.name.clone())
 }
 
 /// The served major of a model's version (DM-22); `0` when the manifest names none.

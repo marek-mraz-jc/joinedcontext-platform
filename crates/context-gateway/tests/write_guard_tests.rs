@@ -310,3 +310,50 @@ fn coordinates_outside_every_granted_area_are_refused_when_the_grant_draws_sever
         Err(Refusal::LocationOutsideGrant)
     );
 }
+
+/// F-PLT2-009: under a scoped grant a whole entity without a scope is refused, since no scoped
+/// read of the grant would reach it; a fragment keeps the entity's scope and passes.
+#[test]
+fn a_whole_entity_without_a_scope_is_refused_under_a_scoped_grant() {
+    let mut unscoped = entity();
+    unscoped.as_object_mut().expect("an object").remove("scope");
+    assert_eq!(check(&unscoped, &grant()), Err(Refusal::ScopeMissing));
+    let unscoped_grant = Constraints {
+        granted_scopes: None,
+        ..grant()
+    };
+    assert_eq!(check(&unscoped, &unscoped_grant), Ok(()));
+    let fragment = json!({ "pm10": { "type": "Property", "value": 1 } });
+    assert_eq!(
+        context_gateway::pdp::write_guard::check_fragment(&fragment, &grant()),
+        Ok(())
+    );
+}
+
+/// F-PLT2-011: a hidden attribute is refused however the payload spells it, as a term, an
+/// expanded IRI or a compact IRI; a key that only ends in the same letters passes the rule.
+#[test]
+fn a_hidden_attribute_is_refused_in_every_spelling() {
+    use context_gateway::pdp::write_guard::names_attribute;
+    let hidden = Constraints {
+        hidden: names(&["pm25"]),
+        attrs: BTreeSet::new(),
+        ..grant()
+    };
+    for key in [
+        "pm25",
+        "https://example.org/pm25",
+        "ex:pm25",
+        "https://x.org/ns#pm25",
+    ] {
+        let mut payload = entity();
+        payload[key] = json!({ "type": "Property", "value": 1 });
+        assert_eq!(
+            check(&payload, &hidden),
+            Err(Refusal::AttributeOutsideGrant(key.to_owned())),
+            "{key}"
+        );
+    }
+    assert!(!names_attribute("notpm25", "pm25"));
+    assert!(!names_attribute("ex:xpm25", "pm25"));
+}

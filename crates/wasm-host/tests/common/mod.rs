@@ -1,7 +1,6 @@
 //! The test servers of jc-wasm-host's storage suites: a fresh Postgres database with two shards
 //! and their Apps, and RustFS with a key per shard. See tests/storage_tests.rs for the variables.
 
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool};
 use time::OffsetDateTime;
 use wasm_host::blob::S3Blob;
@@ -103,8 +102,7 @@ impl Db {
     }
 
     pub async fn pool(&self, shard: &str, size: u32) -> PgPool {
-        PgPoolOptions::new()
-            .max_connections(size)
+        wasm_host::sql::pool_options(size)
             .connect(&self.login(shard))
             .await
             .expect("the shard logs in")

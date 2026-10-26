@@ -525,7 +525,7 @@ fn instance_of(dir: &Path) -> jc_core::kinds::CkanInstanceSpec {
 fn the_resolved_token_never_appears_in_an_error() {
     let (dir, key_file) = sealed_repo(
         "token-no-echo",
-        "JCCTL_T2526_NO_ECHO",
+        "CKAN_JCCTL_T2526_NO_ECHO",
         &[("ckan-open-data", Node::Keys(&[("otherKey", SEALED_TOKEN)]))],
     );
     let error = token(
@@ -547,7 +547,7 @@ fn the_resolved_token_never_appears_in_an_error() {
 fn an_empty_secret_from_sops_is_refused_rather_than_published_as_a_blank_token() {
     let (dir, key_file) = sealed_repo(
         "token-empty",
-        "JCCTL_T2526_EMPTY",
+        "CKAN_JCCTL_T2526_EMPTY",
         &[("ckan-open-data", Node::Keys(&[("apiToken", "")]))],
     );
     let error = token(
@@ -567,7 +567,7 @@ fn an_empty_secret_from_sops_is_refused_rather_than_published_as_a_blank_token()
 fn a_token_decrypted_from_the_repositorys_sops_files_is_used() {
     let (dir, key_file) = sealed_repo(
         "token-sops",
-        "JCCTL_T2526_SOPS",
+        "CKAN_JCCTL_T2526_SOPS",
         &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
     );
     let value = token(
@@ -588,17 +588,17 @@ fn a_token_decrypted_from_the_repositorys_sops_files_is_used() {
 fn env_var_named_on_the_command_line_wins_over_the_references_own_env_var() {
     let (dir, key_file) = sealed_repo(
         "token-order",
-        "JCCTL_T2526_REFERENCE",
+        "CKAN_JCCTL_T2526_REFERENCE",
         &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
     );
-    std::env::set_var("JCCTL_T2526_REFERENCE", "from-the-reference");
-    std::env::set_var("JCCTL_T2526_FLAG", "from-the-flag");
+    std::env::set_var("CKAN_JCCTL_T2526_REFERENCE", "from-the-reference");
+    std::env::set_var("CKAN_JCCTL_T2526_FLAG", "from-the-flag");
     let instance = instance_of(&dir);
     let flagged = token(
         &instance,
         &dir,
         TokenSource {
-            env: Some("JCCTL_T2526_FLAG"),
+            env: Some("CKAN_JCCTL_T2526_FLAG"),
             age_key_file: Some(&key_file),
         },
     )
@@ -614,8 +614,8 @@ fn env_var_named_on_the_command_line_wins_over_the_references_own_env_var() {
     )
     .expect("the reference's variable");
     assert_eq!(referenced.expose(), "from-the-reference");
-    std::env::remove_var("JCCTL_T2526_REFERENCE");
-    std::env::remove_var("JCCTL_T2526_FLAG");
+    std::env::remove_var("CKAN_JCCTL_T2526_REFERENCE");
+    std::env::remove_var("CKAN_JCCTL_T2526_FLAG");
 }
 
 /// EP-67: a variable the operator named explicitly and left empty is an error naming it; it
@@ -624,21 +624,24 @@ fn env_var_named_on_the_command_line_wins_over_the_references_own_env_var() {
 fn an_explicitly_named_variable_that_is_empty_stops_with_its_name() {
     let (dir, key_file) = sealed_repo(
         "token-explicit-empty",
-        "JCCTL_T2526_EXPLICIT_REF",
+        "CKAN_JCCTL_T2526_EXPLICIT_REF",
         &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
     );
-    std::env::set_var("JCCTL_T2526_BLANK", "   ");
+    std::env::set_var("CKAN_JCCTL_T2526_BLANK", "   ");
     let error = token(
         &instance_of(&dir),
         &dir,
         TokenSource {
-            env: Some("JCCTL_T2526_BLANK"),
+            env: Some("CKAN_JCCTL_T2526_BLANK"),
             age_key_file: Some(&key_file),
         },
     )
     .expect_err("blank");
-    assert!(error.to_string().contains("JCCTL_T2526_BLANK"), "{error}");
-    std::env::remove_var("JCCTL_T2526_BLANK");
+    assert!(
+        error.to_string().contains("CKAN_JCCTL_T2526_BLANK"),
+        "{error}"
+    );
+    std::env::remove_var("CKAN_JCCTL_T2526_BLANK");
 }
 
 /// EP-67: an unset reference variable is not a token; the walk goes on to the repository.
@@ -646,7 +649,7 @@ fn an_explicitly_named_variable_that_is_empty_stops_with_its_name() {
 fn an_unset_reference_variable_falls_through_to_the_repository() {
     let (dir, key_file) = sealed_repo(
         "token-fallthrough",
-        "JCCTL_T2526_NEVER_SET",
+        "CKAN_JCCTL_T2526_NEVER_SET",
         &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
     );
     let value = token(
@@ -668,7 +671,7 @@ fn no_age_key_file_and_no_env_source_is_refused_naming_how_to_supply_one() {
     common::write(
         &dir,
         "projects/ovzdusie/ckan/open-data.yaml",
-        &INSTANCE.replace("CKAN_OPEN_DATA_TOKEN", "JCCTL_T2526_NO_SOURCE"),
+        &INSTANCE.replace("CKAN_OPEN_DATA_TOKEN", "CKAN_JCCTL_T2526_NO_SOURCE"),
     );
     std::env::remove_var(AGE_KEY_FILE_ENV);
     let error = token(&instance_of(&dir), &dir, TokenSource::default()).expect_err("no source");
@@ -892,4 +895,29 @@ fn the_walk_reads_the_public_temporal_grants_and_the_retention_of_the_space() {
     assert_eq!(history.window(AIR, "no2").as_deref(), Some("P1D"));
     assert_eq!(history.window(AIR, "pm10"), None);
     assert_eq!(history.window("WeatherObserved", "no2"), None);
+}
+
+/// F-PLT3-009: a manifest whose `envVar` names a variable that is not a CKAN token is refused
+/// before anything is read or sent, and the refusal names the way out.
+#[test]
+fn an_env_var_outside_the_ckan_prefix_is_refused() {
+    let (dir, key_file) = sealed_repo(
+        "token-prefix",
+        "HOME",
+        &[("ckan-open-data", Node::Keys(&[("apiToken", SEALED_TOKEN)]))],
+    );
+    let error = token(
+        &instance_of(&dir),
+        &dir,
+        TokenSource {
+            env: None,
+            age_key_file: Some(&key_file),
+        },
+    )
+    .expect_err("HOME is no CKAN token");
+    let text = error.to_string();
+    assert!(text.contains("--api-token-env"), "{text}");
+    if let Some(home) = std::env::var_os("HOME") {
+        assert!(!text.contains(&*home.to_string_lossy()), "{text}");
+    }
 }
