@@ -72,6 +72,24 @@ const PROFILE_ROWS: usize = 5;
 /// longer answer is no profile and is left out.
 const PROFILE_CHARS: usize = 8_000;
 
+/// The statistics of one attribute of a profile the answer call reads (T-5783); the histogram,
+/// spread, outliers, centroid and samples stay out: they were half of a 5.7k-character profile.
+const PROFILE_STATS: &[&str] = &[
+    "kind", "n", "nulls", "min", "max", "mean", "median", "p10", "p90", "unit", "distinct",
+    "other", "top5", "top3",
+];
+
+/// The passages a data answer reads beside its tables, each cut to [`DATA_PASSAGE_CHARS`]
+/// (T-5783): the rows answer, the passages add a dataset's description.
+const DATA_PASSAGES: usize = 3;
+const DATA_PASSAGE_CHARS: usize = 600;
+
+/// The most tokens (by [`tokens_of`]) of a data answer's messages for one broad 50-row read with
+/// its profile and passages, the tool definitions apart (T-5783: prod's data call read 11.8k
+/// tokens in 23.1 s).
+#[cfg(test)]
+const DATA_PROMPT_TOKENS: u64 = 4_000;
+
 /// Columns of a table: the name first, then the entity's values in the order they come.
 const MAX_COLUMNS: usize = 8;
 
@@ -2056,10 +2074,11 @@ fn routed_rules(
     no_tables: bool,
     missing: &[String],
     live: &[Shown],
+    tables: &[Table],
 ) -> String {
     let mut more = answer_rules(routing.data, steps, no_tables, missing);
     if routing.data && !live.is_empty() {
-        more.push_str(&super::data::endpoints(live));
+        more.push_str(&super::data::endpoints(live, tables));
     }
     if routing.catalogue {
         more.push_str(CATALOGUE_RULE);
@@ -2156,12 +2175,15 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
     // some rows, and the first rows of all of them answered "which schools are in Zvolen" with
     // 20 of 433 other organizations (T-4740). An attribute the type lacks answers no rows, not
     // an error, so nothing is lost there.
-    let (text, profile) = tokio::join!(
+    // The dataset page is looked up beside the rows (T-5783); a failed lookup is looked up again
+    // after them, as before.
+    let (text, profile, own) = tokio::join!(
         call(wanted.q.as_deref()),
-        profile_of(ask, connector, wanted)
+        profile_of(ask, connector, wanted),
+        rows_dataset(ask, connector, kind)
     );
     let asked = asked_of(&json!({ "q": wanted.q }));
-    let mut table = table(ask, connector, kind, &text?, &asked)
+    let mut table = table_with(ask, connector, kind, &text?, &asked, own.ok())
         .await
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())?;
     table.profile = profile;
@@ -2189,6 +2211,68 @@ async fn profile_of(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Opti
 fn profile_text(answer: &str) -> Option<String> {
     let text = answer.trim();
     (!text.is_empty() && text.chars().count() <= PROFILE_CHARS).then(|| text.to_owned())
+}
+
+/// A `summarize` profile as the answer call reads it (T-5783): the type, its count, what the
+/// statistics were computed over, and [`PROFILE_STATS`] of the table's `columns` alone, numbers
+/// rounded to two decimals. A profile that is no JSON object is read as its text.
+fn profile_for_model(profile: &str, columns: &[String]) -> Value {
+    let Ok(Value::Object(whole)) = serde_json::from_str::<Value>(profile) else {
+        return json!(profile);
+    };
+    let mut slim = serde_json::Map::new();
+    for key in ["type", "count"] {
+        if let Some(value) = whole.get(key) {
+            slim.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(Value::Object(basis)) = whole.get("basis") {
+        let kept = ["loaded", "total"]
+            .iter()
+            .filter_map(|k| Some(((*k).to_owned(), basis.get(*k)?.clone())));
+        slim.insert("basis".into(), Value::Object(kept.collect()));
+    }
+    let attributes = whole.get("attributes").and_then(Value::as_object);
+    let mut kept = serde_json::Map::new();
+    for (name, stats) in attributes.into_iter().flatten() {
+        let Some(stats) = stats.as_object().filter(|_| columns.contains(name)) else {
+            continue;
+        };
+        let mut stats: serde_json::Map<String, Value> = PROFILE_STATS
+            .iter()
+            .filter_map(|k| Some(((*k).to_owned(), stats.get(*k)?.clone())))
+            .collect();
+        for top in ["top5", "top3"] {
+            if let Some(Value::Array(values)) = stats.get_mut(top) {
+                values
+                    .iter_mut()
+                    .filter_map(Value::as_object_mut)
+                    .for_each(|value| value.retain(|k, _| k == "value" || k == "count"));
+            }
+        }
+        let mut stats = Value::Object(stats);
+        rounded(&mut stats);
+        kept.insert(name.clone(), stats);
+    }
+    slim.insert("attributes".into(), Value::Object(kept));
+    Value::Object(slim)
+}
+
+/// Every fractional number in `value` rounded to two decimals.
+fn rounded(value: &mut Value) {
+    match value {
+        Value::Number(n) if n.is_f64() => {
+            if let Some(r) = n
+                .as_f64()
+                .and_then(|f| serde_json::Number::from_f64((f * 100.0).round() / 100.0))
+            {
+                *n = r;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(rounded),
+        Value::Object(members) => members.values_mut().for_each(rounded),
+        _ => {}
+    }
 }
 
 /// The entity type a `query_entities` call with `arguments` reads; `None` for any other tool.
@@ -2230,27 +2314,52 @@ pub(super) async fn dataset_of(
     kind: &str,
     text: &str,
 ) -> Option<String> {
+    dataset_or(ask, connector, kind, text, None).await
+}
+
+/// [`dataset_of`] with the connector's own dataset page already looked up, beside the read that
+/// brought `text` (T-5783: 5.1 s on prod after the rows); `None` looks it up now.
+async fn dataset_or(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+    text: &str,
+    own: Option<Option<String>>,
+) -> Option<String> {
     let found = async {
         if let Some(part) = part_of(text) {
             if crate::held_page_projects(ask.pool, &part, ask.sources, ask.public_only).await? {
                 return Ok(Some(part));
             }
         }
-        crate::rows_dataset_projects(
-            ask.pool,
-            &connector.surface.slug,
-            &connector.siblings,
-            kind,
-            ask.sources,
-            ask.public_only,
-        )
-        .await
+        match own {
+            Some(own) => Ok(own),
+            None => rows_dataset(ask, connector, kind).await,
+        }
     }
     .await;
     found.unwrap_or_else(|why: crate::Error| {
         tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
         None
     })
+}
+
+/// The dataset page of `kind` read from `connector` that names no `isPartOf` of its rows:
+/// [`crate::rows_dataset_projects`].
+async fn rows_dataset(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+) -> Result<Option<String>, crate::Error> {
+    crate::rows_dataset_projects(
+        ask.pool,
+        &connector.surface.slug,
+        &connector.siblings,
+        kind,
+        ask.sources,
+        ask.public_only,
+    )
+    .await
 }
 
 /// The rows of `kind` as the Endpoint `slug` serves them to anyone: a table's download, and the
@@ -2313,6 +2422,18 @@ pub(super) async fn table(
     text: &str,
     asked: &[String],
 ) -> Option<Table> {
+    table_with(ask, connector, kind, text, asked, None).await
+}
+
+/// [`table`] with the connector's own dataset page when it was looked up beside the read.
+async fn table_with(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+    text: &str,
+    asked: &[String],
+    own: Option<Option<String>>,
+) -> Option<Table> {
     let total = total_of(text);
     // Both lookups are steps of their own (T-4731): they sat in the untracked time, so whether
     // they are worth running beside the rows is read from these steps first.
@@ -2336,7 +2457,7 @@ pub(super) async fn table(
     }
     let slug = connector.surface.slug.as_str();
     let began = Instant::now();
-    let dataset = dataset_of(ask, connector, kind, text).await;
+    let dataset = dataset_or(ask, connector, kind, text, own).await;
     ask.trace.note(
         "tool",
         "dataset_page",
@@ -2488,6 +2609,12 @@ fn written_in(languages: &[String]) -> String {
 /// `q` may test. The router picks from it, and the data loop names its `endpoint` from it
 /// (T-4748): the one short summary of the data in place of every tool of every Endpoint.
 pub fn catalogue(live: &[Shown]) -> String {
+    catalogue_with(live, |_| true)
+}
+
+/// [`catalogue`] with the attributes only of the Endpoints `full` names; the others' lines end at
+/// their types (T-5783).
+pub fn catalogue_with(live: &[Shown], full: impl Fn(&str) -> bool) -> String {
     let mut out = String::new();
     for shown in live {
         out.push_str(&format!("- {}", shown.endpoint));
@@ -2495,10 +2622,12 @@ pub fn catalogue(live: &[Shown]) -> String {
             out.push_str(&format!(" ({title})"));
         }
         out.push_str(&format!(": {}", shown.types.join(", ")));
-        if shown.attributes.is_empty() {
-            out.push_str("; no attributes listed, so no q narrows it");
-        } else {
-            out.push_str(&format!("; {}", shown.attributes.join(", ")));
+        if full(&shown.endpoint) {
+            if shown.attributes.is_empty() {
+                out.push_str("; no attributes listed, so no q narrows it");
+            } else {
+                out.push_str(&format!("; {}", shown.attributes.join(", ")));
+            }
         }
         out.push('\n');
     }
@@ -3277,7 +3406,14 @@ async fn answer_routed(
         )
     };
     let (citations, passages, data) = evidence(&best, &tables);
-    let more = routed_rules(&routing, ask.data_steps, tables.is_empty(), &missing, &live);
+    let more = routed_rules(
+        &routing,
+        ask.data_steps,
+        tables.is_empty(),
+        &missing,
+        &live,
+        &tables,
+    );
     let messages = messages_with(
         ask.system_prompt,
         &more,
@@ -3837,6 +3973,12 @@ async fn search_rounds(
 fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<Value>) {
     let mut citations: Vec<Citation> = Vec::new();
     let mut passages = Vec::new();
+    let rows = tables.iter().any(|t| !t.rows.is_empty());
+    let best = if rows {
+        &best[..best.len().min(DATA_PASSAGES)]
+    } else {
+        best
+    };
     for (at, hit) in best.iter().enumerate() {
         let n = at + 1;
         citations.push(Citation {
@@ -3848,7 +3990,12 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
             cards: super::cards::of(&hit.text),
             dates: hit.dates.clone(),
         });
-        let mut passage = json!({"n": n, "url": hit.url, "text": hit.text});
+        let text = if rows {
+            super::mcp::cut(&hit.text, DATA_PASSAGE_CHARS)
+        } else {
+            hit.text.clone()
+        };
+        let mut passage = json!({"n": n, "url": hit.url, "text": text});
         if let (Value::Object(passage), Ok(Value::Object(dates))) =
             (&mut passage, serde_json::to_value(&hit.dates))
         {
@@ -3889,7 +4036,7 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
             "endpointUrl": table.download,
         });
         if let Some(profile) = &table.profile {
-            read["profile"] = json!(profile);
+            read["profile"] = profile_for_model(profile, &table.columns);
         }
         if !placeholders.is_empty() {
             read["placeholders"] = json!(&placeholders[..placeholders.len().min(MODEL_ROWS)]);
@@ -4509,6 +4656,111 @@ mod tests {
         assert_eq!(profile_text(" \n "), None);
         assert_eq!(profile_text(&"x".repeat(PROFILE_CHARS + 1)), None);
         assert!(profile_text(&"x".repeat(PROFILE_CHARS)).is_some());
+    }
+
+    /// T-5783: the data answer of a broad 50-row read with its profile, five passages and a
+    /// deployment of 30 Endpoints stays under [`DATA_PROMPT_TOKENS`]; prod's read 11.8k tokens.
+    /// The profile keeps the table's columns and their statistics, the other Endpoints their types.
+    #[test]
+    fn a_data_answer_s_prompt_stays_within_its_token_budget() {
+        let profile = include_str!("../../tests/fixtures/bbsk_bridges_profile.json");
+        let columns: Vec<String> = [
+            "name",
+            "yearBuilt",
+            "districtName",
+            "roadClass",
+            "spanCount",
+            "bridgedLength",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let row = |i: usize| {
+            vec![
+                json!(format!(
+                    "2724-{i:03}_Most cez potok Rimava v obci Kokava nad Rimavicou"
+                )),
+                json!(1900 + i),
+                json!("Rimavská Sobota"),
+                json!("thirdClass"),
+                json!(1),
+                json!(12.5),
+            ]
+        };
+        let table = Table {
+            endpoint: "bbsk/bbsk-registre".into(),
+            entity_type: "Bridge".into(),
+            units: vec![None; columns.len()],
+            columns,
+            rows: (0..READ_ROWS).map(row).collect(),
+            labels: Vec::new(),
+            enums: Vec::new(),
+            summary: Vec::new(),
+            total: Some(1651),
+            dataset: Some("https://data.bbsk.test/dataset/mosty".into()),
+            download: None,
+            geojson: None,
+            map: None,
+            geometries: Vec::new(),
+            profile: Some(profile.into()),
+        };
+        let page = "Register mostov Banskobystrického samosprávneho kraja: názov, rok výstavby, okres, trieda cesty, počet polí, premostená dĺžka a správca každého mosta. ";
+        let best: Vec<Hit> = (1..=ANSWER_PASSAGES as i64)
+            .map(|chunk| Hit {
+                text: page.repeat(8),
+                ..hit(chunk, 0.5)
+            })
+            .collect();
+        let attributes: Vec<String> = (0..MAX_ATTRIBUTES)
+            .map(|i| format!("attribute{i}"))
+            .collect();
+        let live: Vec<Shown> = (0..30)
+            .map(|i| Shown {
+                endpoint: if i == 0 {
+                    "bbsk/bbsk-registre".into()
+                } else {
+                    format!("bbsk/endpoint-{i}")
+                },
+                title: Some(format!("Registre kraja {i}")),
+                types: vec!["Bridge".into(), "School".into(), "PointOfInterest".into()],
+                attributes: attributes.clone(),
+            })
+            .collect();
+        let routing = Routing {
+            direct: false,
+            rag: true,
+            data: true,
+            queries: vec!["mosty pred rokom 1900".into()],
+            reads: Vec::new(),
+            followups: Vec::new(),
+            catalogue: false,
+        };
+        let tables = [table];
+        let (_, passages, data) = evidence(&best, &tables);
+        let more = routed_rules(&routing, 6, false, &[], &live, &tables);
+        let question = "Koľko mostov v Banskej Bystrici bolo postavených pred rokom 1900?";
+        let messages = messages_with(None, &more, &[], question, NOW, &passages, &data);
+        let used = tokens_of(&messages);
+        assert!(used <= DATA_PROMPT_TOKENS, "{used} tokens: {messages:#?}");
+        assert_eq!(passages.len(), DATA_PASSAGES);
+        let profile = &data[0]["profile"];
+        assert_eq!(
+            (profile["count"].clone(), profile["basis"]["total"].clone()),
+            (json!(1651), json!(1651))
+        );
+        assert_eq!(profile["attributes"]["yearBuilt"]["min"], 1000);
+        assert_eq!(profile["attributes"]["bridgedLength"]["mean"], 15.84);
+        assert_eq!(
+            profile["attributes"]["roadClass"]["top5"][0],
+            json!({"count": 498, "value": "thirdClass"})
+        );
+        assert_eq!(profile["attributes"].get("managerName"), None);
+        assert_eq!(profile["attributes"]["yearBuilt"].get("hist"), None);
+        assert_eq!(profile.get("samples"), None);
+        assert!(more.contains(
+            "- bbsk/bbsk-registre (Registre kraja 0): Bridge, School, PointOfInterest; attribute0"
+        ));
+        assert!(more
+            .contains("- bbsk/endpoint-1 (Registre kraja 1): Bridge, School, PointOfInterest\n"));
     }
 
     const NOW: &str = "Now: Friday 2026-10-16 12:05 UTC (2026-10-16T12:05Z).";
