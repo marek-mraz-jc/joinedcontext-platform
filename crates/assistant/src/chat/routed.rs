@@ -2175,15 +2175,16 @@ async fn read(ask: &Ask<'_>, connector: &Connected, wanted: &Read) -> Result<Tab
     // some rows, and the first rows of all of them answered "which schools are in Zvolen" with
     // 20 of 433 other organizations (T-4740). An attribute the type lacks answers no rows, not
     // an error, so nothing is lost there.
-    // The dataset page is looked up beside the rows (T-5783); a failed lookup is looked up again
-    // after them, as before.
-    let (text, profile, own) = tokio::join!(
+    // The dataset page (T-5783) and the model (T-5789: up to 2 s after the rows on prod) are
+    // looked up beside the rows; a failed page lookup is looked up again after them, as before.
+    let (text, profile, own, model) = tokio::join!(
         call(wanted.q.as_deref()),
         profile_of(ask, connector, wanted),
-        rows_dataset(ask, connector, kind)
+        page_step(ask, connector, kind),
+        model_step(ask, connector, kind)
     );
     let asked = asked_of(&json!({ "q": wanted.q }));
-    let mut table = table_with(ask, connector, kind, &text?, &asked, own.ok())
+    let mut table = table_with(ask, connector, kind, &text?, &asked, Some(model), own)
         .await
         .ok_or_else(|| "the Endpoint's answer is no list of entities".to_owned())?;
     table.profile = profile;
@@ -2337,12 +2338,66 @@ async fn dataset_or(
             Some(own) => Ok(own),
             None => rows_dataset(ask, connector, kind).await,
         }
+    };
+    match bounded(PAGE_DEADLINE, found).await {
+        Some(Ok(page)) => page,
+        Some(Err(why)) => {
+            tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
+            None
+        }
+        None => {
+            tracing::info!(deployment = %ask.deployment, endpoint = %connector.endpoint, kind, "the Endpoint's page was not found within its deadline");
+            None
+        }
     }
-    .await;
-    found.unwrap_or_else(|why: crate::Error| {
-        tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
-        None
-    })
+}
+
+/// How long a table waits for its dataset page; past it the table links no page (T-5789). Each
+/// lookup is a regular-expression scan of the index's passages, which no index serves under
+/// row-level security: 5-15 s on prod over the 2026-10-25 crawl, while the rows took 0.4 s.
+// ponytail: the page is lost to a slow scan; keep each Endpoint type's page in a table filled at
+// index time when a link matters more than these seconds.
+const PAGE_DEADLINE: Duration = Duration::from_millis(1_500);
+
+/// `work`'s output, or `None` once `deadline` passed first.
+async fn bounded<T>(deadline: Duration, work: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(deadline, work).await.ok()
+}
+
+/// [`rows_dataset`] beside a read, a step of the turn: `Some` the page or none, also when
+/// [`PAGE_DEADLINE`] passed; `None` when the lookup failed, and the table looks it up again.
+async fn page_step(ask: &Ask<'_>, connector: &Connected, kind: &str) -> Option<Option<String>> {
+    let began = Instant::now();
+    let found = match bounded(PAGE_DEADLINE, rows_dataset(ask, connector, kind)).await {
+        Some(Ok(page)) => Some(page),
+        Some(Err(why)) => {
+            tracing::warn!(deployment = %ask.deployment, %why, "the Endpoint's page could not be looked up");
+            None
+        }
+        None => Some(None),
+    };
+    let output = match &found {
+        Some(Some(_)) => "found",
+        Some(None) if began.elapsed() >= PAGE_DEADLINE => "deadline",
+        _ => "none",
+    };
+    ask.trace
+        .note("tool", "dataset_page", began, Some(kind), Some(output));
+    found
+}
+
+/// [`model_of`] as a step of the turn (T-4731).
+async fn model_step(
+    ask: &Ask<'_>,
+    connector: &Connected,
+    kind: &str,
+) -> Option<std::sync::Arc<str>> {
+    let began = Instant::now();
+    let model = model_of(ask, connector).await;
+    let found = if model.is_some() { "found" } else { "none" };
+    ask.trace
+        .note("tool", "data_model", began, Some(kind), Some(found));
+    model
 }
 
 /// The dataset page of `kind` read from `connector` that names no `isPartOf` of its rows:
@@ -2423,31 +2478,27 @@ pub(super) async fn table(
     text: &str,
     asked: &[String],
 ) -> Option<Table> {
-    table_with(ask, connector, kind, text, asked, None).await
+    table_with(ask, connector, kind, text, asked, None, None).await
 }
 
-/// [`table`] with the connector's own dataset page when it was looked up beside the read.
+/// [`table`] with the connector's model and own dataset page when they were looked up beside the
+/// read, each then a step of its own already.
 async fn table_with(
     ask: &Ask<'_>,
     connector: &Connected,
     kind: &str,
     text: &str,
     asked: &[String],
+    model: Option<Option<std::sync::Arc<str>>>,
     own: Option<Option<String>>,
 ) -> Option<Table> {
     let total = total_of(text);
     // Both lookups are steps of their own (T-4731): they sat in the untracked time, so whether
     // they are worth running beside the rows is read from these steps first.
-    let began = Instant::now();
-    let model = model_of(ask, connector).await;
-    let found = |some: bool| Some(if some { "found" } else { "none" });
-    ask.trace.note(
-        "tool",
-        "data_model",
-        began,
-        Some(kind),
-        found(model.is_some()),
-    );
+    let model = match model {
+        Some(model) => model,
+        None => model_step(ask, connector, kind).await,
+    };
     let (columns, rows, units, fields, words) = table_of(text, READ_ROWS, asked, model.as_deref())?;
     let mut enums = enums_of(model.as_deref(), kind, &columns);
     if words.is_some() {
@@ -2458,14 +2509,13 @@ async fn table_with(
     }
     let slug = connector.surface.slug.as_str();
     let began = Instant::now();
+    let beside = own.is_some();
     let dataset = dataset_or(ask, connector, kind, text, own).await;
-    ask.trace.note(
-        "tool",
-        "dataset_page",
-        began,
-        Some(kind),
-        found(dataset.is_some()),
-    );
+    if !beside {
+        let found = if dataset.is_some() { "found" } else { "none" };
+        ask.trace
+            .note("tool", "dataset_page", began, Some(kind), Some(found));
+    }
     let download = type_listing(ask, slug, kind);
     let mut table = Table {
         endpoint: connector.endpoint.clone(),
