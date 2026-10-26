@@ -23,6 +23,10 @@ use crate::previews::WorkloadToken;
 /// How often the Portal is asked, the pace of the preview list (CC-78).
 pub const INTERVAL: Duration = Duration::from_secs(10);
 
+/// The most of the list read: about 100 000 marks, so a Portal answering without end cannot
+/// fill the gateway's memory (T-4984).
+pub const MAX_LIST_BYTES: usize = 8 * 1024 * 1024;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Item {
@@ -87,10 +91,12 @@ impl Revocations {
             .get(reqwest::header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let list: List = response.json().await.map_err(|error| {
-            self.etag = None;
-            format!("the revocations are not readable: {error}")
-        })?;
+        let list: List = crate::previews::json_within(response, MAX_LIST_BYTES)
+            .await
+            .map_err(|error| {
+                self.etag = None;
+                format!("the revocations are not readable: {error}")
+            })?;
         let marks: HashMap<String, i64> = list
             .items
             .into_iter()

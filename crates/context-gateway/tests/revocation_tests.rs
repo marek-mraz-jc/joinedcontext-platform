@@ -11,7 +11,7 @@ use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{Endpoint, Model};
-use context_gateway::revocations::Revocations;
+use context_gateway::revocations::{Revocations, MAX_LIST_BYTES};
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -187,5 +187,39 @@ async fn a_revoked_subject_is_refused_on_rest_and_mcp_within_one_poll() {
     // A Portal that stops answering leaves the list as it was.
     drop(items.lock().map(|mut i| *i = Value::Null));
     assert!(poller.poll().await.is_err());
+    assert_eq!(doors(&app, &jana).await, [StatusCode::UNAUTHORIZED; 3]);
+}
+
+#[tokio::test]
+async fn a_list_past_the_cap_is_refused_and_the_last_one_stands() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let verifier = Arc::new(realm.verifier());
+    let gateway = Gateway::new(
+        Broker::new(&broker.url),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(vec![endpoint()])
+    .authenticate(
+        Arc::clone(&verifier),
+        ServiceAccounts::new(),
+        Some("https://city.example".to_owned()),
+    );
+    let app = router(Arc::new(gateway));
+    let jana = steward(&realm, "0f5a");
+
+    let items = Arc::new(Mutex::new(
+        json!([{ "subject": "0f5a", "revokedAt": common::in_seconds(0) }]),
+    ));
+    let mut poller =
+        Revocations::new(portal(Arc::clone(&items)).await, None, verifier).expect("a poller");
+    assert_eq!(poller.poll().await, Ok(Some(1)));
+
+    // One subject name longer than the cap: refused before it is parsed.
+    *items.lock().expect("the list") =
+        json!([{ "subject": "x".repeat(MAX_LIST_BYTES), "revokedAt": 0 }]);
+    let refused = poller.poll().await.expect_err("past the cap");
+    assert!(refused.contains("longer than"), "{refused}");
     assert_eq!(doors(&app, &jana).await, [StatusCode::UNAUTHORIZED; 3]);
 }

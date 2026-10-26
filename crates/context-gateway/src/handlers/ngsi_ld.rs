@@ -374,6 +374,20 @@ pub(crate) fn create_key(subject: &Subject, headers: &HeaderMap) -> String {
 /// The longest view id the broker accepts (`[a-z0-9-]{1,63}`, ADR-0023).
 pub(crate) const MAX_VIEW_ID: usize = 63;
 
+/// The answer for an Endpoint the broker holds no view of: its slug is longer than a view id can
+/// be, so the Portal's writer refused the view and the Endpoint's status says so. Nobody decides
+/// for it, so nothing is answered (fail closed).
+pub(crate) fn no_view(endpoint: &Endpoint) -> Response<Body> {
+    tracing::error!(slug = %endpoint.slug, "no broker view serves this endpoint's access surface");
+    ProblemDetails::new(
+        503,
+        "no-view",
+        "The access surface of this endpoint is not served",
+    )
+    .with_detail("no context broker view serves this endpoint; its status in the Portal says why")
+    .into_response()
+}
+
 /// Whether the broker holds a view `view` of an Endpoint (plan 5.1, T-3643): every Endpoint has
 /// one, unless its slug is longer than a view id can be (the writer refuses it).
 pub(crate) fn has_view(view: &str) -> bool {
@@ -516,7 +530,7 @@ async fn answered_here(
     request: &mut Request,
 ) -> Result<(), Box<Response<Body>>> {
     if !has_view(view) {
-        return Err(Box::new(crate::handlers::view_access::no_view(endpoint)));
+        return Err(Box::new(no_view(endpoint)));
     }
     if operation == Operation::QueryEntity {
         if let Some(refusal) = query_shape_refusal(params) {
