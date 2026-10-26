@@ -145,7 +145,7 @@ fn the_organisation_domain_of_every_entity_urn_is_rewritten() {
     let dest = destination("import-urn-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
@@ -197,7 +197,7 @@ spec:
     let dest = destination("import-pattern-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
@@ -229,7 +229,7 @@ fn a_string_that_is_not_an_entity_urn_is_left_alone() {
     let dest = destination("import-urn-untouched-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
