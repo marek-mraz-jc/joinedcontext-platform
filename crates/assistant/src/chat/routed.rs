@@ -4713,6 +4713,7 @@ mod tests {
             map: None,
             geometries: Vec::new(),
             profile: Some(profile.into()),
+            filter: None,
         };
         let page = "Register mostov Banskobystrického samosprávneho kraja: názov, rok výstavby, okres, trieda cesty, počet polí, premostená dĺžka a správca každého mosta. ";
         let best: Vec<Hit> = (1..=ANSWER_PASSAGES as i64)
