@@ -290,25 +290,7 @@ impl Minute {
             .iter()
             .map(|source| source.project.as_str())
             .collect();
-        // The terms of the chunks stored before chunk_terms existed (T-5799), a batch at a time
-        // within TERMS_BUDGET; a project with none left costs one empty index read.
-        let until = std::time::Instant::now() + TERMS_BUDGET;
-        for project in &projects {
-            let mut filled = 0;
-            while std::time::Instant::now() < until {
-                match fill_terms(pool, project, TERMS_BATCH).await {
-                    Ok(0) => break,
-                    Ok(batch) => filled += batch,
-                    Err(err) => {
-                        tracing::warn!(project, %err, "passage terms not filled this minute");
-                        break;
-                    }
-                }
-            }
-            if filled > 0 {
-                tracing::info!(project, filled, "passage terms filled");
-            }
-        }
+        fill_all_terms(pool, &projects).await;
         let until = std::time::Instant::now() + EMBED_BUDGET;
         for project in projects {
             match embed_until(pool, &self.embedder, project, until).await {
@@ -316,6 +298,28 @@ impl Minute {
                 Ok(embedded) => tracing::info!(project, embedded, "passages embedded"),
                 Err(err) => tracing::warn!(project, %err, "passages not embedded this minute"),
             }
+        }
+    }
+}
+
+/// The terms of the chunks stored before chunk_terms existed (T-5799), a batch at a time within
+/// TERMS_BUDGET; a project with none left costs one empty index read.
+async fn fill_all_terms(pool: &PgPool, projects: &std::collections::BTreeSet<&str>) {
+    let until = std::time::Instant::now() + TERMS_BUDGET;
+    for project in projects {
+        let mut filled = 0;
+        while std::time::Instant::now() < until {
+            match fill_terms(pool, project, TERMS_BATCH).await {
+                Ok(0) => break,
+                Ok(batch) => filled += batch,
+                Err(err) => {
+                    tracing::warn!(project, %err, "passage terms not filled this minute");
+                    break;
+                }
+            }
+        }
+        if filled > 0 {
+            tracing::info!(project, filled, "passage terms filled");
         }
     }
 }
