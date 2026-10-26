@@ -21,7 +21,7 @@ The App sees the path below `/apps/{name}`:
 | `POST /api/notes` `{"body"}` | signed in | a new note of the caller's |
 | `PUT /api/notes/{id}` `{"body"}` | owner, steward | the note's text changed |
 | `DELETE /api/notes/{id}` | owner, steward | the note and its file gone |
-| `POST /api/notes/{id}/file` `{"name", "contentType"}` | owner, steward | a URL the browser uploads the file to, valid two minutes |
+| `POST /api/notes/{id}/file` `{"name", "contentType", "size"}` | owner, steward | a URL the browser uploads the file of exactly `size` bytes to, valid two minutes |
 | `GET /api/notes/{id}/file` | owner, steward | a URL the browser downloads it from |
 | `GET /api/notice` | anyone | the shared notice |
 | `PUT /api/notice` `{"body"}` | steward | the notice changed |

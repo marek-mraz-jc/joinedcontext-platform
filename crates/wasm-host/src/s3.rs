@@ -179,12 +179,14 @@ impl Bucket {
     }
 
     /// A URL that lets its holder do `method` on `key` alone until it expires (at most 7 days by
-    /// S3's rule; the host gives far less).
+    /// S3's rule; the host gives far less). With `length`, `content-length` is a signed header:
+    /// the store refuses a body of any other length.
     pub fn presign(
         &self,
         method: &str,
         key: &str,
         expires_seconds: u32,
+        length: Option<u64>,
         at: OffsetDateTime,
     ) -> String {
         let (amz_date, date) = stamps(at);
@@ -198,7 +200,15 @@ impl Bucket {
             ),
             ("X-Amz-Date".to_owned(), amz_date.clone()),
             ("X-Amz-Expires".to_owned(), expires_seconds.to_string()),
-            ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
+            (
+                "X-Amz-SignedHeaders".to_owned(),
+                if length.is_some() {
+                    "content-length;host"
+                } else {
+                    "host"
+                }
+                .to_owned(),
+            ),
         ];
         query.sort();
         let canonical_query = query
@@ -208,10 +218,15 @@ impl Bucket {
             .join("&");
         // Signed for the address the browser uses, which is the one it sends as `Host`.
         let endpoint = self.public_endpoint.as_deref().unwrap_or(&self.endpoint);
-        let canonical = format!(
-            "{method}\n{path}\n{canonical_query}\nhost:{}\n\nhost\nUNSIGNED-PAYLOAD",
-            host_of(endpoint)
-        );
+        let host = host_of(endpoint);
+        let canonical = match length {
+            Some(length) => format!(
+                "{method}\n{path}\n{canonical_query}\ncontent-length:{length}\nhost:{host}\n\ncontent-length;host\nUNSIGNED-PAYLOAD"
+            ),
+            None => format!(
+                "{method}\n{path}\n{canonical_query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD"
+            ),
+        };
         let (signature, _) = sign(&self.secret, &self.region, &amz_date, &date, &canonical);
         format!(
             "{}{path}?{canonical_query}&X-Amz-Signature={signature}",
@@ -502,7 +517,7 @@ mod tests {
     #[test]
     fn a_presigned_url_is_signed_as_aws_documents_it() {
         // The example presigns on the bucket's own host: no bucket segment in the path.
-        let url = example().presign("GET", "test.txt", 86_400, may_24_2013());
+        let url = example().presign("GET", "test.txt", 86_400, None, may_24_2013());
         assert_eq!(
             url,
             "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256\
@@ -516,8 +531,24 @@ mod tests {
             ..example()
         };
         assert!(path_style
-            .presign("PUT", "s1/a1/x.png", 300, may_24_2013())
+            .presign("PUT", "s1/a1/x.png", 300, None, may_24_2013())
             .starts_with("http://rustfs:9000/apps/s1/a1/x.png?"));
+    }
+
+    #[test]
+    fn a_sized_presigned_url_signs_its_content_length() {
+        let at = may_24_2013();
+        let sized = example().presign("PUT", "k", 60, Some(4), at);
+        let other = example().presign("PUT", "k", 60, Some(5), at);
+        assert!(
+            sized.contains("&X-Amz-SignedHeaders=content-length%3Bhost&"),
+            "{sized}"
+        );
+        // The length is in the signature: another size is another URL.
+        assert_ne!(sized, other);
+        assert!(example()
+            .presign("PUT", "k", 60, None, at)
+            .contains("&X-Amz-SignedHeaders=host&"));
     }
 
     #[test]
@@ -533,8 +564,8 @@ mod tests {
         };
         let at = may_24_2013();
         let (inside, outside) = (
-            internal.presign("GET", "k", 60, at),
-            public.presign("GET", "k", 60, at),
+            internal.presign("GET", "k", 60, None, at),
+            public.presign("GET", "k", 60, None, at),
         );
         assert!(
             inside.starts_with("http://rustfs.store:9000/apps/k?"),

@@ -48,6 +48,8 @@ struct Text {
 struct Upload {
     name: String,
     content_type: Option<String>,
+    /// The file's length in bytes; the URL takes a body of exactly this length.
+    size: u64,
 }
 
 /// A note's text: 1 to 2000 characters once trimmed.
@@ -204,7 +206,7 @@ fn upload(request: &Request, params: &Params) -> Response {
     ) {
         return answer;
     }
-    match blob::presign(&key, Method::Put, URL_SECONDS) {
+    match blob::presign_put(&key, wanted.size, URL_SECONDS) {
         Ok(url) => Response::json(
             200,
             &serde_json::json!({"url": url, "method": "PUT", "contentType": wanted.content_type}),
