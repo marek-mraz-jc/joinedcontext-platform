@@ -133,6 +133,17 @@ test("neither script ever parses HTML: no innerHTML and no way around it", () =>
   }
 });
 
+test("every call of the widget goes to the chat host, and the launcher's frame names its parent's origin", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  // F-DEP1-011: on the standalone app the page's own host is static; a relative call misses the service
+  const widget = fs.readFileSync(path.join(__dirname, "widget.js"), "utf8");
+  assert.doesNotMatch(widget, /fetch\(\s*["']\/api/);
+  // F-DEP1-012: app.js falls back to document.referrer (Firefox), so the frame sends the origin alone
+  const embed = fs.readFileSync(path.join(__dirname, "embed.js"), "utf8");
+  assert.match(embed, /frame\.referrerPolicy = "strict-origin";/);
+});
+
 // T-4138: the public chat's stream, language and data table.
 
 test("events are read whole, a split one waits for the next chunk and a bad one is skipped", () => {
