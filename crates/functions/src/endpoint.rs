@@ -91,13 +91,7 @@ fn problem(status: u16, title: &str) -> Value {
 
 /// Performs one request of the function and answers `{status, body}`: the endpoint's answer, a
 /// 403 for a request this runtime does not send, or status 0 when the gateway did not answer.
-pub async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option<String>) -> Value {
-    request_within(endpoint, method, path, body, ANSWER_LIMIT)
-        .await
-        .0
-}
-
-/// [`request`] reading at most `limit` bytes of the answer; also answers how many it read.
+/// Reads at most `limit` bytes of the answer and also answers how many it read.
 pub async fn request_within(
     endpoint: &Endpoint,
     method: &str,
