@@ -426,6 +426,7 @@ fn reader() -> assistant::catalogue::Reader {
         gateway: None,
         endpoint_base: None,
         portal: None,
+        held: Default::default(),
     }
 }
 
