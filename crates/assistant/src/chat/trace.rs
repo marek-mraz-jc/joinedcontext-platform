@@ -297,7 +297,8 @@ pub fn with_gaps(mut steps: Vec<Step>, total_ms: u64) -> Vec<Step> {
 }
 
 impl Trace {
-    /// A turn's trace; `anonymous` as [`Trace::anonymous`] says.
+    /// A turn's trace; `anonymous` when an anonymous visitor asked, whose log lines may then carry
+    /// the tool arguments and search words, redacted and cut.
     pub fn new(anonymous: bool) -> Self {
         Trace {
             started: Instant::now(),
