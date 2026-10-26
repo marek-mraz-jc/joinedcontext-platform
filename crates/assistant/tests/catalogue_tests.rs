@@ -9,7 +9,7 @@ mod db;
 use std::path::Path;
 use std::time::Duration;
 
-use assistant::catalogue::{sync_catalogue, EndpointPage, Held, Reader};
+use assistant::catalogue::{sync_catalogue, EndpointPage, Held, Reader, COUNT_FRESH};
 use assistant::crawl::{upsert_site, Sink};
 use assistant::worker::{self, Checkout, Source};
 use jc_core::kinds::assistant::Visibility;
@@ -566,7 +566,7 @@ async fn a_refused_count_is_not_asked_again_and_the_last_good_counts_stand() {
         endpoint_base: Url::parse("https://platform.example.org/").ok(),
         portal: None,
         // Every sync asks again: only a refusal keeps the last counts.
-        held: Held::new(Duration::ZERO),
+        held: Held::new(Duration::ZERO, Duration::ZERO),
     };
     let sources = worker::sources(&checkout("shed")).expect("reads");
     let source = source_owned(&sources, "catalogue");
@@ -677,6 +677,91 @@ async fn a_shedding_gateway_gets_a_few_refusals_per_sync() {
     for (_, html) in &written.0 {
         assert!(html.contains("AirQualityStation"), "{html}");
     }
+    gateway.verify().await;
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-5795: an Endpoint refused before it had any count is asked again once the short retry is
+/// over, not after the hour its counts would stand.
+#[tokio::test]
+async fn a_first_refusal_is_asked_again_after_the_retry() {
+    let (admin, pool, name) = db::database("catalogue_first_refused").await;
+    let gateway = MockServer::start().await;
+    count_answer("AirQualityObserved", 503, None)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    count_answer("AirQualityObserved", 200, Some("14"))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    count_answer("AirQualityStation", 200, Some("0"))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    let reader = Reader {
+        http: reqwest::Client::new(),
+        gateway: Url::parse(&format!("{}/", gateway.uri())).ok(),
+        endpoint_base: Url::parse("https://platform.example.org/").ok(),
+        portal: None,
+        held: Held::new(COUNT_FRESH, Duration::ZERO),
+    };
+    let sources = worker::sources(&checkout("first_refused")).expect("reads");
+    let source = source_owned(&sources, "catalogue");
+    let site = upsert_site(&pool, "bb", "example.org", &source.name, Visibility::Public)
+        .await
+        .expect("site");
+    let first = sync_once(&pool, &reader, site, &source.catalogue).await;
+    let second = sync_once(&pool, &reader, site, &source.catalogue).await;
+    assert!(!air(&first).contains("14 entities"), "{}", air(&first));
+    assert!(
+        air(&second).contains("14 entities of type AirQualityObserved (counted "),
+        "{}",
+        air(&second)
+    );
+    gateway.verify().await;
+    db::drop_database(admin, pool, &name).await;
+}
+
+/// T-5795: a refusal right after an Endpoint's types changed keeps its last good counts.
+#[tokio::test]
+async fn a_refusal_after_a_type_change_keeps_the_last_counts() {
+    let (admin, pool, name) = db::database("catalogue_type_shed").await;
+    let gateway = MockServer::start().await;
+    count_answer("AirQualityObserved", 200, Some("14"))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    count_answer("AirQualityStation", 200, Some("0"))
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    count_answer("AirQualityObserved", 503, None)
+        .expect(1)
+        .mount(&gateway)
+        .await;
+    let reader = Reader {
+        http: reqwest::Client::new(),
+        gateway: Url::parse(&format!("{}/", gateway.uri())).ok(),
+        endpoint_base: Url::parse("https://platform.example.org/").ok(),
+        portal: None,
+        held: Held::default(),
+    };
+    let sources = worker::sources(&checkout("type_shed")).expect("reads");
+    let source = source_owned(&sources, "catalogue");
+    let site = upsert_site(&pool, "bb", "example.org", &source.name, Visibility::Public)
+        .await
+        .expect("site");
+    let first = sync_once(&pool, &reader, site, &source.catalogue).await;
+    let mut changed = source.catalogue.clone();
+    for page in &mut changed {
+        page.types.retain(|t| t.class == "AirQualityObserved");
+    }
+    let second = sync_once(&pool, &reader, site, &changed).await;
+    assert!(air(&first).contains("14 entities"), "{}", air(&first));
+    assert!(air(&second).contains("14 entities"), "{}", air(&second));
     gateway.verify().await;
     db::drop_database(admin, pool, &name).await;
 }

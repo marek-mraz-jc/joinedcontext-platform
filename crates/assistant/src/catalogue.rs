@@ -444,10 +444,15 @@ pub const COUNT_FRESH: Duration = Duration::from_secs(3600);
 /// last counts until the next sync (T-5795: 11,053 refused counts in 30 min on dev).
 const SHED_LIMIT: usize = 3;
 
+/// How long a sync leaves an Endpoint the gateway refused before asking it again, so the next
+/// syncs ask the other Endpoints first and the refused one is counted once the gateway recovers.
+pub const SHED_RETRY: Duration = Duration::from_secs(300);
+
 /// The counts of each public Endpoint a sync last asked for, by slug, in this process.
 #[derive(Debug, Clone)]
 pub struct Held {
     fresh: Duration,
+    retry: Duration,
     by_slug: Arc<Mutex<HashMap<String, Counted>>>,
 }
 
@@ -455,29 +460,35 @@ pub struct Held {
 struct Counted {
     /// The types the counts were asked for: a change to them asks again at once.
     classes: Vec<String>,
-    asked: Instant,
+    /// When the gateway last answered the counts; `None` before a first answer.
+    answered: Option<Instant>,
+    /// When the gateway last refused them.
+    refused: Option<Instant>,
     counts: BTreeMap<String, u64>,
     counted_at: Option<String>,
 }
 
 impl Default for Held {
     fn default() -> Self {
-        Self::new(COUNT_FRESH)
+        Self::new(COUNT_FRESH, SHED_RETRY)
     }
 }
 
 impl Held {
-    /// Counts that stand for `fresh` after they were asked for.
-    pub fn new(fresh: Duration) -> Self {
+    /// Counts that stand for `fresh` after the gateway answered them; an Endpoint it refused is
+    /// asked again after `retry`.
+    pub fn new(fresh: Duration, retry: Duration) -> Self {
         Self {
             fresh,
+            retry,
             by_slug: Arc::default(),
         }
     }
 
-    /// `page`'s counts and when they were counted: the held ones while fresh and the page is
-    /// unchanged, else the gateway's. Past [`SHED_LIMIT`] refusals in this sync (`sheds`), or
-    /// when the gateway sheds this one, the last good counts stand and the gateway is not asked.
+    /// `page`'s counts and when they were counted: the held ones while fresh and the page's types
+    /// are unchanged, else the gateway's. Past [`SHED_LIMIT`] refusals in this sync (`sheds`), or
+    /// when the gateway refuses this one, the last good counts stand (across a type change too)
+    /// and the Endpoint waits `retry` before it is asked again.
     async fn count(
         &self,
         http: &reqwest::Client,
@@ -491,39 +502,46 @@ impl Held {
             .by_slug
             .lock()
             .ok()
-            .and_then(|held| held.get(&page.slug).cloned())
-            .filter(|last| last.classes == classes);
+            .and_then(|held| held.get(&page.slug).cloned());
         let kept = |last: Option<Counted>| {
             last.map(|last| (last.counts, last.counted_at))
                 .unwrap_or_default()
         };
-        if last
-            .as_ref()
-            .is_some_and(|l| l.asked.elapsed() < self.fresh)
-            || *sheds >= SHED_LIMIT
-        {
+        let wait = last.as_ref().is_some_and(|l| {
+            (l.classes == classes && l.answered.is_some_and(|at| at.elapsed() < self.fresh))
+                || l.refused.is_some_and(|at| at.elapsed() < self.retry)
+        });
+        if wait || *sheds >= SHED_LIMIT {
             return kept(last);
         }
-        let (counts, counted_at) = match counts(http, gateway, page).await {
-            Some(counts) => (counts, Some(now.to_owned())),
+        let held = match counts(http, gateway, page).await {
+            Some(counts) => Counted {
+                classes,
+                answered: Some(Instant::now()),
+                refused: None,
+                counts,
+                counted_at: Some(now.to_owned()),
+            },
             None => {
                 *sheds += 1;
                 tokio::time::sleep(SHED_WAIT).await;
-                kept(last)
+                Counted {
+                    refused: Some(Instant::now()),
+                    ..last.unwrap_or(Counted {
+                        classes,
+                        answered: None,
+                        refused: None,
+                        counts: BTreeMap::new(),
+                        counted_at: None,
+                    })
+                }
             }
         };
-        if let Ok(mut held) = self.by_slug.lock() {
-            held.insert(
-                page.slug.clone(),
-                Counted {
-                    classes,
-                    asked: Instant::now(),
-                    counts: counts.clone(),
-                    counted_at: counted_at.clone(),
-                },
-            );
+        let answer = (held.counts.clone(), held.counted_at.clone());
+        if let Ok(mut by_slug) = self.by_slug.lock() {
+            by_slug.insert(page.slug.clone(), held);
         }
-        (counts, counted_at)
+        answer
     }
 }
 
