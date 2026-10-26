@@ -13,8 +13,9 @@ use crate::kinds::endpoint::Audience;
 use crate::kinds::mcp_server::{breadth, AccessLevel, McpServerSpec, Select};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The most Endpoints one deployment resolves (AG-122).
-pub const MAX_RESOLVED: usize = 50;
+/// The most Endpoints one deployment resolves (AG-122): 100 since T-5786, because the catalogue's
+/// general assistant names 67 and the bound of 50 dropped the 17 with the highest slugs.
+pub const MAX_RESOLVED: usize = 100;
 
 /// The timeout of an Endpoint that joins by the selector or the server, not as a connector.
 pub const SELECTED_TIMEOUT_SECONDS: u16 = 20;
@@ -376,8 +377,28 @@ mod tests {
         let r = resolve_connectors("bb", &d, &many, None);
         assert_eq!(r.endpoints.len(), MAX_RESOLVED);
         assert_eq!(r.endpoints[0].slug, "bb-e000");
-        assert_eq!(r.omitted, ["bb-e050", "bb-e051", "bb-e052"]);
+        assert_eq!(r.omitted, ["bb-e100", "bb-e101", "bb-e102"]);
         assert_eq!(r, resolve_connectors("bb", &d, &many, None));
+    }
+
+    /// T-5786: the catalogue's general assistant names 67 public connectors over five projects;
+    /// every one resolves, the one with the highest slug included.
+    #[test]
+    fn a_catalogue_assistant_of_sixty_seven_connectors_reads_every_one() {
+        let many: Vec<EndpointFacts> = (0..67)
+            .map(|i| endpoint("bbsk", &format!("e{i:03}"), Audience::Public, &[]))
+            .collect();
+        let connectors: Vec<_> = (0..67)
+            .map(|i| json!({"endpoint": format!("bbsk/e{i:03}"), "tools": ["query_entities"]}))
+            .collect();
+        let d = deployment(json!({"connectors": connectors}));
+        let r = resolve_connectors("bb", &d, &many, None);
+        assert_eq!(r.endpoints.len(), 67);
+        assert_eq!(
+            r.endpoints.last().map(|e| e.slug.as_str()),
+            Some("bbsk-e066")
+        );
+        assert!(r.omitted.is_empty());
     }
 
     #[test]
