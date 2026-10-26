@@ -8,7 +8,7 @@
 
 use crate::loader::RawManifest;
 use jc_core::kinds::Blueprint;
-use minijinja::{Environment, UndefinedBehavior};
+use minijinja::{Environment, ErrorKind, UndefinedBehavior};
 use serde_json::Value;
 
 /// Annotation naming the blueprint a manifest was rendered from (CC-27), jc-core's name.
@@ -87,6 +87,22 @@ pub fn expand(blueprint: &Blueprint, parameters: &Value) -> Result<Vec<Expanded>
     // strict undefined turns a typo in a parameter name into an error instead of a silent
     // empty string (ADR-N-005).
     env.set_undefined_behavior(UndefinedBehavior::Strict);
+    // Templates place string parameters inside double-quoted YAML scalars. Writing them
+    // JSON-escaped (no outer quotes) keeps a `"` or a newline inside that scalar, so a
+    // parameter can never add a key to the rendered manifest (F-BNT2-004).
+    env.set_formatter(|out, state, value| match value.as_str() {
+        Some(text) => {
+            let quoted = serde_json::to_string(text)
+                .map_err(|e| minijinja::Error::new(ErrorKind::BadSerialization, e.to_string()))?;
+            let inner = quoted
+                .strip_prefix('"')
+                .and_then(|q| q.strip_suffix('"'))
+                .unwrap_or(&quoted);
+            out.write_str(inner)
+                .map_err(|_| minijinja::Error::from(ErrorKind::WriteFailure))
+        }
+        None => minijinja::escape_formatter(out, state, value),
+    });
 
     let mut out = Vec::with_capacity(blueprint.spec.templates.len());
     for template in &blueprint.spec.templates {
