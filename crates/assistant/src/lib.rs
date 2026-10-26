@@ -587,30 +587,51 @@ pub fn website_sources(own: &str, named: &[String], sources: &[worker::Source]) 
         .collect()
 }
 
-/// [`hybrid_search`] over every project's sources, each ranked in its own project; the best
-/// `search.limit` of all by fused score.
+/// How many projects [`search_projects`] searches at once: three of the pool's four connections,
+/// so the crawler keeps one. One by one, a public city assistant over six projects waited 7-17 s
+/// per search on prod (T-5773), each project's lexical arm a 1-3 s scan, since `@@` is not
+/// leakproof and the GIN index never serves it under the forced row-level security.
+pub const SEARCH_PARALLEL: usize = 3;
+
+/// [`hybrid_search`] over every project's sources, each ranked in its own project and
+/// [`SEARCH_PARALLEL`] at once; the best `search.limit` of all by fused score.
 pub async fn search_projects(
     pool: &sqlx::PgPool,
     sources: &[(String, Vec<String>)],
     search: &Search<'_>,
 ) -> Result<Vec<Hit>, Error> {
-    let mut hits = Vec::new();
-    for (project, names) in sources {
-        let mut tx = project_scope(pool, project).await?;
-        hits.extend(
-            hybrid_search(
-                &mut tx,
-                &Search {
-                    sources: names,
-                    ..search.clone()
-                },
-            )
-            .await?,
-        );
-        tx.rollback().await?;
-    }
+    use futures_util::{StreamExt, TryStreamExt};
+    let searches: Vec<_> = sources
+        .iter()
+        .map(|(project, names)| search_project(pool, project, names, search))
+        .collect();
+    let per_project: Vec<Vec<Hit>> = futures_util::stream::iter(searches)
+        .buffer_unordered(SEARCH_PARALLEL)
+        .try_collect()
+        .await?;
+    let mut hits: Vec<Hit> = per_project.into_iter().flatten().collect();
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.chunk.cmp(&b.chunk)));
     hits.truncate(usize::try_from(search.limit).unwrap_or(0));
+    Ok(hits)
+}
+
+/// [`hybrid_search`] over one project's `names`, in that project's scope.
+async fn search_project(
+    pool: &sqlx::PgPool,
+    project: &str,
+    names: &[String],
+    search: &Search<'_>,
+) -> Result<Vec<Hit>, Error> {
+    let mut tx = project_scope(pool, project).await?;
+    let hits = hybrid_search(
+        &mut tx,
+        &Search {
+            sources: names,
+            ..search.clone()
+        },
+    )
+    .await?;
+    tx.rollback().await?;
     Ok(hits)
 }
 
