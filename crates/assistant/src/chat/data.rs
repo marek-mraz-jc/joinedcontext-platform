@@ -50,14 +50,17 @@ pub fn data_rules(steps: usize) -> String {
 }
 
 /// The Endpoints the data tools read, for the rules (T-4748): the router's [`catalogue`] under a
-/// heading that says to name one as `endpoint`. Same for every question of a deployment, so it
-/// stays in the cached rules.
+/// heading that says to name one as `endpoint`. Only the Endpoints `tables` were read from list
+/// their attributes (T-5783): the 80 names of each other Endpoint made most of an 11.8k-token
+/// data call on prod, and list_attributes gives them when a further read needs them. With no
+/// table every Endpoint lists them.
 ///
 /// [`catalogue`]: super::routed::catalogue
-pub fn endpoints(live: &[super::routed::Shown]) -> String {
+pub fn endpoints(live: &[super::routed::Shown], tables: &[Table]) -> String {
+    let full = |endpoint: &str| tables.is_empty() || tables.iter().any(|t| t.endpoint == endpoint);
     format!(
-        "\n\nThe Endpoints you may read, one per line (endpoint (what it holds): types; the attributes a q may test). Give its name as `endpoint`:\n{}",
-        super::routed::catalogue(live).trim_end()
+        "\n\nThe Endpoints you may read, one per line (endpoint (what it holds): types; the attributes a q may test; list_attributes gives those of a line that lists none). Give its name as `endpoint`:\n{}",
+        super::routed::catalogue_with(live, full).trim_end()
     )
 }
 
