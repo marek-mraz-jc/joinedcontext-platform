@@ -23,6 +23,7 @@ use context_gateway::resolver::Endpoint;
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use jc_manifest::loader::Repository;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
@@ -173,14 +174,28 @@ fn transfer(audience: &str, lifetime: i64, participant: &str, agreement: &str) -
 
 /// One read through the endpoint with the given token.
 async fn read(agreements: Agreements, assignee: &str, claims: &Value) -> StatusCode {
+    read_under(agreements, assignee, claims, provenance(), PROJECT).await
+}
+
+/// [`read`], with the repository's Projects in `provenance` and the Endpoint in `project`.
+async fn read_under(
+    agreements: Agreements,
+    assignee: &str,
+    claims: &Value,
+    provenance: context_gateway::store::Provenance,
+    project: &str,
+) -> StatusCode {
+    let mut served = endpoint(SLUG, assignee);
+    served.project = project.to_owned();
     let realm = common::Realm::new();
     let token = realm.mint(claims);
     let gateway = Arc::new(
         Gateway::new(Broker::new(broker().await), Box::new(PolicyPdp), DOMAIN)
             .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None)
-            .serve([endpoint(SLUG, assignee), endpoint(OTHER_SLUG, assignee)]),
+            .serve([served, endpoint(OTHER_SLUG, assignee)]),
     );
     gateway.replace_agreements(agreements);
+    gateway.replace_provenance(provenance);
 
     router(gateway)
         .oneshot(
@@ -196,6 +211,18 @@ async fn read(agreements: Agreements, assignee: &str, claims: &Value) -> StatusC
         .await
         .expect("the gateway answers")
         .status()
+}
+
+/// Each Project's Organization: the agreement's project and the Endpoint's are one.
+fn organizations() -> BTreeMap<String, String> {
+    BTreeMap::from([(PROJECT.to_owned(), "banskabystrica".to_owned())])
+}
+
+fn provenance() -> context_gateway::store::Provenance {
+    context_gateway::store::Provenance {
+        organizations: organizations(),
+        ..Default::default()
+    }
 }
 
 const DID_ASSIGNEE: &str = "{ kind: did, id: did:web:helsinki.fi }";
@@ -289,6 +316,7 @@ async fn transferred(
             .serve([served]),
     );
     gateway.replace_agreements(serving_now());
+    gateway.replace_provenance(provenance());
     let request = build(
         Request::builder()
             .header("authorization", format!("Bearer {token}"))
@@ -441,6 +469,7 @@ fn the_agreement_travels_with_the_subject_the_audit_line_reads() {
         &claims_of(&transfer(SLUG, 300, CONSUMER, AGREEMENT)),
         &serving_now(),
         &endpoint(SLUG, DID_ASSIGNEE),
+        &organizations(),
         context_gateway::pdp::now(),
     )
     .expect("the token establishes the consumer");
@@ -464,6 +493,7 @@ fn a_token_without_an_issue_time_has_no_measurable_lifetime() {
             &claims_of(&claims),
             &serving_now(),
             &endpoint(SLUG, DID_ASSIGNEE),
+            &organizations(),
             context_gateway::pdp::now(),
         ),
         Err(Refused::NoLifetime)
@@ -483,6 +513,7 @@ fn a_token_naming_an_agreement_but_no_participant_is_incomplete() {
             &claims_of(&claims),
             &serving_now(),
             &endpoint(SLUG, DID_ASSIGNEE),
+            &organizations(),
             context_gateway::pdp::now(),
         ),
         Err(Refused::Incomplete)
@@ -502,8 +533,60 @@ fn an_endpoint_outside_the_agreements_project_is_forbidden() {
             &claims_of(&transfer(SLUG, 300, CONSUMER, AGREEMENT)),
             &serving_now(),
             &elsewhere,
+            &organizations(),
             context_gateway::pdp::now(),
         ),
         Err(Refused::OutOfProject(AGREEMENT.to_owned()))
+    );
+}
+
+/// F-PLT3-011: an `organization` Endpoint is its Organization's, so an agreement negotiated in a
+/// project of another Organization of this installation reads nothing through it, and neither
+/// does one whose project the repository names no Organization for.
+#[tokio::test]
+async fn an_agreement_of_another_organizations_project_is_forbidden() {
+    let claims = transfer(SLUG, 300, CONSUMER, AGREEMENT);
+    let of = |helsinki: &str| {
+        let mut provenance = provenance();
+        provenance
+            .organizations
+            .insert("helsinki".to_owned(), helsinki.to_owned());
+        provenance
+    };
+    assert_eq!(
+        read_under(
+            serving_now(),
+            DID_ASSIGNEE,
+            &claims,
+            of("helsinki"),
+            "helsinki"
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "the Endpoint's project is of another Organization"
+    );
+    assert_eq!(
+        read_under(
+            serving_now(),
+            DID_ASSIGNEE,
+            &claims,
+            of("banskabystrica"),
+            "helsinki"
+        )
+        .await,
+        StatusCode::OK,
+        "a project of the same Organization reads"
+    );
+    assert_eq!(
+        read_under(
+            serving_now(),
+            DID_ASSIGNEE,
+            &claims,
+            Default::default(),
+            PROJECT
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+        "no known Organization is no admission"
     );
 }

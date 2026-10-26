@@ -346,6 +346,7 @@ pub(crate) fn subject_of(
             claims,
             gateway.agreements.load().as_ref(),
             endpoint,
+            &gateway.provenance().organizations,
             crate::pdp::now(),
         )
         .map_err(|refused| Box::new(ProblemDetails::from(refused)));

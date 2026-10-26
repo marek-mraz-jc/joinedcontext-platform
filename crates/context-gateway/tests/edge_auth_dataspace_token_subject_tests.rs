@@ -79,6 +79,11 @@ fn written(participant: &str) -> Agreements {
     agreements_of(&Repository::load(&dir).expect("the repository loads"))
 }
 
+/// Each Project's Organization: the agreement's project belongs to the Endpoint's.
+fn organizations() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([(PROJECT.to_owned(), "banskabystrica".to_owned())])
+}
+
 fn serving_now() -> Agreements {
     written(CONSUMER)
 }
@@ -147,7 +152,13 @@ fn claims_of(value: &Value) -> Claims {
 }
 
 fn establish(value: &Value) -> Result<context_gateway::auth::subject::Subject, Refused> {
-    subject(&claims_of(value), &serving_now(), &endpoint(), now())
+    subject(
+        &claims_of(value),
+        &serving_now(),
+        &endpoint(),
+        &organizations(),
+        now(),
+    )
 }
 
 #[test]
@@ -404,7 +415,7 @@ fn which_endpoint_a_transfer_token_reaches_is_the_agreements_project_and_the_aud
     public.audience = Audience::Public;
     public.project = "helsinki".to_owned();
     assert!(
-        subject(&claims, &serving_now(), &public, now()).is_ok(),
+        subject(&claims, &serving_now(), &public, &organizations(), now()).is_ok(),
         "a public endpoint admits any project, the agreement's included",
     );
 
@@ -413,13 +424,13 @@ fn which_endpoint_a_transfer_token_reaches_is_the_agreements_project_and_the_aud
     listed.project = "helsinki".to_owned();
     listed.allowed_projects = vec![PROJECT.to_owned()];
     assert!(
-        subject(&claims, &serving_now(), &listed, now()).is_ok(),
+        subject(&claims, &serving_now(), &listed, &organizations(), now()).is_ok(),
         "a project list that names the agreement's project admits it",
     );
 
     listed.allowed_projects = vec!["kosice".to_owned()];
     assert_eq!(
-        subject(&claims, &serving_now(), &listed, now()),
+        subject(&claims, &serving_now(), &listed, &organizations(), now()),
         Err(Refused::OutOfProject(AGREEMENT.to_owned())),
         "one that does not, does not",
     );
@@ -433,9 +444,9 @@ fn the_same_token_twice_establishes_the_same_caller_and_a_refusal_leaves_nothing
     let good = claims_of(&transfer(300, CONSUMER, AGREEMENT));
     let bad = claims_of(&transfer(300, "did:web:somebody.else", AGREEMENT));
 
-    let first = subject(&good, &agreements, &endpoint(), now());
-    let refused = subject(&bad, &agreements, &endpoint(), now());
-    let second = subject(&good, &agreements, &endpoint(), now());
+    let first = subject(&good, &agreements, &endpoint(), &organizations(), now());
+    let refused = subject(&bad, &agreements, &endpoint(), &organizations(), now());
+    let second = subject(&good, &agreements, &endpoint(), &organizations(), now());
 
     assert!(refused.is_err());
     assert_eq!(first, second);
@@ -453,8 +464,51 @@ fn a_stored_participant_that_only_looks_like_the_tokens_did_does_not_match() {
             &claims_of(&transfer(300, CONSUMER, AGREEMENT)),
             &padded,
             &endpoint(),
+            &organizations(),
             now(),
         ),
         Err(Refused::WrongParticipant(AGREEMENT.to_owned())),
     );
+}
+
+/// F-PLT3-011: an `organization` Endpoint admits an agreement only from a project of its own
+/// Organization. Two Organizations in one installation: the other one's agreement is out of
+/// project, one of the same Organization passes, and a project the repository names no
+/// Organization for is refused (deny by default).
+#[test]
+fn an_organization_endpoint_admits_only_its_own_organizations_agreements() {
+    let claims = claims_of(&transfer(300, CONSUMER, AGREEMENT));
+    let mut theirs = endpoint();
+    theirs.project = "helsinki".to_owned();
+    let of = |pairs: &[(&str, &str)]| -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(project, organization)| ((*project).to_owned(), (*organization).to_owned()))
+            .collect()
+    };
+
+    let two = of(&[(PROJECT, "banskabystrica"), ("helsinki", "helsinki")]);
+    assert_eq!(
+        subject(&claims, &serving_now(), &theirs, &two, now()),
+        Err(Refused::OutOfProject(AGREEMENT.to_owned())),
+        "another Organization's project is refused",
+    );
+
+    let one = of(&[(PROJECT, "banskabystrica"), ("helsinki", "banskabystrica")]);
+    assert!(
+        subject(&claims, &serving_now(), &theirs, &one, now()).is_ok(),
+        "a project of the same Organization passes",
+    );
+
+    for unknown in [
+        of(&[("helsinki", "banskabystrica")]),
+        of(&[(PROJECT, "banskabystrica")]),
+        of(&[]),
+    ] {
+        assert_eq!(
+            subject(&claims, &serving_now(), &theirs, &unknown, now()),
+            Err(Refused::OutOfProject(AGREEMENT.to_owned())),
+            "{unknown:?}",
+        );
+    }
 }
