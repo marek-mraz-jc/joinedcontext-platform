@@ -138,7 +138,13 @@ pub async fn authenticate(
             .get("l5d-client-id")
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
-        if !is_runs_own_workload(client_id, &run.id) {
+        // The run's own workspace, or the Portal that drives conversations and `ui`/`wasm` builds
+        // in-process with the ticket it minted (AP-56). A ticket replayed from any other pod is
+        // refused, whoever copied it (F-PLT1-008).
+        if !is_runs_own_workload(client_id, &run.id)
+            && !is_workload(client_id, &config.portal_identity)
+        {
+            tracing::warn!(run = %run_id, %client_id, "a run's ticket was presented from another workload");
             return Err(Box::new(
                 jc_core::ProblemDetails::forbidden().with_detail("mesh workload identity mismatch"),
             ));
@@ -207,9 +213,11 @@ pub async fn authenticate_data(
     Ok(run)
 }
 
-/// Whether a Linkerd client identity is the workload `account`: its first label, compared whole.
-fn is_workload(client_id: &str, account: &str) -> bool {
-    !account.is_empty() && client_id.split('.').next() == Some(account)
+/// Whether a Linkerd client identity is the workload `expected`: a ServiceAccount, or
+/// `<serviceaccount>.<namespace>`, compared label by label and each label whole.
+fn is_workload(client_id: &str, expected: &str) -> bool {
+    let mut labels = client_id.split('.');
+    !expected.is_empty() && expected.split('.').all(|want| labels.next() == Some(want))
 }
 
 /// Whether a Linkerd client identity is this run's own workload (AG-52).

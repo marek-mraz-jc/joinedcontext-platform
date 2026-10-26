@@ -89,6 +89,8 @@ fn config_for(upstreams: &Upstreams<'_>) -> Arc<Config> {
     Arc::new(
         Config::from_lookup(|key| match key {
             "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
+            // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+            "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
             "JC_GATEWAY_BASE" => Some(gateway.clone()),
             "JC_MODEL_BASE" => Some(model.clone()),
             "JC_FORGE_BASE" => Some(forge.clone()),
@@ -455,6 +457,8 @@ async fn the_token_grant_is_never_resent_to_a_second_address() {
     let config = Arc::new(
         Config::from_lookup(|key| match key {
             "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
+            // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+            "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
             "JC_GATEWAY_BASE" => Some("http://context-gateway:8080".to_owned()),
             "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_owned()),
             "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_owned()),
