@@ -431,3 +431,30 @@ fn an_absolute_artifact_path_is_refused_at_load() {
     assert!(artifacts::rebuild(&dir, &options(&out)).is_err());
     assert!(store_holds_nothing_from_outside(&out));
 }
+
+/// T-5702 (F-PLT3-006): the repository is loaded, not validated, and the store key is built
+/// from its names: a space named `../..` wrote outside `--out-dir`.
+#[test]
+fn a_space_name_that_climbs_out_of_the_output_is_refused() {
+    let dir = repo("rebuild-climb");
+    let models = "projects/ovzdusie/spaces/ovzdusie/datamodels";
+    common::write(
+        &dir,
+        &format!("{models}/air-quality.yaml"),
+        &MODEL.replace(
+            "contextSpaceRef: ovzdusie",
+            "contextSpaceRef: ../../../climbed",
+        ),
+    );
+    let out = temp_dir("rebuild-climb-out");
+    let err = artifacts::rebuild(&dir, &options(&out)).expect_err("refused");
+    assert!(
+        err.to_string()
+            .contains("the space is not a DNS-1123 label"),
+        "{err}"
+    );
+    assert!(
+        !out.join("../climbed").exists()
+            && !out.parent().expect("a parent").join("climbed").exists()
+    );
+}

@@ -182,6 +182,12 @@ pub enum ImportError {
     /// Two documents in the bundle are the same resource.
     #[error("{0} appears twice in the bundle, so it has no single desired state")]
     Duplicate(Box<ResourceId>),
+    /// A resource's path would leave the repository (T-5702).
+    #[error(
+        "{0} is not a path inside the repository; a manifest's name, project and space are \
+         DNS-1123 labels, never `..` or `/` (MF-06)"
+    )]
+    Escape(PathBuf),
 }
 
 /// Reads a bundle, rewrites it for this repository and decides every collision (MF-22, MF-23).
@@ -290,6 +296,15 @@ pub fn write(repo_dir: &Path, report: &Report) -> Result<usize, ImportError> {
         if resource.outcome == Outcome::Skipped {
             continue;
         }
+        // The path comes from the bundle's names: one that is absolute or climbs with `..`
+        // would write outside the repository, whatever `collect` let through (T-5702).
+        if !resource
+            .path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(ImportError::Escape(resource.path.clone()));
+        }
         let path = repo_dir.join(&resource.path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ImportError::Io {
@@ -389,6 +404,20 @@ fn unacceptable(manifest: &RawManifest) -> Option<String> {
             if credentials.len() > 1 { "s" } else { "" },
             credentials.join("`, `")
         ));
+    }
+    // The names the manifest is written under: one that is no DNS-1123 label could build a
+    // path outside the repository (MF-06, T-5702).
+    let space = crate::loader::extract_space(&manifest.spec);
+    for (field, value) in [
+        ("metadata.name", Some(manifest.metadata.name.as_str())),
+        ("metadata.namespace", manifest.metadata.namespace.as_deref()),
+        ("spec.contextSpaceRef", (!space.is_empty()).then_some(space)),
+    ] {
+        if value.is_some_and(|value| jc_core::names::validate_dns1123_label(value).is_err()) {
+            return Some(format!(
+                "{field} is not a DNS-1123 label (MF-06), so it cannot name a file"
+            ));
+        }
     }
     None
 }
