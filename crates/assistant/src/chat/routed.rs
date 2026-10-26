@@ -93,6 +93,11 @@ const TYPES_LIFE: Duration = Duration::from_secs(600);
 /// reads, and one slow Endpoint must not hold the question (T-4611).
 pub const ROUTING_DEADLINE: Duration = Duration::from_secs(3);
 
+/// Endpoints listed at once, by a question or by warming: a quarter of the gateway's per-caller
+/// share, as the counts take (T-5771). Unbounded, a deployment of 66 connectors filled the share
+/// and about 30 lists came back 503 at once on prod (T-5773).
+const LIST_PARALLEL: usize = 8;
+
 /// When warming lists an Endpoint's types again: well inside [`TYPES_LIFE`], so a question
 /// never meets them expired, and seldom enough that an idle Endpoint hears less than one call in
 /// five minutes (T-4683).
@@ -1605,6 +1610,9 @@ async fn live_of(
     connectors: &[Connected],
     said: Option<&str>,
 ) -> (Live, Vec<String>) {
+    use futures_util::StreamExt as _;
+    // One deadline for the whole listing, so the lists waiting for a free slot wait inside it.
+    let began = tokio::time::Instant::now();
     let listings = connectors
         .iter()
         .filter(|connector| offers(connector, "list_types") && offers(connector, "query_entities"))
@@ -1620,28 +1628,35 @@ async fn live_of(
             if cache.skipped(slug) && !followed_up {
                 return (connector, cache.last_types_of(slug));
             }
-            let deadline = if followed_up {
-                connector.surface.timeout
+            let deadline = began
+                + if followed_up {
+                    connector.surface.timeout
+                } else {
+                    ROUTING_DEADLINE
+                };
+            // A list whose slot came after the deadline is not asked for at all.
+            let listed = if tokio::time::Instant::now() < deadline {
+                tokio::time::timeout_at(
+                    deadline,
+                    connector.surface.call(http, "list_types", json!({})),
+                )
+                .await
+                .ok()
             } else {
-                ROUTING_DEADLINE
+                None
             };
-            let listed = tokio::time::timeout(
-                deadline,
-                connector.surface.call(http, "list_types", json!({})),
-            )
-            .await;
             match listed {
-                Ok(Ok(text)) => {
+                Some(Ok(text)) => {
                     let types = type_names(&text);
                     cache.keep_types(slug, types.clone());
                     (connector, Some(types))
                 }
-                Ok(Err(why)) => {
+                Some(Err(why)) => {
                     tracing::warn!(%deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed; its last list stands in, asked again after a backoff");
                     cache.failed(slug);
                     (connector, cache.last_types_of(slug))
                 }
-                Err(_) => {
+                None => {
                     tracing::warn!(%deployment, endpoint = %connector.endpoint, deadline_ms = ROUTING_DEADLINE.as_millis() as u64, "a connector's types did not come in time; its last list stands in");
                     cache.miss(slug);
                     (connector, cache.last_types_of(slug))
@@ -1650,7 +1665,11 @@ async fn live_of(
         });
     let mut out = Vec::new();
     let mut missing = Vec::new();
-    for (connector, types) in futures_util::future::join_all(listings).await {
+    let listed: Vec<_> = futures_util::stream::iter(listings.collect::<Vec<_>>())
+        .buffered(LIST_PARALLEL)
+        .collect()
+        .await;
+    for (connector, types) in listed {
         let Some(types) = types else {
             // By its publisher, and what the catalogue says it offers (T-4734).
             let label = connector.label.clone().unwrap_or_default();
@@ -1726,7 +1745,11 @@ pub async fn warm(cache: &AnswerCache, http: &reqwest::Client, connectors: &[Con
                 }
             }
         });
-    futures_util::future::join_all(listings).await;
+    use futures_util::StreamExt as _;
+    futures_util::stream::iter(listings.collect::<Vec<_>>())
+        .buffer_unordered(LIST_PARALLEL)
+        .collect::<Vec<()>>()
+        .await;
     futures_util::future::join_all(catalogues).await;
 }
 
@@ -4515,6 +4538,58 @@ mod tests {
         // Known now, so a second warming asks neither: one call each in all.
         warm(&cache, &reqwest::Client::new(), &connectors[..1]).await;
         assert_eq!(gateway.received_requests().await.map(|r| r.len()), Some(2));
+    }
+
+    /// T-5773: a question lists at most [`LIST_PARALLEL`] Endpoints at once, all inside one
+    /// [`ROUTING_DEADLINE`]: 40 lists of 1 s each send at most three rounds of eight before the
+    /// deadline and never the rest. Unbounded, all 40 went out at once and filled the gateway's
+    /// per-caller share; bounded with a deadline per list, the listing took five rounds.
+    #[tokio::test]
+    async fn a_question_lists_eight_endpoints_at_once_inside_one_deadline() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let types = json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "{\"typeList\": [\"Event\"]}"}]}});
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(types)
+                    .set_delay(Duration::from_secs(1)),
+            )
+            .mount(&gateway)
+            .await;
+        let tool = |name: &str| super::super::mcp::Tool {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let connectors: Vec<Connected> = (0..40)
+            .map(|n| Connected {
+                titles: Default::default(),
+                endpoint: format!("e{n}"),
+                title: None,
+                surface: super::super::mcp::Surface {
+                    gateway: gateway.uri(),
+                    slug: format!("e{n}"),
+                    timeout: Duration::from_secs(10),
+                    token: None,
+                },
+                tools: vec![tool("list_types"), tool("query_entities")],
+                label: None,
+                siblings: Vec::new(),
+            })
+            .collect();
+        let cache = AnswerCache::default();
+        let began = Instant::now();
+
+        let (live, missing) =
+            live_of(&cache, &reqwest::Client::new(), "d", &connectors, None).await;
+
+        assert!(began.elapsed() < ROUTING_DEADLINE + Duration::from_millis(500));
+        let sent = gateway.received_requests().await.map_or(0, |r| r.len());
+        assert!(sent <= 3 * LIST_PARALLEL, "{sent} lists sent");
+        assert_eq!(live.len() + missing.len(), 40);
+        assert!(live.len() >= 2 * LIST_PARALLEL, "{} listed", live.len());
     }
 
     /// T-4746: warming reads the catalogue Endpoint's organizations once, through the same MCP
