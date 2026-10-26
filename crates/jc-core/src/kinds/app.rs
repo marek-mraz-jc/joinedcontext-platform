@@ -237,18 +237,20 @@ pub struct GitSource {
     pub path: Option<String>,
 }
 
+impl GitSource {
+    /// Refuses a clone URL off the organization's forge (F-PLT2-019): the builder passes the
+    /// forge host and any allow-listed origin from its configuration before it fetches.
+    pub fn check_allowed_host(&self, allowed: &[&str]) -> Result<()> {
+        super::sync::check_allowed_host(&self.url, allowed)
+    }
+}
+
 impl AppSource {
     fn validate(&self) -> Result<()> {
         match (&self.path, &self.git) {
             (Some(path), None) => names::validate_relative_path("source.path", path),
             (None, Some(git)) => {
-                if !git.url.starts_with("https://") {
-                    return Err(Error::Name {
-                        field: "source.git.url",
-                        value: git.url.clone(),
-                        reason: "the forge URL must be https://",
-                    });
-                }
+                super::sync::validate_remote_url("source.git.url", &git.url, false)?;
                 if git.git_ref.trim().is_empty() {
                     return Err(Error::Name {
                         field: "source.git.ref",

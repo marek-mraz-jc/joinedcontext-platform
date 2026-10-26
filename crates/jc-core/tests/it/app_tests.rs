@@ -147,6 +147,41 @@ fn source_is_a_path_or_a_forge_repository_ap02() {
         }
     ));
 
+    // F-PLT2-019: an App's repository is on a public forge host, never an in-cluster or
+    // metadata address, and the builder fetches only the forge or an allow-listed origin.
+    for url in [
+        "https://127.0.0.1/mesto/app.git",
+        "https://169.254.169.254/latest",
+        "https://gitea-http.gitea.svc/mesto/app.git",
+        "https://u:hunter2@forge.banskabystrica.sk/mesto/app.git",
+    ] {
+        let internal = GOLDEN.replace(
+            "  source: { path: ./src }",
+            &format!("  source: {{ git: {{ url: \"{url}\", ref: main }} }}"),
+        );
+        let err = App::from_yaml(&internal)
+            .expect("parses")
+            .validate()
+            .expect_err(url);
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+        assert!(
+            matches!(
+                err,
+                Error::Name {
+                    field: "source.git.url",
+                    ..
+                }
+            ),
+            "{url}: {err}"
+        );
+    }
+    let app = App::from_yaml(&git).expect("parses");
+    let source = app.spec.source.git.as_ref().expect("a git source");
+    source
+        .check_allowed_host(&["forge.banskabystrica.sk"])
+        .expect("the forge host passes");
+    assert!(source.check_allowed_host(&["github.com"]).is_err());
+
     let escaping = GOLDEN.replace("  source: { path: ./src }", "  source: { path: ../../etc }");
     let app = App::from_yaml(&escaping).expect("parses");
     assert!(app.validate().is_err());
