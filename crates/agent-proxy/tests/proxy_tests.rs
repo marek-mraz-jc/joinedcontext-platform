@@ -94,6 +94,8 @@ fn test_state_with_all(
     let forge = forge.to_string();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+        "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_string()),
         "JC_GATEWAY_BASE" => Some(gateway.clone()),
         "JC_MODEL_BASE" => Some(model.clone()),
         "JC_FORGE_BASE" => Some(forge.clone()),
@@ -1546,6 +1548,7 @@ mod mesh_identity {
             "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
             "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
             "JC_REQUIRE_MESH_IDENTITY" => Some("true".to_string()),
+            "JC_PROXY_PORTAL_IDENTITY" => Some("portal.jc-portal".to_string()),
             _ => None,
         })
         .expect("the test configuration parses");
@@ -1602,6 +1605,42 @@ mod mesh_identity {
         }
     }
 
+    /// F-PLT1-008: the check is on unless a deployment says `false`, and a value that is neither
+    /// refuses to start rather than leaving it off.
+    #[test]
+    fn the_mesh_identity_is_required_by_default() {
+        let parse = |value: Option<&str>| {
+            Config::from_lookup(|key| match key {
+                "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+                "JC_GATEWAY_BASE" => Some("http://gateway:8080".to_string()),
+                "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
+                "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),
+                "JC_MODEL_KEY" => Some("mock-model-key".to_string()),
+                "JC_FORGE_TOKEN" => Some("mock-forge-token".to_string()),
+                "JC_REQUIRE_MESH_IDENTITY" => value.map(str::to_string),
+                _ => None,
+            })
+        };
+        let required = |value| parse(value).map(|c| c.require_mesh_identity).ok();
+        assert_eq!(required(None), Some(true), "unset is on");
+        assert_eq!(required(Some("true")), Some(true));
+        assert_eq!(required(Some("false")), Some(false), "only `false` is off");
+        assert!(
+            matches!(
+                parse(Some("no")),
+                Err(agent_proxy::config::ConfigError::InvalidValue {
+                    var: "JC_REQUIRE_MESH_IDENTITY",
+                    ..
+                })
+            ),
+            "a typo refuses to start"
+        );
+        assert_eq!(
+            parse(None).map(|c| c.portal_identity).ok().as_deref(),
+            Some("portal")
+        );
+    }
+
     #[tokio::test]
     async fn the_runs_own_mesh_identity_passes() {
         let (state, gateway) = proxy_and_gateway().await;
@@ -1615,6 +1654,41 @@ mod mesh_identity {
         assert_eq!(
             gateway.received_requests().await.unwrap_or_default().len(),
             1
+        );
+    }
+
+    /// F-PLT1-008: the Portal drives conversations and `ui` builds in-process with the ticket it
+    /// minted, so its own workload passes; the same ticket from any other pod is refused.
+    #[tokio::test]
+    async fn the_portal_passes_and_a_ticket_replayed_from_another_pod_is_refused() {
+        let (state, gateway) = proxy_and_gateway().await;
+        assert_eq!(
+            read_as(
+                state.clone(),
+                Some("portal.jc-portal.serviceaccount.identity.linkerd.cluster.local")
+            )
+            .await,
+            StatusCode::OK,
+            "the Portal's own workload reads"
+        );
+        for identity in [
+            // A pod of another workload in the Portal's namespace.
+            "pipeline-runner.jc-portal.serviceaccount.identity.linkerd.cluster.local",
+            // An account named `portal` in a namespace somebody else owns.
+            "portal.helsinki-apps.serviceaccount.identity.linkerd.cluster.local",
+            "portal-evil.jc-portal.serviceaccount.identity.linkerd.cluster.local",
+            "portal",
+        ] {
+            assert_eq!(
+                read_as(state.clone(), Some(identity)).await,
+                StatusCode::FORBIDDEN,
+                "{identity} is not the Portal"
+            );
+        }
+        assert_eq!(
+            gateway.received_requests().await.unwrap_or_default().len(),
+            1,
+            "only the Portal's read reached the gateway"
         );
     }
 
@@ -1670,6 +1744,8 @@ async fn a_callback_presents_a_minted_token_and_never_a_configured_string() {
     let realm_uri = realm.uri();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+        "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_string()),
         "JC_GATEWAY_BASE" => Some("http://context-gateway:8080".to_string()),
         "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
         "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),
@@ -1735,6 +1811,8 @@ async fn a_callback_with_no_token_answers_503_and_says_nothing_about_the_realm()
     let realm_uri = realm.uri();
     let config = Config::from_lookup(|k| match k {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_string()),
+        // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+        "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_string()),
         "JC_GATEWAY_BASE" => Some("http://context-gateway:8080".to_string()),
         "JC_MODEL_BASE" => Some("https://api.anthropic.com".to_string()),
         "JC_FORGE_BASE" => Some("http://gitea-http:3000".to_string()),

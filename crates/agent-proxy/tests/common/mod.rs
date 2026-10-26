@@ -87,6 +87,8 @@ impl Default for Bases {
 pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
     let config = Config::from_lookup(|key| match key {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
+        // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+        "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
         "JC_GATEWAY_BASE" => Some(bases.gateway.clone()),
         "JC_MODEL_BASE" => Some(bases.model.clone()),
         "JC_FORGE_BASE" => Some(bases.forge.clone()),

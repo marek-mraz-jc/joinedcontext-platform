@@ -60,9 +60,9 @@ pub struct Config {
     /// dial its own cluster's ingress hostname. The issuer's own endpoint when none is named.
     pub oidc_token_url: Option<String>,
     /// Whether a caller must arrive through the mesh with a Linkerd identity
-    /// (`JC_REQUIRE_MESH_IDENTITY`, the string `true` to require it; default off). The
-    /// deployment turns it on where every client is meshed; an unmeshed call is then refused
-    /// rather than served on the strength of a NetworkPolicy alone.
+    /// (`JC_REQUIRE_MESH_IDENTITY`, `true` or `false`; default on, F-PLT1-008). A run's ticket is
+    /// then honoured from the run's own workload or the Portal's alone, so a ticket copied out of
+    /// a run works from no other pod. `false` is for a proxy outside a mesh (a laptop, a test).
     pub require_mesh_identity: bool,
     /// The Portal's Keycloak client (`JC_PORTAL_CLIENT_ID`, default `portal-api`): the one
     /// caller whose service-account token may hand this proxy a person's token for a run
@@ -72,6 +72,11 @@ pub struct Config {
     /// `jc-functions`): with mesh identity required, the one workload a run's data credential is
     /// honoured from (ADR-N-038 decision 6).
     pub functions_identity: String,
+    /// The Portal's workload (`JC_PROXY_PORTAL_IDENTITY`, `<serviceaccount>` or
+    /// `<serviceaccount>.<namespace>`, default `portal`): with mesh identity required, the one
+    /// workload besides a run's own whose ticket is honoured. The Portal drives conversations and
+    /// `ui`/`wasm` builds in-process and holds those tickets (AP-56, AG-54).
+    pub portal_identity: String,
     /// The knowledge assistant's Keycloak client (`JC_ASSISTANT_CLIENT_ID`, default
     /// `jc-assistant`): its service account's token buys model calls for an `AssistantDeployment`,
     /// counted against that deployment's day (AG-109, AG-110).
@@ -116,6 +121,7 @@ impl std::fmt::Debug for Config {
             .field("require_mesh_identity", &self.require_mesh_identity)
             .field("portal_client_id", &self.portal_client_id)
             .field("functions_identity", &self.functions_identity)
+            .field("portal_identity", &self.portal_identity)
             .field("assistant_client_id", &self.assistant_client_id)
             .field("daily_caps", &self.daily_caps)
             .field("model_probe_secs", &self.model_probe_secs)
@@ -137,6 +143,8 @@ pub enum ConfigError {
         other: &'static str,
         reason: &'static str,
     },
+    #[error("invalid value for {var}: {reason}")]
+    InvalidValue { var: &'static str, reason: String },
     #[error("invalid number for {var}: {reason}")]
     InvalidNumber { var: &'static str, reason: String },
     #[error("failed to read secret file {path:?}: {source}")]
@@ -247,13 +255,26 @@ impl Config {
         // presented on every callback. The proxy asks the realm for a token of its own client now,
         // audience-bound to the Portal's internal listener, and it expires by itself.
         let oidc_token_url = lookup("JC_OIDC_TOKEN_URL").filter(|v| !v.trim().is_empty());
-        let require_mesh_identity = lookup("JC_REQUIRE_MESH_IDENTITY").is_some_and(|v| v == "true");
+        let require_mesh_identity = match lookup("JC_REQUIRE_MESH_IDENTITY").as_deref() {
+            None | Some("true") => true,
+            Some("false") => false,
+            // A typo must not turn the check off: refuse to start instead (F-PLT1-008).
+            Some(other) => {
+                return Err(ConfigError::InvalidValue {
+                    var: "JC_REQUIRE_MESH_IDENTITY",
+                    reason: format!("{other:?} is neither `true` nor `false`"),
+                })
+            }
+        };
         let portal_client_id = lookup("JC_PORTAL_CLIENT_ID")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "portal-api".to_string());
         let functions_identity = lookup("JC_PROXY_FUNCTIONS_IDENTITY")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "jc-functions".to_string());
+        let portal_identity = lookup("JC_PROXY_PORTAL_IDENTITY")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "portal".to_string());
         let assistant_client_id = lookup("JC_ASSISTANT_CLIENT_ID")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| "jc-assistant".to_string());
@@ -297,6 +318,7 @@ impl Config {
             require_mesh_identity,
             portal_client_id,
             functions_identity,
+            portal_identity,
             assistant_client_id,
         })
     }

@@ -31,6 +31,8 @@ const TOKEN_PATH: &str = "/realms/jc/protocol/openid-connect/token";
 fn manager(token_url: &str, secret: &str) -> CredentialManager {
     let config = Config::from_lookup(|key| match key {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
+        // No mesh in a test process: these tests are about other checks (F-PLT1-008).
+        "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
         "JC_MODEL_KEY" => Some("mock-model-key".to_owned()),
         "JC_FORGE_TOKEN" => Some("mock-forge-token".to_owned()),
         "JC_OIDC_TOKEN_URL" => Some(token_url.to_owned()),
