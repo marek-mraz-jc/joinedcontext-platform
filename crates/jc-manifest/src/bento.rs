@@ -78,10 +78,13 @@ root = root.map_each(e -> if e.size > $max_bytes || e.csize > $max_bytes { throw
 
 /// One directory entry to the metadata the member's ranged read needs (PL-72). The range
 /// covers the 30-byte local header, its name and extra field as the directory gives them, the
-/// packed bytes, and 1 KiB in case the local extra field is longer than the directory's.
+/// packed bytes, and 1 KiB in case the local extra field is longer than the directory's. The
+/// content is emptied: Bento's `http` sends it as the request body, and CloudFront answers a GET
+/// with a body 403 (T-5766: every member of the Bratislava GTFS was refused).
 const ZIP_MEMBER: &str = r#"meta archive_filename = this.name
 meta zip = this.format_json(no_indent: true)
 meta range = "bytes=%v-%v".format(this.offset, this.offset + 30 + this.nlen + this.elen + this.csize + 1024)
+root = ""
 "#;
 
 /// The member's local header and packed bytes, checked against the directory, as an archive of
