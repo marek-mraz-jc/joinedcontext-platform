@@ -603,6 +603,65 @@ async fn crawl_recrawl_change_detection() {
     drop_database(admin, pool, &db_name).await;
 }
 
+/// T-5699, F-PLT1-014: one page linking 50 PDFs, under `maxPages` 5, fetches 5 of them.
+#[tokio::test]
+async fn crawl_reads_no_more_documents_than_max_pages() {
+    let (admin, pool, db_name) = database("doccap").await;
+    let server = MockServer::start().await;
+    let port = server.address().port();
+    let crawler = test_crawler(FixtureResolver::new(&[("www.city.test", port)]), None);
+    Mock::given(method("GET"))
+        .and(path("/robots.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("User-agent: *\nAllow: /\n"))
+        .mount(&server)
+        .await;
+    let links: String = (0..50)
+        .map(|n| format!(r#"<a href="/d{n}.pdf">D{n}</a>"#))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string(links),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/d[0-9]+\.pdf$"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/pdf")
+                .set_body_bytes(b"%PDF-1.4 a document".to_vec()),
+        )
+        .mount(&server)
+        .await;
+
+    let mut spec = test_spec(&format!("http://www.city.test:{port}/"));
+    spec.max_pages = 5;
+    let mut sink = RecordingSink::default();
+    let report = crawl_site(
+        &pool,
+        &crawler,
+        "hel",
+        "helsinki",
+        "doccap-src",
+        &spec,
+        &mut sink,
+    )
+    .await
+    .expect("crawl succeeds");
+
+    let asked = server.received_requests().await.unwrap_or_default();
+    let pdfs = asked
+        .iter()
+        .filter(|request| request.url.path().ends_with(".pdf"))
+        .count();
+    assert_eq!(pdfs, 5, "{report:?}");
+    assert_eq!(report.removed, 0);
+    drop_database(admin, pool, &db_name).await;
+}
+
 /// Case 3: Page byte cap and document byte cap enforcement.
 #[tokio::test]
 async fn crawl_caps_exceeded() {

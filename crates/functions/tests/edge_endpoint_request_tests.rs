@@ -1,4 +1,4 @@
-//! Edge cases of `endpoint::request`, the sandbox's one host call (T-2498, SDK-22, GW10).
+//! Edge cases of `endpoint::request_within`, the sandbox's one host call (T-2498, SDK-22, GW10).
 //!
 //! **The contract.** One HTTP call to the function's own endpoint through the gateway: GET, POST,
 //! PATCH or DELETE only, with the caller's token or none, `Accept: application/json` always, and a
@@ -8,7 +8,7 @@
 //! **Inputs.** The method (a string the function's code chose), the path (checked by `allowed`,
 //! whose cases are the module's own tests), an optional body, and the gateway's answer.
 
-use functions::endpoint::{request, Endpoint, ANSWER_LIMIT};
+use functions::endpoint::{request_within, Endpoint, ANSWER_LIMIT};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use wiremock::matchers::any;
@@ -39,7 +39,14 @@ async fn answering(template: ResponseTemplate) -> MockServer {
     server
 }
 
+async fn request(endpoint: &Endpoint, method: &str, path: &str, body: Option<String>) -> Value {
+    request_within(endpoint, method, path, body, ANSWER_LIMIT)
+        .await
+        .0
+}
+
 /// SDK-22: a method the runtime does not send is refused before anything leaves the sandbox.
+
 #[tokio::test]
 async fn a_method_outside_get_post_patch_delete_is_403_before_any_request_is_sent() {
     let server = answering(ResponseTemplate::new(200)).await;

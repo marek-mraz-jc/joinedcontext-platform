@@ -145,7 +145,7 @@ fn the_organisation_domain_of_every_entity_urn_is_rewritten() {
     let dest = destination("import-urn-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
@@ -197,7 +197,7 @@ spec:
     let dest = destination("import-pattern-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
@@ -229,7 +229,7 @@ fn a_string_that_is_not_an_entity_urn_is_left_alone() {
     let dest = destination("import-urn-untouched-dest");
     let options = Options {
         namespace: Some("ovzdusie".to_owned()),
-        org_domain: Some("banskabystrica.sk".to_owned()),
+        org_domain: Some(("kosice.sk".to_owned(), "banskabystrica.sk".to_owned())),
         ..Options::default()
     };
 
@@ -608,4 +608,40 @@ fn import_reads_a_link_that_stays_inside_the_source() {
         paths.iter().any(|path| path.contains("voda")),
         "the linked document was read: {paths:?}"
     );
+}
+
+/// T-5702 (F-PLT3-001): a bundle from another instance names its own files. A space named
+/// `../../../tmp/pwn` used to build a path outside `--repo-dir`.
+#[test]
+fn a_bundle_name_that_climbs_out_of_the_repository_is_refused() {
+    let source = bundle("import-climb");
+    write_file(
+        &source,
+        "projects/vzduch/spaces/vzduch/endpoints/climb.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ../../../../climbed\n  namespace: vzduch\nspec:\n  isSandbox: false\n",
+    );
+    let dest = destination("import-climb-dest");
+    let report = collect(&source, &dest, &options("ovzdusie")).expect("import collects");
+    assert!(
+        report.rejections.iter().any(
+            |r| r.source.contains("climb.yaml") && r.reason.contains("is not a DNS-1123 label")
+        ),
+        "{:?}",
+        report.rejections
+    );
+    assert_eq!(write(&dest, &report).expect("nothing to write"), 0);
+}
+
+#[test]
+fn write_refuses_a_path_outside_the_repository_whatever_collect_let_through() {
+    let source = bundle("import-escape");
+    let dest = destination("import-escape-dest");
+    let mut report = collect(&source, &dest, &options("ovzdusie")).expect("import collects");
+    report.imported[0].path = PathBuf::from("../escaped.yaml");
+    let err = write(&dest, &report).expect_err("refused");
+    assert!(
+        err.to_string().contains("not a path inside the repository"),
+        "{err}"
+    );
+    assert!(!dest.join("../escaped.yaml").exists());
 }

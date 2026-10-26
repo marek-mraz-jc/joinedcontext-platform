@@ -362,11 +362,26 @@ fn projects_of(gateway: &Gateway, claims: &Claims) -> Vec<String> {
     {
         return vec![project];
     }
-    claims
-        .groups
-        .iter()
-        .map(|group| group.trim_start_matches('/').to_owned())
-        .collect()
+    group_projects(&claims.groups)
+}
+
+/// The projects a person's groups name: the reconciler renders a project's groups as
+/// `{slug}-readers` and `{slug}-writers` (PF-87), and a group named exactly as a project keeps
+/// counting as it did.
+fn group_projects<'a>(groups: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut projects = Vec::new();
+    for group in groups {
+        let group = group.trim_start_matches('/');
+        projects.push(group.to_owned());
+        if let Some(project) = group
+            .strip_suffix("-readers")
+            .or_else(|| group.strip_suffix("-writers"))
+            .filter(|project| !project.is_empty())
+        {
+            projects.push(project.to_owned());
+        }
+    }
+    projects
 }
 
 /// `initialize` of a named server: its title and description are what the client reads.
@@ -717,6 +732,25 @@ pub async fn protected_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-5699, F-PLT2-022: a member of `helsinki-readers` or `-writers` acts in `helsinki`; a
+    /// group merely starting with the name does not.
+    #[test]
+    fn group_projects_reads_the_rendered_project_groups() {
+        let groups = [
+            "/helsinki-readers",
+            "espoo-writers",
+            "helsinki-other",
+            "-readers",
+        ]
+        .map(str::to_owned);
+        let projects = group_projects(&groups);
+        assert!(projects.contains(&"helsinki".to_owned()));
+        assert!(projects.contains(&"espoo".to_owned()));
+        assert!(!projects.contains(&String::new()));
+        let other = group_projects(&["helsinki-other".to_owned()]);
+        assert_eq!(other, ["helsinki-other"]);
+    }
 
     /// EP-122, MF-57: the organization's built-in server selects everything an organization
     /// member reads and attaches no knowledge sources, so it lists no `search_documents`.

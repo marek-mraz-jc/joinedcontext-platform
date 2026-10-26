@@ -697,25 +697,8 @@ impl GitCheckouts<'_> {
         }
     }
 
-    fn git(&self, credential: Option<&Basic>, args: &[&str]) -> Result<String, String> {
-        use base64::Engine as _;
-        let mut command = std::process::Command::new("git");
-        command
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_CONFIG_NOSYSTEM", "1");
-        if let Some((user, secret)) = credential {
-            let pair = format!("{user}:{}", secret.expose());
-            let header = format!(
-                "Authorization: Basic {}",
-                base64::engine::general_purpose::STANDARD.encode(pair)
-            );
-            command
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env("GIT_CONFIG_VALUE_0", header);
-        }
-        let output = command
+    fn git(&self, credential: Option<(&Basic, &str)>, args: &[&str]) -> Result<String, String> {
+        let output = git_command(credential, args)
             .output()
             .map_err(|err| format!("git does not run: {err}"))?;
         if !output.status.success() {
@@ -727,6 +710,32 @@ impl GitCheckouts<'_> {
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     }
+}
+
+/// One git invocation. A credential goes to its repository's URL alone (T-5702): the header is
+/// scoped as `http.<url>.extraHeader`, and redirects are not followed, because git keeps
+/// sending a header to the host a redirect named for every request after the first.
+fn git_command(credential: Option<(&Basic, &str)>, args: &[&str]) -> std::process::Command {
+    use base64::Engine as _;
+    let mut command = std::process::Command::new("git");
+    command
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    if let Some(((user, secret), url)) = credential {
+        let pair = format!("{user}:{}", secret.expose());
+        let header = format!(
+            "Authorization: Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(pair)
+        );
+        command
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", format!("http.{url}.extraHeader"))
+            .env("GIT_CONFIG_VALUE_0", header)
+            .env("GIT_CONFIG_KEY_1", "http.followRedirects")
+            .env("GIT_CONFIG_VALUE_1", "false");
+    }
+    command
 }
 
 impl Resolver for GitCheckouts<'_> {
@@ -750,7 +759,7 @@ impl Resolver for GitCheckouts<'_> {
         let mirror_arg = mirror.to_string_lossy().into_owned();
         if mirror.is_dir() {
             self.git(
-                credential,
+                credential.map(|basic| (basic, url.as_str())),
                 &[
                     "--git-dir",
                     &mirror_arg,
@@ -761,12 +770,12 @@ impl Resolver for GitCheckouts<'_> {
                 ],
             )?;
             self.git(
-                credential,
+                credential.map(|basic| (basic, url.as_str())),
                 &["--git-dir", &mirror_arg, "remote", "update", "--prune"],
             )?;
         } else {
             self.git(
-                credential,
+                credential.map(|basic| (basic, url.as_str())),
                 &["clone", "--mirror", "--quiet", &url, &mirror_arg],
             )?;
         }
@@ -816,5 +825,43 @@ impl Resolver for GitCheckouts<'_> {
             }
         }
         Ok(tree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_command;
+    use std::collections::BTreeMap;
+
+    fn config(command: &std::process::Command) -> BTreeMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((key.to_str()?.to_owned(), value?.to_str()?.to_owned()))
+            })
+            .collect()
+    }
+
+    /// T-5702 (F-PLT3-008): an unscoped `http.extraHeader` went with every request of the
+    /// process, the host a redirect named among them.
+    #[test]
+    fn a_credential_is_scoped_to_its_repository_and_no_redirect_is_followed() {
+        let basic = ("x".to_owned(), jc_core::Secret::new("s3cret".to_owned()));
+        let url = "https://forge.example/org/repo.git";
+        let env = config(&git_command(Some((&basic, url)), &["ls-remote", url]));
+        assert_eq!(env["GIT_CONFIG_COUNT"], "2");
+        assert_eq!(env["GIT_CONFIG_KEY_0"], format!("http.{url}.extraHeader"));
+        assert!(env["GIT_CONFIG_VALUE_0"].starts_with("Authorization: Basic "));
+        assert_eq!(env["GIT_CONFIG_KEY_1"], "http.followRedirects");
+        assert_eq!(env["GIT_CONFIG_VALUE_1"], "false");
+    }
+
+    #[test]
+    fn an_anonymous_fetch_carries_no_header() {
+        let env = config(&git_command(
+            None,
+            &["ls-remote", "https://forge.example/o/r.git"],
+        ));
+        assert!(!env.contains_key("GIT_CONFIG_COUNT"), "{env:?}");
     }
 }

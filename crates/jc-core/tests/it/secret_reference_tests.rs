@@ -220,3 +220,57 @@ impl<T> RefusalText for Result<T, Error> {
         }
     }
 }
+
+fn env_var(name: &str) -> jc_core::error::Result<()> {
+    SecretRef {
+        name: "ckan-api-token".to_owned(),
+        key: Some("token".to_owned()),
+        env_var: Some(name.to_owned()),
+    }
+    .validate("spec.apiTokenRef")
+}
+
+/// T-5702 (F-PLT2-007): one project's secret under a process variable steers the runner every
+/// project's streams share: its loader, its proxy, the certificates it trusts.
+#[test]
+fn an_env_var_that_steers_the_runner_process_is_refused() {
+    for name in [
+        "JC_CLIENT_SECRET_OTHER",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "GODEBUG",
+        "GOMAXPROCS",
+        "https_proxy",
+        "1TOKEN",
+        "",
+        "A-B",
+    ] {
+        let err = env_var(name).expect_err(name);
+        assert!(
+            matches!(&err, Error::Invalid { field, .. } if field == "spec.apiTokenRef.envVar"),
+            "{name}: {err}"
+        );
+    }
+}
+
+/// The names the deployment seeds today stay valid (supervisor 2026-10-25T18:55Z).
+#[test]
+fn a_value_named_env_var_still_passes() {
+    for name in [
+        "CKAN_API_TOKEN",
+        "PRAHA_GOLEMIO_TOKEN",
+        "GOOGLE_API_KEY",
+        "PROXY_TOKEN",
+    ] {
+        env_var(name).unwrap_or_else(|err| panic!("{name}: {err}"));
+    }
+}

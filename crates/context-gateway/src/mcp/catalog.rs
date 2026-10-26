@@ -80,11 +80,29 @@ struct Catalog {
     /// The Endpoints it was built from, held so that a reload, which builds new ones, is a miss
     /// and no address of them is reused while the entry lives.
     built_from: Vec<Arc<Endpoint>>,
+    /// The subject each of them was read as, compared on a hit: the key is a hash, and a
+    /// collision never serves one caller another's catalogue.
+    built_for: Vec<Subject>,
     /// The public read it took its Datasets and Organizations from.
     public: Arc<Vec<Value>>,
     entities: Vec<(Value, Value)>,
     /// The Datasets ranked by words, for the hub's `search` (T-4493).
     index: super::search::Index,
+}
+
+impl Catalog {
+    /// Whether this entry answers a caller reaching `listed` while the public read is `public`:
+    /// the same Endpoints, read as the same subjects.
+    fn serves(&self, public: &Arc<Vec<Value>>, listed: &[(&Arc<Endpoint>, &Subject)]) -> bool {
+        Arc::ptr_eq(&self.public, public)
+            && self.built_from.len() == listed.len()
+            && self.built_for.len() == listed.len()
+            && self.built_from.iter().zip(&self.built_for).zip(listed).all(
+                |((held, read_as), (endpoint, subject))| {
+                    Arc::ptr_eq(held, endpoint) && read_as == *subject
+                },
+            )
+    }
 }
 
 fn cache() -> &'static Mutex<HashMap<u64, Arc<Catalog>>> {
@@ -102,6 +120,15 @@ fn is_catalog_space(endpoint: &Endpoint) -> bool {
     endpoint.space == NAME || endpoint.space == format!("{}-{NAME}", endpoint.project)
 }
 
+/// The installation's public catalogue Endpoint in reach, under either space name the catalogue
+/// takes (`catalog` or the rendered `{project}-catalog`).
+fn public_catalog(reach: &[(Arc<Endpoint>, Subject)]) -> Option<&Arc<Endpoint>> {
+    reach
+        .iter()
+        .map(|(endpoint, _)| endpoint)
+        .find(|endpoint| is_catalog_space(endpoint) && endpoint.audience == Audience::Public)
+}
+
 /// The public catalogue's CKAN-named `Dataset` and `Organization` entities, read through the
 /// installation's `catalog` Endpoint as the anonymous caller, at most once a minute for every
 /// caller: the one list every caller shares is what anyone may read, never what the first caller
@@ -114,10 +141,7 @@ async fn public_entities(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) 
     // ponytail: one read at a time for every catalogue; per-slug locks if an installation ever
     // serves more than one.
     static READING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let Some((endpoint, _)) = reach
-        .iter()
-        .find(|(endpoint, _)| endpoint.space == NAME && endpoint.audience == Audience::Public)
-    else {
+    let Some(endpoint) = public_catalog(reach) else {
         return Arc::new(Vec::new());
     };
     let held = HELD.get_or_init(Mutex::default);
@@ -273,17 +297,8 @@ async fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalo
         .lock()
         .ok()
         .and_then(|cache| cache.get(&key).cloned());
-    if let Some(catalog) = cached {
-        let same = Arc::ptr_eq(&catalog.public, &public)
-            && catalog.built_from.len() == listed.len()
-            && catalog
-                .built_from
-                .iter()
-                .zip(&listed)
-                .all(|(held, (endpoint, _))| Arc::ptr_eq(held, endpoint));
-        if same {
-            return catalog;
-        }
+    if let Some(catalog) = cached.filter(|catalog| catalog.serves(&public, &listed)) {
+        return catalog;
     }
 
     let base = gateway.base_url();
@@ -354,6 +369,10 @@ async fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalo
         built_from: listed
             .iter()
             .map(|(endpoint, _)| Arc::clone(endpoint))
+            .collect(),
+        built_for: listed
+            .iter()
+            .map(|(_, subject)| (*subject).clone())
             .collect(),
         public,
         entities,
@@ -607,6 +626,48 @@ fn shaped(entity: &Value, key_values: bool, attrs: Option<&[&str]>) -> Value {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// T-5699, F-PLT2-021: the public catalogue is found under the rendered
+    /// `{project}-catalog` space too, and a non-public one in that space is not it.
+    #[test]
+    fn public_catalog_takes_the_rendered_space_name() {
+        let mut rendered = fixture();
+        rendered.space = format!("{}-{NAME}", rendered.project);
+        let rendered = Arc::new(rendered);
+        let other = Arc::new(fixture());
+        let reach = vec![
+            (Arc::clone(&other), Subject::anonymous()),
+            (Arc::clone(&rendered), Subject::anonymous()),
+        ];
+        let found = public_catalog(&reach).map(|endpoint| Arc::ptr_eq(endpoint, &rendered));
+        assert_eq!(found, Some(true));
+        let mut private = (*rendered).clone();
+        private.audience = Audience::Organization;
+        let reach = vec![(Arc::new(private), Subject::anonymous())];
+        assert!(public_catalog(&reach).is_none());
+    }
+
+    /// T-5699, F-PLT2-014: an entry built for one subject never serves another reaching the
+    /// same Endpoints, whatever the key hashed to.
+    #[test]
+    fn a_catalog_serves_only_the_subjects_it_was_read_as() {
+        let endpoint = Arc::new(fixture());
+        let public = Arc::new(Vec::new());
+        let first = Subject::anonymous();
+        let second = Subject {
+            id: Some("someone".to_owned()),
+            ..Subject::default()
+        };
+        let catalog = Catalog {
+            built_from: vec![Arc::clone(&endpoint)],
+            built_for: vec![first.clone()],
+            public: Arc::clone(&public),
+            entities: Vec::new(),
+            index: super::super::search::Index::build(std::iter::empty(), &HashMap::new()),
+        };
+        assert!(catalog.serves(&public, &[(&endpoint, &first)]));
+        assert!(!catalog.serves(&public, &[(&endpoint, &second)]));
+    }
 
     /// An Endpoint with nothing declared, for the unit tests of this crate.
     pub(crate) fn fixture() -> Endpoint {

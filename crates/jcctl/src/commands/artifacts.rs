@@ -49,6 +49,17 @@ pub enum Error {
         /// What the filesystem said.
         reason: String,
     },
+    /// A name the store key is built from is no DNS-1123 label, so the key could climb out of
+    /// the output directory (T-5702).
+    #[error(
+        "{name}: the {segment} is not a DNS-1123 label (MF-06), so it cannot name a store key"
+    )]
+    Segment {
+        /// The manifest declaring it.
+        name: String,
+        /// Which name: organization, project, space or name.
+        segment: &'static str,
+    },
     /// A declared artifact path leads out of the repository, so its file is never read (PF-29,
     /// CC-08).
     #[error("{name}: {field} `{path}` leads outside the repository")]
@@ -90,6 +101,21 @@ pub fn rebuild(repo_dir: &Path, options: &Options) -> Result<Report, Error> {
             continue;
         };
 
+        // The repository is loaded, not validated: each segment of the key is checked here, or
+        // a space named `../..` writes outside `--out-dir` (T-5702).
+        for (segment, value) in [
+            ("organization", organization.as_str()),
+            ("project", project),
+            ("space", space),
+            ("name", manifest.metadata.name.as_str()),
+        ] {
+            if jc_core::names::validate_dns1123_label(value).is_err() {
+                return Err(Error::Segment {
+                    name: manifest.metadata.name.clone(),
+                    segment,
+                });
+            }
+        }
         let (prefix, files) = match manifest.kind.as_str() {
             "DataModel" => (
                 format!(

@@ -363,3 +363,38 @@ fn any_other_agent_profile_change_is_yellow() {
         assert_eq!(lane_of(&change).lane, Lane::Yellow, "{:?}", change.diff);
     }
 }
+
+/// T-5699, F-PLT3-014: the jcctl lane gives the kinds the Portal's lane makes red the same lane:
+/// public exposure through an App, an McpServer or an assistant, and Group, Project and the
+/// brokers whatever they change.
+#[test]
+fn public_apps_servers_assistants_and_grant_kinds_are_red_as_in_the_portal() {
+    let manifest = |kind: &str, spec: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: {kind}\nmetadata:\n  name: x\n  namespace: ovzdusie\nspec:\n{spec}"
+        )
+    };
+    let red = [
+        manifest("App", "  visibility: public\n"),
+        manifest("App", "  egress: [{host: example.org}]\n"),
+        manifest("McpServer", "  audience: public\n"),
+        manifest("AssistantDeployment", "  channel: ckan\n"),
+        manifest("Group", "  members: []\n"),
+        manifest("Project", "  title: x\n"),
+        manifest("ContextBroker", "  kind: antares\n"),
+        manifest("MqttBroker", "  roles: []\n"),
+    ];
+    for body in &red {
+        let verdict = lane_of(&change(Action::Create, body));
+        assert_eq!(verdict.lane, Lane::Red, "{body}: {}", verdict.reason);
+    }
+    let yellow = [
+        manifest("App", "  visibility: project\n"),
+        manifest("McpServer", "  audience: organization\n"),
+        manifest("AssistantDeployment", "  channel: internal\n"),
+    ];
+    for body in &yellow {
+        let verdict = lane_of(&change(Action::Create, body));
+        assert_eq!(verdict.lane, Lane::Yellow, "{body}: {}", verdict.reason);
+    }
+}

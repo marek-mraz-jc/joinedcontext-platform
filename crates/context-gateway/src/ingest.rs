@@ -116,25 +116,33 @@ fn entity(
     let mut changed = false;
     for class in classes {
         for (attribute, mode) in schema.ingest(&class) {
-            let Some(value) = object.get_mut(&attribute) else {
-                continue;
-            };
-            match mode.as_str() {
-                "drop" => {
-                    object.remove(&attribute);
-                    changed = true;
+            // the term, its expanded IRI or a compact IRI: one attribute
+            let keys: Vec<String> = object
+                .keys()
+                .filter(|k| crate::quality::names(k, &attribute))
+                .cloned()
+                .collect();
+            for written in keys {
+                let Some(value) = object.get_mut(&written) else {
+                    continue;
+                };
+                match mode.as_str() {
+                    "drop" => {
+                        object.remove(&written);
+                        changed = true;
+                    }
+                    "keyedHash" => {
+                        let key = key.ok_or_else(|| Refusal::NoKey {
+                            attribute: attribute.clone(),
+                        })?;
+                        changed |= hashed(
+                            value,
+                            &attribute,
+                            &hmac::Key::new(hmac::HMAC_SHA256, key.expose().as_bytes()),
+                        )?;
+                    }
+                    _ => return Err(Refusal::Unknown { attribute, mode }),
                 }
-                "keyedHash" => {
-                    let key = key.ok_or_else(|| Refusal::NoKey {
-                        attribute: attribute.clone(),
-                    })?;
-                    changed |= hashed(
-                        value,
-                        &attribute,
-                        &hmac::Key::new(hmac::HMAC_SHA256, key.expose().as_bytes()),
-                    )?;
-                }
-                _ => return Err(Refusal::Unknown { attribute, mode }),
             }
         }
     }
@@ -250,6 +258,25 @@ mod tests {
         assert!(trip.get("location").is_none());
         assert_eq!(trip["startStation"]["value"], "Námestie SNP");
         assert!(!trip.to_string().contains("anna"));
+    }
+
+    #[test]
+    fn an_expanded_or_compact_iri_is_the_same_slot() {
+        let mut trip = json!({ "id": "urn:ngsi-ld:BikeTrip:1", "type": "BikeTrip",
+            "https://uri.etsi.org/ngsi-ld/default-context/rider": { "type": "Property", "value": "anna" },
+            "ex:location": { "type": "GeoProperty", "value": { "type": "Point", "coordinates": [19.1, 48.7] } },
+            "https://example.org/startStation": { "type": "Property", "value": "Námestie SNP" } });
+        assert_eq!(run(&mut trip, whole()), Ok(true));
+        assert_eq!(
+            trip["https://uri.etsi.org/ngsi-ld/default-context/rider"]["value"],
+            json!(anna())
+        );
+        assert!(trip.get("ex:location").is_none());
+        assert_eq!(
+            trip["https://example.org/startStation"]["value"],
+            "Námestie SNP"
+        );
+        assert!(!trip.to_string().contains("\"anna\""));
     }
 
     #[test]
