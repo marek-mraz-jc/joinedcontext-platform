@@ -54,6 +54,13 @@ pub trait Storage: Send + Sync {
         method: Method,
         expires: u32,
     ) -> Answer<'a, String, BlobError>;
+    fn presign_put<'a>(
+        &'a self,
+        app: &'a Placed,
+        key: String,
+        size: u64,
+        expires: u32,
+    ) -> Answer<'a, String, BlobError>;
 }
 
 /// A shard with no stores configured: every call says so.
@@ -91,6 +98,15 @@ impl Storage for Unconfigured {
         _: &'a Placed,
         _: String,
         _: Method,
+        _: u32,
+    ) -> Answer<'a, String, BlobError> {
+        Box::pin(async { Err(BlobError::Unavailable(NONE.into())) })
+    }
+    fn presign_put<'a>(
+        &'a self,
+        _: &'a Placed,
+        _: String,
+        _: u64,
         _: u32,
     ) -> Answer<'a, String, BlobError> {
         Box::pin(async { Err(BlobError::Unavailable(NONE.into())) })
@@ -139,6 +155,17 @@ impl jc::app::blob::Host for State {
         let storage = self.storage.clone();
         storage
             .presign(&self.app, key, method, expires_seconds)
+            .await
+    }
+    async fn presign_put(
+        &mut self,
+        key: String,
+        size: u64,
+        expires_seconds: u32,
+    ) -> Result<String, BlobError> {
+        let storage = self.storage.clone();
+        storage
+            .presign_put(&self.app, key, size, expires_seconds)
             .await
     }
 }
@@ -246,6 +273,21 @@ impl Storage for Stores {
                 .as_ref()
                 .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
                 .presign(app, &key, method, expires)
+                .await
+        })
+    }
+    fn presign_put<'a>(
+        &'a self,
+        app: &'a Placed,
+        key: String,
+        size: u64,
+        expires: u32,
+    ) -> Answer<'a, String, BlobError> {
+        Box::pin(async move {
+            self.blob
+                .as_ref()
+                .ok_or_else(|| BlobError::Unavailable(NONE.into()))?
+                .presign_put(app, &key, size, expires)
                 .await
         })
     }

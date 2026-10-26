@@ -513,6 +513,66 @@ async fn a_presigned_put_stops_at_the_quota_and_a_read_at_its_limit() {
     assert_eq!(roomy.get(&a, "full").await.expect("at the limit"), b"abcd");
 }
 
+/// T-5817: a `presign-put` URL signs `content-length`, so the store itself refuses a body one
+/// byte over (or under) the size the host checked against the quota.
+#[tokio::test]
+async fn a_sized_presigned_put_takes_exactly_its_size_and_stops_at_the_quota() {
+    let store = Store::new().await;
+    let blob = store.blob("s1", 8);
+    let a = app("presign_put");
+    let url = blob
+        .presign_put(&a, "photo.png", 4, 60)
+        .await
+        .expect("presign-put");
+    assert!(
+        url.contains("X-Amz-SignedHeaders=content-length%3Bhost&"),
+        "{url}"
+    );
+    let http = reqwest::Client::new();
+    for body in [&b"abcde"[..], &b"abc"[..]] {
+        assert_eq!(
+            http.put(&url)
+                .body(body.to_vec())
+                .send()
+                .await
+                .expect("put")
+                .status(),
+            403,
+            "{} bytes on a URL signed for 4",
+            body.len()
+        );
+    }
+    assert!(matches!(
+        blob.get(&a, "photo.png").await,
+        Err(BlobError::NotFound)
+    ));
+    let status = http
+        .put(&url)
+        .body(b"abcd".to_vec())
+        .send()
+        .await
+        .expect("put")
+        .status();
+    assert!(status.is_success(), "{status}");
+    assert_eq!(blob.get(&a, "photo.png").await.expect("get"), b"abcd");
+    match blob.presign_put(&a, "more", 5, 60).await {
+        Err(BlobError::Quota(why)) => assert!(why.contains("8 bytes"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    blob.presign_put(&a, "more", 4, 60)
+        .await
+        .expect("exactly the quota");
+    // The four bytes that URL may still write count already: a second URL finds no room.
+    assert!(matches!(
+        blob.presign_put(&a, "again", 1, 60).await,
+        Err(BlobError::Quota(_))
+    ));
+    assert!(matches!(
+        blob.presign_put(&a, "../b/photo.png", 1, 60).await,
+        Err(BlobError::Refused(_))
+    ));
+}
+
 /// F-PLT3-007: a session advisory lock one statement took is gone when the connection comes
 /// back from the pool, so the next App on that connection holds nothing of the last one's.
 #[tokio::test]

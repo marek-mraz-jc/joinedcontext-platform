@@ -254,11 +254,18 @@ async fn the_example_keeps_notes_and_files_of_its_own() {
             &first,
             "POST",
             &format!("/api/notes/{id}/file"),
-            r#"{"name": "list.txt"}"#,
+            r#"{"name": "list.txt", "size": 10}"#,
         )
         .await;
     assert_eq!(status, 200, "{upload}");
     let http = reqwest::Client::new();
+    let longer = http
+        .put(upload["url"].as_str().expect("url"))
+        .body("milk, eggs!")
+        .send()
+        .await
+        .expect("upload");
+    assert_eq!(longer.status(), 403, "one byte over the signed size");
     let put = http
         .put(upload["url"].as_str().expect("url"))
         .body("milk, eggs")

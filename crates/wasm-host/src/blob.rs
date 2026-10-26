@@ -152,26 +152,25 @@ impl S3Blob {
         content_type: Option<String>,
     ) -> Result<(), BlobError> {
         let key = self.key(app, key)?;
-        if self.used(app).await? + data.len() as u64 > self.quota_bytes {
-            tracing::warn!(app = %app.id, kind = "blob", "refused: quota");
-            return Err(BlobError::Quota(format!(
-                "the application's files would pass {} bytes, its quota",
-                self.quota_bytes
-            )));
-        }
         let size = data.len() as u64;
+        self.room_for(app, size).await?;
         let (status, _) = self
             .bucket
             .object(reqwest::Method::PUT, &key, Some((data, content_type)))
             .await
             .map_err(BlobError::Unavailable)?;
         Self::answer(status)?;
+        self.count(app, size);
+        Ok(())
+    }
+
+    /// `size` more bytes in the cached use until the next listing.
+    fn count(&self, app: &Placed, size: u64) {
         if let Ok(mut sizes) = self.sizes.lock() {
             if let Some((_, used)) = sizes.get_mut(&app.id) {
-                *used += size;
+                *used = used.saturating_add(size);
             }
         }
-        Ok(())
     }
 
     pub async fn list(&self, app: &Placed, prefix: &str) -> Result<Vec<String>, BlobError> {
@@ -203,8 +202,8 @@ impl S3Blob {
 
     /// A URL for one key and one method, for at most [`MAX_PRESIGN_SECONDS`]. A PUT is refused
     /// once the application's files are at their quota, as [`Self::put`] refuses a write.
-    // ponytail: the URL signs no length yet, so one PUT below the quota can still pass it;
-    // a signed content-length needs a size in the WIT presign (later/T-later-wasm-storage-presign-signed-length).
+    /// ponytail: this unsized PUT (`jc:app@0.1.0` `presign`) signs no length, so one upload below
+    /// the quota can still pass it; [`Self::presign_put`] signs one, kept for published components.
     pub async fn presign(
         &self,
         app: &Placed,
@@ -216,22 +215,52 @@ impl S3Blob {
         let method = match method {
             Method::Get => "GET",
             Method::Put => {
-                if self.used(app).await? >= self.quota_bytes {
-                    tracing::warn!(app = %app.id, kind = "blob", "refused: quota");
-                    return Err(BlobError::Quota(format!(
-                        "the application's files are at {} bytes, its quota",
-                        self.quota_bytes
-                    )));
-                }
+                // At least one byte fits: refused once the files are at their quota.
+                self.room_for(app, 1).await?;
                 "PUT"
             }
         };
-        Ok(self.bucket.presign(
+        Ok(self.signed(method, &key, expires, None))
+    }
+
+    /// A PUT URL for one key whose body is exactly `size` bytes: `content-length` is signed, so
+    /// the store refuses any other length, and the URL is refused when the application's files
+    /// plus `size` would pass its quota (`jc:app@0.1.2` `presign-put`, AP-145).
+    pub async fn presign_put(
+        &self,
+        app: &Placed,
+        key: &str,
+        size: u64,
+        expires: u32,
+    ) -> Result<String, BlobError> {
+        let key = self.key(app, key)?;
+        self.room_for(app, size).await?;
+        // Counted when signed, so several URLs inside one cached listing cannot add up past the
+        // quota; an unused one holds its room until the listing refreshes.
+        self.count(app, size);
+        Ok(self.signed("PUT", &key, expires, Some(size)))
+    }
+
+    /// `Quota` unless `size` more bytes fit beside the application's files.
+    async fn room_for(&self, app: &Placed, size: u64) -> Result<(), BlobError> {
+        if self.used(app).await?.saturating_add(size) > self.quota_bytes {
+            tracing::warn!(app = %app.id, kind = "blob", "refused: quota");
+            return Err(BlobError::Quota(format!(
+                "the application's files would pass {} bytes, its quota",
+                self.quota_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn signed(&self, method: &str, key: &str, expires: u32, length: Option<u64>) -> String {
+        self.bucket.presign(
             method,
-            &key,
+            key,
             expires.clamp(1, MAX_PRESIGN_SECONDS),
+            length,
             OffsetDateTime::now_utc(),
-        ))
+        )
     }
 }
 

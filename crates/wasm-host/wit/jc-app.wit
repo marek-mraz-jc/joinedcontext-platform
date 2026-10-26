@@ -1,9 +1,9 @@
 /// What the shared host offers a server WASM App beside `wasi:http` (ADR-N-044, AP-144, AP-145).
 /// An App never holds a connection string, a password or an object-store key: it asks the host,
 /// and the host answers as the App's own database role and under the App's own storage prefix.
-/// 0.1.1 adds `identity`, `email` and `ai` (API/06 §5) and changes nothing of 0.1.0, so a
-/// component built against 0.1.0 links unchanged.
-package jc:app@0.1.1;
+/// 0.1.1 adds `identity`, `email` and `ai` (API/06 §5), 0.1.2 adds `blob.presign-put`; neither
+/// changes anything before it, so a component built against 0.1.0 or 0.1.1 links unchanged.
+package jc:app@0.1.2;
 
 /// The App's own Postgres schema, `app_<id>`, through bound parameters only (AP-144).
 interface sql {
@@ -64,7 +64,12 @@ interface blob {
     list-keys: func(prefix: string) -> result<list<string>, error>;
     delete: func(key: string) -> result<_, error>;
     /// A URL for one key and one method, valid for at most 300 seconds.
+    /// A `put` URL signs no length: upload through `presign-put`, which does.
     presign: func(key: string, method: method, expires-seconds: u32) -> result<string, error>;
+    /// A PUT URL for one key whose body is exactly `size` bytes, valid for at most 300 seconds:
+    /// the store refuses a body of another length, and the host answers `quota` when the App's
+    /// files plus `size` would pass its quota.
+    presign-put: func(key: string, size: u64, expires-seconds: u32) -> result<string, error>;
 }
 
 /// The person a request comes from, as the Portal verified them for this App (AP-109): an id,

@@ -2,7 +2,7 @@
 //! written against. A request comes in as a [`http::Request`], a handler answers a
 //! [`http::Response`], and the App's own database and files are [`sql`] and [`blob`]. The request's
 //! person is [`identity::caller`], and the platform's [`email`] and [`ai`] are asked in their name
-//! (`jc:app@0.1.1`, API/06 §5). Who may change what is [`access`] (API/07). The App never holds a connection string, a password, a storage key
+//! (`jc:app@0.1.2`, API/06 §5). Who may change what is [`access`] (API/07). The App never holds a connection string, a password, a storage key
 //! or a token: the host answers every call as the App and no other.
 //!
 //! ```no_run
@@ -145,6 +145,14 @@ pub mod blob {
     /// key, valid for at most five minutes.
     pub fn presign(key: &str, method: Method, expires_seconds: u32) -> Result<String, Error> {
         crate::jc::app::blob::presign(key, method, expires_seconds)
+    }
+
+    /// A URL the browser uploads exactly `size` bytes to, for one key, valid for at most five
+    /// minutes: the store refuses a body of another length, and `Error::Quota` comes back when
+    /// the App's files plus `size` would pass its quota. Prefer it to `presign(key, Method::Put, …)`,
+    /// which signs no length.
+    pub fn presign_put(key: &str, size: u64, expires_seconds: u32) -> Result<String, Error> {
+        crate::jc::app::blob::presign_put(key, size, expires_seconds)
     }
 }
 
