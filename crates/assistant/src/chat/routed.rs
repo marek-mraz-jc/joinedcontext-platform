@@ -4186,11 +4186,6 @@ fn worth_text(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The most tokens (by [`tokens_of`]) of a data answer's messages for one broad 50-row read with
-    /// its profile and passages, the tool definitions apart (T-5783: prod's data call read 11.8k
-    /// tokens in 23.1 s).
-    const DATA_PROMPT_TOKENS: u64 = 4_000;
-
     /// The most tokens (by [`tokens_of`]) of a data answer's first call, messages and tool
     /// definitions, for one broad 50-row read with its profile and passages (T-5783: prod's data call
     /// read 11.8k tokens in 23.1 s).
