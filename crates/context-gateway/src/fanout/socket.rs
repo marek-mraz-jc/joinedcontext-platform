@@ -535,6 +535,9 @@ fn text_of(metadata: &Map<String, Value>, key: &str) -> String {
 /// would otherwise hold a page of each in memory together (T-5182).
 const SNAPSHOTS: usize = 2;
 
+/// The smallest page a snapshot reads when a page passes the body cap.
+const SMALLEST_PAGE: usize = 50;
+
 /// Starts [`snapshot`] when the hub's table is due and a filter needs it.
 fn read_if_wanted(gateway: &Arc<Gateway>, hub: &Arc<Hub>, headers: &HeaderMap) {
     if hub.snapshot_now() {
@@ -554,11 +557,12 @@ async fn snapshot(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
         return;
     };
     let mut offset = 0;
+    let mut limit = PAGE;
     while offset < bound() {
         let mut headers = headers.clone();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         let path = format!(
-            "/x/views/{}/ngsi-ld/v1/entities?type=*&limit={PAGE}&offset={offset}",
+            "/x/views/{}/ngsi-ld/v1/entities?type=*&limit={limit}&offset={offset}",
             hub.slug
         );
         let answer = match gateway
@@ -576,7 +580,14 @@ async fn snapshot(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
                 return;
             }
         };
-        let Ok(bytes) = axum::body::to_bytes(answer.into_body(), 64 * 1024 * 1024).await else {
+        // A page is held to the gateway's own body cap; one past it is read again in smaller
+        // pages, so a view of large entities never buffers 64 MiB per page (F-PLT1-015).
+        let Ok(bytes) = axum::body::to_bytes(answer.into_body(), crate::app::MAX_BODY).await else {
+            if limit > SMALLEST_PAGE {
+                limit = (limit / 4).max(SMALLEST_PAGE);
+                continue;
+            }
+            tracing::warn!(slug = %hub.slug, limit, "a fan-out snapshot page is larger than the body cap");
             return;
         };
         let Ok(Value::Array(page)) = serde_json::from_slice::<Value>(&bytes) else {
@@ -586,7 +597,7 @@ async fn snapshot(gateway: Arc<Gateway>, hub: Arc<Hub>, headers: HeaderMap) {
         for entity in page {
             hub.seed(entity);
         }
-        if read < PAGE {
+        if read < limit {
             return;
         }
         offset += read;
@@ -1232,5 +1243,49 @@ mod tests {
         );
         let latin = Frame::message(vec![0xce, 0xba, 0xff], OpCode::Data(Data::Text), true);
         assert_eq!(closes_with(&url, Message::Frame(latin)).await, Some(1007));
+    }
+
+    /// F-PLT1-015: a snapshot page past the gateway's body cap is read again in quarter pages
+    /// instead of being buffered whole.
+    #[tokio::test]
+    async fn a_snapshot_page_past_the_body_cap_is_read_again_in_smaller_pages() {
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&asked);
+        let broker = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let seen = Arc::clone(&seen);
+            async move {
+                let query = uri.query().unwrap_or_default().to_owned();
+                seen.lock().expect("asked").push(query.clone());
+                let big = "x".repeat(10_000);
+                let page: Vec<Value> = if query.contains("offset=0") && query.contains("limit=1000")
+                {
+                    (0..1000)
+                        .map(|n| json!({ "id": format!("urn:ngsi-ld:A:{n}"), "big": big }))
+                        .collect()
+                } else if query.contains("offset=0") {
+                    vec![json!({ "id": "urn:ngsi-ld:A:1" })]
+                } else {
+                    Vec::new()
+                };
+                axum::Json(Value::Array(page))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        tokio::spawn(async move { axum::serve(listener, broker).await });
+        let gateway = Arc::new(Gateway::new(
+            crate::proxy::Broker::new(url),
+            Box::new(crate::pdp::PolicyPdp),
+            "hel.fi",
+        ));
+        snapshot(gateway, Arc::new(Hub::new("s", 10)), HeaderMap::new()).await;
+        let asked = asked.lock().expect("asked").clone();
+        assert_eq!(
+            asked,
+            ["type=*&limit=1000&offset=0", "type=*&limit=250&offset=0"],
+            "{asked:?}"
+        );
     }
 }

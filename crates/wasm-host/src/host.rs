@@ -383,6 +383,9 @@ pub struct Host {
     /// can never send one elsewhere.
     client: reqwest::Client,
     cache: Mutex<Cache>,
+    /// One compile per digest in flight: a burst of first requests to a cold App waits on the
+    /// one fetch and compile instead of each repeating it (F-PLT3-022).
+    loading: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     apps: Mutex<HashMap<String, Arc<Semaphore>>>,
     tenants: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
@@ -440,6 +443,7 @@ impl Host {
                 hits: 0,
                 misses: 0,
             }),
+            loading: Mutex::new(HashMap::new()),
             engine,
             linker,
             limits,
@@ -497,17 +501,52 @@ impl Host {
     /// The App's component, compiled once: fetched by its digest and refused unless the bytes
     /// hash to it (AP-143).
     pub async fn component(&self, digest: &str) -> Result<ProxyPre<State>, Failure> {
-        {
-            let mut cache = self
-                .cache
-                .lock()
-                .map_err(|_| Failure::Unavailable("cache".into()))?;
-            if let Some(pre) = cache.get(digest) {
-                cache.hits += 1;
-                return Ok(pre);
-            }
-            cache.misses += 1;
+        if let Some(pre) = self.cached_pre(digest)? {
+            return Ok(pre);
         }
+        let gate = self
+            .loading
+            .lock()
+            .map_err(|_| Failure::Unavailable("cache".into()))?
+            .entry(digest.to_owned())
+            .or_default()
+            .clone();
+        let loaded = {
+            let _turn = gate.lock().await;
+            match self.cached_pre(digest)? {
+                Some(pre) => Ok(pre),
+                None => self.load(digest).await,
+            }
+        };
+        if let Ok(mut loading) = self.loading.lock() {
+            if loading.get(digest).is_some_and(|g| Arc::ptr_eq(g, &gate))
+                && Arc::strong_count(&gate) <= 2
+            {
+                loading.remove(digest);
+            }
+        }
+        loaded
+    }
+
+    /// The cached component of `digest`, counted as a hit; a miss is counted by [`Self::load`].
+    fn cached_pre(&self, digest: &str) -> Result<Option<ProxyPre<State>>, Failure> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| Failure::Unavailable("cache".into()))?;
+        let pre = cache.get(digest);
+        if pre.is_some() {
+            cache.hits += 1;
+        }
+        Ok(pre)
+    }
+
+    /// Fetches, checks and compiles `digest`, then caches it; a failure is not cached.
+    async fn load(&self, digest: &str) -> Result<ProxyPre<State>, Failure> {
+        self.cache
+            .lock()
+            .map_err(|_| Failure::Unavailable("cache".into()))?
+            .misses += 1;
         let bytes = self
             .source
             .fetch(digest)
