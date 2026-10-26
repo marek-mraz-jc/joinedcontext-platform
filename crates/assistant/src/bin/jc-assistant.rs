@@ -196,6 +196,10 @@ fn chat_state(
     Ok((chat_state, reader))
 }
 
+/// How long a new pod waits for its first warm-up before it turns ready: past the 20 s a
+/// connector's list may take, well inside the readiness probe's patience.
+const FIRST_WARM: Duration = Duration::from_secs(30);
+
 /// What the minute's work reads and keeps between minutes.
 struct Minute {
     pool: PgPool,
@@ -224,8 +228,18 @@ impl Minute {
         if let Ok(mut held) = self.chat_state.snapshot.write() {
             *held = Arc::clone(&snapshot);
         }
-        // Routing's type lists, ahead of the first question (T-4611).
-        tokio::spawn(chat::warm_types(Arc::clone(&self.chat_state)));
+        // Routing's type lists, ahead of the first question (T-4611). A new pod turns ready only
+        // once its first warm-up listed them, or after `FIRST_WARM`: ready at once, its first
+        // questions met no connector and were answered as if the data held nothing (T-5782).
+        let warming = tokio::spawn(chat::warm_types(Arc::clone(&self.chat_state)));
+        if !self.ready.load(Ordering::Relaxed)
+            && tokio::time::timeout(FIRST_WARM, warming).await.is_err()
+        {
+            tracing::warn!(
+                seconds = FIRST_WARM.as_secs(),
+                "the first warm-up did not finish in time; ready without every type list"
+            );
+        }
         // The context pages' entity counts, so no visitor's request asks the gateway (T-4692).
         tokio::spawn(chat::context::count(Arc::clone(&self.chat_state)));
         let sources = &snapshot.sources;
