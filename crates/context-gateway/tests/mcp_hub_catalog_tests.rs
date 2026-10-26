@@ -156,6 +156,23 @@ fn city() -> Vec<Endpoint> {
     ]
 }
 
+/// The city with its public catalogue Endpoint under the plain `catalog` space and `slug`,
+/// in place of the rendered `mesto-catalog` one: the hub reads the first catalogue in reach
+/// (T-5699) and holds that read process-wide by slug for a minute, so a test counting the
+/// broker's catalogue reads needs a catalogue slug no other test reaches.
+fn city_with_catalog(slug: &str) -> Vec<Endpoint> {
+    let mut endpoints = city();
+    endpoints.retain(|endpoint| endpoint.space != "mesto-catalog");
+    endpoints.push(endpoint(
+        slug,
+        "Open data catalogue",
+        "catalog",
+        Audience::Public,
+        "public",
+    ));
+    endpoints
+}
+
 fn steward(realm: &common::Realm) -> String {
     realm.mint(&json!({
         "iss": common::ISSUER,
@@ -299,14 +316,7 @@ fn package(name: &str, slug: &str, org: &str, kind: Option<&str>) -> Package {
 async fn the_hub_lists_the_portals_ckan_datasets_and_organizations_with_one_read() {
     const CATALOG: &str = "kkkkkkkkkkkkkkkkkkkkkkkkkk";
     let realm = common::Realm::new();
-    let mut endpoints = city();
-    endpoints.push(endpoint(
-        CATALOG,
-        "Open data catalogue",
-        "catalog",
-        Audience::Public,
-        "public",
-    ));
+    let endpoints = city_with_catalog(CATALOG);
     let request = Request::builder()
         .uri("/catalog.jsonld")
         .body(Body::empty())
@@ -1905,14 +1915,7 @@ async fn ten_thousand_generated_datasets_are_found_fast() {
 async fn callers_at_once_read_the_public_catalogue_once() {
     const CATALOG: &str = "jjjjjjjjjjjjjjjjjjjjjjjjjj";
     let realm = common::Realm::new();
-    let mut endpoints = city();
-    endpoints.push(endpoint(
-        CATALOG,
-        "Open data catalogue",
-        "catalog",
-        Audience::Public,
-        "public",
-    ));
+    let endpoints = city_with_catalog(CATALOG);
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let app = app_on(&broker.url, &realm, endpoints);
     let answers = futures_util::future::join_all((0..8).map(|_| {
