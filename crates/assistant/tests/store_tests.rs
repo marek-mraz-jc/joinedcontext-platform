@@ -1041,3 +1041,80 @@ async fn every_public_endpoint_and_type_of_prod_cites_its_dataset() {
     assert!(misses.is_empty(), "{}", misses.join("\n"));
     drop_database(admin, pool, &name).await;
 }
+
+/// T-5773: the semantic arm walks the HNSW index instead of sorting every chunk of the scope by
+/// distance (23.5 s on prod at 130k chunks), and the walk goes on past `ef_search` until the
+/// scope's own chunks are found: a source of 2 chunks beside 400 nearer ones of another source
+/// still gets them. Sequential and bitmap scans and sorts are off so a table this small plans as
+/// the large one does.
+#[tokio::test]
+async fn the_semantic_arm_walks_the_vector_index_past_other_sources_chunks() {
+    let (admin, pool, name) = database("knn").await;
+    let near: Vec<(String, Vec<f32>)> = (0..400)
+        .map(|i| {
+            (
+                format!("Pier {i}"),
+                embedding(0, Some((2, i as f32 / 1000.0))),
+            )
+        })
+        .collect();
+    let near: Vec<(&str, &str, &str, Vec<f32>)> = near
+        .iter()
+        .map(|(text, v)| (text.as_str(), "en", "public", v.clone()))
+        .collect();
+    site(&pool, "helsinki", "hel-big", &near).await;
+    let small = site(
+        &pool,
+        "helsinki",
+        "hel-small",
+        &[
+            (
+                "Library hours",
+                "en",
+                "public",
+                embedding(1, Some((0, 0.5))),
+            ),
+            (
+                "Library cards",
+                "en",
+                "public",
+                embedding(1, Some((0, 0.4))),
+            ),
+        ],
+    )
+    .await;
+    let sources = vec!["hel-small".to_owned()];
+    let mut tx = project_scope(&pool, "helsinki").await.expect("scope");
+    sqlx::raw_sql(
+        "SET LOCAL ROLE assistant_app; SET LOCAL enable_seqscan = off; \
+         SET LOCAL enable_bitmapscan = off; SET LOCAL enable_sort = off",
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("settings");
+    let hits = hybrid_search(
+        &mut tx,
+        &Search {
+            text: "zzzz",
+            embedding: &embedding(0, None),
+            sources: &sources,
+            public_only: true,
+            limit: 10,
+            lang: None,
+        },
+    )
+    .await
+    .expect("search");
+    let walked: i64 =
+        sqlx::query_scalar("SELECT pg_stat_get_xact_numscans('chunks_embedding'::regclass)")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("index scans");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(
+        hits.iter().map(|hit| hit.chunk).collect::<Vec<_>>(),
+        vec![small[0], small[1]]
+    );
+    assert_eq!(walked, 1, "the semantic arm is served by chunks_embedding");
+    drop_database(admin, pool, &name).await;
+}
