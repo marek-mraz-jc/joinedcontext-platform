@@ -7,9 +7,9 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
+pub use crate::kinds::service_account::BindingValidity;
 use crate::kinds::service_account::RoleScope;
 use crate::names;
-use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -393,18 +393,6 @@ pub enum SubjectSource {
     Provider,
 }
 
-/// When a binding applies; absent bounds are open.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct BindingValidity {
-    /// Not in force before this instant (UTC).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_before: Option<DateTime<Utc>>,
-    /// Not in force after this instant (UTC).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub not_after: Option<DateTime<Utc>>,
-}
-
 /// `spec` of a RoleBinding (PF-49).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -483,13 +471,5 @@ impl RoleBindingSpec {
             }
         }
         Ok(())
-    }
-}
-
-/// Whether the binding is in force at `now`.
-impl BindingValidity {
-    /// `true` when `now` is inside the window (bounds inclusive).
-    pub fn contains(&self, now: DateTime<Utc>) -> bool {
-        self.not_before.is_none_or(|from| from <= now) && self.not_after.is_none_or(|to| now <= to)
     }
 }

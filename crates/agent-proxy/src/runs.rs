@@ -74,7 +74,7 @@ pub struct RunResolver {
     credentials: Option<crate::inject::CredentialManager>,
     cache: RunCache,
     /// The tickets that verified, per run, so a run's later calls skip Argon2 (F-PLT1-007).
-    pub tickets: crate::auth::TicketCache,
+    pub tickets: crate::tickets::TicketCache,
 }
 
 impl std::fmt::Debug for RunResolver {
@@ -105,7 +105,7 @@ impl RunResolver {
             portal_base,
             credentials: Some(credentials),
             cache: Arc::new(RwLock::new(HashMap::new())),
-            tickets: crate::auth::TicketCache::default(),
+            tickets: crate::tickets::TicketCache::default(),
         }
     }
 
@@ -120,7 +120,7 @@ impl RunResolver {
             portal_base: Url::parse("http://portal").unwrap(),
             credentials: None,
             cache: Arc::new(RwLock::new(map)),
-            tickets: crate::auth::TicketCache::default(),
+            tickets: crate::tickets::TicketCache::default(),
         }
     }
 

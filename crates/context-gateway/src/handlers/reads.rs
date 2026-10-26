@@ -3,9 +3,9 @@
 
 use crate::app::{Gateway, MAX_BODY, MAX_COLLECTED, PAGE};
 use crate::auth::subject::Subject;
+use crate::handlers::ngsi_ld::no_view;
 use crate::handlers::ngsi_ld::{has_view, ANTARES_RESTRICTED};
 use crate::handlers::types_list::dataset_types;
-use crate::handlers::view_access::no_view;
 use crate::handlers::writes::names_no_tenant;
 use crate::resolver::Endpoint;
 use crate::{middleware::tenancy, query};

@@ -73,7 +73,7 @@ pub(crate) async fn file_csv(
         Err(problem) => return *problem,
     };
     // A strong ETag over the bytes and a 304 when they still match (EP-43, T-5209).
-    let mut response = revalidated_text(bytes.to_vec(), tabular::CSV_MEDIA_TYPE, request.headers());
+    let mut response = revalidated_text(bytes, tabular::CSV_MEDIA_TYPE, request.headers());
     let headers = response.headers_mut();
     // The slug is base32 and the extension a literal, so the filename needs no quoting beyond
     // the quotes themselves (EP-43).

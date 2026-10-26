@@ -647,15 +647,13 @@ pub(crate) fn admit_space(
 /// The same PDP that enforces a request decides who may see the space exists, so the
 /// catalog cannot list a space the data surface would refuse.
 pub(crate) fn discoverable(gateway: &Gateway, space: &Space, subject: &Subject) -> bool {
-    !gateway
-        .pdp
-        .decide(
-            subject,
-            Operation::QueryEntity,
-            &query::requested(&[]),
-            &space.endpoint,
-        )
-        .is_deny()
+    let verdict = gateway.pdp.decide(
+        subject,
+        Operation::QueryEntity,
+        &query::requested(&[]),
+        &space.endpoint,
+    );
+    !matches!(verdict, crate::pdp::evaluator::Verdict::Deny)
 }
 
 #[cfg(test)]
