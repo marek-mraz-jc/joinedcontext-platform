@@ -68,7 +68,7 @@ pub struct RoleBinding {
     /// When the grant applies; outside the window it grants nothing, and the Portal removes it
     /// once `notAfter` has passed (AG-131).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validity: Option<crate::kinds::role::BindingValidity>,
+    pub validity: Option<BindingValidity>,
 }
 
 impl RoleBinding {
@@ -547,4 +547,24 @@ fn validate_cidr(cidr: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// When a binding applies; absent bounds are open.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BindingValidity {
+    /// Not in force before this instant (UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_before: Option<DateTime<Utc>>,
+    /// Not in force after this instant (UTC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<DateTime<Utc>>,
+}
+
+/// Whether the binding is in force at `now`.
+impl BindingValidity {
+    /// `true` when `now` is inside the window (bounds inclusive).
+    pub fn contains(&self, now: DateTime<Utc>) -> bool {
+        self.not_before.is_none_or(|from| from <= now) && self.not_after.is_none_or(|to| now <= to)
+    }
 }

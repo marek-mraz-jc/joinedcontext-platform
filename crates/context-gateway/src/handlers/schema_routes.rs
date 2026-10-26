@@ -249,12 +249,14 @@ pub(crate) fn revalidated(
     revalidated_text(bytes, media_type, headers)
 }
 
-/// The same, for a document that is already the bytes the caller receives (T-0284).
+/// The same, for a document that is already the bytes the caller receives (T-0284). Shared
+/// bytes, a cached download say, are sent without a copy.
 pub(crate) fn revalidated_text(
-    bytes: Vec<u8>,
+    bytes: impl Into<axum::body::Bytes>,
     media_type: &str,
     headers: &HeaderMap,
 ) -> Response<Body> {
+    let bytes = bytes.into();
     let etag = format!("\"{}\"", sha256_hex(&bytes));
 
     let mut response = if matches_etag(headers, &etag) {

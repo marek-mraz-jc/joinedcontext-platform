@@ -46,20 +46,18 @@ fn with_reasoning(body: &Bytes, rest: &str, effort: &str) -> Bytes {
 /// its cost hold whatever model the workspace names, and a harness that names a side model of its
 /// own (titles, summaries) keeps working on the run's. A body that is not a JSON object, or a
 /// profile naming no model, is sent as is.
-fn with_model(body: &Bytes, model: &str) -> Bytes {
+fn with_model(body: Bytes, model: &str) -> Bytes {
     if model.is_empty() {
-        return body.clone();
+        return body;
     }
-    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(body) else {
-        return body.clone();
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(&body) else {
+        return body;
     };
     if map.get("model").and_then(Value::as_str) == Some(model) {
-        return body.clone();
+        return body;
     }
     map.insert("model".into(), json!(model));
-    serde_json::to_vec(&map)
-        .map(Bytes::from)
-        .unwrap_or_else(|_| body.clone())
+    serde_json::to_vec(&map).map(Bytes::from).unwrap_or(body)
 }
 
 /// Why the body's OpenRouter `provider` field is refused, or `None` when it is absent or holds
@@ -655,7 +653,7 @@ pub async fn handler(
     }
 
     let body_bytes = match &caller {
-        Caller::Run(run) => with_model(&body_bytes, &run.model_name),
+        Caller::Run(run) => with_model(body_bytes, &run.model_name),
         Caller::Assistant { .. } | Caller::App { .. } => body_bytes,
     };
     let effort_setting = match &caller {
@@ -880,7 +878,7 @@ mod tests {
     #[test]
     fn the_runs_model_replaces_the_one_the_body_names() {
         let sent = |body: &str, model: &str| {
-            String::from_utf8(with_model(&Bytes::from(body.to_owned()), model).to_vec())
+            String::from_utf8(with_model(Bytes::from(body.to_owned()), model).to_vec())
                 .unwrap_or_default()
         };
         let replaced: Value =

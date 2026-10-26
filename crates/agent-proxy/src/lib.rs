@@ -11,6 +11,7 @@ pub mod model_key;
 pub mod public_dns;
 pub mod routes;
 pub mod runs;
+pub mod tickets;
 
 use axum::routing::{get, post};
 use axum::Router;

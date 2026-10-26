@@ -11,6 +11,7 @@ use crate::auth::subject::principal_of;
 use crate::auth::subject::Subject;
 use crate::auth::subject::{anonymous_on, subject_from, PORTAL_CLIENT, SIMULATE_AUDIENCE};
 use crate::auth::token::{self, Claims};
+use crate::handlers::ngsi_ld::no_view;
 use crate::handlers::ngsi_ld::{broker_failure, has_view, view_of};
 use crate::handlers::respond::json_response;
 use crate::handlers::respond::sha256_hex;
@@ -228,20 +229,6 @@ async fn from_view(
             Err(Box::new(not_a_document()))
         }
     }
-}
-
-/// The answer for an Endpoint the broker holds no view of: its slug is longer than a view id can
-/// be, so the Portal's writer refused the view and the Endpoint's status says so. Nobody decides
-/// for it, so nothing is answered (fail closed).
-pub(crate) fn no_view(endpoint: &Endpoint) -> Response<Body> {
-    tracing::error!(slug = %endpoint.slug, "no broker view serves this endpoint's access surface");
-    ProblemDetails::new(
-        503,
-        "no-view",
-        "The access surface of this endpoint is not served",
-    )
-    .with_detail("no context broker view serves this endpoint; its status in the Portal says why")
-    .into_response()
 }
 
 /// A broker answer the gateway cannot read: the caller learns that the broker failed, the
