@@ -530,6 +530,7 @@ mod tests {
                 None,
             ],
             profile: None,
+            filter: None,
         }
     }
 
