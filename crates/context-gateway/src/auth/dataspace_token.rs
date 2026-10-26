@@ -123,10 +123,13 @@ pub fn presented(claims: &Claims) -> bool {
 ///
 /// The signature, the issuer and the audience were checked before this: what is left is
 /// everything about the agreement, and the lifetime the token was minted with.
+/// `organizations` is each Project's Organization: an `organization` Endpoint serves only an
+/// agreement of a project of its own Organization (F-PLT3-011).
 pub fn subject(
     claims: &Claims,
     agreements: &Agreements,
     endpoint: &Endpoint,
+    organizations: &std::collections::BTreeMap<String, String>,
     now: DateTime<Utc>,
 ) -> Result<Subject, Refused> {
     let (Some(id), Some(participant)) = (
@@ -149,7 +152,7 @@ pub fn subject(
     if agreement.spec.remote_participant.as_str() != participant {
         return Err(Refused::WrongParticipant(id.to_owned()));
     }
-    if !endpoint.admits(Some(&agreement.project)) {
+    if !endpoint.admits_from(&agreement.project, organizations) {
         return Err(Refused::OutOfProject(id.to_owned()));
     }
 

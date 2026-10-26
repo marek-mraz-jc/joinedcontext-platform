@@ -241,6 +241,20 @@ impl Endpoint {
         }
     }
 
+    /// [`Endpoint::admits`] for a caller from `project`, with an `organization` audience held to
+    /// the projects of this endpoint's own Organization (EP-15, ADR-N-058, F-PLT3-011).
+    /// `organizations` maps each Project to its `organizationRef`; a project either side of
+    /// which it does not name is refused.
+    pub fn admits_from(&self, project: &str, organizations: &BTreeMap<String, String>) -> bool {
+        if !self.admits(Some(project)) {
+            return false;
+        }
+        self.audience != Audience::Organization
+            || organizations
+                .get(&self.project)
+                .is_some_and(|theirs| organizations.get(project) == Some(theirs))
+    }
+
     /// The personal attributes this Endpoint would serve to anyone, as `Class.attribute`
     /// (ADR-N-054 2.6, DM-122): none unless its audience is public.
     pub fn public_personal_attributes(&self) -> Vec<String> {

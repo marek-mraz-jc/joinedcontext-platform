@@ -184,3 +184,29 @@ fn the_answer_does_not_depend_on_the_order_of_the_questions() {
         assert!(listed.admits(Some("ovzdusie")));
     }
 }
+
+/// F-PLT3-011: `admits_from` holds an organization endpoint to its own Organization's projects,
+/// refuses a project either side of which has no Organization, and leaves the other audiences
+/// to `admits`.
+#[test]
+fn admits_from_holds_an_organization_endpoint_to_its_organization() {
+    let organizations: std::collections::BTreeMap<String, String> = [
+        ("ovzdusie", "banskabystrica"),
+        ("doprava", "banskabystrica"),
+        ("helsinki", "helsinki"),
+    ]
+    .iter()
+    .map(|(project, organization)| ((*project).to_owned(), (*organization).to_owned()))
+    .collect();
+    let internal = endpoint(Audience::Organization, &[]);
+    assert!(internal.admits_from("ovzdusie", &organizations));
+    assert!(internal.admits_from("doprava", &organizations));
+    assert!(!internal.admits_from("helsinki", &organizations));
+    assert!(!internal.admits_from("a-project-nobody-listed", &organizations));
+    assert!(!internal.admits_from("doprava", &Default::default()));
+
+    assert!(endpoint(Audience::Public, &[]).admits_from("helsinki", &organizations));
+    let listed = endpoint(Audience::ProjectList, &["helsinki"]);
+    assert!(listed.admits_from("helsinki", &organizations));
+    assert!(!listed.admits_from("doprava", &organizations));
+}
