@@ -24,6 +24,14 @@ pub const CHUNK_OVERLAP: usize = 200;
 /// The most passages one page or document may become: a cap on what one source can cost.
 pub const MAX_PASSAGES: usize = 2_000;
 
+/// The most chunks one source's documents hold, and the most of the whole source (T-5773). On
+/// 2026-10-25 the banskabystrica crawl stored 84,815 chunks of 3,359 linked PDFs in a day (the
+/// project had grown under 300 a day), and every search of every deployment sharing the store
+/// slowed with it. Pages are what most questions are answered from, so documents stop first and
+/// pages keep their room; a document past the cap keeps its first passages, counted as cut.
+pub const MAX_SITE_DOCUMENT_CHUNKS: i64 = 20_000;
+pub const MAX_SITE_CHUNKS: i64 = 50_000;
+
 /// One passage of a page or a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Passage {
@@ -301,7 +309,9 @@ pub enum Owner {
 }
 
 /// Replaces the chunks of `owner` with `extracted`'s passages, in one project-scoped
-/// transaction, so a reader never sees half of an old and half of a new version.
+/// transaction, so a reader never sees half of an old and half of a new version. The site's
+/// caps ([`MAX_SITE_CHUNKS`], [`MAX_SITE_DOCUMENT_CHUNKS`]) keep the first passages that fit;
+/// the count stored is returned.
 pub async fn store(
     pool: &PgPool,
     project: &str,
@@ -321,7 +331,22 @@ pub async fn store(
         .bind(document_id)
         .execute(&mut *tx)
         .await?;
-    for (ordinal, passage) in extracted.passages.iter().enumerate() {
+    let (held, held_by_documents): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(document_id) FROM chunks WHERE project = $1 AND site_id = $2",
+    )
+    .bind(project)
+    .bind(site_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let mut room = MAX_SITE_CHUNKS - held;
+    if document_id.is_some() {
+        room = room.min(MAX_SITE_DOCUMENT_CHUNKS - held_by_documents);
+    }
+    let room = usize::try_from(room).unwrap_or(0);
+    if room < extracted.passages.len() {
+        tracing::warn!(%project, site_id, %url, held, room, passages = extracted.passages.len(), "the source reached its chunk cap; the passages past it are left out");
+    }
+    for (ordinal, passage) in extracted.passages.iter().take(room).enumerate() {
         // A PDF passage cites its page, so a reader lands where the text is.
         let cited = match passage.first_page {
             Some(page) => format!("{url}#page={page}"),
@@ -344,7 +369,7 @@ pub async fn store(
         .await?;
     }
     tx.commit().await?;
-    Ok(extracted.passages.len())
+    Ok(extracted.passages.len().min(room))
 }
 
 /// The crawl's [`Sink`]: extracts each changed, included page or document and replaces its
@@ -419,10 +444,7 @@ impl Indexer {
         }
         let outcome = match extract(bytes, mime, language, self.max_pdf_pages).await {
             Ok(extracted) => {
-                if extracted.truncated {
-                    self.truncated += 1;
-                }
-                store(
+                let stored = store(
                     &self.pool,
                     &self.project,
                     self.site_id,
@@ -431,7 +453,14 @@ impl Indexer {
                     &self.visibility,
                     &extracted,
                 )
-                .await
+                .await;
+                let capped = stored
+                    .as_ref()
+                    .is_ok_and(|stored| *stored < extracted.passages.len());
+                if extracted.truncated || capped {
+                    self.truncated += 1;
+                }
+                stored
             }
             Err(err) => Err(err),
         };

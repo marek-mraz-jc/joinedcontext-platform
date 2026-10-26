@@ -5,7 +5,9 @@
 //! store tests and fail saying so when it is missing.
 
 use assistant::crawl::Sink;
-use assistant::extract::{extract, Indexer, CHUNK_CHARS};
+use assistant::extract::{
+    extract, Indexer, CHUNK_CHARS, MAX_SITE_CHUNKS, MAX_SITE_DOCUMENT_CHUNKS,
+};
 use assistant::{project_scope, MIGRATOR};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -382,5 +384,91 @@ async fn the_indexer_replaces_a_pages_chunks_and_cites_a_pdfs_page() {
         "{:?}",
         indexer.failures
     );
+    drop_database(admin, pool, &name).await;
+}
+
+/// Adds `count` chunks to the site under a new page or document of its own, as a crawl that
+/// stored them earlier would have.
+async fn filler(pool: &PgPool, project: &str, site: i64, page: i64, document: bool, count: i64) {
+    let mut tx = project_scope(pool, project).await.expect("scope");
+    let (page_id, document_id): (Option<i64>, Option<i64>) = if document {
+        let id = sqlx::query_scalar("INSERT INTO documents (site_id, project, page_id, url) VALUES ($1, $2, $3, 'https://bb.example/' || gen_random_uuid() || '.pdf') RETURNING id")
+            .bind(site).bind(project).bind(page).fetch_one(&mut *tx).await.expect("document");
+        (None, Some(id))
+    } else {
+        let id = sqlx::query_scalar("INSERT INTO pages (site_id, project, url, depth) VALUES ($1, $2, 'https://bb.example/' || gen_random_uuid(), 1) RETURNING id")
+            .bind(site).bind(project).fetch_one(&mut *tx).await.expect("page");
+        (Some(id), None)
+    };
+    sqlx::query(
+        "INSERT INTO chunks (site_id, project, page_id, document_id, ordinal, url, text, visibility) \
+         SELECT $1, $2, $3, $4, n, 'https://bb.example/', 'filler', 'public' FROM generate_series(0, $5 - 1) n",
+    )
+    .bind(site).bind(project).bind(page_id).bind(document_id).bind(count)
+    .execute(&mut *tx).await.expect("filler");
+    tx.commit().await.expect("commit");
+}
+
+/// T-5773: one crawl stored 84,815 chunks of linked PDFs in a day and slowed every search. A
+/// source's documents stop at MAX_SITE_DOCUMENT_CHUNKS while its pages still index, and the whole
+/// source stops at MAX_SITE_CHUNKS; what is left out counts as cut.
+#[tokio::test]
+async fn a_source_stops_storing_documents_then_pages_at_its_chunk_caps() {
+    let (admin, pool, name) = database("caps").await;
+    let (site, page, document) = rows(&pool, "banskabystrica").await;
+    filler(
+        &pool,
+        "banskabystrica",
+        site,
+        page,
+        true,
+        MAX_SITE_DOCUMENT_CHUNKS,
+    )
+    .await;
+    let mut indexer = Indexer::new(pool.clone(), "banskabystrica", site, "public", 500);
+
+    indexer
+        .document(
+            document,
+            "https://bb.example/plan.pdf",
+            Some("application/pdf"),
+            &pdf("Zoning plan of the city"),
+        )
+        .await;
+    indexer
+        .page(page, "https://bb.example/", Some("sk"), &long_slovak_page())
+        .await;
+    let stored = chunks(&pool, "banskabystrica").await;
+    let of = |page_id: Option<i64>, document_id: Option<i64>| {
+        stored
+            .iter()
+            .filter(|c| c.0 == page_id && c.1 == document_id)
+            .count()
+    };
+    assert_eq!(of(None, Some(document)), 0, "the documents' cap is full");
+    assert!(of(Some(page), None) >= 3, "a page still has room");
+    assert_eq!((indexer.truncated, indexer.failures.len()), (1, 0));
+
+    let held = i64::try_from(stored.len()).expect("count");
+    filler(
+        &pool,
+        "banskabystrica",
+        site,
+        page,
+        false,
+        MAX_SITE_CHUNKS - held + 1,
+    )
+    .await;
+    indexer
+        .page(page, "https://bb.example/", Some("sk"), &long_slovak_page())
+        .await;
+    let page_chunks = chunks(&pool, "banskabystrica")
+        .await
+        .iter()
+        .filter(|c| c.0 == Some(page))
+        .count();
+    // One chunk over the cap: the page's own chunks are replaced, one fewer.
+    assert_eq!(page_chunks, of(Some(page), None) - 1);
+    assert_eq!(indexer.truncated, 2);
     drop_database(admin, pool, &name).await;
 }
