@@ -433,15 +433,17 @@ pub struct Reader {
 }
 
 /// The entities of each type a public Endpoint serves, as an anonymous caller counts them. A
-/// type whose count does not come back is left out rather than reported as zero.
+/// type whose count does not come back is left out rather than reported as zero. `None` when the
+/// gateway sheds load (503 or 429): the remaining types are not asked, since each would be
+/// refused in a millisecond too (T-5781: 2,416 refused counts in one second on prod).
 pub async fn counts(
     http: &reqwest::Client,
     gateway: &Url,
     page: &EndpointPage,
-) -> BTreeMap<String, u64> {
+) -> Option<BTreeMap<String, u64>> {
     let mut counted = BTreeMap::new();
     if !page.is_public() {
-        return counted;
+        return Some(counted);
     }
     for entity_type in &page.types {
         let Ok(mut url) = gateway.join(&format!("api/endpoint/{}/ngsi-ld/v1/entities", page.slug))
@@ -458,6 +460,10 @@ pub async fn counts(
                 .get("NGSILD-Results-Count")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok()),
+            Ok(answer) if sheds(answer.status()) => {
+                tracing::info!(endpoint = %page.name, class = %entity_type.class, status = %answer.status(), "not counted: the gateway sheds load, the rest wait for the next round");
+                return None;
+            }
             Ok(answer) => {
                 tracing::info!(endpoint = %page.name, class = %entity_type.class, status = %answer.status(), "not counted");
                 None
@@ -471,8 +477,17 @@ pub async fn counts(
             counted.insert(entity_type.class.clone(), count);
         }
     }
-    counted
+    Some(counted)
 }
+
+/// The gateway's answers to a caller past its share (in_flight.rs): asking again at once is refused too.
+fn sheds(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// How long a catalogue sync waits before it asks a shedding gateway once more.
+const SHED_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What one run did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -514,8 +529,18 @@ pub async fn sync_catalogue(
             .join(&format!("api/endpoint/{}", page.slug))
             .map(String::from)
             .unwrap_or_default();
+        // One Endpoint at a time; a shedding gateway gets one more ask after a pause, then the
+        // page is indexed uncounted, every type kept.
         let counts = match &reader.gateway {
-            Some(gateway) => counts(&reader.http, gateway, page).await,
+            Some(gateway) => match counts(&reader.http, gateway, page).await {
+                Some(counts) => counts,
+                None => {
+                    tokio::time::sleep(SHED_WAIT).await;
+                    counts(&reader.http, gateway, page)
+                        .await
+                        .unwrap_or_default()
+                }
+            },
             None => BTreeMap::new(),
         };
         // A public Endpoint shows a visitor the types its Policy grants them: where the counts came
