@@ -4004,6 +4004,194 @@ async fn a_data_question_with_rows_does_not_wait_for_the_first_rounds_judgement(
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
+/// A model reply that notes when it was asked for, so a test can read when a call started.
+struct Stamped(
+    ResponseTemplate,
+    Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+);
+
+impl wiremock::Respond for Stamped {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.1
+            .lock()
+            .expect("the stamps")
+            .push(std::time::Instant::now());
+        self.0.clone()
+    }
+}
+
+/// The router and answer calls of a data question, each noting when it was asked for; the judge
+/// says the passages do not answer.
+async fn stamped_data_question(
+    proxy: &MockServer,
+    answer: &str,
+) -> (
+    Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+) {
+    let (routed, answered) = (Arc::default(), Arc::default());
+    let route = completion(
+        json!({"role": "assistant", "content": "{\"route\": \"data\", \"data\": [{\"endpoint\": \"ovzdusie\", \"type\": \"AirQualityObserved\", \"q\": \"no2>20\"}]}"}),
+        400,
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/llm/chat/completions"))
+        .and(body_string_contains(ROUTER))
+        .respond_with(Stamped(route, Arc::clone(&routed)))
+        .with_priority(1)
+        .mount(proxy)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/llm/chat/completions"))
+        .and(body_string_contains(JUDGE))
+        .respond_with(completion(
+            json!({"role": "assistant", "content": "{\"answers\": false}"}),
+            50,
+        ))
+        .with_priority(1)
+        .mount(proxy)
+        .await;
+    let text = completion(json!({"role": "assistant", "content": answer}), 1_200);
+    Mock::given(method("POST"))
+        .and(path("/v1/llm/chat/completions"))
+        .respond_with(Stamped(text, Arc::clone(&answered)))
+        .with_priority(100)
+        .mount(proxy)
+        .await;
+    (routed, answered)
+}
+
+/// How long after the `n`th router reply the `n`th answer call started.
+fn router_to_data(
+    routed: &std::sync::Mutex<Vec<std::time::Instant>>,
+    answered: &std::sync::Mutex<Vec<std::time::Instant>>,
+    n: usize,
+) -> std::time::Duration {
+    let at = |stamps: &std::sync::Mutex<Vec<std::time::Instant>>| {
+        stamps.lock().expect("the stamps").get(n).copied()
+    };
+    let (Some(routed), Some(answered)) = (at(routed), at(answered)) else {
+        panic!("no router reply or answer call number {n}");
+    };
+    answered.duration_since(routed)
+}
+
+/// T-5789: the router's read, the Endpoint's model and the dataset page are read at once. On prod
+/// 10-15 s passed between the router's reply and the data call; here the rows and the model each
+/// take 2 s, and one after another the data call started 4 s after the router.
+#[tokio::test]
+async fn the_reads_after_the_router_run_at_once() {
+    let pause = std::time::Duration::from_secs(2);
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "describe_schema".into(),
+    ];
+    let w = world("chatreadsonce", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    // Mounted before the recorded ones: the same priority, so these answer first.
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {"type": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "q": {"type": "string"}}}},
+            {"name": "describe_schema", "description": "The model.", "inputSchema": {"type": "object", "properties": {"format": {"type": "string"}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let linkml = "slots:\n  name: {}\n  no2:\n    range: float\nclasses:\n  AirQualityObserved:\n    slots: [name, no2]\n";
+    mcp()
+        .and(body_string_contains("\"describe_schema\""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+                    "content": [{"type": "text", "text": json!({"format": "linkml", "document": linkml}).to_string()}]
+                }}))
+                // just inside MODEL_DEADLINE (2 s), so the model is read
+                .set_delay(pause - std::time::Duration::from_millis(100)),
+        )
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    recorded_air_after(&w.gateway, SLUG, pause).await;
+    let (routed, answered) = stamped_data_question(&w.proxy, "NO2 nad 20 má stanica [1].").await;
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 20?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    assert!(events.iter().any(|(n, _)| n == "answer"), "{events:?}");
+    assert_eq!(tool_calls_of(&w.gateway, "describe_schema").await.len(), 1);
+    let gap = router_to_data(&routed, &answered, 0);
+    eprintln!("router to data call: {gap:?}");
+    assert!(gap < pause * 5 / 4, "{gap:?}");
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-5789: a dataset page lookup is a regular-expression scan of the index that took 5-15 s on
+/// prod; the data call waits for it at most PAGE_DEADLINE (1.5 s), and the table then links no
+/// page. The scan is held here by a lock on the passages until 6 s.
+#[tokio::test]
+async fn a_slow_dataset_page_lookup_does_not_hold_the_data_call() {
+    let hold = std::time::Duration::from_secs(6);
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatpagedeadline", d).await;
+    recorded_air(&w.gateway, SLUG).await;
+    let (routed, answered) = stamped_data_question(&w.proxy, "NO2 nad 20 má stanica [1].").await;
+    // The first question reads the languages, the digest and the types the next one keeps.
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Kde je NO2 nad 20?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let url = std::env::var("JC_ASSISTANT_TEST_DATABASE_URL").expect("the test server");
+    let options: sqlx::postgres::PgConnectOptions = url.parse().expect("the url parses");
+    let mut locker =
+        <sqlx::PgConnection as sqlx::Connection>::connect_with(&options.database(&w.name))
+            .await
+            .expect("a connection of its own");
+    sqlx::query("BEGIN")
+        .execute(&mut locker)
+        .await
+        .expect("begin");
+    sqlx::query("LOCK TABLE chunks IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut locker)
+        .await
+        .expect("the passages are locked");
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(hold).await;
+        sqlx::query("ROLLBACK")
+            .execute(&mut locker)
+            .await
+            .expect("released");
+    });
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Ktoré stanice majú NO2 nad 20?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    release.await.expect("the lock was released");
+    assert_eq!(status, StatusCode::OK, "{events:?}");
+    let gap = router_to_data(&routed, &answered, 1);
+    eprintln!("router to data call under a held scan: {gap:?}");
+    assert!(gap < std::time::Duration::from_millis(2_500), "{gap:?}");
+    let data: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d)
+        .collect();
+    assert!(
+        data.iter().all(|d| d["dataset"].is_null()),
+        "no page past the deadline: {data:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
 /// T-4731: the two reads of one reply go out at once and are numbered in the reply's order. Each
 /// read takes 2 s: the router's read and the reply's two used to take 6 s in a row.
 #[tokio::test]
