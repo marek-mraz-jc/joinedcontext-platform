@@ -84,12 +84,6 @@ const PROFILE_STATS: &[&str] = &[
 const DATA_PASSAGES: usize = 3;
 const DATA_PASSAGE_CHARS: usize = 600;
 
-/// The most tokens (by [`tokens_of`]) of a data answer's messages for one broad 50-row read with
-/// its profile and passages, the tool definitions apart (T-5783: prod's data call read 11.8k
-/// tokens in 23.1 s).
-#[cfg(test)]
-const DATA_PROMPT_TOKENS: u64 = 4_000;
-
 /// Columns of a table: the name first, then the entity's values in the order they come.
 const MAX_COLUMNS: usize = 8;
 
@@ -4189,6 +4183,11 @@ fn worth_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The most tokens (by [`tokens_of`]) of a data answer's messages for one broad 50-row read with
+    /// its profile and passages, the tool definitions apart (T-5783: prod's data call read 11.8k
+    /// tokens in 23.1 s).
+    const DATA_PROMPT_TOKENS: u64 = 4_000;
 
     /// A message's text: its string content, or its parts' texts one after the other.
     fn text(message: &Value) -> String {
