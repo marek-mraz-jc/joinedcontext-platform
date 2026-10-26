@@ -92,8 +92,10 @@ async fn run() -> Result<(), Startup> {
     let threads = embed_threads(&env).map_err(fail("the embedding model is not configured"))?;
     let embedder = Embedder::load(std::path::Path::new(&model_dir), threads)
         .map_err(fail("the embedding model is not usable"))?;
+    // 10, not 4 (2026-10-26): a question searches 3 projects at once beside the embedding
+    // backfill and the catalogue counts, and with 4 each waited ~9.7 s to acquire on prod.
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
+        .max_connections(10)
         .connect(&url)
         .await
         .map_err(fail("the assistant's database is not reachable"))?;
