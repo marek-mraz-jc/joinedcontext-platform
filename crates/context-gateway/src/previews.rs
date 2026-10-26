@@ -24,7 +24,7 @@ pub struct Preview {
     pub prefix: String,
     /// The branch's files by their path in the repository.
     pub files: BTreeMap<String, String>,
-    /// The Keycloak usernames that may read the preview: the workspace's author and the
+    /// The Keycloak user ids that may read the preview: the workspace's author and the
     /// reviewers of its Change (CC-91). None listed is a preview nobody reads.
     #[serde(default)]
     pub readers: BTreeSet<String>,
@@ -38,7 +38,7 @@ pub struct Preview {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Access {
-    /// The Keycloak usernames the preview answers.
+    /// The Keycloak user ids the preview answers.
     pub readers: BTreeSet<String>,
     /// The salt of [`jc_manifest::loader::preview_slug_salted`].
     pub salt: String,
@@ -68,7 +68,7 @@ pub fn valid_salt(salt: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
 }
 
-/// A Keycloak username: 1 to 255 characters, none of them a control character.
+/// A Keycloak user id: 1 to 255 characters, none of them a control character.
 fn valid_reader(user: &str) -> bool {
     (1..=255).contains(&user.len()) && !user.chars().any(char::is_control)
 }
