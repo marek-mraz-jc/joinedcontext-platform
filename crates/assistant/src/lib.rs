@@ -192,24 +192,29 @@ pub fn vector_literal(embedding: &[f32]) -> Result<String, Error> {
 
 /// The hybrid query: full-text and vector rankings of the deployment's sources, fused by
 /// reciprocal rank. The question is parsed with every configuration the store indexes with, so
-/// it matches a chunk in whatever language that chunk is, and the GIN index still serves it.
-/// Its words are OR-ed: a question asked in a person's words never has all of them in the
-/// passage that answers it (AND-ed, the lexical ranking found nothing for any of the forty eval
-/// questions, T-3053), and `ts_rank_cd` puts the passages with more of them first. A page under a
-/// news path (`/aktuality/`, `/novinky/`, `/news/`, …) counts 0.9 of its score and loses a tie:
-/// opening hours, prices and contacts are kept on the pages beside the news, and a news item about
-/// them goes stale (a COVID-19 notice answered a pool's hours, T-4370). `scope` is read twice, so
-/// Postgres would materialize it, copying every chunk's tsvector and embedding of the sources
-/// before either ranking, with no index left to serve them: the worker logged it as a slow
-/// statement on dev (T-4663). Inlined, the GIN index serves the lexical match.
+/// it matches a chunk in whatever language that chunk is. Its words are OR-ed: a question asked
+/// in a person's words never has all of them in the passage that answers it (AND-ed, the lexical
+/// ranking found nothing for any of the forty eval questions, T-3053), and `ts_rank_cd` puts the
+/// passages with more of them first. A page under a news path (`/aktuality/`, `/novinky/`,
+/// `/news/`, …) counts 0.9 of its score and loses a tie: opening hours, prices and contacts are
+/// kept on the pages beside the news, and a news item about them goes stale (a COVID-19 notice
+/// answered a pool's hours, T-4370).
+///
+/// Speed (T-4663, T-5773): under the forced row-level security `@@` is not leakproof, so it is a
+/// filter after the policy and no GIN lookup; `question` is materialized, else its four
+/// `to_tsvector` calls ran once per chunk of the scope (3.9 s of a 4.1 s search over 35k chunks).
+/// The semantic arm is a plain `ORDER BY embedding <=> $2 LIMIT` over `chunks`, its sites an
+/// array and not a join, so the HNSW index serves it and filters as it walks ([`KNN_SETTINGS`]);
+/// a window over the whole scope sorted every chunk of the project by distance, 23.5 s on prod
+/// once one crawl stored 100k chunks.
 const HYBRID: &str = r#"
 WITH scope AS NOT MATERIALIZED (
-    SELECT c.id, c.fts, c.embedding
+    SELECT c.id, c.fts
     FROM chunks c JOIN sites s ON s.id = c.site_id
     WHERE s.source = ANY($3) AND (NOT $4 OR c.visibility = 'public')
       AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
 ),
-question AS (
+question AS MATERIALIZED (
     SELECT jc_any_word('english', $1) || jc_any_word('finnish', $1)
         || jc_any_word('german', $1) || jc_any_word('jc_simple_unaccent', $1) AS q
 ),
@@ -221,11 +226,16 @@ lexical AS (
     LIMIT $5
 ),
 semantic AS (
-    SELECT scope.id, row_number() OVER (ORDER BY scope.embedding <=> $2::vector, scope.id) AS rank
-    FROM scope
-    WHERE scope.embedding IS NOT NULL
-    ORDER BY rank
-    LIMIT $5
+    SELECT near.id, row_number() OVER (ORDER BY near.distance, near.id) AS rank
+    FROM (
+        SELECT c.id, c.embedding <=> $2::vector AS distance
+        FROM chunks c
+        WHERE c.site_id = ANY (ARRAY(SELECT s.id FROM sites s WHERE s.source = ANY($3)))
+          AND (NOT $4 OR c.visibility = 'public')
+          AND ($8::text IS NULL OR c.lang IS NULL OR c.lang = $8)
+        ORDER BY c.embedding <=> $2::vector
+        LIMIT $5
+    ) near
 )
 SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
        to_char(COALESCE(p.published, d.published) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS published,
@@ -243,6 +253,14 @@ ORDER BY score DESC, news.item, c.id
 LIMIT $7
 "#;
 
+/// The HNSW walk of the semantic arm, for the transaction it runs in: an iterative scan goes on
+/// past `ef_search` until [`CANDIDATES`] chunks pass the scope's filters (pgvector 0.8), where a
+/// plain scan returns the 40 nearest of every project and filters them to few or none. The order
+/// may be relaxed, since the arm ranks its rows by their distance again; `max_scan_tuples` bounds
+/// the walk for a scope that holds few of the chunks.
+const KNN_SETTINGS: &str = "SET LOCAL hnsw.ef_search = 100; \
+    SET LOCAL hnsw.iterative_scan = relaxed_order; SET LOCAL hnsw.max_scan_tuples = 20000";
+
 /// The passages that answer `search`, best first, read in the transaction's project scope.
 pub async fn hybrid_search(
     conn: &mut PgConnection,
@@ -252,6 +270,7 @@ pub async fn hybrid_search(
     if search.sources.is_empty() || search.limit <= 0 {
         return Ok(Vec::new());
     }
+    sqlx::raw_sql(KNN_SETTINGS).execute(&mut *conn).await?;
     let rows: Vec<PgRow> = sqlx::query(HYBRID)
         .bind(search.text)
         .bind(vector)
