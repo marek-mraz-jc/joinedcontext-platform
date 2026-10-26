@@ -626,6 +626,14 @@ struct ViewHop {
 /// The broker's MCP surfaces of the members' views (T-3808): every view answers a page of one
 /// entity, but `refusing`'s view answers the tool error a view without the grant gives.
 async fn views(refusing: &'static str) -> (String, Arc<std::sync::Mutex<Vec<ViewHop>>>) {
+    views_stalling(refusing, "").await
+}
+
+/// [`views`], with `stalling`'s view never answering within a minute (T-5782).
+async fn views_stalling(
+    refusing: &'static str,
+    stalling: &'static str,
+) -> (String, Arc<std::sync::Mutex<Vec<ViewHop>>>) {
     let hops: Arc<std::sync::Mutex<Vec<ViewHop>>> = Arc::default();
     let recorder = Arc::clone(&hops);
     let stub = Router::new().fallback(move |request: Request<Body>| {
@@ -643,6 +651,9 @@ async fn views(refusing: &'static str) -> (String, Arc<std::sync::Mutex<Vec<View
                 .and_then(|rest| rest.strip_suffix("/mcp"))
                 .unwrap_or_default()
                 .to_owned();
+            if view == stalling {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
             let result = if view == refusing {
                 json!({ "isError": true, "content": [{ "type": "text", "text": "this view grants no read of AirQualityObserved" }] })
             } else {
@@ -666,6 +677,52 @@ async fn views(refusing: &'static str) -> (String, Arc<std::sync::Mutex<Vec<View
         let _ = axum::serve(listener, stub).await;
     });
     (url, hops)
+}
+
+/// T-5782: a `list_types` without `endpoint` answers with the members that listed within the
+/// list's own 2.5 s, and names the stalled one as `failed`, never waiting its ten seconds.
+#[tokio::test]
+async fn a_stalled_member_leaves_the_type_list_of_the_others_within_its_budget() {
+    let realm = common::Realm::new();
+    let (url, _) = views_stalling("", BIKES).await;
+    let reads = "queryEntity, retrieveEntityTypes";
+    let gateway = Gateway::new(Broker::new(&url), Box::new(PolicyPdp), "banskabystrica.sk")
+        .serve(vec![
+            endpoint(AIR, vec![grant("steward", reads)]),
+            endpoint(BIKES, vec![grant("steward", reads)]),
+        ])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            ServiceAccounts::new(),
+            Some(HOST.to_owned()),
+        );
+    gateway.replace_servers(vec![server(
+        "mobility",
+        &[BIKES, AIR],
+        Audience::Organization,
+    )]);
+    let app = router(Arc::new(gateway));
+    let edge = token(&realm, json!("context-gateway"));
+
+    let began = std::time::Instant::now();
+    let (_, answer) = send(
+        app,
+        post(SERVER, Some(&edge), call("list_types", json!({}))),
+    )
+    .await;
+    let took = began.elapsed();
+    let structured = &answer["result"]["structuredContent"];
+    assert_eq!(slugs(&structured["results"]), [AIR], "{answer}");
+    assert_eq!(slugs(&structured["failed"]), [BIKES], "{answer}");
+    assert_eq!(
+        structured["failed"][0]["reason"],
+        json!("no type list within 2.5 seconds; name this Endpoint in `endpoint` to wait for it")
+    );
+    assert_eq!(answer["result"]["isError"], json!(false));
+    assert!(
+        took < std::time::Duration::from_secs(4),
+        "the list waited {took:?}"
+    );
 }
 
 /// T-3808: a read without `endpoint` asks each readable member's own view in the broker's form,

@@ -909,18 +909,26 @@ async fn connected(
             surface,
         ));
     }
-    // Every listing at once, so a question waits for the slowest connector, not their sum (T-4680).
-    let listed = futures_util::future::join_all(reachable.iter().map(
-        |(connector, _, _, _, surface)| async move {
+    // At most `LIST_PARALLEL` listings at once, so a question waits for the slowest few, not
+    // their sum (T-4680), and a cold pod's first warm-up does not fill the gateway's per-caller
+    // share: unbounded, its 503s put every connector into backoff and the questions after it
+    // listed none (T-5782).
+    use futures_util::StreamExt as _;
+    let listings: Vec<_> = reachable
+        .iter()
+        .map(|(connector, _, _, _, surface)| async move {
             match mcp::reads_any(&connector.tools) {
                 true => routed::listing(&state.answers, &state.http, surface)
                     .await
                     .map(|listed| mcp::picked(&listed, &connector.tools)),
                 false => Ok(Vec::new()),
             }
-        },
-    ))
-    .await;
+        })
+        .collect();
+    let listed: Vec<_> = futures_util::stream::iter(listings)
+        .buffered(routed::LIST_PARALLEL)
+        .collect()
+        .await;
     let mut connected = Vec::new();
     for ((connector, (title, titles), label, near, surface), listed) in
         reachable.into_iter().zip(listed)
@@ -2311,6 +2319,7 @@ mod tests {
             map: None,
             geometries: Vec::new(),
             profile: None,
+            filter: None,
         });
         for event in [&tool, &table] {
             let shown = |anonymous| format!("{:?}", sse(event, anonymous));

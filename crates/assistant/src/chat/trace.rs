@@ -705,6 +705,7 @@ mod tests {
             map: None,
             geometries: vec![],
             profile: None,
+            filter: None,
         };
         trace.visual(&Event::Data(table));
         trace.visual(&Event::Visualization(

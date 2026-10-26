@@ -5809,3 +5809,128 @@ async fn a_poisoned_row_never_makes_the_server_write_leave_its_endpoints_or_fetc
     }
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
+
+/// T-5784: prod answered "how many bridges, and how many built before 1900" with the exact
+/// total and a pre-1900 count from the type's profile, a sample of 1,000 of 1,651. The filtered
+/// count is its own read with the `q` and `count`, and the answer call reads that exact total
+/// beside the q it counts, and the whole register's total beside it.
+#[tokio::test]
+async fn a_filtered_count_is_read_exactly_not_from_the_profile_sample() {
+    let mut d = deployment(Channel::Public, 80_000, 10);
+    d.spec.connectors[0].tools = vec![
+        "list_types".into(),
+        "query_entities".into(),
+        "summarize".into(),
+    ];
+    let w = world("chatexactcount", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    let text = |v: Value| {
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": v.to_string()}]
+        }}))
+    };
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {
+                "type": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "limit": {"type": "integer", "maximum": 1000},
+                "count": {"type": "boolean"},
+                "q": {"type": "string"},
+                "attrs": {"type": "array", "items": {"enum": ["name", "yearBuilt"]}}}}},
+            {"name": "summarize", "description": "Profiles a type.", "inputSchema": {"type": "object"}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(text(json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["Bridge"]}})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    // The profile's year statistics come from a sample of 1,000 of the 1,651 bridges.
+    mcp()
+        .and(body_string_contains("\"summarize\""))
+        .respond_with(text(json!({"type": "Bridge", "count": 1651, "basis": 1000, "yearBuilt": {"min": 1820, "below1900": 21}})))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    let bridge = |n: usize, year: u64| {
+        json!({"id": format!("urn:ngsi-ld:Bridge:{n}"), "type": "Bridge",
+               "name": {"type": "Property", "value": format!("Most {n}")},
+               "yearBuilt": {"type": "Property", "value": year}})
+    };
+    mcp()
+        .and(body_string_contains("yearBuilt<1900"))
+        .respond_with(text(
+            json!({"entities": (0..37).map(|n| bridge(n, 1850)).collect::<Vec<_>>(), "total": 37}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(text(json!({"entities": (0..50).map(|n| bridge(n, 1960)).collect::<Vec<_>>(), "total": 1651, "nextCursor": "c"})))
+        .with_priority(2)
+        .mount(&w.gateway)
+        .await;
+    script_routed(&w.proxy, vec![
+        completion(json!({"role": "assistant", "content": json!({"route": "data", "queries": ["mosty"], "data": [
+            {"endpoint": "ovzdusie", "type": "Bridge"},
+            {"endpoint": "ovzdusie", "type": "Bridge", "q": "yearBuilt<1900"}]}).to_string()}), 400),
+    ], vec![], vec![
+        completion(json!({"role": "assistant", "content": "V registri je 1 651 mostov [1], z nich 37 postavených pred rokom 1900 [2]."}), 900),
+    ]).await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(json!({"message": "Koľko mostov je v registri a koľko je postavených pred rokom 1900?"}), Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reads = tool_calls_of(&w.gateway, "query_entities").await;
+    let mut asked: Vec<(Value, Value)> = reads
+        .iter()
+        .map(|r| {
+            (
+                r["params"]["arguments"]["q"].clone(),
+                r["params"]["arguments"]["count"].clone(),
+            )
+        })
+        .collect();
+    asked.sort_by_key(|(q, _)| q.to_string());
+    assert_eq!(
+        asked,
+        [
+            (json!("yearBuilt<1900"), json!(true)),
+            (Value::Null, json!(true))
+        ],
+        "{reads:?}"
+    );
+    // The answer call reads the exact filtered total with its q, and the whole register's.
+    let calls = model_calls(&w.proxy).await;
+    let answers = calls_of(&calls, None);
+    let told = answers.last().map(|a| a.to_string()).unwrap_or_default();
+    for wanted in [
+        r#"\"q\":\"yearBuilt<1900\""#,
+        r#"\"total\":37"#,
+        r#"\"total\":1651"#,
+        "never give a number from it as an exact count",
+    ] {
+        assert!(told.contains(wanted), "{wanted} in {told}");
+    }
+    let tables: Vec<&Value> = events
+        .iter()
+        .filter(|(n, _)| n == "data")
+        .map(|(_, d)| d)
+        .collect();
+    let mut totals: Vec<u64> = tables.iter().filter_map(|t| t["total"].as_u64()).collect();
+    totals.sort_unstable();
+    assert_eq!(totals, [37, 1651], "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|(n, d)| n == "answer" && d.to_string().contains("37")),
+        "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}

@@ -256,6 +256,10 @@ pub struct Table {
     /// call reads it beside the first rows; the `data` event does not carry it.
     #[serde(skip)]
     pub profile: Option<String>,
+    /// The `q` the read kept its rows by, when it had one: the answer call reads it beside the
+    /// table, so a filtered `total` is told from the type's whole count (T-5784).
+    #[serde(skip)]
+    pub filter: Option<String>,
 }
 
 /// Everything one question is answered with.

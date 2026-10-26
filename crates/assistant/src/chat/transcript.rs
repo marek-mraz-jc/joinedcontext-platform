@@ -694,6 +694,7 @@ mod tests {
                 map: None,
                 geometries: vec![],
                 profile: None,
+                filter: None,
             }),
             Event::Citations(vec![Citation {
                 n: 1,
