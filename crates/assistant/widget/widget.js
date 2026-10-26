@@ -1316,7 +1316,7 @@
   // empty, so nothing shows twice and nothing is asked again.
   async function replay(id, item, signal) {
     var held = await visitorToken();
-    var response = await fetch("/api/v1/d/" + encodeURIComponent(config.publicId) + "/turns/" +
+    var response = await fetch(api + "/api/v1/d/" + encodeURIComponent(config.publicId) + "/turns/" +
       encodeURIComponent(id) + "/resume?after=0", {
       headers: { Accept: "text/event-stream", "X-JC-Visitor": held.token },
       credentials: "omit",
