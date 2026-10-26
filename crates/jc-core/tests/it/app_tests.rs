@@ -148,7 +148,7 @@ fn source_is_a_path_or_a_forge_repository_ap02() {
     ));
 
     // F-PLT2-019: an App's repository is on a public forge host, never an in-cluster or
-    // metadata address, and the builder fetches only the forge or an allow-listed origin.
+    // metadata address.
     for url in [
         "https://127.0.0.1/mesto/app.git",
         "https://169.254.169.254/latest",
@@ -175,12 +175,6 @@ fn source_is_a_path_or_a_forge_repository_ap02() {
             "{url}: {err}"
         );
     }
-    let app = App::from_yaml(&git).expect("parses");
-    let source = app.spec.source.git.as_ref().expect("a git source");
-    source
-        .check_allowed_host(&["forge.banskabystrica.sk"])
-        .expect("the forge host passes");
-    assert!(source.check_allowed_host(&["github.com"]).is_err());
 
     let escaping = GOLDEN.replace("  source: { path: ./src }", "  source: { path: ../../etc }");
     let app = App::from_yaml(&escaping).expect("parses");

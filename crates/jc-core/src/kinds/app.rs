@@ -237,14 +237,6 @@ pub struct GitSource {
     pub path: Option<String>,
 }
 
-impl GitSource {
-    /// Refuses a clone URL off the organization's forge (F-PLT2-019): the builder passes the
-    /// forge host and any allow-listed origin from its configuration before it fetches.
-    pub fn check_allowed_host(&self, allowed: &[&str]) -> Result<()> {
-        super::sync::check_allowed_host(&self.url, allowed)
-    }
-}
-
 impl AppSource {
     fn validate(&self) -> Result<()> {
         match (&self.path, &self.git) {

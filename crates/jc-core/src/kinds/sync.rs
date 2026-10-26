@@ -62,16 +62,6 @@ pub struct GitOrigin {
     pub secret_ref: Option<SecretRef>,
 }
 
-impl GitOrigin {
-    /// Refuses a clone URL whose host is not one the installation lets a sync reach
-    /// (F-PLT2-019): the configured forge or an allow-listed origin, from the fetching
-    /// component's configuration. Call it before every fetch: [`SyncSourceSpec`]
-    /// validation knows no configuration and judges the host's form only.
-    pub fn check_allowed_host(&self, allowed: &[&str]) -> Result<()> {
-        check_allowed_host(&self.url, allowed)
-    }
-}
-
 /// A published bundle URL as a sync origin (MF-17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -684,26 +674,6 @@ impl fmt::Display for SyncMode {
     }
 }
 
-/// Refuses a clone URL whose host is neither the configured forge nor an allow-listed origin
-/// (F-PLT2-019). `allowed` comes from the fetching component's configuration, never from a
-/// manifest; hosts compare without case or a trailing dot, after any userinfo, so
-/// `ssh://forge@evil.example` is judged as `evil.example`.
-pub(crate) fn check_allowed_host(url: &str, allowed: &[&str]) -> Result<()> {
-    let (_, rest) = url.split_once("://").unwrap_or(("", url));
-    let authority = crate::project::authority(rest);
-    let host = remote_host(authority.rsplit('@').next().unwrap_or_default());
-    let plain = |h: &str| h.trim_end_matches('.').to_ascii_lowercase();
-    if allowed.iter().any(|a| plain(a) == plain(host)) {
-        return Ok(());
-    }
-    Err(Error::Name {
-        field: "source.git.url",
-        value: plain(host),
-        reason: "the host is neither the platform's forge nor an allow-listed origin; ask the \
-                 operator to add it to the sync allow-list",
-    })
-}
-
 /// Rejects `http://` and anything that is not a URL we are willing to fetch (MF-31, MF-32), and
 /// a host no remote origin can have (F-PLT2-019).
 pub(crate) fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Result<()> {
@@ -899,40 +869,5 @@ mod remote_url_tests {
                 "{url}"
             );
         }
-    }
-
-    /// F-PLT2-019: only the configured forge or an allow-listed host may be fetched; a decoy
-    /// userinfo naming the forge does not make another host the forge.
-    #[test]
-    fn only_the_forge_or_an_allow_listed_host_is_fetched() {
-        let origin = |url: &str| super::GitOrigin {
-            url: url.to_owned(),
-            git_ref: "main".to_owned(),
-            path: None,
-            secret_ref: None,
-        };
-        let allowed = ["forge.dev.joinedcontext.com", "github.com"];
-        for url in [
-            "https://forge.dev.joinedcontext.com/o/r.git",
-            "https://FORGE.dev.joinedcontext.com./o/r.git",
-            "git@github.com:o/r.git",
-            "ssh://git@github.com:22/o/r.git",
-        ] {
-            assert!(origin(url).check_allowed_host(&allowed).is_ok(), "{url}");
-        }
-        for url in [
-            "https://git.example.org/o/r.git",
-            "ssh://forge.dev.joinedcontext.com@evil.example.org/r.git",
-            "https://github.com.evil.example.org/o/r.git",
-        ] {
-            let refusal = origin(url)
-                .check_allowed_host(&allowed)
-                .expect_err(url)
-                .to_string();
-            assert!(refusal.contains("allow-list"), "{refusal}");
-        }
-        assert!(origin("https://github.com/o/r.git")
-            .check_allowed_host(&[])
-            .is_err());
     }
 }
