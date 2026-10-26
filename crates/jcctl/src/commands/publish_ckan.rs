@@ -435,11 +435,31 @@ pub fn fetch(url: &str, accept: &str) -> Result<String, Error> {
     let status = response.status();
     let text = response.text().map_err(|e| gateway(e.to_string()))?;
     if !status.is_success() {
-        let detail: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let shown: String = detail.chars().take(200).collect();
-        return Err(gateway(format!("{} {shown}", status.as_u16())));
+        return Err(gateway(refusal(status, &text)));
     }
     Ok(text)
+}
+
+/// What a refused read says: the status and, for a problem document, its `detail` (else its
+/// `title`), so the Portal's CKAN page shows words instead of the document's JSON (T-5748).
+/// Another JSON body says only the status's reason; a text body its first 200 characters.
+fn refusal(status: reqwest::StatusCode, text: &str) -> String {
+    let code = status.as_u16();
+    let reason = status.canonical_reason().unwrap_or("unexpected status");
+    let shown = match serde_json::from_str::<Value>(text) {
+        Ok(body) => ["detail", "title"]
+            .iter()
+            .find_map(|key| body.get(key).and_then(Value::as_str))
+            .unwrap_or(reason)
+            .to_owned(),
+        Err(_) => text.split_whitespace().collect::<Vec<_>>().join(" "),
+    };
+    let shown: String = shown.chars().take(200).collect();
+    if shown.is_empty() {
+        format!("{code} {reason}")
+    } else {
+        format!("{code} {shown}")
+    }
 }
 
 /// The DCAT-AP record of one target, read from the gateway (EP-27, EP-63), with the entity type
@@ -613,8 +633,32 @@ fn outcome_word(outcome: Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{example_of, guide_type, served_types, with_types};
+    use super::{example_of, guide_type, refusal, served_types, with_types};
+    use reqwest::StatusCode;
     use serde_json::json;
+
+    /// T-5748: a refused read names the problem's detail, never the problem document's JSON.
+    #[test]
+    fn a_refusal_says_the_problem_detail_not_its_json() {
+        let problem = r#"{"type":"https://uri.etsi.org/ngsi-ld/errors/ResourceNotFound","title":"Not found","detail":"the view helsinki-bikes lists no file.csv"}"#;
+        assert_eq!(
+            refusal(StatusCode::NOT_FOUND, problem),
+            "404 the view helsinki-bikes lists no file.csv"
+        );
+        assert_eq!(
+            refusal(StatusCode::NOT_FOUND, r#"{"title":"Not found"}"#),
+            "404 Not found"
+        );
+        assert_eq!(
+            refusal(StatusCode::BAD_GATEWAY, r#"{"error":{"code":7}}"#),
+            "502 Bad Gateway"
+        );
+        assert_eq!(
+            refusal(StatusCode::SERVICE_UNAVAILABLE, "  upstream\n  timed out "),
+            "503 upstream timed out"
+        );
+        assert_eq!(refusal(StatusCode::FORBIDDEN, ""), "403 Forbidden");
+    }
 
     /// T-4802: the example names a type the Endpoint serves, never the model's first class.
     #[test]
