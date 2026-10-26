@@ -660,8 +660,8 @@ pub(crate) async fn member_call(
             tracing::warn!(
                 slug = %endpoint.slug,
                 status = status.as_u16(),
-                broker = %String::from_utf8_lossy(&held),
-                "the broker failed a member call; its own explanation is not passed on"
+                bytes = held.len(),
+                "the broker failed a member call; its answer is neither logged nor passed on"
             );
             member_refusal(id, None)
         }

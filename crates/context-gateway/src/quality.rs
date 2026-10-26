@@ -54,10 +54,14 @@ pub const OWNED: [&str; 2] = [QUARANTINED_AT, QUARANTINE_RULES];
 /// Whether `name` is an owned attribute: its term, or an IRI or compact IRI ending in it, so
 /// the expanded `…/default-context/quarantinedAt` is the same attribute.
 pub fn is_owned(name: &str) -> bool {
-    OWNED.iter().any(|owned| {
-        name.strip_suffix(owned)
-            .is_some_and(|head| head.is_empty() || head.ends_with(['/', '#', ':']))
-    })
+    OWNED.iter().any(|owned| names(name, owned))
+}
+
+/// Whether the attribute key `name` is `term`: the term itself, or an IRI or compact IRI
+/// ending in `/`, `#` or `:` plus the term.
+pub fn names(name: &str, term: &str) -> bool {
+    name.strip_suffix(term)
+        .is_some_and(|head| head.is_empty() || head.ends_with(['/', '#', ':']))
 }
 
 /// The refusal of a write whose path addresses an attribute the gateway owns, a `DELETE`
