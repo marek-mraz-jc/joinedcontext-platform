@@ -252,8 +252,8 @@ async fn a_credential_in_the_diagnostics_is_scrubbed_and_a_commit_sha_is_not() {
     assert!(read.contains("1200"), "the counters stay: {read}");
 }
 
-/// AG-41: the profile's response cap holds on this door, and it cuts on character boundaries, so
-/// a document full of accented text comes back short rather than broken.
+/// AG-41: the profile's response cap holds on this door in bytes (F-PLT1-009), and it cuts on
+/// character boundaries, so a document full of accented text comes back short rather than broken.
 #[tokio::test]
 async fn the_answer_is_cut_at_the_runs_response_cap() {
     let portal = portal_answering(200, &"\u{e4}".repeat(100)).await;
@@ -269,9 +269,9 @@ async fn the_answer_is_cut_at_the_runs_response_cap() {
     assert_eq!(response.status(), StatusCode::OK);
     let read = body_of(response).await;
     assert_eq!(
-        read.chars().count(),
-        10,
-        "the cap counts characters and the text stays valid: {read:?}"
+        read,
+        "\u{e4}".repeat(5),
+        "the cap counts bytes and the text stays valid: {read:?}"
     );
 }
 

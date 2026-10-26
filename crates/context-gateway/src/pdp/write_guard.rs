@@ -31,6 +31,9 @@ pub enum Refusal {
     /// The entity's `scope` is outside the granted scope tree (R29, R31).
     #[error("scope `{0}` is outside the granted scopes")]
     ScopeOutsideGrant(String),
+    /// A whole entity names no `scope` while the grant covers scoped entities only (F-PLT2-009).
+    #[error("the entity names no scope, and the grant covers only entities inside its scopes")]
+    ScopeMissing,
     /// The entity's own location lies outside the granted area (GW16).
     #[error("the entity's location lies outside the granted area")]
     LocationOutsideGrant,
@@ -76,7 +79,23 @@ pub fn check(entity: &Value, constraints: &Constraints) -> Result<(), Refusal> {
     if let Some(raw) = entity_id(entity) {
         check_granted_id(raw, constraints)?;
     }
+    // A whole entity without a scope would sit outside every scope the grant names, so a grant
+    // on `/geo/SK/BB` could create entities no scoped read of it reaches (F-PLT2-009). A
+    // fragment keeps the scope the entity already has, so only the whole entity must carry one.
+    if constraints.granted_scopes.is_some() && entity.get("scope").is_none() {
+        return Err(Refusal::ScopeMissing);
+    }
     check_fragment(entity, constraints)
+}
+
+/// Whether a payload key names the attribute `term`: the term itself, or an expanded or
+/// compact IRI ending in it (`https://example.org/secret`, `ex:secret`), the rule of
+/// `quality::is_owned` (F-PLT2-011).
+pub fn names_attribute(key: &str, term: &str) -> bool {
+    key == term
+        || key
+            .strip_suffix(term)
+            .is_some_and(|head| head.ends_with(['/', '#', ':']))
 }
 
 /// A write's identifier against what the grant selects (T-0806, GW11, R24): the type the
@@ -198,9 +217,12 @@ fn check_attributes(entity: &Value, constraints: &Constraints) -> Result<(), Ref
     let withheld = entity
         .as_object()
         .and_then(|members| {
-            members
-                .keys()
-                .find(|name| constraints.hidden.contains(*name))
+            members.keys().find(|name| {
+                constraints
+                    .hidden
+                    .iter()
+                    .any(|hidden| names_attribute(name, hidden))
+            })
         })
         .map(String::as_str);
     match withheld.or_else(|| ungranted(entity, &constraints.attrs).first().copied()) {

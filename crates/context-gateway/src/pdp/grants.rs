@@ -60,3 +60,66 @@ pub fn condition_attributes(grants: &[GrantView]) -> BTreeSet<String> {
     }
     names
 }
+
+/// The read `read` split into one read per grant, each with that grant's own types, id patterns
+/// and filter (F-PLT2-004, ADR 006). The union read pairs one grant's types with another's `q`:
+/// with A {X, `a>1`} and B {Y, `b>1`}, an X entity with `b>1` passed. A grant whose types the
+/// read does not ask is left out; an entity is readable when one of these reads finds it.
+pub fn per_grant(read: &super::evaluator::Constraints) -> Vec<super::evaluator::Constraints> {
+    read.grants
+        .iter()
+        .filter_map(|grant| {
+            let types: BTreeSet<String> = if grant.types.is_empty() {
+                read.types.clone()
+            } else if read.types.is_empty() {
+                grant.types.clone()
+            } else {
+                grant.types.intersection(&read.types).cloned().collect()
+            };
+            if types.is_empty() && !(grant.types.is_empty() && read.types.is_empty()) {
+                return None;
+            }
+            let mut one = read.clone();
+            one.types = types;
+            one.id_patterns = grant.id_patterns.clone().into();
+            one.q = super::evaluator::grant_filter(grant.q.as_deref(), grant.scope_q.as_deref())
+                .map(|filter| format!("({filter})"));
+            one.grants = vec![grant.clone()];
+            Some(one)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod per_grant_tests {
+    use super::*;
+
+    /// F-PLT2-004: each read carries one grant's types with that grant's filter alone.
+    #[test]
+    fn each_grant_reads_its_own_types_with_its_own_filter() {
+        let grant = |ty: &str, q: &str| GrantView {
+            types: BTreeSet::from([ty.to_owned()]),
+            q: Some(q.to_owned()),
+            ..GrantView::default()
+        };
+        let read = super::super::evaluator::Constraints {
+            types: BTreeSet::from(["X".to_owned(), "Y".to_owned()]),
+            q: Some("(((a>1))|((b>1)))".to_owned()),
+            grants: vec![grant("X", "a>1"), grant("Y", "b>1")],
+            ..Default::default()
+        };
+        let reads = per_grant(&read);
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[0].types, BTreeSet::from(["X".to_owned()]));
+        assert_eq!(reads[0].q.as_deref(), Some("((a>1))"));
+        assert_eq!(reads[1].types, BTreeSet::from(["Y".to_owned()]));
+        assert_eq!(reads[1].q.as_deref(), Some("((b>1))"));
+        let only_x = super::super::evaluator::Constraints {
+            types: BTreeSet::from(["X".to_owned()]),
+            ..read
+        };
+        let reads = per_grant(&only_x);
+        assert_eq!(reads.len(), 1, "Y's grant reads nothing of an X target");
+        assert_eq!(reads[0].q.as_deref(), Some("((a>1))"));
+    }
+}

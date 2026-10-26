@@ -729,6 +729,23 @@ impl GitCheckouts<'_> {
     }
 }
 
+impl GitCheckouts<'_> {
+    /// Removes the checkouts of `slug` other than `keep`, once nothing reads them any more: the
+    /// caller prunes after the link points at `keep`, so a link that could not be moved still
+    /// resolves to the tree it named (F-PLT3-003).
+    pub fn prune(&self, slug: &str, keep: &Path) {
+        let prefix = format!("{slug}.tree-");
+        if let Ok(listing) = std::fs::read_dir(&self.cache) {
+            for item in listing.flatten() {
+                let name = item.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && item.path() != keep {
+                    let _ = std::fs::remove_dir_all(item.path());
+                }
+            }
+        }
+    }
+}
+
 impl Resolver for GitCheckouts<'_> {
     fn checkout(&self, slug: &str, entry: &ProjectSpec) -> Result<PathBuf, String> {
         let url = self.url(entry)?;
@@ -804,16 +821,6 @@ impl Resolver for GitCheckouts<'_> {
                 ],
             )?;
             std::fs::rename(&partial, &tree).map_err(|err| err.to_string())?;
-        }
-        // The checkouts of other commits of this project are no longer read.
-        let prefix = format!("{slug}.tree-");
-        if let Ok(listing) = std::fs::read_dir(&self.cache) {
-            for item in listing.flatten() {
-                let name = item.file_name().to_string_lossy().into_owned();
-                if name.starts_with(&prefix) && item.path() != tree {
-                    let _ = std::fs::remove_dir_all(item.path());
-                }
-            }
         }
         Ok(tree)
     }
