@@ -2357,7 +2357,7 @@ async fn dataset_or(
 /// row-level security: 5-15 s on prod over the 2026-10-25 crawl, while the rows took 0.4 s.
 // ponytail: the page is lost to a slow scan; keep each Endpoint type's page in a table filled at
 // index time when a link matters more than these seconds.
-const PAGE_DEADLINE: Duration = Duration::from_millis(1_500);
+pub(super) const PAGE_DEADLINE: Duration = Duration::from_millis(1_500);
 
 /// `work`'s output, or `None` once `deadline` passed first.
 async fn bounded<T>(deadline: Duration, work: impl std::future::Future<Output = T>) -> Option<T> {
@@ -3457,7 +3457,7 @@ async fn answer_routed(
             found.asked.len(),
         )
     };
-    let (citations, passages, data) = evidence(&best, &tables);
+    let (citations, passages, data) = evidence(&best, &tables, question);
     let more = routed_rules(
         &routing,
         ask.data_steps,
@@ -4022,7 +4022,12 @@ async fn search_rounds(
 
 /// The best passages, then the tables, numbered from 1 in that order: their citations, and the
 /// passages and tables as the answer call reads them (at most [`MODEL_ROWS`] rows each).
-fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<Value>) {
+fn evidence(
+    best: &[Hit],
+    tables: &[Table],
+    question: &str,
+) -> (Vec<Citation>, Vec<Value>, Vec<Value>) {
+    let stems = place_stems(question);
     let mut citations: Vec<Citation> = Vec::new();
     let mut passages = Vec::new();
     let rows = tables.iter().any(|t| !t.rows.is_empty());
@@ -4074,10 +4079,13 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
         } else {
             MODEL_ROWS
         };
-        let (placeholders, rows): (Vec<&Vec<Value>>, Vec<&Vec<Value>>) = table
+        let (placeholders, mut rows): (Vec<&Vec<Value>>, Vec<&Vec<Value>>) = table
             .rows
             .iter()
             .partition(|row| placeholder(&table.columns, &table.units, row));
+        if table.filter.is_none() {
+            rows.sort_by_key(|row| std::cmp::Reverse(places_named(&stems, row)));
+        }
         let mut read = json!({
             "n": n,
             "type": table.entity_type,
@@ -4099,6 +4107,38 @@ fn evidence(best: &[Hit], tables: &[Table]) -> (Vec<Citation>, Vec<Value>, Vec<V
         data.push(read);
     }
     (citations, passages, data)
+}
+
+/// The letters of a question's word that name a place in a row's label: "v Banskej Bystrici"
+/// and "Banská Bystrica, stanica SK0263A" share "bansk" and "bystr".
+const PLACE_STEM: usize = 5;
+
+/// The first [`PLACE_STEM`] letters of each folded word of the question that long.
+// ponytail: word stems, not a gazetteer; a place of under five letters is not matched, a place
+// table per deployment when one must be.
+fn place_stems(question: &str) -> HashSet<String> {
+    jc_core::ngsi_catalog::fold(question)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= PLACE_STEM)
+        .map(|word| word.chars().take(PLACE_STEM).collect())
+        .collect()
+}
+
+/// How many of `stems` start a word of the row's label (its first column, a name or an id). An
+/// unnarrowed read shows the answer the rows naming the question's place first, the most named
+/// first and the rest in their order (T-5800): prod's 53 Slovak air stations showed it 15 rows
+/// without Banská Bystrica's, and it read twice more before answering.
+fn places_named(stems: &HashSet<String>, row: &[Value]) -> usize {
+    let label = match row.first() {
+        Some(Value::String(text)) => jc_core::ngsi_catalog::fold(text),
+        Some(Value::Null) | None => return 0,
+        Some(other) => jc_core::ngsi_catalog::fold(&other.to_string()),
+    };
+    let words: Vec<&str> = label.split(|c: char| !c.is_alphanumeric()).collect();
+    stems
+        .iter()
+        .filter(|stem| words.iter().any(|word| word.starts_with(stem.as_str())))
+        .count()
 }
 
 /// What the log line of a routed answer reports of how it was found.
@@ -4659,7 +4699,7 @@ mod tests {
             profile: None,
             filter: None,
         };
-        let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table));
+        let (citations, passages, data) = evidence(&best, std::slice::from_ref(&table), "");
         let numbered: Vec<_> = citations
             .iter()
             .map(|c| (c.n, c.url.as_deref(), c.endpoint.as_deref()))
@@ -4681,12 +4721,70 @@ mod tests {
         assert_eq!(data[0]["rowCount"], MODEL_ROWS + 3);
         assert_eq!(citations[2].tool.as_deref(), Some("query_entities"));
 
-        let (citations, passages, data) = evidence(&[], &[]);
+        let (citations, passages, data) = evidence(&[], &[], "");
         assert!(citations.is_empty() && passages.is_empty() && data.is_empty());
     }
 
     /// T-4680: with the type's profile the answer reads it and the first rows, the row count
     /// still whole; a profile past its bound or empty is left out.
+    #[test]
+    fn an_unnarrowed_read_shows_the_rows_of_the_place_asked_first() {
+        let names = [
+            "Bratislava, stanica SK0001A (mestská pozaďová)",
+            "Bystričany, stanica SK0013A (predmestská pozaďová)",
+            "Banská Bystrica, stanica SK0214A (mestská dopravná)",
+            "Zvolen, stanica SK0262A (mestská pozaďová)",
+            "Banská Bystrica, stanica SK0263A (mestská pozaďová)",
+        ];
+        let mut table = Table {
+            endpoint: "slovensko/ovzdusie-sk".into(),
+            entity_type: "AirQualityObserved".into(),
+            columns: vec!["name".into(), "pm10".into()],
+            rows: names.iter().map(|n| vec![json!(n), json!(20)]).collect(),
+            units: vec![None, None],
+            labels: Vec::new(),
+            summary: Vec::new(),
+            enums: Vec::new(),
+            total: Some(53),
+            dataset: None,
+            download: None,
+            geojson: None,
+            map: None,
+            geometries: Vec::new(),
+            profile: Some("type=AirQualityObserved count=53".into()),
+            filter: None,
+        };
+        let first = |table: &Table, question: &str| -> Vec<Value> {
+            let (_, _, data) = evidence(&[], std::slice::from_ref(table), question);
+            data[0]["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|row| row[0].clone())
+                .collect()
+        };
+        // Both words of the inflected name beat the one Bystričany shares; ties keep their order.
+        for question in [
+            "Aké je teraz znečistenie ovzdušia v Banskej Bystrici?",
+            "What is the air quality in Banská Bystrica right now?",
+        ] {
+            assert_eq!(
+                first(&table, question),
+                [json!(names[2]), json!(names[4]), json!(names[1])],
+                "{question}"
+            );
+        }
+        assert_eq!(
+            first(&table, "Aká je kvalita ovzdušia?"),
+            [json!(names[0]), json!(names[1]), json!(names[2])]
+        );
+        // A read narrowed by its q keeps the broker's order.
+        table.filter = Some("pm10>10".into());
+        table.profile = None;
+        assert_eq!(first(&table, "PM10 v Zvolene?")[0], json!(names[0]));
+        assert_eq!(places_named(&place_stems("Zvolen"), &[Value::Null]), 0);
+    }
+
     #[test]
     fn a_profile_goes_to_the_answer_with_five_rows() {
         let table = Table {
@@ -4707,7 +4805,7 @@ mod tests {
             profile: Some("type=AirQualityObserved count=900".into()),
             filter: None,
         };
-        let (_, _, data) = evidence(&[], std::slice::from_ref(&table));
+        let (_, _, data) = evidence(&[], std::slice::from_ref(&table), "");
         assert_eq!(data[0]["rows"].as_array().map(Vec::len), Some(PROFILE_ROWS));
         assert_eq!(data[0]["rowCount"], MODEL_ROWS + 3);
         assert_eq!(data[0]["profile"], "type=AirQualityObserved count=900");
@@ -4803,7 +4901,7 @@ mod tests {
             catalogue: false,
         };
         let tables = [table];
-        let (_, passages, data) = evidence(&best, &tables);
+        let (_, passages, data) = evidence(&best, &tables, "");
         let more = routed_rules(&routing, 6, false, &[], &live, &tables);
         let question = "Koľko mostov v Banskej Bystrici bolo postavených pred rokom 1900?";
         let messages = messages_with(None, &more, &[], question, NOW, &passages, &data);
@@ -5744,7 +5842,11 @@ mod tests {
             filter: filter.map(str::to_owned),
             ..Table::default()
         };
-        let (_, _, data) = evidence(&[], &[table(None, 1651), table(Some("yearBuilt<1900"), 37)]);
+        let (_, _, data) = evidence(
+            &[],
+            &[table(None, 1651), table(Some("yearBuilt<1900"), 37)],
+            "",
+        );
         assert!(data[0].get("q").is_none());
         assert_eq!(
             (&data[1]["q"], &data[1]["total"]),
@@ -6987,7 +7089,7 @@ classes:
         // The map's points move with their rows.
         assert_eq!(table.geometries[0], Some(json!(4)));
         assert_eq!(table.geometries[8], Some(json!(0)));
-        let (_, _, data) = evidence(&[], &[table]);
+        let (_, _, data) = evidence(&[], &[table], "");
         let real = data[0]["rows"].as_array().expect("rows");
         assert_eq!(real.len(), 8);
         assert_eq!(real[2][code], "M191");
