@@ -2,7 +2,7 @@
 antares | links-unmatched | 0
 antares | memory-body-copy | 20
 antares | memory-per-request-build | 0
-antares | memory-unbounded-global | 13
+antares | memory-unbounded-global | 12
 antares | memory-uncapped-read | 1
 antares | modularity-file-cycle | 62
 antares | modularity-server-as-library | 0
