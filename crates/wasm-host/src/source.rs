@@ -61,4 +61,26 @@ mod tests {
     fn a_component_is_kept_where_ap_151_says() {
         assert_eq!(super::component_key("ab12"), "components/sha256-ab12.wasm");
     }
+
+    #[tokio::test]
+    async fn a_directory_source_fetches_only_a_digest_it_holds() {
+        let dir = std::env::temp_dir().join(format!("wasm-host-source-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.expect("dir");
+        let hex = "a".repeat(64);
+        tokio::fs::write(dir.join(format!("sha256-{hex}.wasm")), b"\0asm")
+            .await
+            .expect("write");
+        let source = super::Source::Dir(dir.clone());
+        assert_eq!(
+            source.fetch(&format!("sha256:{hex}")).await,
+            Ok(b"\0asm".to_vec())
+        );
+        assert_eq!(
+            source.fetch("sha256:ab12").await,
+            Err("not a sha256 digest".to_owned())
+        );
+        let missing = source.fetch(&format!("sha256:{}", "b".repeat(64))).await;
+        assert!(missing.is_err_and(|why| why.starts_with(&format!("component {}", "b".repeat(64)))));
+        tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+    }
 }
