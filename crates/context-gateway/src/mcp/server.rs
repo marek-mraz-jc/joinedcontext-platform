@@ -41,6 +41,25 @@ pub(crate) const FAN_OUT: &[&str] = &["query_entities", "list_types", "describe_
 /// How long one member call of a fan-out may take (ADR-N-043 §2.7).
 pub(crate) const MEMBER_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How long one member's `list_types` may take in a fan-out: a type list is what a client reads
+/// before it asks anything, so the members that answered come back in seconds, never after the
+/// slowest member's ten (T-5782: one stalled Endpoint held bbsk/otvorene-data's list for 10.1 s,
+/// past the assistant's 3 s routing deadline). A member past it is a `failed` entry; naming it in
+/// `endpoint` waits the whole [`MEMBER_DEADLINE`].
+const LIST_MEMBER_DEADLINE: Duration = Duration::from_millis(2500);
+
+/// The deadline of one member call of `tool` in a fan-out, and how a member past it is reported.
+fn member_deadline(tool: &str) -> (Duration, &'static str) {
+    if tool == "list_types" {
+        (
+            LIST_MEMBER_DEADLINE,
+            "no type list within 2.5 seconds; name this Endpoint in `endpoint` to wait for it",
+        )
+    } else {
+        (MEMBER_DEADLINE, "no answer within ten seconds")
+    }
+}
+
 /// How long a whole fan-out may take (ADR-N-043 §2.7).
 const CALL_DEADLINE: Duration = Duration::from_secs(15);
 
@@ -525,6 +544,7 @@ impl Hub {
                 ),
             ));
         }
+        let (member_deadline, late) = member_deadline(name);
         let mut failed: Vec<(usize, Value)> = Vec::new();
         let mut runs = tokio::task::JoinSet::new();
         let mut asked: Vec<(usize, String)> = Vec::new();
@@ -559,7 +579,7 @@ impl Hub {
             let (name, id, params) = (name.to_owned(), id.clone(), params.clone());
             runs.spawn(async move {
                 let answer = tokio::time::timeout(
-                    MEMBER_DEADLINE,
+                    member_deadline,
                     hub.forward(&endpoint, &subject, &name, id, &params, own),
                 )
                 .await;
@@ -579,10 +599,9 @@ impl Hub {
                 continue;
             };
             match answer {
-                Err(_) => failed.push((
-                    index,
-                    json!({ "endpoint": endpoint.slug, "reason": "no answer within ten seconds" }),
-                )),
+                Err(_) => {
+                    failed.push((index, json!({ "endpoint": endpoint.slug, "reason": late })))
+                }
                 Ok(answer) => match member_entry(&endpoint, &answer) {
                     Ok((entry, cursor)) => {
                         if let Some(cursor) = cursor {

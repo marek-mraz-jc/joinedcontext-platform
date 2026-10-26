@@ -96,7 +96,7 @@ pub const ROUTING_DEADLINE: Duration = Duration::from_secs(3);
 /// Endpoints listed at once, by a question or by warming: a quarter of the gateway's per-caller
 /// share, as the counts take (T-5771). Unbounded, a deployment of 66 connectors filled the share
 /// and about 30 lists came back 503 at once on prod (T-5773).
-const LIST_PARALLEL: usize = 8;
+pub const LIST_PARALLEL: usize = 8;
 
 /// When warming lists an Endpoint's types again: well inside [`TYPES_LIFE`], so a question
 /// never meets them expired, and seldom enough that an idle Endpoint hears less than one call in
@@ -4630,6 +4630,69 @@ mod tests {
         assert!(sent <= 3 * LIST_PARALLEL, "{sent} lists sent");
         assert_eq!(live.len() + missing.len(), 40);
         assert!(live.len() >= 2 * LIST_PARALLEL, "{} listed", live.len());
+    }
+
+    /// T-5782: one Endpoint whose type list never comes leaves the others listed inside the
+    /// routing deadline, named as missing; the router's read of a listed Endpoint is kept, so
+    /// the question still takes the data path.
+    #[tokio::test]
+    async fn a_partial_listing_still_routes_the_question_to_data() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let types = |kind: &str| json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": format!("{{\"typeList\": [\"{kind}\"]}}")}]}});
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/registre/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(types("Bridge")))
+            .mount(&gateway)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/endpoint/tabulky/mcp"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(types("School"))
+                    .set_delay(Duration::from_secs(10)),
+            )
+            .mount(&gateway)
+            .await;
+        let tool = |name: &str| super::super::mcp::Tool {
+            name: name.into(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        };
+        let connectors: Vec<Connected> = ["registre", "tabulky"]
+            .iter()
+            .map(|slug| Connected {
+                titles: Default::default(),
+                endpoint: (*slug).to_owned(),
+                title: None,
+                surface: super::super::mcp::Surface {
+                    gateway: gateway.uri(),
+                    slug: (*slug).to_owned(),
+                    timeout: Duration::from_secs(20),
+                    token: None,
+                },
+                tools: vec![tool("list_types"), tool("query_entities")],
+                label: Some(format!("publisher of {slug}")),
+                siblings: Vec::new(),
+            })
+            .collect();
+        let cache = AnswerCache::default();
+        let began = Instant::now();
+
+        let (live, missing) =
+            live_of(&cache, &reqwest::Client::new(), "d", &connectors, None).await;
+
+        assert!(began.elapsed() < ROUTING_DEADLINE + Duration::from_millis(500));
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].endpoint, "registre");
+        assert_eq!(live[0].types, ["Bridge"]);
+        assert_eq!(missing, ["publisher of tabulky"]);
+        let reply = r#"{"route": "data", "lang": "sk", "queries": ["mosty"], "data": [{"endpoint": "registre", "type": "Bridge"}]}"#;
+        let routed = routing(reply, "Koľko mostov je v registri?", &live);
+        assert!(routed.data);
+        assert_eq!(routed.reads.len(), 1);
+        assert_eq!(routed.reads[0].endpoint, "registre");
     }
 
     /// T-4746: warming reads the catalogue Endpoint's organizations once, through the same MCP
