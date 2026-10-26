@@ -52,6 +52,13 @@ const ALWAYS_RED: &[&str] = &[
     "ContextSourceRegistration",
     "Role",
     "RoleBinding",
+    // A Group is a grant path of its own: a Policy may name it as assignee.
+    "Group",
+    "Project",
+    // A broker brings its own database, client and share of the node (PF-110, ADR-N-047),
+    // and an MQTT broker's roles grant publish and subscribe on topics (ADR-N-048).
+    "ContextBroker",
+    "MqttBroker",
 ];
 
 /// Why a change is in its lane, in one clause, for the proposal body and the audit trail.
@@ -97,6 +104,12 @@ pub fn lane_of(change: &ResourceChange) -> LaneVerdict {
         return LaneVerdict {
             lane: Lane::Red,
             reason: "public exposure of an endpoint is red (CC-63)",
+        };
+    }
+    if let Some(reason) = public_exposure(change) {
+        return LaneVerdict {
+            lane: Lane::Red,
+            reason,
         };
     }
     if change.id.kind == "AgentProfile" {
@@ -148,6 +161,42 @@ fn touches_public_audience(change: &ResourceChange) -> bool {
         .and_then(Value::as_str)
         == Some("public");
     declared_public || change.diff.iter().any(|d| d.path == "spec.audience")
+}
+
+/// The other kinds whose change opens something to anyone, red as the Portal's lane makes them
+/// (AP-120, AP-134, MF-52, MF-53): a public or egressing App, a public McpServer, an
+/// AssistantDeployment on any channel but `internal`. Moving the member is red both ways.
+fn public_exposure(change: &ResourceChange) -> Option<&'static str> {
+    let spec = change.declared.as_ref().map(|manifest| &manifest.spec);
+    let member = |key: &str| spec.and_then(|spec| spec.get(key));
+    let moved = |path: &str| change.diff.iter().any(|d| d.path.starts_with(path));
+    match change.id.kind.as_str() {
+        "App"
+            if member("visibility").and_then(Value::as_str) == Some("public")
+                || member("egress")
+                    .and_then(Value::as_array)
+                    .is_some_and(|egress| !egress.is_empty())
+                || moved("spec.visibility")
+                || moved("spec.egress") =>
+        {
+            Some("an App anyone opens, or one that sends data out, is red (AP-120, AP-134)")
+        }
+        "McpServer"
+            if member("audience").and_then(Value::as_str) == Some("public")
+                || moved("spec.audience") =>
+        {
+            Some("public exposure of an MCP server is red (MF-53, ADR-N-043)")
+        }
+        "AssistantDeployment"
+            if member("channel")
+                .and_then(Value::as_str)
+                .is_some_and(|channel| channel != "internal")
+                || moved("spec.channel") =>
+        {
+            Some("an assistant that answers outside the project is red (MF-52)")
+        }
+        _ => None,
+    }
 }
 
 /// The self-service cases (CC-63 green column, CC-67): an ephemeral sandbox space, and a

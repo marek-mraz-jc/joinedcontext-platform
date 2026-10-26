@@ -119,7 +119,34 @@ fn office(bytes: &[u8]) -> Result<&'static str, String> {
         }
         at += 46 + name_len + extra + comment;
     }
-    kind.ok_or_else(|| "the archive is neither a DOCX nor an XLSX".into())
+    let kind = kind.ok_or("the archive is neither a DOCX nor an XLSX")?;
+    inflated_within(bytes)?;
+    Ok(kind)
+}
+
+/// Inflates every entry once, counting the bytes it really unpacks to: the sizes the central
+/// directory declares are the file's own word, so a crafted entry that declares 1 KiB is refused
+/// as soon as it passes [`MAX_UNPACKED`], before the extractor inflates it unbounded.
+fn inflated_within(bytes: &[u8]) -> Result<(), String> {
+    const BROKEN: &str = "the archive is not a readable DOCX or XLSX";
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| BROKEN.to_owned())?;
+    let mut left = MAX_UNPACKED;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|_| BROKEN.to_owned())?;
+        let read = std::io::copy(
+            &mut std::io::Read::take(entry, left + 1),
+            &mut std::io::sink(),
+        )
+        .map_err(|_| BROKEN.to_owned())?;
+        left = left.checked_sub(read).ok_or_else(|| {
+            format!(
+                "the archive unpacks past {} MiB",
+                MAX_UNPACKED / 1024 / 1024
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// One uploaded file as the administration lists it.
@@ -334,23 +361,68 @@ mod tests {
         out
     }
 
+    /// A real Office-shaped ZIP whose entries hold what they declare, deflated.
+    fn office_zip(names: &[&str]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for name in names {
+            assert!(writer.start_file(*name, options).is_ok());
+            assert!(writer.write_all(b"<x/>").is_ok());
+        }
+        writer
+            .finish()
+            .map(std::io::Cursor::into_inner)
+            .unwrap_or_default()
+    }
+
+    /// T-5699, F-PLT1-010: an entry whose central directory declares 1 KiB but that inflates
+    /// past the cap is refused; the declared sizes alone let it through before.
+    #[test]
+    fn an_entry_that_inflates_past_what_it_declares_is_refused() {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .large_file(false);
+        assert!(writer.start_file("word/document.xml", options).is_ok());
+        let block = vec![0u8; 1024 * 1024];
+        for _ in 0..=MAX_UNPACKED / 1024 / 1024 {
+            assert!(writer.write_all(&block).is_ok());
+        }
+        let mut bomb = writer
+            .finish()
+            .map(std::io::Cursor::into_inner)
+            .unwrap_or_default();
+        // Rewrite the declared uncompressed size, in the local header and the directory, to 1 KiB.
+        let local = 22;
+        bomb[local..local + 4].copy_from_slice(&1024u32.to_le_bytes());
+        let directory = bomb
+            .windows(4)
+            .rposition(|window| window == b"PK\x01\x02")
+            .unwrap_or_default();
+        bomb[directory + 24..directory + 28].copy_from_slice(&1024u32.to_le_bytes());
+        let refused = sniff("x.docx", &bomb);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.contains("unpacks past 200 MiB")),
+            "{refused:?}"
+        );
+    }
+
     #[test]
     fn a_file_is_typed_by_its_content_never_its_name() {
         assert_eq!(sniff("a.txt", b"%PDF-1.7\n..."), Ok(PDF));
         assert_eq!(
             sniff(
                 "x",
-                &zip(
-                    &[("[Content_Types].xml", 10), ("word/document.xml", 99)],
-                    false
-                )
+                &office_zip(&["[Content_Types].xml", "word/document.xml"])
             ),
             Ok(DOCX)
         );
-        assert_eq!(
-            sniff("x.pdf", &zip(&[("xl/workbook.xml", 99)], false)),
-            Ok(XLSX)
-        );
+        assert_eq!(sniff("x.pdf", &office_zip(&["xl/workbook.xml"])), Ok(XLSX));
         assert_eq!(
             sniff("Rozpočet.CSV", "obec;suma\nBB;1\n".as_bytes()),
             Ok("text/csv")

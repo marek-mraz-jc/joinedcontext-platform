@@ -207,6 +207,9 @@ struct Walk {
     report: CrawlReport,
     /// The robots.txt of each other host a document of the site lives on, read once a crawl.
     foreign_robots: HashMap<String, robots::Robots>,
+    /// A document was left unread because `maxPages` documents were read already: the run is
+    /// capped and says nothing about what the site no longer links (T-5699).
+    documents_capped: bool,
 }
 
 /// The first start URL and its host; a source that is not a website, or names no usable start
@@ -426,6 +429,7 @@ async fn crawl(
     // Only a crawl that walked the whole site, under a robots.txt it could read, from a start
     // that answered, says what the site no longer links: a capped or blind run says nothing.
     let answered = walk.report.pages_fetched + walk.report.pages_unchanged > 0;
+    complete &= !walk.documents_capped;
     if complete && answered && !matches!(robots, robots::Robots::DisallowAll) {
         walk.report.removed += age_unreached(pool, project, site_id, &walk).await?;
     }
@@ -836,6 +840,12 @@ async fn handle_document(
     let url_str = canon_doc_url.as_str();
 
     if !walk.seen_documents.insert(url_str.to_owned()) {
+        return Ok(());
+    }
+    // `maxPages` bounds the documents a crawl reads as well as its pages: a page linking
+    // thousands of PDFs fetches no more of them than that.
+    if walk.report.documents_fetched + walk.report.documents_unchanged >= spec.max_pages {
+        walk.documents_capped = true;
         return Ok(());
     }
     let report = &mut walk.report;
