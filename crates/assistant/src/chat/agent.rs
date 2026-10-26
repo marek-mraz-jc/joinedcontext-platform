@@ -1109,7 +1109,7 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
     // After the answer streamed and before the visitor sees its sources: a step of its own, so
     // the wait is named in the transcript (T-4729).
     let began = std::time::Instant::now();
-    let named: Result<(), crate::Error> = async {
+    let naming = async {
         // A table names its connector; a passage of an Endpoint's own page names its address,
         // which a visitor reads as JSON: both cite the dataset's page where one names the
         // Endpoint (T-4366), and an address stays only when no page does.
@@ -1165,17 +1165,27 @@ pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
                 .and_then(|url| titles.get(url).cloned())
                 .or(citation.title.take());
         }
-        Ok(())
-    }
-    .await;
+        Ok::<(), crate::Error>(())
+    };
+    // Both lookups read the passages; the Endpoint pages' one is the regular-expression scan the
+    // tables' page lookup is bounded for (T-5789), and it held od-67's finished answer 5.5 s on
+    // prod (T-5800). Past the deadline every citation keeps the address and name it came with.
+    let named = tokio::time::timeout(super::routed::PAGE_DEADLINE, naming).await;
     let output = match &named {
-        Ok(()) => format!("{} sources named", citations.len()),
-        Err(why) => format!("failed: {why}"),
+        Ok(Ok(())) => format!("{} sources named", citations.len()),
+        Ok(Err(why)) => format!("failed: {why}"),
+        Err(_) => "deadline".to_owned(),
     };
     ask.trace
         .note("tool", "name_sources", began, None, Some(&output));
-    if let Err(why) = named {
-        tracing::warn!(deployment = %ask.deployment, %why, "naming the sources failed");
+    match named {
+        Ok(Ok(())) => {}
+        Ok(Err(why)) => {
+            tracing::warn!(deployment = %ask.deployment, %why, "naming the sources failed");
+        }
+        Err(_) => {
+            tracing::info!(deployment = %ask.deployment, "the sources were not named within their deadline");
+        }
     }
 }
 

@@ -453,6 +453,11 @@ async fn answer_of(
         .await
         .expect("a body");
     let text = String::from_utf8_lossy(&bytes);
+    (status, events_in(&text), headers)
+}
+
+/// The events of an answer's stream, each by its name with its data.
+fn events_in(text: &str) -> Vec<(String, Value)> {
     let mut found = Vec::new();
     for block in text.split("\n\n") {
         let name = block
@@ -473,10 +478,32 @@ async fn answer_of(
     if found.is_empty() {
         found.push((
             "body".into(),
-            serde_json::from_str(&text).unwrap_or(Value::Null),
+            serde_json::from_str(text).unwrap_or(Value::Null),
         ));
     }
-    (status, found, headers)
+    found
+}
+
+/// The answer's events and how long after the request its `answer` event arrived, the stream
+/// read frame by frame.
+async fn answer_timed(
+    app: &axum::Router,
+    request: Request<Body>,
+) -> (std::time::Duration, Vec<(String, Value)>) {
+    use futures_util::StreamExt as _;
+    let asked = std::time::Instant::now();
+    let response = app.clone().oneshot(request).await.expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut frames = response.into_body().into_data_stream();
+    let (mut text, mut answered) = (String::new(), None);
+    while let Some(frame) = frames.next().await {
+        text.push_str(&String::from_utf8_lossy(&frame.expect("a frame")));
+        if answered.is_none() && text.contains("event: answer") {
+            answered = Some(asked.elapsed());
+        }
+    }
+    let events = events_in(&text);
+    (answered.expect("an answer event"), events)
 }
 
 async fn model_calls(proxy: &MockServer) -> Vec<(axum::http::HeaderMap, Value)> {
@@ -623,6 +650,105 @@ async fn a_not_found_answer_shows_no_table_and_offers_no_question_it_cannot_answ
         [json!({"questions": ["Kde je NO2 najvyššie?"]})],
         "{events:?}"
     );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// T-5800: prod answered "Aké je teraz znečistenie ovzdušia v Banskej Bystrici?" after two and
+/// three data model calls (32-43k tokens, first text 23-25 s): the router reads Slovakia's 53 air
+/// stations unnarrowed and the answer was shown the first 15, none of them Banská Bystrica's, so
+/// it read again by name. The rows naming the asked place come first, and one call answers.
+#[tokio::test]
+async fn an_air_question_about_one_town_is_answered_in_one_data_call() {
+    let mut d = deployment(Channel::Public, 50_000, 10);
+    d.spec.connectors[0].tools = vec!["list_types".into(), "query_entities".into()];
+    let w = world("chatairtown", d).await;
+    let mcp = || Mock::given(method("POST")).and(path(format!("/api/endpoint/{SLUG}/mcp")));
+    mcp().and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "list_types", "description": "Lists the entity types.", "inputSchema": {"type": "object"}},
+            {"name": "query_entities", "description": "Reads entities.", "inputSchema": {"type": "object", "properties": {
+                "type": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "q": {"type": "string"}, "count": {"type": "boolean"},
+                "limit": {"type": "integer", "maximum": 1000}}}}
+        ]}})))
+        .with_priority(1).mount(&w.gateway).await;
+    let types = json!({"entityTypes": {"id": "urn:ngsi-ld:EntityTypeList:1", "type": "EntityTypeList", "typeList": ["AirQualityObserved"]}});
+    mcp()
+        .and(body_string_contains("\"list_types\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": types.to_string()}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    let stations = include_str!("fixtures/mcp/query-entities-air-ovzdusie-sk.json");
+    mcp()
+        .and(body_string_contains("\"query_entities\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [{"type": "text", "text": stations}]
+            }}),
+        ))
+        .with_priority(1)
+        .mount(&w.gateway)
+        .await;
+    script_routed(
+        &w.proxy,
+        vec![completion(
+            json!({"role": "assistant", "content": json!({"route": "data", "queries": ["kvalita ovzdušia Banská Bystrica"],
+                "data": [{"endpoint": "ovzdusie", "type": "AirQualityObserved"}]}).to_string()}),
+            400,
+        )],
+        vec![completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 100)],
+        vec![],
+    )
+    .await;
+    // The answer model answers once it is shown a Banská Bystrica station; else it reads them
+    // by name, as prod's did.
+    let answer = "V Banskej Bystrici je PM10 23,5 µg/m³ (SK0214A) a 37,5 µg/m³ (SK0263A) [1].";
+    let llm = || Mock::given(method("POST")).and(path("/v1/llm/chat/completions"));
+    llm()
+        .and(body_string_contains("stanica SK0263A"))
+        .respond_with(completion(
+            json!({"role": "assistant", "content": answer}),
+            900,
+        ))
+        .with_priority(50)
+        .mount(&w.proxy)
+        .await;
+    llm()
+        .respond_with(completion(
+            tool_call("c1", "query_entities", json!({"endpoint": "ovzdusie", "type": ["AirQualityObserved"], "q": "name~=\"Banská Bystrica.*\""})),
+            900,
+        ))
+        .up_to_n_times(1)
+        .with_priority(100)
+        .mount(&w.proxy)
+        .await;
+
+    let (status, events, _) = answer_of(
+        &w.app,
+        ask(
+            json!({"message": "Aké je teraz znečistenie ovzdušia v Banskej Bystrici?"}),
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let calls = model_calls(&w.proxy).await;
+    let data_calls = calls_of(&calls, None);
+    assert_eq!(data_calls.len(), 1, "{events:?}");
+    assert_eq!(
+        events
+            .iter()
+            .find(|(n, _)| n == "answer")
+            .map(|(_, d)| d["text"].clone()),
+        Some(json!(answer)),
+        "{events:?}"
+    );
+    assert_eq!(tool_calls_of(&w.gateway, "query_entities").await.len(), 1);
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
@@ -4130,7 +4256,9 @@ async fn the_reads_after_the_router_run_at_once() {
 
 /// T-5789: a dataset page lookup is a regular-expression scan of the index that took 5-15 s on
 /// prod; the data call waits for it at most PAGE_DEADLINE (1.5 s), and the table then links no
-/// page. The scan is held here by a lock on the passages until 6 s.
+/// page. The scan is held here by a lock on the passages until 6 s. Naming the cited sources
+/// reads the same passages after the answer is written and waits as long (T-5800: 5.5 s after
+/// od-67's answer on prod), so the answer goes out well before the lock is released.
 #[tokio::test]
 async fn a_slow_dataset_page_lookup_does_not_hold_the_data_call() {
     let hold = std::time::Duration::from_secs(6);
@@ -4167,7 +4295,7 @@ async fn a_slow_dataset_page_lookup_does_not_hold_the_data_call() {
             .await
             .expect("released");
     });
-    let (status, events, _) = answer_of(
+    let (took, events) = answer_timed(
         &w.app,
         ask(
             json!({"message": "Ktoré stanice majú NO2 nad 20?"}),
@@ -4176,7 +4304,8 @@ async fn a_slow_dataset_page_lookup_does_not_hold_the_data_call() {
     )
     .await;
     release.await.expect("the lock was released");
-    assert_eq!(status, StatusCode::OK, "{events:?}");
+    eprintln!("answer event under a held scan: {took:?}");
+    assert!(took < std::time::Duration::from_millis(4_500), "{took:?}");
     let gap = router_to_data(&routed, &answered, 1);
     eprintln!("router to data call under a held scan: {gap:?}");
     assert!(gap < std::time::Duration::from_millis(2_500), "{gap:?}");

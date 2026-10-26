@@ -1,0 +1,1506 @@
+{
+ "_comment": "T-5800: query_entities of slovensko/ovzdusie-sk (AirQualityObserved), every station of the seed's station table (deployment slovensko-pipeline-ovzdusie-bento.yaml) in id order as the broker pages them; values made up, names and ids as the pipeline writes them.",
+ "total": 53,
+ "entities": [
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0001A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bratislava, stanica SK0001A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 10.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 5.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.125496,
+      48.124711
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0002A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bratislava, stanica SK0002A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 17.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 8.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.128917,
+      48.158371
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0002R",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Demänovská Dolina, stanica SK0002R (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 24.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 11.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.589164,
+      48.943544
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0004A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bratislava, stanica SK0004A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 31.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 14.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.113576,
+      48.144672
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0004R",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Stará Lesná, stanica SK0004R (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 38.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 17.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.289486,
+      49.15141
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0006R",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Stakčín, stanica SK0006R (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 15.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 20.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      22.26,
+      49.042778
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0007R",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Okoč, stanica SK0007R (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 22.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 23.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.860144,
+      47.959448
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0008A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Ružomberok, stanica SK0008A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 29.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 26.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.302525,
+      49.079012
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0013A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bystričany, stanica SK0013A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 36.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 29.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.514078,
+      48.666969
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0016A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Košice, stanica SK0016A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 13.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 7.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.245046,
+      48.753179
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0018A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Veľká Ida, stanica SK0018A (predmestská priemyselná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 20.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 10.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.175192,
+      48.592102
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0020A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Žilina, stanica SK0020A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 27.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 13.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.771215,
+      49.211447
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0021A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Senica, stanica SK0021A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 34.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 16.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.363169,
+      48.680608
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0022A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Hnúšťa, stanica SK0022A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 11.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 19.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.951642,
+      48.583883
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0025A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Jelšava, stanica SK0025A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 18.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 22.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.240365,
+      48.631196
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0027A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Handlová, stanica SK0027A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 25.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 25.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.756377,
+      48.73312
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0030A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Strážske, stanica SK0030A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 32.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 28.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.837579,
+      48.874029
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0031A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Vranov nad Topľou, stanica SK0031A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 39.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 6.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.687617,
+      48.886382
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0037A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Humenné, stanica SK0037A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 16.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 9.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.913705,
+      48.930932
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0039A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Martin, stanica SK0039A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 23.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 12.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.921364,
+      49.059721
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0041A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Gánovce, stanica SK0041A (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 30.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 15.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.322811,
+      49.034659
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0042A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Kojšov, stanica SK0042A (vidiecka pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 37.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 18.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.987197,
+      48.782852
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0045A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Trnava, stanica SK0045A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 14.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 21.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.584946,
+      48.37123
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0047A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Trenčín, stanica SK0047A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 21.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 24.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.041254,
+      48.896467
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0048A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bratislava, stanica SK0048A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 28.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 27.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.106244,
+      48.167961
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0050A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Prievidza, stanica SK0050A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 35.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 5.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.628133,
+      48.782705
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0061A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bratislava, stanica SK0061A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 12.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 8.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.157958,
+      48.21127
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0063A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Sereď, stanica SK0063A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 19.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 11.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.735158,
+      48.28365
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0064A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Komárno, stanica SK0064A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 26.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 14.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.138552,
+      47.764117
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0066A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Púchov, stanica SK0066A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 33.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 17.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.325265,
+      49.118973
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0067A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Liptovský Mikuláš, stanica SK0067A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 10.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 20.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.61935,
+      49.083893
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0068A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Senec, stanica SK0068A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 17.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 23.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.404402,
+      48.223043
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0069A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Poprad, stanica SK0069A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 24.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 26.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.28578,
+      49.06147
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0070A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Plášťovce, stanica SK0070A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 31.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 29.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.978435,
+      48.159624
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0071A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Oščadnica, stanica SK0071A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 38.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 7.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.88362,
+      49.43538
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0072A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Lučenec, stanica SK0072A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 15.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 10.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.675888,
+      48.336629
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0073A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Trebišov, stanica SK0073A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 22.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 13.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.713304,
+      48.628344
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0074A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Bardejov, stanica SK0074A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 29.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 16.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.277867,
+      49.300521
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0075A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Pezinok, stanica SK0075A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 36.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 19.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.2597,
+      48.283298
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0076A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Rovinka, stanica SK0076A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 13.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 22.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.231191,
+      48.099674
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0077A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Rohožník, stanica SK0077A (predmestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 20.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 25.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      17.171582,
+      48.457053
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0078A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Žarnovica, stanica SK0078A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 27.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 28.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.717646,
+      48.483124
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0134A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Nitra, stanica SK0134A (predmestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 34.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 6.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      18.140637,
+      48.28305
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0214A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Banská Bystrica, stanica SK0214A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 11.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 9.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.154914,
+      48.735156
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0262A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Zvolen, stanica SK0262A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 18.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 12.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.156863,
+      48.558203
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0263A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Banská Bystrica, stanica SK0263A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 25.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 15.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      19.115268,
+      48.733256
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0264A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Košice, stanica SK0264A (mestská pozaďová)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 32.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 18.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.285442,
+      48.690217
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0265A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Krompachy, stanica SK0265A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 39.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 21.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      20.874058,
+      48.915596
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0266A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Prešov, stanica SK0266A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 16.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 24.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.266789,
+      48.992494
+     ]
+    }
+   }
+  },
+  {
+   "id": "urn:ngsi-ld:AirQualityObserved:joinedcontext.com:ovzdusie-sk:SK0267A",
+   "type": "AirQualityObserved",
+   "name": {
+    "type": "Property",
+    "value": "Košice, stanica SK0267A (mestská dopravná)"
+   },
+   "pm10": {
+    "type": "Property",
+    "value": 23.5,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "no2": {
+    "type": "Property",
+    "value": 27.25,
+    "unitCode": "GQ",
+    "observedAt": "2026-10-26T15:00:00Z"
+   },
+   "location": {
+    "type": "GeoProperty",
+    "value": {
+     "type": "Point",
+     "coordinates": [
+      21.258836,
+      48.726267
+     ]
+    }
+   }
+  }
+ ]
+}
