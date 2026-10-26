@@ -17,6 +17,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use jc_core::kinds::assistant::{Localised, SourceType, Visibility};
 use jc_core::kinds::catalog::DataTheme;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub const KEEP: Duration = Duration::from_secs(60);
 const MAX_HELD: usize = 1_000;
 /// How long one count through the gateway may take; a slower one is left out, never zero.
 const COUNT_DEADLINE: Duration = Duration::from_secs(3);
+/// Endpoints counted at once: a quarter of the gateway's per-caller share, so a question keeps room.
+const COUNT_PARALLEL: usize = 8;
 
 pub fn router(state: Arc<ChatState>) -> Router {
     // `/api/v1/d/{publicId}/context` is the chat router's, beside its preflight.
@@ -189,22 +192,30 @@ pub async fn count(state: Arc<ChatState>) {
             }
         }
     }
-    let counted = futures_util::future::join_all(slugs.iter().map(|slug| {
-        let page = &snapshot.pages[*slug].page;
-        let gateway = &gateway;
-        let http = &state.http;
-        async move {
-            let counts = tokio::time::timeout(
-                COUNT_DEADLINE,
-                crate::catalogue::counts(http, gateway, page),
-            )
-            .await
-            .unwrap_or_default();
-            (!counts.is_empty() && counts.len() == page.types.len())
-                .then(|| (page.slug.clone(), counts.values().sum::<u64>()))
-        }
-    }))
-    .await;
+    // A bounded fan-out: the gateway admits 32 requests per caller, and an unbounded one over
+    // every Endpoint held them all each minute, so the questions' own reads got 503.
+    let asks: Vec<_> = slugs
+        .iter()
+        .map(|slug| {
+            let page = &snapshot.pages[*slug].page;
+            let gateway = &gateway;
+            let http = &state.http;
+            async move {
+                let counts = tokio::time::timeout(
+                    COUNT_DEADLINE,
+                    crate::catalogue::counts(http, gateway, page),
+                )
+                .await
+                .unwrap_or_default();
+                (!counts.is_empty() && counts.len() == page.types.len())
+                    .then(|| (page.slug.clone(), counts.values().sum::<u64>()))
+            }
+        })
+        .collect();
+    let counted: Vec<_> = futures_util::stream::iter(asks)
+        .buffer_unordered(COUNT_PARALLEL)
+        .collect()
+        .await;
     if let Ok(mut held) = state.contexts.lock() {
         held.counts = counted.into_iter().flatten().collect();
     }
