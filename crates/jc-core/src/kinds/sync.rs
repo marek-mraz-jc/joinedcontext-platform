@@ -62,6 +62,16 @@ pub struct GitOrigin {
     pub secret_ref: Option<SecretRef>,
 }
 
+impl GitOrigin {
+    /// Refuses a clone URL whose host is not one the installation lets a sync reach
+    /// (F-PLT2-019): the configured forge or an allow-listed origin, from the fetching
+    /// component's configuration. Call it before every fetch: [`SyncSourceSpec`]
+    /// validation knows no configuration and judges the host's form only.
+    pub fn check_allowed_host(&self, allowed: &[&str]) -> Result<()> {
+        check_allowed_host(&self.url, allowed)
+    }
+}
+
 /// A published bundle URL as a sync origin (MF-17).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -674,12 +684,34 @@ impl fmt::Display for SyncMode {
     }
 }
 
-/// Rejects `http://` and anything that is not a URL we are willing to fetch (MF-31, MF-32).
-fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Result<()> {
+/// Refuses a clone URL whose host is neither the configured forge nor an allow-listed origin
+/// (F-PLT2-019). `allowed` comes from the fetching component's configuration, never from a
+/// manifest; hosts compare without case or a trailing dot, after any userinfo, so
+/// `ssh://forge@evil.example` is judged as `evil.example`.
+pub(crate) fn check_allowed_host(url: &str, allowed: &[&str]) -> Result<()> {
+    let (_, rest) = url.split_once("://").unwrap_or(("", url));
+    let authority = crate::project::authority(rest);
+    let host = remote_host(authority.rsplit('@').next().unwrap_or_default());
+    let plain = |h: &str| h.trim_end_matches('.').to_ascii_lowercase();
+    if allowed.iter().any(|a| plain(a) == plain(host)) {
+        return Ok(());
+    }
+    Err(Error::Name {
+        field: "source.git.url",
+        value: plain(host),
+        reason: "the host is neither the platform's forge nor an allow-listed origin; ask the \
+                 operator to add it to the sync allow-list",
+    })
+}
+
+/// Rejects `http://` and anything that is not a URL we are willing to fetch (MF-31, MF-32), and
+/// a host no remote origin can have (F-PLT2-019).
+pub(crate) fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Result<()> {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let (userinfo, host) = match crate::project::authority(rest).rsplit_once('@') {
+    let authority = crate::project::authority(rest);
+    let (userinfo, host) = match authority.rsplit_once('@') {
         Some((userinfo, host)) => (Some(userinfo), host),
-        None => (None, ""),
+        None => (None, authority),
     };
     // A refusal repeats no userinfo: a pasted URL may carry a live password (F-PLT3-010).
     let shown = || match userinfo {
@@ -709,6 +741,84 @@ fn validate_remote_url(field: &'static str, url: &str, allow_ssh: bool) -> Resul
             reason: "url carries credentials; the URL names the repository and `secretRef` \
                      names the secret that reads it (MF-24)",
         });
+    }
+    if let Err(reason) = check_remote_host(remote_host(host)) {
+        return Err(Error::Name {
+            field,
+            value: shown(),
+            reason,
+        });
+    }
+    Ok(())
+}
+
+/// The host of an authority past its userinfo: without the port, the scp form's `:path`
+/// (`git@host:org/repo`) or an IPv6 literal's brackets' tail.
+fn remote_host(host_port: &str) -> &str {
+    match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host_port.split(':').next().unwrap_or_default(),
+    }
+}
+
+/// Names that answer inside the installation, never on the internet: `localhost` (RFC 6761),
+/// mDNS (RFC 6762), the home network (RFC 8375), Kubernetes Services and the usual private zones.
+const INTERNAL_SUFFIXES: [&str; 7] = [
+    "localhost",
+    "local",
+    "localdomain",
+    "internal",
+    "lan",
+    "home.arpa",
+    "svc",
+];
+
+/// Refuses a host no remote origin can have (F-PLT2-019): an address written into the URL that
+/// is not on the public internet, in any form a URL parser reads as one (`2130706433`,
+/// `0x7f.1`, `[::ffff:127.0.0.1]`), a name of one label (an in-cluster Service) or under an
+/// internal suffix, and anything a parser would decode into another host (`%`, non-ASCII).
+/// What a public name resolves to is judged when it is fetched, by the outbound guard.
+fn check_remote_host(host: &str) -> std::result::Result<(), &'static str> {
+    const PRIVATE: &str = "the host is a loopback, private, link-local or internal address; a \
+                           remote names a public host such as git.example.org";
+    if host.is_empty() {
+        return Err("url names no host, e.g. https://git.example.org/org/repo.git");
+    }
+    if host.contains(':') {
+        return match host.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) if crate::address::is_public(ip.into()) => Ok(()),
+            Ok(_) => Err(PRIVATE),
+            Err(_) => Err("the host is not a valid IPv6 address"),
+        };
+    }
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+    {
+        return Err(
+            "the host holds only letters, digits, dots and hyphens; an internationalised \
+                    name is written in its xn-- form",
+        );
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    // A URL parser reads a host whose last label is a number as an IPv4 address.
+    if last.starts_with("0x") || last.bytes().all(|b| b.is_ascii_digit()) {
+        return match host.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if crate::address::is_public(ip.into()) => Ok(()),
+            Ok(_) => Err(PRIVATE),
+            Err(_) => Err("an IPv4 address is written in dotted decimal, e.g. 203.0.113.7"),
+        };
+    }
+    let internal = INTERNAL_SUFFIXES.iter().any(|suffix| {
+        host == *suffix
+            || host
+                .strip_suffix(suffix)
+                .is_some_and(|rest| rest.ends_with('.'))
+    });
+    if internal || !host.contains('.') {
+        return Err(PRIVATE);
     }
     Ok(())
 }
@@ -742,5 +852,87 @@ mod remote_url_tests {
                 "{url}"
             );
         }
+    }
+
+    /// F-PLT2-019: a loopback, private, link-local, metadata or internal host is refused in
+    /// every spelling a URL parser accepts, behind a userinfo decoy too; a public one passes.
+    #[test]
+    fn a_private_or_internal_host_is_refused_and_a_public_one_passes() {
+        for url in [
+            "https://127.0.0.1/r.git",
+            "https://localhost/r.git",
+            "https://LOCALHOST./r.git",
+            "https://forge.localhost/r.git",
+            "https://10.43.0.10:3000/r.git",
+            "https://192.168.1.1/r.git",
+            "https://169.254.169.254/latest/meta-data",
+            "https://2130706433/r.git",
+            "https://0x7f.1/r.git",
+            "https://0177.0.0.1/r.git",
+            "https://[::1]/r.git",
+            "https://[::ffff:127.0.0.1]/r.git",
+            "https://[fe80::1]:443/r.git",
+            "https://gitea/r.git",
+            "https://gitea-http.gitea.svc/r.git",
+            "https://gitea-http.gitea.svc.cluster.local/r.git",
+            "https://forge.internal/r.git",
+            "https://%6c%6fcalhost/r.git",
+            "https://",
+            "ssh://git@127.0.0.1/r.git",
+            "ssh://forge.example.org@127.0.0.1/r.git",
+            "git@10.0.0.5:o/r.git",
+            "git@[::1]:o/r.git",
+        ] {
+            let refusal = validate_remote_url("source.git.url", url, true);
+            assert!(refusal.is_err(), "{url}");
+        }
+        for url in [
+            "https://git.example.org/r.git",
+            "https://Git.Example.org./r.git",
+            "https://116.203.134.249/r.git",
+            "https://[2606:4700::1111]/r.git",
+            "ssh://git@git.example.org:2222/r.git",
+            "git@github.com:o/r.git",
+        ] {
+            assert!(
+                validate_remote_url("source.git.url", url, true).is_ok(),
+                "{url}"
+            );
+        }
+    }
+
+    /// F-PLT2-019: only the configured forge or an allow-listed host may be fetched; a decoy
+    /// userinfo naming the forge does not make another host the forge.
+    #[test]
+    fn only_the_forge_or_an_allow_listed_host_is_fetched() {
+        let origin = |url: &str| super::GitOrigin {
+            url: url.to_owned(),
+            git_ref: "main".to_owned(),
+            path: None,
+            secret_ref: None,
+        };
+        let allowed = ["forge.dev.joinedcontext.com", "github.com"];
+        for url in [
+            "https://forge.dev.joinedcontext.com/o/r.git",
+            "https://FORGE.dev.joinedcontext.com./o/r.git",
+            "git@github.com:o/r.git",
+            "ssh://git@github.com:22/o/r.git",
+        ] {
+            assert!(origin(url).check_allowed_host(&allowed).is_ok(), "{url}");
+        }
+        for url in [
+            "https://git.example.org/o/r.git",
+            "ssh://forge.dev.joinedcontext.com@evil.example.org/r.git",
+            "https://github.com.evil.example.org/o/r.git",
+        ] {
+            let refusal = origin(url)
+                .check_allowed_host(&allowed)
+                .expect_err(url)
+                .to_string();
+            assert!(refusal.contains("allow-list"), "{refusal}");
+        }
+        assert!(origin("https://github.com/o/r.git")
+            .check_allowed_host(&[])
+            .is_err());
     }
 }

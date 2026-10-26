@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod address;
 #[cfg(feature = "auth")]
 pub mod auth;
 pub mod classification;
