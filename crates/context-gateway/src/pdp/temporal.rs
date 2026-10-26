@@ -162,7 +162,9 @@ fn instant(value: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     if let Ok(absolute) = DateTime::parse_from_rfc3339(value) {
         return Some(absolute.with_timezone(&Utc));
     }
-    duration(value).map(|offset| now + offset)
+    // Checked: an offset past chrono's range is no instant, and the window that names it is
+    // unreadable rather than a panic on the request path (F-PLT2-005).
+    duration(value).and_then(|offset| now.checked_add_signed(offset))
 }
 
 /// An ISO 8601 duration as a signed offset: `P-1D` and `-P1D` are both "a day ago".
@@ -193,13 +195,13 @@ fn duration(value: &str) -> Option<Duration> {
                 unit if units.contains(unit) => {
                     let count: i64 = digits.parse().ok()?;
                     digits.clear();
-                    total += match unit {
+                    total = total.checked_add(&match unit {
                         'W' => Duration::try_weeks(count)?,
                         'D' => Duration::try_days(count)?,
                         'H' => Duration::try_hours(count)?,
                         'M' => Duration::try_minutes(count)?,
                         _ => Duration::try_seconds(count)?,
-                    };
+                    })?;
                 }
                 // A month or a year has no fixed length, and anything else is not a
                 // duration at all.
@@ -239,4 +241,26 @@ fn to_bound(bounds: impl Iterator<Item = Option<DateTime<Utc>>>) -> Option<DateT
         highest = Some(highest.map_or(at, |current| current.max(at)));
     }
     highest
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+
+    /// F-PLT2-005: an offset past chrono's range is no instant, and a window that names one
+    /// clamps without a panic.
+    #[test]
+    fn an_offset_out_of_range_is_no_instant() {
+        let now = Utc::now();
+        assert_eq!(instant("P100000000D", now), None);
+        assert_eq!(instant("P99999999999W", now), None);
+        assert!(duration("P15000000000W").is_some());
+        assert_eq!(
+            duration("P15000000000W10000000000D"),
+            None,
+            "the sum overflows"
+        );
+        let _ = clamp(Some("timerel=after;timeAt=P100000000D"), &[], now);
+        let _ = clamp(None, &["timerel=after;timeAt=P100000000D"], now);
+    }
 }

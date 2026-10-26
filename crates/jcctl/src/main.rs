@@ -1050,8 +1050,14 @@ fn plan(dir: &Path, live: Connection, as_json: bool) -> ExitCode {
         Ok(repo) => repo,
         Err(err) => return fail(&err.to_string()),
     };
+    // Configuration has no plan: every component reads the manifests from the repository
+    // (CC-72), and comparing them with an empty store reported each one as `CREATE` on every
+    // run (F-PLT3-015). What the comparison notices about the repository, its flags, stays.
     let changes = match commands::plan::compute(&repo, &InMemory::new()) {
-        Ok(changes) => changes,
+        Ok(computed) => commands::plan::ChangeSet {
+            waves: Vec::new(),
+            flags: computed.flags,
+        },
         Err(err) => return fail(&err.to_string()),
     };
 
@@ -1062,6 +1068,9 @@ fn plan(dir: &Path, live: Connection, as_json: bool) -> ExitCode {
         }
     } else {
         print!("{}", changes.render());
+        println!(
+            "configuration: read from the repository by each component, nothing to plan (CC-72)"
+        );
     }
 
     // The live half: the seed entities, which are the only state a component does not read
@@ -1184,19 +1193,21 @@ fn apply(dir: &Path, options: commands::apply::Options, live: Connection) -> Exi
         Err(err) => return fail(&err.to_string()),
     };
 
+    // The replay runs against no platform store, so only what it could not take is a result a
+    // reader acts on; "applied" would claim a change nothing received (CC-72, F-PLT3-015).
     for result in &report.results {
+        let outcome = match &result.outcome {
+            commands::apply::Outcome::Applied | commands::apply::Outcome::Unchanged => continue,
+            commands::apply::Outcome::Skipped(why) => format!("skipped: {why}"),
+            commands::apply::Outcome::Failed(err) => format!("failed: {err}"),
+        };
         println!(
-            "{:<9} {} {}",
+            "{:<9} {} {outcome}",
             result.action.as_str().to_lowercase(),
             result.id,
-            match &result.outcome {
-                commands::apply::Outcome::Applied => "applied".to_owned(),
-                commands::apply::Outcome::Unchanged => "unchanged".to_owned(),
-                commands::apply::Outcome::Skipped(why) => format!("skipped: {why}"),
-                commands::apply::Outcome::Failed(err) => format!("failed: {err}"),
-            }
         );
     }
+    println!("configuration: read from the repository by each component, nothing to apply (CC-72)");
     if let Some(revision) = &report.revision {
         println!("applied revision {revision}");
     }

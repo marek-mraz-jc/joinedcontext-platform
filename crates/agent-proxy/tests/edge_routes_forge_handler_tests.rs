@@ -573,3 +573,125 @@ async fn a_repository_name_that_is_a_path_is_refused() {
     }
     assert!(paths_asked(&forge).await.is_empty());
 }
+
+/// A run whose Portal record names no application directory: an assistant conversation, or an
+/// application the Portal writes itself in its own repository (portal api/assistant.rs,
+/// api/agent_runs.rs). Neither writes through this door.
+fn proxy_without_directory(forge: &str, kind: &str, path_prefix: &str) -> axum::Router {
+    app(
+        agent_proxy::runs::RunContext {
+            kind: kind.to_owned(),
+            path_prefix: path_prefix.to_owned(),
+            ..sample_run(true)
+        },
+        Bases {
+            forge: forge.to_owned(),
+            ..Bases::default()
+        },
+    )
+}
+
+/// F-PLT1-003: an empty prefix once matched every path, so a conversation run could write the
+/// whole configuration repository. Each run kind with no directory writes nothing.
+#[tokio::test]
+async fn a_run_without_an_application_directory_writes_nothing() {
+    let forge = forge_answering(200, "{}").await;
+    for (kind, prefix) in [
+        ("conversation", ""),
+        ("application", ""),
+        ("conversation", "/"),
+    ] {
+        let proxy = proxy_without_directory(&forge.uri(), kind, prefix);
+        for (verb, uri, body) in [
+            (
+                "PUT",
+                "/v1/forge/contents/secrets/values.yaml",
+                r#"{"content":"eA==","message":"x"}"#,
+            ),
+            (
+                "DELETE",
+                "/v1/forge/contents/project.yaml",
+                r#"{"message":"x"}"#,
+            ),
+            (
+                "POST",
+                "/v1/forge/branches",
+                r#"{"new_branch_name":"agent/app-bikes/run-1"}"#,
+            ),
+            ("POST", "/v1/forge/pulls", r#"{"title":"x","base":"main"}"#),
+        ] {
+            let response = proxy
+                .clone()
+                .oneshot(authed(verb, uri).body(Body::from(body)).expect("a request"))
+                .await
+                .expect("an answer");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{kind} {prefix:?} {verb} {uri}"
+            );
+        }
+    }
+    assert!(paths_asked(&forge).await.is_empty());
+}
+
+/// F-PLT1-004: a prefix the Portal sends without its closing `/` still compares by whole
+/// segments, so a neighbour sharing its letters stays outside.
+#[tokio::test]
+async fn a_prefix_without_its_slash_admits_no_neighbour() {
+    let forge = forge_answering(200, "{}").await;
+    let proxy = app(
+        agent_proxy::runs::RunContext {
+            path_prefix: INSIDE.to_owned(),
+            ..sample_run(true)
+        },
+        Bases {
+            forge: forge.uri(),
+            ..Bases::default()
+        },
+    );
+    for (path, expected) in [
+        (
+            "projects/helsinki/apps/bikesX/src/main.rs",
+            StatusCode::FORBIDDEN,
+        ),
+        ("projects/helsinki/apps/bikes/src/main.rs", StatusCode::OK),
+    ] {
+        let response = proxy
+            .clone()
+            .oneshot(
+                authed("PUT", &format!("/v1/forge/contents/{path}"))
+                    .body(Body::from(r#"{"content":"eA==","message":"add"}"#))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), expected, "{path}");
+    }
+    let asked = paths_asked(&forge).await;
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(
+        asked[0].ends_with("/contents/projects/helsinki/apps/bikes/src/main.rs"),
+        "{asked:?}"
+    );
+}
+
+/// F-PLT1-004: Gitea Actions also runs `.github/workflows`, so a run writes there no more than
+/// under `.gitea/`.
+#[tokio::test]
+async fn a_run_never_writes_a_github_workflow() {
+    let forge = forge_answering(200, "{}").await;
+    let response = proxy(&forge.uri())
+        .oneshot(
+            authed(
+                "PUT",
+                &format!("/v1/forge/contents/{INSIDE}/.github/workflows/build.yml"),
+            )
+            .body(Body::from(r#"{"content":"eA==","message":"build"}"#))
+            .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(paths_asked(&forge).await.is_empty());
+}

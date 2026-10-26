@@ -43,6 +43,7 @@ fn proxy_asking_at(
 ) -> axum::Router {
     let mut run = sample_run(false);
     run.reasoning_effort = effort.map(str::to_owned);
+    run.model_name = "google/gemini-3.8-flash".to_owned();
     app(
         run,
         Bases {
@@ -772,4 +773,36 @@ async fn the_probe_reports_the_keys_limit_and_what_the_account_can_still_spend()
         asked.iter().all(|request| request.method.as_str() == "GET"),
         "no completion"
     );
+}
+
+/// F-PLT1-006: the provider is asked for the run's profile model, whichever model the workspace
+/// named, so a run on a cheap profile cannot buy time on a dearer model.
+#[tokio::test]
+async fn the_provider_is_asked_for_the_profiles_model_alone() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        })))
+        .mount(&provider)
+        .await;
+    let portal = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({ "seq": 1 })))
+        .mount(&portal)
+        .await;
+    let response = proxy_asking(&provider.uri(), &portal)
+        .oneshot(
+            authed("POST", "/v1/llm/v1/chat/completions")
+                .body(body(r#"{"model":"openai/o3-pro","messages":[]}"#))
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+    let seen = provider.received_requests().await.unwrap_or_default();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&seen.first().expect("the provider was asked").body)
+            .expect("a JSON body");
+    assert_eq!(sent["model"], "google/gemini-3.8-flash");
 }
