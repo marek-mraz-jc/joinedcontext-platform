@@ -1900,14 +1900,15 @@ fn an_assistant_selects_inside_its_reach_and_excludes_declared_endpoints() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// AG-122: one deployment serves at most 50 Endpoints; a selector that reaches more is refused
-/// with the count and the slugs left out, and an exclusion brings it back under.
+/// AG-122: one deployment serves at most 100 Endpoints (50 before T-5786); a selector that
+/// reaches more is refused with the count and the slugs left out, and an exclusion brings it
+/// back under.
 #[test]
-fn an_assistant_resolving_more_than_fifty_endpoints_is_refused() {
-    let dir = valid_repo("assistant-fifty");
+fn an_assistant_resolving_more_than_a_hundred_endpoints_is_refused() {
+    let dir = valid_repo("assistant-hundred");
     const BASE32: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
-    // The repository's own `public-air` is the 51st.
-    for i in 0..50usize {
+    // The repository's own `public-air` is the 101st.
+    for i in 0..jc_core::reach::MAX_RESOLVED {
         let tail: String = [i / 32, i % 32]
             .iter()
             .map(|&k| BASE32[k] as char)
@@ -1921,7 +1922,7 @@ fn an_assistant_resolving_more_than_fifty_endpoints_is_refused() {
     let report = selecting_deployment(&dir, "  select: {}\n");
     let found = citing(&report, "AG-122");
     assert_eq!(found.len(), 1, "{:?}", report.findings);
-    assert!(found[0].contains("resolves 51 Endpoints"), "{}", found[0]);
+    assert!(found[0].contains("resolves 101 Endpoints"), "{}", found[0]);
     assert!(
         found[0].contains("zt4qm7ge2xdv6ksb3ncf5arw2y"),
         "{}",
