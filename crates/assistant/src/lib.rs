@@ -242,7 +242,8 @@ SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
        to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
        to_char(COALESCE(p.fetched_at, d.fetched_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS crawled,
        ((COALESCE(1.0 / ($6 + lexical.rank), 0) + COALESCE(1.0 / ($6 + semantic.rank), 0))
-        * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score
+        * CASE WHEN news.item THEN 0.9 ELSE 1 END)::float8 AS score,
+       lexical.rank IS NOT NULL AS by_words, semantic.rank IS NOT NULL AS by_meaning
 FROM lexical FULL OUTER JOIN semantic USING (id)
 JOIN chunks c ON c.id = COALESCE(lexical.id, semantic.id)
 JOIN sites site ON site.id = c.site_id
@@ -271,6 +272,7 @@ pub async fn hybrid_search(
         return Ok(Vec::new());
     }
     sqlx::raw_sql(KNN_SETTINGS).execute(&mut *conn).await?;
+    let began = std::time::Instant::now();
     let rows: Vec<PgRow> = sqlx::query(HYBRID)
         .bind(search.text)
         .bind(vector)
@@ -282,6 +284,21 @@ pub async fn hybrid_search(
         .bind(search.lang)
         .fetch_all(conn)
         .await?;
+    // Which arm found each passage kept (T-5779): one statement runs both, so the arms share
+    // its time.
+    let arm = |column: &str| {
+        rows.iter()
+            .filter(|row| row.try_get::<bool, _>(column).unwrap_or(false))
+            .count()
+    };
+    tracing::info!(
+        sources = ?search.sources,
+        rows = rows.len(),
+        lexical = arm("by_words"),
+        semantic = arm("by_meaning"),
+        ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "search arms"
+    );
     rows.iter()
         .map(|row| {
             Ok(Hit {

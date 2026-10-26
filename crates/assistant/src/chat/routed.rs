@@ -1586,6 +1586,26 @@ async fn search_index(
     Ok((hits, took))
 }
 
+/// One INFO line per connector a question lists (T-5779): `cached` (a list younger than
+/// [`TYPES_LIFE`]), `backoff` (not asked, after a recent failure), `listed`, `failed` or `late`;
+/// the types it routes on, the last list for the three without a fresh one.
+fn listing_logged(
+    endpoint: &str,
+    how: &'static str,
+    asked: tokio::time::Instant,
+    types: Option<&Vec<String>>,
+) {
+    let ms = u64::try_from(asked.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tracing::info!(
+        endpoint,
+        status = how,
+        cached = how == "cached",
+        ms,
+        types = types.map(Vec::len),
+        "types listed"
+    );
+}
+
 fn offers(connector: &Connected, tool: &str) -> bool {
     connector.tools.iter().any(|t| t.name == tool)
 }
@@ -1618,7 +1638,9 @@ async fn live_of(
         .filter(|connector| offers(connector, "list_types") && offers(connector, "query_entities"))
         .map(|connector| async move {
             let slug = &connector.surface.slug;
+            let asked = tokio::time::Instant::now();
             if let Some(types) = cache.types_of(slug) {
+                listing_logged(&connector.endpoint, "cached", asked, Some(&types));
                 return (connector, Some(types));
             }
             let followed_up = connector
@@ -1626,7 +1648,9 @@ async fn live_of(
                 .as_deref()
                 .is_some_and(|label| !label.trim().is_empty() && said.is_some_and(|said| said.contains(label.trim())));
             if cache.skipped(slug) && !followed_up {
-                return (connector, cache.last_types_of(slug));
+                let last = cache.last_types_of(slug);
+                listing_logged(&connector.endpoint, "backoff", asked, last.as_ref());
+                return (connector, last);
             }
             let deadline = began
                 + if followed_up {
@@ -1648,18 +1672,23 @@ async fn live_of(
             match listed {
                 Some(Ok(text)) => {
                     let types = type_names(&text);
+                    listing_logged(&connector.endpoint, "listed", asked, Some(&types));
                     cache.keep_types(slug, types.clone());
                     (connector, Some(types))
                 }
                 Some(Err(why)) => {
                     tracing::warn!(%deployment, endpoint = %connector.endpoint, %why, "a connector's types could not be listed; its last list stands in, asked again after a backoff");
                     cache.failed(slug);
-                    (connector, cache.last_types_of(slug))
+                    let last = cache.last_types_of(slug);
+                    listing_logged(&connector.endpoint, "failed", asked, last.as_ref());
+                    (connector, last)
                 }
                 None => {
                     tracing::warn!(%deployment, endpoint = %connector.endpoint, deadline_ms = ROUTING_DEADLINE.as_millis() as u64, "a connector's types did not come in time; its last list stands in");
                     cache.miss(slug);
-                    (connector, cache.last_types_of(slug))
+                    let last = cache.last_types_of(slug);
+                    listing_logged(&connector.endpoint, "late", asked, last.as_ref());
+                    (connector, last)
                 }
             }
         });

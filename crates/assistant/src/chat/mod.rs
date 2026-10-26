@@ -50,6 +50,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
+use tracing::Instrument as _;
 
 use self::agent::{Ask, Connected, Event, Spent, Turn};
 use self::mcp::{PersonToken, Server, Surface};
@@ -1281,6 +1282,18 @@ async fn chat(
     with_cors(response, origin)
 }
 
+/// The most characters of an anonymous visitor's question a log line carries (T-5779).
+const QUESTION_LOGGED_CHARS: usize = 200;
+
+/// A turn's id in the logs: the first 12 hex digits of the conversation id's SHA-256, a dash and
+/// the turn (T-5779). `encode(sha256(id::text::bytea), 'hex')` finds the conversation in the store.
+fn question_id(conversation: &str, turn: u32) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(conversation.as_bytes());
+    let hex: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    format!("{hex}-{turn}")
+}
+
 /// The `conversation` event's data: a visitor's carries the turn to resume (T-4685).
 fn opened(conversation: &str, at: &str, turn: Option<&str>) -> serde_json::Value {
     match turn {
@@ -1938,11 +1951,31 @@ async fn ask(
     });
     let turn_id = held.as_ref().map(|(id, _)| id.clone());
     let held = held.map(|(_, turn)| turn);
+    // Every line the answer logs carries its question's id (T-5779): the conversation's hash
+    // and the turn, so an operator finds the stored transcript without the log holding the
+    // conversation id, which continues it.
+    let turn_number = asked_before.saturating_add(1);
+    let span = tracing::info_span!("question", id = %question_id(&conversation, turn_number));
+    let logged_question = anonymous && person.is_none();
     tokio::spawn(async move {
         // Held until the answer is done, whether or not anyone still reads it.
         let _permit = permit;
         let state = task_state;
-        let trace = trace::Trace::default();
+        // Only an anonymous visitor's question is logged, redacted and cut (T-5779).
+        let asked = logged_question.then(|| {
+            let text = redact::redact(&redact::secrets(question.message.trim()));
+            match text.char_indices().nth(QUESTION_LOGGED_CHARS) {
+                Some((end, _)) => format!("{}…", &text[..end]),
+                None => text,
+            }
+        });
+        tracing::info!(
+            deployment = %format_args!("{}/{}", deployment.project, deployment.name),
+            anonymous = logged_question,
+            question = asked.as_deref(),
+            "question asked"
+        );
+        let trace = trace::Trace::new(logged_question);
         let mut failed = Vec::new();
         // `answer.routes` narrows what the answer may use (T-4281): `rag` connects nothing,
         // `data` searches nothing.
@@ -2104,7 +2137,7 @@ async fn ask(
             project: &deployment.project,
             deployment: &deployment.name,
             conversation: &conversation_id,
-            turn: asked_before.saturating_add(1),
+            turn: turn_number,
             origin: started_from.as_deref(),
             client: &client_hash,
             question: &question.message,
@@ -2148,7 +2181,7 @@ async fn ask(
             turn.finish(Instant::now());
         }
         let _ = tx.send(done).await;
-    });
+    }.instrument(span));
 
     let first = futures_util::stream::once(async move {
         Ok::<_, Infallible>(
@@ -2175,6 +2208,18 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-5779: a turn's log id is the conversation's hash and the turn, never the id itself.
+    #[test]
+    fn a_question_id_hashes_its_conversation() {
+        let conversation = "6f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11";
+        let id = question_id(conversation, 3);
+        assert_eq!(id.len(), 14, "{id}");
+        assert!(id.ends_with("-3"), "{id}");
+        assert!(!id.contains("6f1c0e9e"), "{id}");
+        assert_eq!(id, question_id(conversation, 3));
+        assert_ne!(id, question_id("7f1c0e9e-3b1a-4d7e-9b51-2c4f8f2a7c11", 3));
+    }
 
     /// T-4625: an Endpoint's siblings are its project's Endpoints over the same space, itself
     /// included; an unknown space has none.

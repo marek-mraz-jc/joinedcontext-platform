@@ -54,7 +54,7 @@ pub struct Step {
     pub finish_reason: Option<String>,
     pub effort: Option<String>,
     pub prompt_version: Option<String>,
-    /// The rows a `visual` step showed.
+    /// The rows a `visual` step showed, or a tool's JSON answer held (T-5779).
     pub rows: Option<u64>,
 }
 
@@ -102,15 +102,146 @@ impl Drop for Pending<'_> {
 pub struct Trace {
     started: Instant,
     steps: Mutex<Vec<Step>>,
+    /// Whether the turn is an anonymous visitor's: only then may its log lines carry what was
+    /// asked (tool arguments, a search's words), redacted and cut (T-5779).
+    anonymous: bool,
 }
 
 impl Default for Trace {
     fn default() -> Self {
-        Trace {
-            started: Instant::now(),
-            steps: Mutex::new(Vec::new()),
-        }
+        Trace::new(false)
     }
+}
+
+/// The most characters of a step's input or error a log line carries (T-5779).
+const LOGGED_CHARS: usize = 300;
+
+/// Argument names whose values no log line carries, whoever asked (T-5779).
+const HIDDEN_KEYS: [&str; 7] = [
+    "authorization",
+    "cookie",
+    "token",
+    "password",
+    "secret",
+    "apikey",
+    "api_key",
+];
+
+fn cut_chars(text: &str, most: usize) -> String {
+    match text.char_indices().nth(most) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text.to_owned(),
+    }
+}
+
+/// `value` with every member a [`HIDDEN_KEYS`] name holds (any case, any depth) replaced.
+fn hidden(value: &Value) -> Value {
+    match value {
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .map(|(key, member)| {
+                    let lower = key.to_ascii_lowercase();
+                    if HIDDEN_KEYS.iter().any(|h| lower.contains(h)) {
+                        (key.clone(), Value::String("[hidden]".into()))
+                    } else {
+                        (key.clone(), hidden(member))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(hidden).collect()),
+        other => other.clone(),
+    }
+}
+
+/// What a step's log line says of its input: for an anonymous visitor the input with its
+/// secrets, personal data and [`HIDDEN_KEYS`] members masked, cut at [`LOGGED_CHARS`]; for a
+/// signed-in person only a tool's argument names, since the values may carry their question.
+fn logged_input(step: &Step, anonymous: bool) -> Option<String> {
+    let input = step.input.as_deref()?;
+    let parsed = serde_json::from_str::<Value>(input).ok();
+    if !anonymous {
+        if step.kind != "tool" {
+            return None;
+        }
+        let names: Vec<&str> = parsed
+            .as_ref()?
+            .as_object()?
+            .keys()
+            .map(String::as_str)
+            .collect();
+        return Some(format!("[{}]", names.join(",")));
+    }
+    let text = parsed.map_or_else(|| input.to_owned(), |value| hidden(&value).to_string());
+    Some(cut_chars(
+        &super::redact::redact(&super::redact::secrets(&text)),
+        LOGGED_CHARS,
+    ))
+}
+
+/// The HTTP status a failed call's error names (`the Endpoint answered 503 …`).
+fn http_status(error: &str) -> Option<u16> {
+    let after = error.split("answered ").nth(1)?;
+    after.get(..3)?.parse().ok()
+}
+
+/// The rows a tool's JSON answer holds: its array's items, or its `entities`' or `results'`.
+fn rows_of(text: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let items = value
+        .as_array()
+        .or_else(|| value.get("entities").and_then(Value::as_array))
+        .or_else(|| value.get("results").and_then(Value::as_array))?;
+    u64::try_from(items.len()).ok()
+}
+
+/// One INFO line for `step`, in the `question` span of its turn (T-5779): what it was, where it
+/// went, how it ended and how long it took. A step's output text never goes in; a model call's
+/// tool names, a search's timing line and a tool's rows and bytes do.
+fn log(step: &Step, anonymous: bool) {
+    let input = logged_input(step, anonymous);
+    let error = step
+        .error
+        .as_deref()
+        .map(|e| cut_chars(&super::redact::secrets(e), LOGGED_CHARS));
+    let http = step.error.as_deref().and_then(http_status);
+    let bytes = step.output_bytes.or_else(|| {
+        step.output
+            .as_ref()
+            .and_then(|o| u64::try_from(o.len()).ok())
+    });
+    // A model call's output is its tool names; a search's last line is where its time went.
+    let detail = match step.kind {
+        "model" => step.output.clone(),
+        "search" => step
+            .output
+            .as_deref()
+            .and_then(|o| o.lines().last())
+            .filter(|line| line.starts_with("time:"))
+            .map(str::to_owned),
+        _ => None,
+    };
+    tracing::info!(
+        kind = step.kind,
+        name = %step.name,
+        endpoint = step.endpoint.as_deref(),
+        status = step.status,
+        http,
+        start_ms = step.start_ms,
+        ms = step.duration_ms,
+        stage = step.stage,
+        model = step.model.as_deref(),
+        tokens_in = step.tokens_in,
+        tokens_out = step.tokens_out,
+        finish = step.finish_reason.as_deref(),
+        rows = step.rows,
+        bytes,
+        detail = detail.as_deref(),
+        input = input.as_deref(),
+        error = error.as_deref(),
+        "step"
+    );
 }
 
 fn ms(from: Instant, to: Instant) -> u64 {
@@ -166,7 +297,17 @@ pub fn with_gaps(mut steps: Vec<Step>, total_ms: u64) -> Vec<Step> {
 }
 
 impl Trace {
+    /// A turn's trace; `anonymous` as [`Trace::anonymous`] says.
+    pub fn new(anonymous: bool) -> Self {
+        Trace {
+            started: Instant::now(),
+            steps: Mutex::new(Vec::new()),
+            anonymous,
+        }
+    }
+
     fn push(&self, step: Step) {
+        log(&step, self.anonymous);
         if let Ok(mut steps) = self.steps.lock() {
             steps.push(step);
         }
@@ -260,6 +401,7 @@ impl Trace {
                 let (output, whole) = kept(text);
                 step.output = Some(output);
                 step.output_bytes = whole;
+                step.rows = rows_of(text);
             }
             Err(err) => {
                 step.status = "failed";
@@ -593,5 +735,142 @@ mod tests {
             .iter()
             .skip(1)
             .all(|s| !s.input.as_deref().unwrap_or("").contains("data")));
+    }
+
+    /// The log lines `run` writes, as the worker's subscriber formats them (T-5779).
+    fn logged(run: impl FnOnce()) -> String {
+        use std::sync::Arc;
+        #[derive(Clone, Default)]
+        struct Lines(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Lines {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Ok(mut all) = self.0.lock() {
+                    all.extend_from_slice(bytes);
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let lines = Lines::default();
+        let writer = lines.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, run);
+        let bytes = lines.0.lock().map(|b| b.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn a_tool_call_logs_its_endpoint_status_http_rows_and_ms() {
+        let out = logged(|| {
+            let trace = Trace::new(true);
+            trace.tool(
+                "query_entities",
+                Some("ovzdusie-sk"),
+                &json!({"type": "AirQualityObserved", "limit": 5}),
+                Instant::now(),
+                &Ok(r#"[{"id":"a"},{"id":"b"}]"#.into()),
+            );
+            trace.tool(
+                "query_entities",
+                Some("podujatia"),
+                &json!({"type": "Event"}),
+                Instant::now(),
+                &Err("the Endpoint answered 503 Service Unavailable".into()),
+            );
+        });
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        for (line, endpoint) in lines.iter().zip(["ovzdusie-sk", "podujatia"]) {
+            assert!(line.contains(&format!("endpoint=\"{endpoint}\"")), "{line}");
+            assert!(line.contains(" ms="), "{line}");
+            assert!(line.contains("kind=\"tool\""), "{line}");
+            assert!(line.contains("name=query_entities"), "{line}");
+        }
+        assert!(lines[0].contains("status=\"ok\""), "{}", lines[0]);
+        assert!(lines[0].contains("rows=2"), "{}", lines[0]);
+        assert!(lines[0].contains("AirQualityObserved"), "{}", lines[0]);
+        assert!(lines[1].contains("status=\"failed\""), "{}", lines[1]);
+        assert!(lines[1].contains("http=503"), "{}", lines[1]);
+        assert!(lines[1].contains("answered 503"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn a_model_call_logs_its_model_tokens_finish_and_tool_names() {
+        let out = logged(|| {
+            Trace::new(false).model(
+                "answer",
+                "google/x",
+                Instant::now(),
+                Ok(&completion(Some(9))),
+            );
+        });
+        for field in [
+            "kind=\"model\"",
+            "stage=\"answer\"",
+            "model=\"google/x\"",
+            "tokens_in=20",
+            "tokens_out=10",
+            "finish=\"stop\"",
+            "detail=\"tools: query_entities\"",
+            " ms=",
+        ] {
+            assert!(out.contains(field), "{field} missing: {out}");
+        }
+    }
+
+    #[test]
+    fn a_search_logs_where_its_time_went_and_never_a_signed_in_persons_words() {
+        let out = logged(|| {
+            Trace::new(false).note(
+                "search",
+                "search",
+                Instant::now(),
+                Some("moja diagnóza a adresa"),
+                Some("0.031 https://x.sk/a\ntime: embedding waited 2 ms, ran 40 ms; index 900 ms"),
+            );
+        });
+        assert!(
+            out.contains("detail=\"time: embedding waited 2 ms, ran 40 ms; index 900 ms\""),
+            "{out}"
+        );
+        assert!(!out.contains("diagnóza"), "{out}");
+        assert!(!out.contains("x.sk"), "a search's hits stay out: {out}");
+    }
+
+    #[test]
+    fn no_log_line_carries_a_token_an_authorization_header_or_personal_data() {
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJqYW4ifQ.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
+        let arguments = json!({
+            "q": format!("name==\"jan.novak@mesto.sk\";note==\"Bearer {jwt}\""),
+            "headers": {"Authorization": format!("Bearer {jwt}"), "Cookie": "session=abc123"},
+            "token": "plain-secret-value",
+        });
+        let out = logged(|| {
+            for anonymous in [true, false] {
+                let trace = Trace::new(anonymous);
+                trace.tool(
+                    "query_entities",
+                    Some("ep"),
+                    &arguments,
+                    Instant::now(),
+                    &Err(format!("the Endpoint refused: Bearer {jwt}")),
+                );
+            }
+        });
+        assert_eq!(out.lines().count(), 2, "{out}");
+        for secret in [jwt, "abc123", "plain-secret-value", "jan.novak@mesto.sk"] {
+            assert!(!out.contains(secret), "{secret} logged: {out}");
+        }
+        let signed_in = out.lines().nth(1).unwrap_or_default();
+        assert!(
+            signed_in.contains("input=\"[q,headers,token]\""),
+            "{signed_in}"
+        );
+        assert!(signed_in.contains("endpoint=\"ep\""), "{signed_in}");
     }
 }
