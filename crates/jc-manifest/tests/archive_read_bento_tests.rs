@@ -138,9 +138,11 @@ fn read(zip: &[u8], members: &[&str]) -> Vec<Value> {
             .expect("yaml");
     let mut processors = rendered["pipeline"]["processors"].clone();
     let encoded = base64::engine::general_purpose::STANDARD.encode(zip);
-    // The member request, as a server that honours Range answers it.
+    // The member request, as a server that honours Range answers it. Bento's `http` sends the
+    // content as the body, and CloudFront answers a GET with a body 403 (T-5766).
     processors[4]["for_each"][0]["try"][1] = json!({"mapping": format!(
-        "let at = @range.re_find_all_submatch(\"^bytes=([0-9]+)-([0-9]+)$\").index(0)\n\
+        "let body = if content().length() > 0 {{ throw(\"a GET with a %v-byte body\".format(content().length())) }}\n\
+         let at = @range.re_find_all_submatch(\"^bytes=([0-9]+)-([0-9]+)$\").index(0)\n\
          let whole = \"{encoded}\".decode(\"base64\")\n\
          let end = [$at.index(2).number() + 1, $whole.length()].min()\n\
          root = $whole.slice($at.index(1).number(), $end)"
