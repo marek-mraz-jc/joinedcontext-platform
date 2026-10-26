@@ -57,8 +57,21 @@ def epoch(stamp):
     return datetime.fromisoformat(stamp).timestamp()
 
 
-def api(path):
-    return json.loads(subprocess.run(["gh", "api", path], check=True, capture_output=True, text=True).stdout)
+# Pauses between `gh api` attempts: one GitHub hiccup failed the whole gate (ship run 40377654855,
+# T-5812), so a call is tried len(RETRY_PAUSES) + 1 times before the gate gives up.
+RETRY_PAUSES = (5, 20)
+
+
+def api(path, run=subprocess.run, sleep=time.sleep):
+    for pause in (*RETRY_PAUSES, None):
+        done = run(["gh", "api", path], capture_output=True, text=True)
+        if done.returncode == 0:
+            return json.loads(done.stdout)
+        error = done.stderr.strip() or f"exit {done.returncode}"
+        if pause is None:
+            sys.exit(f"image-gate: gh api {path} failed: {error}")
+        print(f"image-gate: gh api {path} failed ({error}), retrying in {pause} s", file=sys.stderr)
+        sleep(pause)
 
 
 def green_runs(repo):
@@ -94,6 +107,17 @@ def selftest():
     assert not refresh_due(a, [(a, noon - 60, True), (b, noon - 13 * 3600, True)], noon), \
         "a refresh build today counts, not the older commit's"
     assert epoch("2026-10-23T09:08:40Z") == 1792746520.0
+    answers = iter([(1, "", "HTTP 502: Bad Gateway"), (0, '{"ok": 1}', "")])
+    fake = lambda *_, **__: subprocess.CompletedProcess([], *next(answers))
+    pauses = []
+    assert api("x", fake, pauses.append) == {"ok": 1}, "a failed call is retried"
+    assert pauses == [RETRY_PAUSES[0]], "after the first pause"
+    fake = lambda *_, **__: subprocess.CompletedProcess([], 1, "", "HTTP 403: rate limit")
+    try:
+        api("x", fake, pauses.append)
+        raise AssertionError("a call failing every attempt must stop the gate")
+    except SystemExit as stop:
+        assert "rate limit" in str(stop.code), "the gate names gh's error"
     print("image-gate selftest: ok")
 
 
