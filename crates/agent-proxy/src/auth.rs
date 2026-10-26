@@ -136,11 +136,6 @@ impl TicketCache {
             map.remove(run_id);
         }
     }
-
-    /// How many Argon2 verifies ran.
-    pub fn argon2_verifies(&self) -> u64 {
-        self.hashed.load(Ordering::Relaxed)
-    }
 }
 
 /// Equal digests, compared in time independent of where they differ.
@@ -317,6 +312,7 @@ fn is_runs_own_workload(client_id: &str, run_id: &str) -> bool {
 mod tests {
     use super::{is_workload, run_id_is_well_formed, TicketCache};
     use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    use std::sync::atomic::Ordering;
 
     fn run_with_ticket(ticket: &str) -> crate::runs::RunContext {
         let salt = SaltString::generate(&mut OsRng);
@@ -341,15 +337,15 @@ mod tests {
         let run = run_with_ticket("right");
         assert_eq!(tickets.verify(&run, "right").await, Ok(true));
         assert_eq!(tickets.verify(&run, "right").await, Ok(true));
-        assert_eq!(tickets.argon2_verifies(), 1);
+        assert_eq!(tickets.hashed.load(Ordering::Relaxed), 1);
         assert_eq!(tickets.verify(&run, "wrong").await, Ok(false));
-        assert_eq!(tickets.argon2_verifies(), 2);
+        assert_eq!(tickets.hashed.load(Ordering::Relaxed), 2);
         let reminted = run_with_ticket("new");
         assert_eq!(tickets.verify(&reminted, "right").await, Ok(false));
         assert_eq!(tickets.verify(&reminted, "new").await, Ok(true));
         tickets.forget("run-1");
         assert_eq!(tickets.verify(&reminted, "new").await, Ok(true));
-        assert_eq!(tickets.argon2_verifies(), 5);
+        assert_eq!(tickets.hashed.load(Ordering::Relaxed), 5);
     }
 
     /// ADR-N-038 decision 6: with mesh identity required, a data credential is honoured from the
