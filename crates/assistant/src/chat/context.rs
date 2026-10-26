@@ -9,6 +9,7 @@
 //! A document is computed at most once a minute per deployment; the language only picks labels.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,8 +33,9 @@ pub const KEEP: Duration = Duration::from_secs(60);
 const MAX_HELD: usize = 1_000;
 /// How long one count through the gateway may take; a slower one is left out, never zero.
 const COUNT_DEADLINE: Duration = Duration::from_secs(3);
-/// Endpoints counted at once: a quarter of the gateway's per-caller share, so a question keeps room.
-const COUNT_PARALLEL: usize = 8;
+/// Endpoints counted at once. A count unanswered after 2 s weighs 4 of the gateway's slots
+/// (in_flight.rs SLOW_WEIGHT), so 4 slow counts hold half the caller's 32 and a question keeps room.
+const COUNT_PARALLEL: usize = 4;
 
 pub fn router(state: Arc<ChatState>) -> Router {
     // `/api/v1/d/{publicId}/context` is the chat router's, beside its preflight.
@@ -172,6 +174,12 @@ fn hosts<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
 /// published deployment reads, as an anonymous caller counts them; a page only reads the
 /// result. An Endpoint with a type that did not come back has no total: a part is not its count.
 pub async fn count(state: Arc<ChatState>) {
+    // The worker starts a round each minute: one still running keeps the gateway alone, so a
+    // slow round never doubles the fan-out (T-5781).
+    static ROUND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Ok(_round) = ROUND.try_lock() else {
+        return;
+    };
     let Ok(snapshot) = state.snapshot.read().map(|s| Arc::clone(&s)) else {
         return;
     };
@@ -192,21 +200,50 @@ pub async fn count(state: Arc<ChatState>) {
             }
         }
     }
+    let pages: Vec<_> = slugs
+        .iter()
+        .map(|slug| &snapshot.pages[*slug].page)
+        .collect();
+    let (counted, shed) = count_round(&state.http, &gateway, &pages).await;
+    if let Ok(mut held) = state.contexts.lock() {
+        // A shed round counted only some Endpoints: the others keep the last round's totals.
+        if shed {
+            held.counts.extend(counted);
+        } else {
+            held.counts = counted;
+        }
+    }
+}
+
+/// Counts `pages` [`COUNT_PARALLEL`] at a time and gives each Endpoint whose every type came
+/// back its total, and whether the gateway shed load. Once it does, no Endpoint not yet asked is
+/// asked this round (T-5781: a round kept asking a full gateway, 2,416 refusals in one second).
+async fn count_round(
+    http: &reqwest::Client,
+    gateway: &url::Url,
+    pages: &[&crate::catalogue::EndpointPage],
+) -> (HashMap<String, u64>, bool) {
+    let shed = AtomicBool::new(false);
     // A bounded fan-out: the gateway admits 32 requests per caller, and an unbounded one over
     // every Endpoint held them all each minute, so the questions' own reads got 503.
-    let asks: Vec<_> = slugs
+    let asks: Vec<_> = pages
         .iter()
-        .map(|slug| {
-            let page = &snapshot.pages[*slug].page;
-            let gateway = &gateway;
-            let http = &state.http;
+        .map(|page| {
+            let shed = &shed;
             async move {
+                if shed.load(Ordering::Relaxed) {
+                    return None;
+                }
                 let counts = tokio::time::timeout(
                     COUNT_DEADLINE,
                     crate::catalogue::counts(http, gateway, page),
                 )
                 .await
-                .unwrap_or_default();
+                .unwrap_or(Some(BTreeMap::new()));
+                let Some(counts) = counts else {
+                    shed.store(true, Ordering::Relaxed);
+                    return None;
+                };
                 (!counts.is_empty() && counts.len() == page.types.len())
                     .then(|| (page.slug.clone(), counts.values().sum::<u64>()))
             }
@@ -216,9 +253,7 @@ pub async fn count(state: Arc<ChatState>) {
         .buffer_unordered(COUNT_PARALLEL)
         .collect()
         .await;
-    if let Ok(mut held) = state.contexts.lock() {
-        held.counts = counted.into_iter().flatten().collect();
-    }
+    (counted.into_iter().flatten().collect(), shed.into_inner())
 }
 
 /// The deployment's own document from `snapshot`, the store and the minute's counts.
@@ -624,5 +659,115 @@ mod tests {
         for absent in ["systemPrompt", "model", "budget", "secretRef"] {
             assert!(!document.to_string().contains(absent), "{absent}");
         }
+    }
+
+    /// A stub gateway that answers `status` to every count after `pause`, and the most requests
+    /// it held at once and in total.
+    async fn gateway(
+        status: StatusCode,
+        pause: Duration,
+    ) -> (
+        url::Url,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::AtomicUsize;
+        let now = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let total = Arc::new(AtomicUsize::new(0));
+        let (n, m, t) = (Arc::clone(&now), Arc::clone(&most), Arc::clone(&total));
+        let app = Router::new().fallback(move || {
+            let (n, m, t) = (Arc::clone(&n), Arc::clone(&m), Arc::clone(&t));
+            async move {
+                t.fetch_add(1, Ordering::SeqCst);
+                let held = n.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                m.fetch_max(held, Ordering::SeqCst);
+                tokio::time::sleep(pause).await;
+                n.fetch_sub(1, Ordering::SeqCst);
+                (status, [("NGSILD-Results-Count", "7")])
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let address = listener.local_addr().expect("its address");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let url = url::Url::parse(&format!("http://{address}/")).expect("url");
+        (url, most, total)
+    }
+
+    fn endpoints(n: usize, types: usize) -> Vec<crate::catalogue::EndpointPage> {
+        (0..n)
+            .map(|i| crate::catalogue::EndpointPage {
+                name: format!("e{i}"),
+                title: None,
+                description: None,
+                space: "s".into(),
+                slug: format!("slug{i}"),
+                audience: "public".into(),
+                ckan_dataset: None,
+                types: (0..types)
+                    .map(|t| crate::catalogue::EntityType {
+                        class: format!("T{t}"),
+                        description: None,
+                        attributes: Vec::new(),
+                    })
+                    .collect(),
+                datasets: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// T-5781: a round asks the gateway at most `COUNT_PARALLEL` counts at once.
+    #[tokio::test]
+    async fn a_round_counts_at_most_count_parallel_at_once() {
+        let (url, most, total) = gateway(StatusCode::OK, Duration::from_millis(30)).await;
+        let pages = endpoints(12, 2);
+        let pages: Vec<_> = pages.iter().collect();
+        let (counted, shed) = count_round(&reqwest::Client::new(), &url, &pages).await;
+        let most = most.load(Ordering::SeqCst);
+        assert!(
+            most <= COUNT_PARALLEL,
+            "{most} counts at once, past {COUNT_PARALLEL}"
+        );
+        assert!(most > 1, "the round counts Endpoints side by side");
+        assert_eq!(total.load(Ordering::SeqCst), 24);
+        assert!(!shed);
+        assert_eq!(counted.len(), 12);
+        assert_eq!(counted.get("slug3"), Some(&14));
+    }
+
+    /// T-5781: once the gateway sheds load, neither the Endpoint's other types nor the Endpoints
+    /// not yet asked are asked this round.
+    #[tokio::test]
+    async fn a_shedding_gateway_ends_the_round() {
+        for status in [
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TOO_MANY_REQUESTS,
+        ] {
+            let (url, _, total) = gateway(status, Duration::from_millis(5)).await;
+            let pages = endpoints(40, 3);
+            let pages: Vec<_> = pages.iter().collect();
+            let (counted, shed) = count_round(&reqwest::Client::new(), &url, &pages).await;
+            let total = total.load(Ordering::SeqCst);
+            assert!(
+                total <= COUNT_PARALLEL,
+                "{status}: {total} counts asked of a shedding gateway"
+            );
+            assert!(shed, "{status}");
+            assert!(counted.is_empty(), "{status}");
+        }
+    }
+
+    /// A refusal that is not load (an Endpoint a visitor may not read) still counts the other types.
+    #[tokio::test]
+    async fn a_refused_type_is_left_out_and_the_round_goes_on() {
+        let (url, _, total) = gateway(StatusCode::FORBIDDEN, Duration::ZERO).await;
+        let pages = endpoints(3, 2);
+        let pages: Vec<_> = pages.iter().collect();
+        let (counted, shed) = count_round(&reqwest::Client::new(), &url, &pages).await;
+        assert_eq!(total.load(Ordering::SeqCst), 6);
+        assert!(!shed);
+        assert!(counted.is_empty());
     }
 }
