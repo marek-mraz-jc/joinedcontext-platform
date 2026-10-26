@@ -62,7 +62,7 @@ pub struct Provenance {
 /// roles a reader is given (CC-91).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewReaders {
-    /// The Keycloak usernames the surface answers.
+    /// The Keycloak user ids the surface answers.
     pub readers: BTreeSet<String>,
     /// The `audience` the branch gave the Endpoint; `public` for a space surface.
     pub audience: Audience,

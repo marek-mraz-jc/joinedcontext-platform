@@ -234,15 +234,19 @@ fn preview_reader(
             .azp
             .as_deref()
             .is_some_and(|azp| gateway.accounts.load().resolve(azp).is_some());
-    let reader = claims.preferred_username.as_deref().filter(|user| {
-        !workload && owns_its_name(user, claims.azp.as_deref()) && preview.readers.contains(*user)
-    });
-    let Some(user) = reader else {
+    // A reader is named by Keycloak user id, the token's verified `sub` (ADR-N-061): a username
+    // a token asserts never stands in for it.
+    if workload || !preview.readers.contains(&claims.sub) {
         tracing::info!(slug = %endpoint.slug, "a preview asked by someone who does not review it");
         return Err(Box::new(ProblemDetails::not_found()));
-    };
+    }
     Ok(Subject {
-        user: Some(user.to_owned()),
+        user: Some(
+            claims
+                .preferred_username
+                .clone()
+                .unwrap_or_else(|| claims.sub.clone()),
+        ),
         id: Some(claims.sub.clone()),
         service_account: None,
         service_account_project: None,

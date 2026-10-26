@@ -604,6 +604,12 @@ const SALT: &str = "Q3vR8kM2pL9xT4nW7yB1cZ";
 const AUTHOR: &str = "demo.author";
 const REVIEWER: &str = "demo.reviewer";
 
+/// The Keycloak user id (`sub`) of the person `user` names, what the Portal lists as a reader
+/// (ADR-N-061).
+fn id_of(user: &str) -> String {
+    format!("f:1:{user}")
+}
+
 /// A branch of `helsinki` whose space `air` everyone may read and write through the public
 /// Endpoint `public-air`.
 fn public_branch() -> BTreeMap<String, String> {
@@ -646,7 +652,7 @@ async fn served(test: &str) -> Served {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: public_branch(),
-            readers: [AUTHOR, REVIEWER].map(str::to_owned).into(),
+            readers: [AUTHOR, REVIEWER].map(id_of).into(),
             salt: SALT.to_owned(),
         }])
         .expect("the preview is written");
@@ -680,7 +686,7 @@ async fn served(test: &str) -> Served {
 fn person(realm: &common::Realm, user: &str) -> String {
     realm.mint(&json!({
         "iss": common::ISSUER,
-        "sub": format!("f:1:{user}"),
+        "sub": id_of(user),
         "aud": "context-gateway",
         "exp": common::in_seconds(300),
         "iat": common::in_seconds(-10),
@@ -746,7 +752,21 @@ async fn a_preview_of_a_public_endpoint_answers_its_author_and_reviewers_only() 
     assert_eq!(nobodys.0, 404, "{nobodys:?}");
 
     let stranger = person(&served.realm, "demo.stranger");
-    for (who, token) in [("anonymous", None), ("a stranger", Some(stranger.as_str()))] {
+    // A reader is the listed id: a token of another person that calls itself the author is not.
+    let namesake = served.realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "f:1:demo.namesake",
+        "aud": "context-gateway",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+        "preferred_username": AUTHOR,
+        "groups": ["/helsinki"],
+    }));
+    for (who, token) in [
+        ("anonymous", None),
+        ("a stranger", Some(stranger.as_str())),
+        ("the author's namesake", Some(namesake.as_str())),
+    ] {
         for path in [
             entities(&served.slug),
             "/cs/ws-air-helsinki-air/ngsi-ld/v1/entities?type=AirQualityObserved".to_owned(),
@@ -790,7 +810,7 @@ async fn a_workload_or_a_refused_token_naming_a_reader_gets_the_unknown_slug_404
     let claims = |extra: Value| {
         let mut claims = json!({
             "iss": common::ISSUER,
-            "sub": "f:1:demo.author",
+            "sub": id_of(AUTHOR),
             "aud": "context-gateway",
             "exp": common::in_seconds(300),
             "iat": common::in_seconds(-10),
@@ -904,12 +924,12 @@ fn a_branch_file_cannot_stand_in_for_the_readers() {
         .apply(vec![Preview {
             prefix: "ws-air-".to_owned(),
             files: files(&[("access.json", r#"{"readers":["mallory"],"salt":""}"#)]),
-            readers: [AUTHOR.to_owned()].into(),
+            readers: [id_of(AUTHOR)].into(),
             ..Default::default()
         }])
         .expect("written");
     let access = context_gateway::previews::access_of(&dir.join("ws-air-"));
-    assert_eq!(access.readers, [AUTHOR.to_owned()].into());
+    assert_eq!(access.readers, [id_of(AUTHOR)].into());
     std::fs::write(dir.join("ws-air-/access.json"), "not json").expect("overwritten");
     assert!(context_gateway::previews::access_of(&dir.join("ws-air-"))
         .readers
