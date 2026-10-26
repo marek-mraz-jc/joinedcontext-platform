@@ -11,6 +11,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::{Endpoint, Space};
@@ -19,6 +20,29 @@ use jc_core::kinds::{Audience, Creates, PolicySpec, Representation};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
+
+mod common;
+
+/// The realm every signed-in caller of these tests comes from.
+static REALM: std::sync::LazyLock<common::Realm> = std::sync::LazyLock::new(common::Realm::new);
+
+/// `request` as a signed-in person sends it: only a caller the platform can name registers or
+/// changes a subscription (F-BNT1-003).
+fn signed(mut request: Request<Body>) -> Request<Body> {
+    let token = REALM.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "sub-jana",
+        "aud": [SLUG, SPACE],
+        "preferred_username": "jana",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {token}").parse().expect("a header value"),
+    );
+    request
+}
 
 const SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
 const SPACE: &str = "ovzdusie";
@@ -133,7 +157,8 @@ fn app(upstream: String, endpoint: Endpoint) -> Router {
     };
     let gateway = Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
         .serve([endpoint])
-        .serve_spaces([space]);
+        .serve_spaces([space])
+        .authenticate(Arc::new(REALM.verifier()), ServiceAccounts::new(), None);
     router(Arc::new(gateway))
 }
 
@@ -328,10 +353,10 @@ async fn an_endpoint_no_view_can_hold_is_refused_and_nothing_reaches_the_broker(
 #[tokio::test]
 async fn a_conditional_write_goes_to_the_view_with_its_if_match() {
     let (upstream, hops) = broker(StatusCode::NO_CONTENT, &[], json!({})).await;
-    let mut conditional = post(
+    let mut conditional = signed(post(
         &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"),
         json!({ "notification": { "endpoint": { "uri": "https://hooks.example/air" } } }),
-    );
+    ));
     *conditional.method_mut() = Method::PATCH;
     conditional
         .headers_mut()
@@ -367,10 +392,10 @@ async fn a_subscription_goes_to_the_view_with_its_own_target() {
     let sent = subscription("https://hooks.example/air");
     let (status, _, body) = call(
         app(upstream.clone(), endpoint()),
-        post(
+        signed(post(
             &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"),
             sent.clone(),
-        ),
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -382,7 +407,7 @@ async fn a_subscription_goes_to_the_view_with_its_own_target() {
             "/subscriptions/urn:ngsi-ld:Subscription:air-1",
         ),
     ] {
-        let mut request = get(&format!("/api/endpoint/{SLUG}/ngsi-ld/v1{rest}"));
+        let mut request = signed(get(&format!("/api/endpoint/{SLUG}/ngsi-ld/v1{rest}")));
         *request.method_mut() = method;
         call(app(upstream.clone(), endpoint()), request).await;
     }
@@ -414,6 +439,39 @@ async fn a_subscription_goes_to_the_view_with_its_own_target() {
     );
 }
 
+/// F-BNT1-003 (User-Guide/05): an anonymous caller registers, changes and removes no
+/// subscription, even where a public Policy grants `createSubscription`: 401 before the view, on
+/// the slug and on the space. A signed-in caller under the same grant passes (above).
+#[tokio::test]
+async fn an_anonymous_caller_changes_no_subscription() {
+    let (upstream, hops) = broker(StatusCode::CREATED, &[], json!({})).await;
+    let one = "subscriptions/urn:ngsi-ld:Subscription:air-1";
+    for prefix in [format!("/api/endpoint/{SLUG}"), format!("/cs/{SPACE}")] {
+        for (method, rest) in [
+            (Method::POST, "subscriptions"),
+            (Method::PATCH, one),
+            (Method::DELETE, one),
+        ] {
+            let mut request = post(
+                &format!("{prefix}/ngsi-ld/v1/{rest}"),
+                subscription("https://hooks.example/air"),
+            );
+            *request.method_mut() = method.clone();
+            let (status, headers, body) = call(app(upstream.clone(), endpoint()), request).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{method} {prefix}/{rest}: {body}"
+            );
+            assert_eq!(headers["www-authenticate"], "Bearer");
+        }
+    }
+    assert!(
+        hops.lock().expect("the hop log").is_empty(),
+        "an anonymous subscription reached the broker"
+    );
+}
+
 /// G11, T-3653: the broker delivers to whatever a stored subscription names, so a target inside
 /// the platform's networks is refused before the view sees it, in every spelling the delivering
 /// client would dial, on a create and on a PATCH; and so is anything but HTTP(S).
@@ -432,20 +490,20 @@ async fn a_subscription_aimed_inside_the_platform_never_reaches_the_view() {
     ] {
         let (status, _, body) = call(
             app(upstream.clone(), endpoint()),
-            post(
+            signed(post(
                 &format!("/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions"),
                 subscription(uri),
-            ),
+            )),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
 
-        let mut patch = post(
+        let mut patch = signed(post(
             &format!(
                 "/api/endpoint/{SLUG}/ngsi-ld/v1/subscriptions/urn:ngsi-ld:Subscription:air-1"
             ),
             json!({ "notification": { "endpoint": { "uri": uri } } }),
-        );
+        ));
         *patch.method_mut() = Method::PATCH;
         let (status, _, body) = call(app(upstream.clone(), endpoint()), patch).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "PATCH {uri}: {body}");
@@ -472,13 +530,14 @@ async fn a_named_private_host_may_be_subscribed() {
     let gateway = Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
         .serve([endpoint()])
         .serve_spaces([space])
-        .deliver_privately_to(vec!["receiver.cluster.local".to_owned()]);
+        .deliver_privately_to(vec!["receiver.cluster.local".to_owned()])
+        .authenticate(Arc::new(REALM.verifier()), ServiceAccounts::new(), None);
     let (status, _, body) = call(
         router(Arc::new(gateway)),
-        post(
+        signed(post(
             &format!("/cs/{SPACE}/ngsi-ld/v1/subscriptions"),
             subscription("http://receiver.cluster.local/air"),
-        ),
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");

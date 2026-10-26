@@ -18,6 +18,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
@@ -136,12 +137,26 @@ async fn send_with(
     tenant: Option<&str>,
 ) -> (StatusCode, Value, Vec<(String, String)>) {
     let (upstream, hops) = broker().await;
+    // A signed-in caller: an anonymous one stores no subscription at all (F-BNT1-003), and the
+    // attack here is about ids, not who sends them.
+    let realm = common::Realm::new();
+    let token = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "sub-jana",
+        "aud": SLUG,
+        "preferred_username": "jana",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
     let gateway = Arc::new(
-        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN).serve([endpoint()]),
+        Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
+            .serve([endpoint()])
+            .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None),
     );
     let mut request = Request::builder()
         .method(method)
-        .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1{uri}"));
+        .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1{uri}"))
+        .header("authorization", format!("Bearer {token}"));
     if body.is_some() {
         request = request.header("content-type", "application/ld+json");
     }

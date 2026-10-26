@@ -220,3 +220,44 @@ fn a_template_that_renders_something_other_than_a_manifest_is_refused() {
     let err = expand(&blueprint, &parameters()).expect_err("not a manifest");
     assert!(matches!(err, ExpandError::NotAManifest { .. }), "{err}");
 }
+
+#[test]
+fn a_string_parameter_with_a_quote_and_a_newline_stays_one_value() {
+    // F-BNT2-004: a free string rendered inside a double-quoted scalar could close the quote
+    // and add a key (quotas, another source) to the rendered Pipeline.
+    let blueprint = Blueprint::from_yaml(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Blueprint
+metadata:
+  name: feed
+  namespace: org
+spec:
+  version: 1.0.0
+  riskClass: green
+  allowedRoles: [domain-editor]
+  parameterSchema:
+    type: object
+    required: [schedule]
+    additionalProperties: false
+    properties:
+      schedule: { type: string }
+  templates:
+    - name: pipeline
+      template: |
+        apiVersion: joinedcontext.com/v1alpha1
+        kind: Pipeline
+        metadata:
+          name: "feed"
+        spec:
+          schedule: "{{ schedule }}"
+"#,
+    )
+    .expect("the fixture blueprint parses");
+    let schedule = "x\"\n  quotas: {maxMemoryMb: 99999}\n  y: \"\\";
+    let out = expand(&blueprint, &json!({ "schedule": schedule })).expect("expands");
+    let manifest: serde_json::Value =
+        serde_norway::from_str(&out[0].manifest).expect("the manifest parses");
+    let spec = manifest["spec"].as_object().expect("spec is a map");
+    assert_eq!(spec.keys().collect::<Vec<_>>(), vec!["schedule"]);
+    assert_eq!(spec["schedule"], json!(schedule));
+}

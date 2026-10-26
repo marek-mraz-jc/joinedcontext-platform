@@ -790,6 +790,33 @@ fn federated_refusal(
     )
 }
 
+/// Nobody anonymous registers, changes or removes a subscription, whatever a public Policy
+/// grants: a stored subscription holds broker resources and notifies an address the caller
+/// chose, so it needs a caller the platform can name (User-Guide/05, F-BNT1-003).
+fn anonymous_subscription_refusal(
+    subject: &Subject,
+    operation: Operation,
+) -> Option<Response<Body>> {
+    let changes = matches!(
+        operation,
+        Operation::CreateSubscription
+            | Operation::UpdateSubscription
+            | Operation::DeleteSubscription
+    );
+    (changes && principal_of(subject) == "anonymous").then(|| {
+        let mut answer = ProblemDetails::new(401, "unauthorized", "Unauthorized")
+            .with_detail(
+                "sign in to register or change a subscription; anonymous callers only read",
+            )
+            .into_response();
+        answer.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+        answer
+    })
+}
+
 /// The longest `JC-Reason` the gateway takes, in characters once decoded (DM-113).
 const MAX_REASON: usize = 500;
 
@@ -843,6 +870,10 @@ pub(crate) async fn view_request(
     operation: Operation,
     request: &mut Request,
 ) -> Result<(), Box<Response<Body>>> {
+    if let Some(refusal) = anonymous_subscription_refusal(subject, operation) {
+        tracing::info!(slug = %endpoint.slug, %operation, "refused: an anonymous subscription");
+        return Err(Box::new(refusal));
+    }
     if operation.is_write() {
         if let Some(refusal) = gateway.domain_gate.refusal(&gateway.org_domain) {
             tracing::info!(slug = %endpoint.slug, %operation, "write refused: the domain is not verified");
