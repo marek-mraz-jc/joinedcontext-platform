@@ -245,3 +245,38 @@ fn an_output_names_itself_in_the_model_gaps() {
         ["`ical` output `kultura` maps DTSTART to `name`, a LanguageProperty; DTSTART takes date or datetime"]
     );
 }
+
+/// A model of sources that mix whole-day and timed events keeps `startDate` a `string` with
+/// an ISO 8601 pattern (bbsk-podujatia, slovensko-podujatia): DTSTART takes it, and a string
+/// without such a pattern stays refused (T-5208: the Portal refused both Endpoints whole).
+#[test]
+fn a_string_with_an_iso_8601_date_pattern_is_a_date() {
+    let model = |pattern: &str| {
+        format!(
+            "classes:\n  Event:\n    slots: [name, startDate]\nslots:\n  name:\n    required: true\n  \
+             startDate:\n    range: string\n    required: true\n{pattern}"
+        )
+    };
+    let gaps = |pattern: &str| {
+        let ical: IcalMapping =
+            serde_norway::from_str("type: Event\nmapping: { DTSTART: startDate, SUMMARY: name }\n")
+                .unwrap();
+        ical.model_gaps(Some(&model(pattern))).unwrap()
+    };
+    let refused =
+        ["`ical` maps DTSTART to `startDate`, range string; DTSTART takes date or datetime"];
+    let dated = "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2}(\\.[0-9]+)?)?(Z|[+-][0-9]{2}:[0-9]{2}))?$";
+    assert_eq!(
+        gaps(&format!("    pattern: '{dated}'\n")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        gaps("    pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(gaps(""), refused);
+    // free text, an unanchored date and a pattern that does not compile are no dates
+    assert_eq!(gaps("    pattern: '^.*$'\n"), refused);
+    assert_eq!(gaps("    pattern: '[0-9]{4}-[0-9]{2}-[0-9]{2}'\n"), refused);
+    assert_eq!(gaps("    pattern: '^[0-9]{4}-(['\n"), refused);
+}
