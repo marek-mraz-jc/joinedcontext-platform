@@ -13,9 +13,9 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    dataset_page, dataset_page_projects, endpoint_page, held_page_projects, hybrid_search,
-    project_scope, rows_dataset_projects, search_projects, sources_by_project, titles, Search,
-    DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, endpoint_page, fill_terms, held_page_projects,
+    hybrid_search, project_scope, rows_dataset_projects, search_projects, sources_by_project,
+    titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -1116,5 +1116,237 @@ async fn the_semantic_arm_walks_the_vector_index_past_other_sources_chunks() {
         vec![small[0], small[1]]
     );
     assert_eq!(walked, 1, "the semantic arm is served by chunks_embedding");
+    drop_database(admin, pool, &name).await;
+}
+
+/// A pool on `pool`'s database whose every connection is the app role, so row-level security
+/// holds for what it runs as it does for the service.
+async fn app_pool(pool: &PgPool) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::Executor::execute(conn, "SET ROLE assistant_app").await?;
+                Ok(())
+            })
+        })
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .expect("connect as the app role")
+}
+
+/// T-5799: the lexical arm finds its chunks through `chunk_terms` (a btree whose leakproof text
+/// `=` the forced row-level security lets serve the lookup) and never scans the project's chunks,
+/// which took 2.6 s on prod at 101k chunks with `@@` evaluated on each. 100k chunks, a sixth of
+/// them matching as on prod, as the app role with the generic plan sqlx runs.
+#[tokio::test]
+async fn the_lexical_arm_looks_chunks_up_by_term_and_never_scans_the_project() {
+    let (admin, pool, name) = database("lexical").await;
+    site(&pool, "banskabystrica", "bb-web", &[]).await;
+    site(&pool, "bbsk", "bbsk-web", &[]).await;
+    sqlx::query(
+        "INSERT INTO chunks (site_id, project, page_id, ordinal, url, text, lang, visibility) \
+         SELECT s.id, s.project, p.id, n, p.url || '#' || n, \
+                CASE WHEN n % 6 = 0 THEN 'Kvalita ovzdušia v Banskej Bystrici, meranie ' || n \
+                     ELSE 'Rozpočet mesta, zápisnica číslo ' || n || ' zastupiteľstvo' END, \
+                'sk', 'public' \
+         FROM sites s JOIN pages p ON p.site_id = s.id, generate_series(1, 100000) n \
+         WHERE s.source = 'bb-web' OR (s.source = 'bbsk-web' AND n <= 2000)",
+    )
+    .execute(&pool)
+    .await
+    .expect("100k chunks");
+    sqlx::raw_sql("ANALYZE chunks; ANALYZE chunk_terms; ANALYZE sites")
+        .execute(&pool)
+        .await
+        .expect("analyze");
+    let sources = vec!["bb-web".to_owned()];
+    let mut tx = project_scope(&pool, "banskabystrica").await.expect("scope");
+    sqlx::raw_sql("SET LOCAL ROLE assistant_app; SET LOCAL plan_cache_mode = force_generic_plan")
+        .execute(&mut *tx)
+        .await
+        .expect("settings");
+    let hits = hybrid_search(
+        &mut tx,
+        &Search {
+            text: "Aká je kvalita ovzdušia v Banskej Bystrici?",
+            embedding: &embedding(0, None),
+            sources: &sources,
+            public_only: true,
+            limit: 10,
+            lang: None,
+        },
+    )
+    .await
+    .expect("search");
+    let (scanned, fetched, looked_up): (i64, i64, i64) = sqlx::query_as(
+        "SELECT pg_stat_get_xact_numscans('chunks'::regclass), \
+                pg_stat_get_xact_tuples_fetched('chunks'::regclass), \
+                pg_stat_get_xact_numscans('chunk_terms_lookup'::regclass)",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .expect("scans");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(hits.len(), 10);
+    assert!(
+        hits.iter()
+            .all(|hit| hit.text.starts_with("Kvalita ovzdušia")
+                && hit.site == "banskabystrica/bb-web"),
+        "{hits:?}"
+    );
+    assert_eq!(scanned, 0, "no sequential scan of chunks");
+    // The 16,667 chunks that hold a term of the question are checked against the scope by id;
+    // a read of the project's chunks (by chunks_scope) fetches all 100,000.
+    assert!(fetched <= 20_000, "{fetched} chunks read");
+    // PostgreSQL 16 counts one scan for each term of the `= ANY` array.
+    assert!(
+        looked_up >= 1,
+        "the lexical arm is served by chunk_terms_lookup"
+    );
+    drop_database(admin, pool, &name).await;
+}
+
+/// The chunks the lexical arm found for `text`, sorted. Every chunk of the fixtures carries an
+/// embedding and the semantic arm returns each chunk in scope (fewer than CANDIDATES), so a chunk
+/// scores above `1 / (RRF_K + 1)` only when the lexical arm found it too.
+async fn by_words(
+    pool: &PgPool,
+    project: &str,
+    text: &str,
+    sources: &[&str],
+    public_only: bool,
+) -> Vec<i64> {
+    let sources: Vec<String> = sources.iter().map(|s| (*s).to_owned()).collect();
+    let mut tx = project_scope(pool, project).await.expect("scope");
+    sqlx::query("SET LOCAL ROLE assistant_app")
+        .execute(&mut *tx)
+        .await
+        .expect("role");
+    let hits = hybrid_search(
+        &mut tx,
+        &Search {
+            text,
+            embedding: &embedding(0, None),
+            sources: &sources,
+            public_only,
+            limit: 10,
+            lang: None,
+        },
+    )
+    .await
+    .expect("search");
+    tx.rollback().await.expect("rollback");
+    let only_semantic = 1.0 / f64::from(assistant::RRF_K + 1);
+    let mut ids: Vec<i64> = hits
+        .iter()
+        .filter(|hit| hit.score > only_semantic + 1e-9)
+        .map(|hit| hit.chunk)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// T-5799: a chunk's terms are its own project's and follow its text, a chunk of another project
+/// or a private one never reaches the lexical arm's answer, and a chunk stored before
+/// `chunk_terms` existed is still found by its words until [`fill_terms`] gives it terms.
+#[tokio::test]
+async fn chunk_terms_keep_to_their_project_and_follow_the_text() {
+    let (admin, pool, name) = database("terms").await;
+    let public = site(
+        &pool,
+        "helsinki",
+        "hel-web",
+        &[("Library opening hours", "en", "public", embedding(0, None))],
+    )
+    .await;
+    let internal = site(
+        &pool,
+        "helsinki",
+        "hel-intranet",
+        &[("Library staff rota", "en", "internal", embedding(0, None))],
+    )
+    .await;
+    let espoo = site(
+        &pool,
+        "espoo",
+        "hel-web",
+        &[("Library in Espoo", "en", "public", embedding(0, None))],
+    )
+    .await;
+    let both = ["hel-web", "hel-intranet"];
+    let mut helsinki = vec![public[0], internal[0]];
+    helsinki.sort_unstable();
+    assert_eq!(
+        by_words(&pool, "helsinki", "library", &both, true).await,
+        public
+    );
+    assert_eq!(
+        by_words(&pool, "helsinki", "library", &both, false).await,
+        helsinki
+    );
+
+    let app = app_pool(&pool).await;
+    let mut tx = project_scope(&app, "helsinki").await.expect("scope");
+    let projects: Vec<String> = sqlx::query_scalar("SELECT DISTINCT project FROM chunk_terms")
+        .fetch_all(&mut *tx)
+        .await
+        .expect("projects");
+    let foreign: i64 = sqlx::query_scalar("SELECT count(*) FROM chunk_terms WHERE chunk_id = $1")
+        .bind(espoo[0])
+        .fetch_one(&mut *tx)
+        .await
+        .expect("espoo's terms");
+    tx.rollback().await.expect("rollback");
+    assert_eq!(projects, vec!["helsinki".to_owned()]);
+    assert_eq!(foreign, 0, "another project's terms are not readable");
+
+    // As before the migration: no terms, every chunk pending.
+    sqlx::raw_sql("DELETE FROM chunk_terms; UPDATE chunks SET terms_pending = true")
+        .execute(&pool)
+        .await
+        .expect("pending");
+    assert_eq!(
+        by_words(&pool, "helsinki", "library", &both, false).await,
+        helsinki,
+        "a pending chunk is found by its words"
+    );
+    assert_eq!(
+        by_words(&pool, "helsinki", "staff", &both, true).await,
+        Vec::<i64>::new()
+    );
+    assert_eq!(fill_terms(&app, "helsinki", 1000).await.expect("fill"), 2);
+    assert_eq!(fill_terms(&app, "helsinki", 1000).await.expect("fill"), 0);
+    let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM chunks WHERE terms_pending")
+        .fetch_one(&pool)
+        .await
+        .expect("pending");
+    assert_eq!(pending, 1, "espoo's chunk waits for espoo's own pass");
+    assert_eq!(fill_terms(&app, "espoo", 1000).await.expect("fill"), 1);
+    assert_eq!(
+        by_words(&pool, "helsinki", "library", &both, false).await,
+        helsinki
+    );
+    assert_eq!(
+        by_words(&pool, "helsinki", "staff", &both, true).await,
+        Vec::<i64>::new()
+    );
+
+    let mut tx = project_scope(&app, "helsinki").await.expect("scope");
+    sqlx::query("UPDATE chunks SET text = 'Swimming hall' WHERE id = $1")
+        .bind(public[0])
+        .execute(&mut *tx)
+        .await
+        .expect("new text");
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        by_words(&pool, "helsinki", "library", &both, true).await,
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        by_words(&pool, "helsinki", "swimming", &both, true).await,
+        public
+    );
+    app.close().await;
     drop_database(admin, pool, &name).await;
 }

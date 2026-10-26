@@ -31,6 +31,7 @@ use assistant::chat::model::{Model, ModelConfig};
 use assistant::chat::{self, ChatState};
 use assistant::crawl::Crawler;
 use assistant::embed::{embed_until, Embedder};
+use assistant::fill_terms;
 use assistant::worker::{self, checkout_from_env};
 use jc_core::ClientCredential;
 use sqlx::PgPool;
@@ -289,6 +290,25 @@ impl Minute {
             .iter()
             .map(|source| source.project.as_str())
             .collect();
+        // The terms of the chunks stored before chunk_terms existed (T-5799), a batch at a time
+        // within TERMS_BUDGET; a project with none left costs one empty index read.
+        let until = std::time::Instant::now() + TERMS_BUDGET;
+        for project in &projects {
+            let mut filled = 0;
+            while std::time::Instant::now() < until {
+                match fill_terms(pool, project, TERMS_BATCH).await {
+                    Ok(0) => break,
+                    Ok(batch) => filled += batch,
+                    Err(err) => {
+                        tracing::warn!(project, %err, "passage terms not filled this minute");
+                        break;
+                    }
+                }
+            }
+            if filled > 0 {
+                tracing::info!(project, filled, "passage terms filled");
+            }
+        }
         let until = std::time::Instant::now() + EMBED_BUDGET;
         for project in projects {
             match embed_until(pool, &self.embedder, project, until).await {
@@ -299,6 +319,11 @@ impl Minute {
         }
     }
 }
+
+/// The share of each worker minute, and the chunks per transaction, that give the chunks stored
+/// before T-5799 their terms: ~130k on prod, a few minutes after the first boot.
+const TERMS_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+const TERMS_BATCH: i64 = 1000;
 
 /// The share of each worker minute that embeds passages (T-4749): a count of 256 used a few
 /// seconds and left a first full index waiting for days.
