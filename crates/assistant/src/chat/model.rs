@@ -902,6 +902,11 @@ mod tests {
     }
 
     /// The log lines written while `run` runs on this thread.
+    ///
+    /// Every test that reaches a log line another test asserts on captures its own log too
+    /// (T-5633). While a single dispatcher is live, tracing-core judges a callsite's first hit by
+    /// the hitting thread's own dispatcher alone; a test without one caches `Interest::never` for
+    /// the whole process, and the capturing test sees no line.
     #[derive(Clone, Default)]
     struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
     impl std::io::Write for Log {
@@ -951,24 +956,48 @@ mod tests {
             .await
     }
 
+    /// A realm on a port bound from the start that closes its first connection unanswered (a send
+    /// error) and answers the second with a token: no freed port another test can take and no
+    /// head start a loaded runner can overrun (T-5633).
+    async fn a_realm_dropping_the_first_connection() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let uri = format!("http://{}", listener.local_addr().expect("the port"));
+        let realm = tokio::spawn(async move {
+            drop(listener.accept().await.expect("the first connection"));
+            let (mut second, _) = listener.accept().await.expect("the second connection");
+            // The whole form arrives before the answer, so the client never sees a reset.
+            let mut asked = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !String::from_utf8_lossy(&asked).contains("grant_type=client_credentials") {
+                let n = second.read(&mut buf).await.expect("the request");
+                assert_ne!(n, 0, "the request ended early");
+                asked.extend_from_slice(buf.get(..n).expect("read bytes"));
+            }
+            let body = json!({"access_token": "tok-123", "expires_in": 300}).to_string();
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            second
+                .write_all(answer.as_bytes())
+                .await
+                .expect("the answer");
+        });
+        (uri, realm)
+    }
+
     /// T-4809: a realm unreachable once (a rollout) is asked again, with one WARN that names the
     /// attempt and holds no credential.
     #[tokio::test(flavor = "current_thread")]
     async fn a_token_request_whose_send_fails_once_is_asked_again() {
-        use wiremock::{matchers::method, Mock};
-        let port = a_free_port();
-        let model = a_model(&format!("http://127.0.0.1:{port}"), "http://127.0.0.1:9");
-        let realm = tokio::spawn(async move {
-            let realm = listening_soon(port).await;
-            Mock::given(method("POST"))
-                .respond_with(token_answer())
-                .mount(&realm)
-                .await;
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            realm
-        });
+        let (uri, realm) = a_realm_dropping_the_first_connection().await;
+        let model = a_model(&uri, "http://127.0.0.1:9");
         let (log, _guard) = Log::capture();
         assert_eq!(model.token().await.expect("a token"), "tok-123");
+        realm.await.expect("the realm answered");
         let text = log.text();
         assert_eq!(text.matches(" WARN ").count(), 1, "{text}");
         assert!(text.contains("attempt=1"), "{text}");
@@ -976,7 +1005,6 @@ mod tests {
             !text.contains("s3cret") && !text.contains("tok-123"),
             "{text}"
         );
-        drop(realm);
     }
 
     /// T-4809: a 503 is asked again and the 200 after it is the token.
@@ -994,8 +1022,11 @@ mod tests {
             .mount(&realm)
             .await;
         let model = a_model(&realm.uri(), "http://127.0.0.1:9");
+        let (log, _guard) = Log::capture();
         assert_eq!(model.token().await.expect("a token"), "tok-123");
         assert_eq!(realm.received_requests().await.map(|r| r.len()), Some(2));
+        let text = log.text();
+        assert_eq!(text.matches(" WARN ").count(), 1, "{text}");
     }
 
     /// T-4809: a 401 is the realm's verdict on the credential; it is never asked again.
@@ -1027,7 +1058,10 @@ mod tests {
             .mount(&realm)
             .await;
         let model = a_model(&realm.uri(), "http://127.0.0.1:9");
+        let (log, _guard) = Log::capture();
         let got = model.token().await;
+        let text = log.text();
+        assert_eq!(text.matches(" WARN ").count(), 2, "{text}");
         assert!(
             matches!(&got, Err(CallError::Unavailable(why)) if why == MODEL_UNREACHABLE),
             "{got:?}"
