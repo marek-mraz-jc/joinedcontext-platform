@@ -288,4 +288,18 @@ fn the_mqtt_allowance_is_catalogued_off_by_default_and_held_to_its_bound() {
     let misplaced = org("  projects:\n    quota: {mqtt: {enabled: true}}\n")
         .expect_err("a project's allowance is its own");
     assert!(misplaced.contains("spec.limits.mqtt"), "{misplaced}");
+    // A hostname or a client CA every project inherits would be held by all of them.
+    let hostname = org(
+        "  limits:\n    mqtt: {enabled: true, addresses: [customHostname], customHostnames: [{name: mqtt.city.example}]}\n",
+    )
+    .expect_err("a hostname belongs to one project");
+    assert!(
+        hostname.contains("spec.limits.mqtt.customHostnames"),
+        "{hostname}"
+    );
+    let ca = org(
+        "  limits:\n    mqtt: {enabled: true, deviceAuth: [token, clientCertificate], clientCaRef: {name: city-ca}}\n",
+    )
+    .expect_err("a client CA belongs to one project");
+    assert!(ca.contains("spec.limits.mqtt.clientCaRef"), "{ca}");
 }
