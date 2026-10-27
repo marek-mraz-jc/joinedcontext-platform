@@ -681,12 +681,14 @@ pub(crate) async fn access_simulate(
     mut request: Request,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
-    let Some(endpoint) = gateway.resolver.resolve(&slug) else {
-        return ProblemDetails::not_found().into_response();
-    };
+    // The Portal first: a caller it refuses learns nothing about which slugs exist, a preview's
+    // included (CC-91, F-SEC1-029).
     if let Err(problem) = the_portal(&gateway, request.headers()) {
         return problem.into_response();
     }
+    let Some(endpoint) = gateway.resolver.resolve(&slug) else {
+        return ProblemDetails::not_found().into_response();
+    };
 
     let (_, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
