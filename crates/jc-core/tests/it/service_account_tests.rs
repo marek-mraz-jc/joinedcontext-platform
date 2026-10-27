@@ -190,6 +190,12 @@ fn an_account_that_derives_a_platform_client_id_is_refused() {
         ("activity", "ingest"),
         ("portal", "api"),
         ("apisix", "gateway"),
+        ("mcp", "mobile"),
+        ("mcp", "hub"),
+        ("mcp", "local"),
+        ("context", "gateway"),
+        ("jc", "assistant"),
+        ("jc", "build-lane"),
     ] {
         let sa = ServiceAccount::from_yaml(&account(project, name)).expect("parses");
         let err = sa
@@ -204,6 +210,7 @@ fn an_account_that_derives_a_platform_client_id_is_refused() {
         ("helsinki", "ingest"),
         ("activity", "ingest-2"),
         ("portal-x", "api"),
+        ("mcp", "mobile-2"),
     ] {
         let sa = ServiceAccount::from_yaml(&account(project, name)).expect("parses");
         sa.validate()
