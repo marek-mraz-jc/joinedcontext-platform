@@ -685,18 +685,17 @@ async fn logged_read(
         *refused.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
         return refused;
     };
-    log_personal_read(endpoint, subject, &personal, &read_entities(&held));
+    log_personal_read(endpoint, subject, &read_entities(&held));
     proxy::with_body(parts, held)
 }
 
-/// The DM-128 line of one read of `personal` attributes: the reader, the Endpoint and the
-/// Entities' URNs, never a value.
-pub(crate) fn log_personal_read(
-    endpoint: &Endpoint,
-    subject: &Subject,
-    personal: &[String],
-    entities: &[String],
-) {
+/// The DM-128 line of one read of the Endpoint's personal attributes, none without them: the
+/// reader, the Endpoint and the Entities' URNs, never a value.
+pub(crate) fn log_personal_read(endpoint: &Endpoint, subject: &Subject, entities: &[String]) {
+    let personal = endpoint.personal_attributes();
+    if personal.is_empty() {
+        return;
+    }
     tracing::info!(
         target: "personal_read",
         slug = %endpoint.slug,

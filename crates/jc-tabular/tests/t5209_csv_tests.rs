@@ -287,3 +287,11 @@ fn a_hundred_thousand_rows_stay_inside_the_ceilings() {
     };
     assert!(csv(&table, &tight, Dialect::default()).is_err());
 }
+
+#[test]
+fn the_table_names_each_row_id_once_and_sorted() {
+    let mut table = Table::default();
+    table.append(&json!([event(2, json!({})), event(1, json!({}))]));
+    table.append(&json!([event(2, json!({}))]));
+    assert_eq!(table.ids(), ["urn:ngsi-ld:Event:e1", "urn:ngsi-ld:Event:e2"]);
+}
