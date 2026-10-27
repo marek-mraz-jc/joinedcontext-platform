@@ -17,9 +17,12 @@ use crate::mqtt_refusals::{account_of, Reader, Reason, Refusal, Refusals};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
+use jc_core::kinds::mqtt_allowance::MqttDeviceAuth;
 use jc_core::kinds::mqtt_broker::{
-    release_name, runner_username, MqttMode, MqttRole, SourceRange, RUNNER_USERNAME,
+    certificate_release_name, release_name, runner_username, MqttMode, MqttRole, SourceRange,
+    RUNNER_USERNAME,
 };
+use jc_core::kinds::service_account::keycloak_client_id;
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
 use jc_core::mqtt::{topics, Binding, Held};
 use jc_manifest::loader::Repository;
@@ -56,7 +59,16 @@ pub struct Broker {
     /// What the Portal's capture subscriber may subscribe to: the publish filters of the roles,
     /// each `${clientid}` level widened to `+`; empty unless the broker is in `capture` mode.
     pub capture_topics: Vec<String>,
+    /// Whether devices may connect with a token: the manifest's `deviceAuth` names `token`.
+    pub tokens: bool,
+    /// Whether this entry is the broker's certificate door, `{release}-cert`, which RMQTT serves
+    /// only to a device whose client certificate the project CA signed (ADR-N-048 §2.12).
+    pub certificate_door: bool,
 }
+
+/// How long a CONNECT through the certificate door holds before the device must connect again
+/// and be checked again (ADR-N-048 §2.12): no token `exp` bounds it.
+pub const CERTIFICATE_CONNECT_SECONDS: i64 = 3600;
 
 /// The filters a capture subscribes to: every role's publish filter, a level that names
 /// `${clientid}` (or any other placeholder the broker binds) widened to `+`, since the
@@ -80,13 +92,15 @@ pub fn capture_topics(roles: &[MqttRole]) -> Vec<String> {
 }
 
 /// Every broker, by release name `mqtt-{project}-{name}`, which is also its Keycloak client
-/// (the token audience) and its Kubernetes ServiceAccount (its mesh identity).
+/// (the token audience) and its Kubernetes ServiceAccount (its mesh identity); a broker whose
+/// devices may use client certificates once more by its certificate door's release.
 pub type Brokers = HashMap<String, Broker>;
 
 /// The brokers of a repository with the topics their pipelines read. A manifest the kind
 /// refuses is left out with a line in the log; `jcctl validate` refuses it before merge.
 pub fn brokers_of(repo: &Repository) -> Brokers {
     let mut brokers = Brokers::new();
+    let mut doors = Vec::new();
     for (id, resource) in repo.iter() {
         if id.kind != "MqttBroker" {
             continue;
@@ -101,6 +115,13 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
             });
         match spec {
             Ok((spec, sources)) => {
+                let auth = spec.effective_device_auth();
+                if auth.contains(&MqttDeviceAuth::ClientCertificate) {
+                    doors.push((
+                        certificate_release_name(&project, &id.name),
+                        release_name(&project, &id.name),
+                    ));
+                }
                 brokers.insert(
                     release_name(&project, &id.name),
                     Broker {
@@ -115,6 +136,8 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
                         runner_topics: Vec::new(),
                         sources,
                         messages_per_second: spec.limits.messages_per_second,
+                        tokens: auth.contains(&MqttDeviceAuth::Token),
+                        certificate_door: false,
                     },
                 );
             }
@@ -141,6 +164,23 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
     for broker in brokers.values_mut() {
         broker.runner_topics.sort();
         broker.runner_topics.dedup();
+    }
+    // A door whose release is another broker's (a broker named `<name>-cert`) is not served:
+    // that release is the other broker's token door, and the Portal refuses to stamp this one.
+    for (door, release) in doors {
+        if brokers.contains_key(&door) {
+            tracing::warn!(%door, "the certificate door's release is another broker's; not served");
+            continue;
+        }
+        if let Some(broker) = brokers.get(&release) {
+            let entry = Broker {
+                certificate_door: true,
+                runner_topics: Vec::new(),
+                capture_topics: Vec::new(),
+                ..broker.clone()
+            };
+            brokers.insert(door, entry);
+        }
     }
     brokers
 }
@@ -354,8 +394,19 @@ pub fn decide(
             Why::unrecorded("the caller is no broker this repository declares"),
         );
     };
+    if broker.certificate_door {
+        return certificate(broker, accounts, connect);
+    }
+    // A token release never admits a device without a token, whatever its username: only the
+    // certificate door's mesh identity vouches for a verified certificate (T-4861 option (a)).
     if connect.password.is_empty() {
         return tokenless(broker, pods, connect);
+    }
+    if !broker.tokens {
+        return refuse(
+            "the broker admits client certificates only",
+            Reason::TokenNotAllowed,
+        );
     }
     if !admits_source(&broker.sources, &connect.ipaddr) {
         return refuse(
@@ -396,6 +447,68 @@ pub fn decide(
         Some(account) => device(broker, account, claims.exp, now),
         None => refuse("the client is no ServiceAccount", Reason::UnknownAccount),
     }
+}
+
+/// Decides a CONNECT through the certificate door (ADR-N-048 §2.12). RMQTT has verified the
+/// client certificate against the project CA and its validity before asking, and put the subject
+/// DN in the username; the common name is the device's ServiceAccount, and the client id must be
+/// that account's, `{project}-{commonName}`. The CONNECT holds for an hour: RMQTT 0.24 checks no
+/// CRL, so a revoked device is one whose account, role or credential the repository ends, which
+/// this check and every publish's read. A certificate with an empty subject arrives with the
+/// username the device sent: a project CA signs device certificates with a common name only.
+fn certificate(broker: &Broker, accounts: &ServiceAccounts, connect: &Connect) -> (Answer, Why) {
+    if !connect.password.is_empty() {
+        return refuse(
+            "the certificate door takes no password",
+            Reason::Certificate,
+        );
+    }
+    if !admits_source(&broker.sources, &connect.ipaddr) {
+        return refuse(
+            "the client's address is outside the broker's allowedSources",
+            Reason::SourceAddress,
+        );
+    }
+    let Some(name) = common_name(&connect.username) else {
+        return refuse(
+            "the certificate names no single common name",
+            Reason::Certificate,
+        );
+    };
+    if connect.clientid != keycloak_client_id(&broker.project, name) {
+        return refuse(
+            "the client id is not the certificate's account",
+            Reason::WrongClient,
+        );
+    }
+    let now = chrono::Utc::now();
+    match accounts.resolve(&connect.clientid) {
+        Some(account) => device(
+            broker,
+            account,
+            now.timestamp().saturating_add(CERTIFICATE_CONNECT_SECONDS),
+            now,
+        ),
+        None => refuse(
+            "the certificate's common name is no ServiceAccount",
+            Reason::UnknownAccount,
+        ),
+    }
+}
+
+/// The common name of a subject DN as RMQTT writes it (`O=helsinki, CN=sensor-1`): the value of
+/// the one `CN` attribute, a ServiceAccount name (lowercase letters, digits, `-`); none when the
+/// DN has no `CN`, two of them, or a value no account could carry.
+pub fn common_name(dn: &str) -> Option<&str> {
+    let mut names = dn
+        .split(',')
+        .filter_map(|part| part.trim().strip_prefix("CN="));
+    let name = names.next()?;
+    let account = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    (names.next().is_none() && account).then_some(name)
 }
 
 /// Whether a device at `ipaddr`, the address Traefik's PROXY header carried, may connect: any
@@ -530,10 +643,17 @@ pub fn publish_check(
         return (false, "a subscription not in the CONNECT answer");
     }
     // The tokenless subscribers never publish; their name is no device's even if an account
-    // derived it.
-    if access.username != access.clientid
-        || [RUNNER_USERNAME, CAPTURE_USERNAME].contains(&access.username.as_str())
-    {
+    // derived it. Through the certificate door the username is the subject DN, whose common
+    // name must still be the client id's account.
+    let device = if broker.certificate_door {
+        common_name(&access.username)
+            .filter(|name| access.clientid == keycloak_client_id(&broker.project, name))
+    } else {
+        Some(access.username.as_str()).filter(|name| {
+            *name == access.clientid && ![RUNNER_USERNAME, CAPTURE_USERNAME].contains(name)
+        })
+    };
+    if device.is_none() {
         return (false, "no device");
     }
     let Some(account) = accounts.resolve(&access.clientid) else {
@@ -794,6 +914,8 @@ mod tests {
                 sources: Vec::new(),
                 capture_topics: Vec::new(),
                 messages_per_second: 10,
+                tokens: true,
+                certificate_door: false,
             },
         )]);
         let accounts = ServiceAccounts::new();
