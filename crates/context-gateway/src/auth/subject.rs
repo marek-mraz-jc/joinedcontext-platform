@@ -130,7 +130,9 @@ fn admit_on(
     let endpoint_audiences = gateway.audiences_for(endpoint);
     let mut audiences = endpoint_audiences.clone();
     audiences.push(CLI_AUDIENCE.to_owned());
-    if federated {
+    // A token exchanged for the broker reaches only an Endpoint a hub reads with the caller's
+    // identity; on any other Endpoint of that broker it is a token of a foreign audience.
+    if federated && gateway.is_caller_member(&endpoint.slug) {
         audiences.push(gateway.broker_audience(endpoint));
     }
     let claims = verifier

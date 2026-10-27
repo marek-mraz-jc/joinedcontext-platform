@@ -164,6 +164,9 @@ async fn granted(
             "iss": common::ISSUER,
             "sub": "f:1:someone",
             "aud": "context-gateway",
+            // A member of the Endpoint's project, which an organization audience asks for
+            // (F-SEC1-009); a test naming its own groups replaces it.
+            "groups": [PROJECT],
             "exp": common::in_seconds(300),
             "iat": common::in_seconds(-10),
         });

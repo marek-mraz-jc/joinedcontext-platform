@@ -515,6 +515,11 @@ impl Gateway {
         self.federation.load().members(project, space).to_vec()
     }
 
+    /// Whether a caller-identity registration names `slug` as its member (F-SEC1-010).
+    pub(crate) fn is_caller_member(&self, slug: &str) -> bool {
+        self.federation.load().is_caller_member(slug)
+    }
+
     /// The `Authorization` a hop over `endpoint`'s space carries for its `identity: caller`
     /// registrations (PF-48, PF-113, T-3999): none when it has none or the caller is anonymous,
     /// else the caller's token exchanged for the brokers those members live on. A member outside

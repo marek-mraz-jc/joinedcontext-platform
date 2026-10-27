@@ -139,6 +139,7 @@ async fn world() -> World {
         "aud": "context-gateway",
         "preferred_username": EDITOR,
         "email": EDITOR,
+        "groups": [SPACE],
         "exp": common::in_seconds(300),
         "iat": common::in_seconds(-10),
     }));
