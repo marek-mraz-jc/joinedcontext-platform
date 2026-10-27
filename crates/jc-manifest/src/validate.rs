@@ -1767,9 +1767,10 @@ fn deployment_reach(
     found
 }
 
-/// The MQTT edge brokers checked against the repository (MF-54, PL-76): every role names
-/// ServiceAccounts its project declares, no two brokers hold one dedicated port (the finding
-/// names the holder), and a DataSource's `brokerRef` names a broker of its own project.
+/// The MQTT edge brokers checked against the repository (MF-54, MF-62, PL-76): every role names
+/// ServiceAccounts its project declares, no two brokers hold one dedicated port or one custom
+/// hostname and no two projects' allowances one hostname (each finding names the holder), and a
+/// DataSource's `brokerRef` names a broker of its own project.
 /// Findings and warnings, each at its manifest.
 type Found = Vec<(Location, String)>;
 
@@ -1795,6 +1796,8 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
         .collect();
     let brokers: BTreeSet<&(Option<String>, String)> = declared.keys().collect();
     let mut ports: BTreeMap<u16, String> = BTreeMap::new();
+    let mut hostnames: BTreeMap<String, String> = BTreeMap::new();
+    let mut assigned: BTreeMap<String, String> = BTreeMap::new();
     let mut found = Vec::new();
     let mut warned = Vec::new();
     for (id, resource) in repo.iter() {
@@ -1823,6 +1826,18 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
                                 "{id}: role `{}` names ServiceAccount `{account}`, which no manifest of this project declares (MF-54)",
                                 role.name
                             )));
+                        }
+                    }
+                }
+                if let (jc_core::kinds::MqttAddress::CustomHostname, Some(name)) =
+                    (broker.effective_address(), &broker.hostname)
+                {
+                    match hostnames.get(name) {
+                        Some(holder) => found.push((at.clone(), format!(
+                            "{id}: spec.hostname {name} is already served by {holder}; a hostname reaches one broker (MF-62)"
+                        ))),
+                        None => {
+                            hostnames.insert(name.clone(), id.to_string());
                         }
                     }
                 }
@@ -1858,6 +1873,26 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
                             "{id}: spec.roles `{}` names a role no MqttBroker of this project declares (ADR-N-048 §2.13)",
                             binding.role
                         )));
+                    }
+                }
+            }
+            "Project" => {
+                let names = resource
+                    .manifest
+                    .spec
+                    .pointer("/quotas/mqtt/customHostnames")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.get("name")?.as_str());
+                for name in names {
+                    match assigned.get(name) {
+                        Some(holder) => found.push((at.clone(), format!(
+                            "{id}: spec.quotas.mqtt.customHostnames {name} is already assigned to {holder}; a hostname is assigned to one project at a time (ADR-N-048 §2.11, MF-62)"
+                        ))),
+                        None => {
+                            assigned.insert(name.to_owned(), id.to_string());
+                        }
                     }
                 }
             }

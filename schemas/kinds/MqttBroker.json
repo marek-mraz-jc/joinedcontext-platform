@@ -80,10 +80,47 @@
       ],
       "type": "object"
     },
+    "MqttAddress": {
+      "description": "How a broker is addressed from outside (ADR-N-048 §2.11).",
+      "oneOf": [
+        {
+          "description": "`<name>.<project>.mqtt.<domain>` on 8883.",
+          "enum": [
+            "platform"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A port of the allowance's `ports`.",
+          "enum": [
+            "dedicatedPort"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A name of the allowance's `customHostnames`, one the city owns, on 8883.",
+          "enum": [
+            "customHostname"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "MqttBrokerSpec": {
       "additionalProperties": false,
       "description": "One MQTT edge broker (MF-54).",
       "properties": {
+        "address": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MqttAddress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the broker is reached from outside; absent is `dedicatedPort` when `port` is set, else `platform` (ADR-N-048 §2.11)."
+        },
         "allowedSources": {
           "description": "The networks devices may connect from, in CIDR notation, at most 32; empty admits any address (PF-129). The edge and the gateway both hold a device to it.",
           "items": {
@@ -101,6 +138,23 @@
             }
           ],
           "description": "How much a `capture` broker keeps; read only in that mode."
+        },
+        "deviceAuth": {
+          "description": "How devices may authenticate, a non-empty subset of `token` and `clientCertificate`; absent is `[token]` (ADR-N-048 §2.12).",
+          "items": {
+            "$ref": "#/definitions/MqttDeviceAuth"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "hostname": {
+          "description": "One of the allowance's `customHostnames`, e.g. `mqtt.city.example`; required with `address: customHostname` and read only there.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "limits": {
           "allOf": [
@@ -127,7 +181,7 @@
           "description": "What the broker does with a message; absent is `ingest` (ADR-N-048 §2.10)."
         },
         "port": {
-          "description": "A dedicated port from 18830–18849 instead of TLS by SNI on 8883.",
+          "description": "A dedicated port from 18830–18849 instead of TLS by SNI on 8883; required with `address: dedicatedPort` and read only there.",
           "format": "uint16",
           "minimum": 0.0,
           "type": [
@@ -166,6 +220,25 @@
         }
       },
       "type": "object"
+    },
+    "MqttDeviceAuth": {
+      "description": "How a device proves who it is when it connects (ADR-N-048 §2.12).",
+      "oneOf": [
+        {
+          "description": "A Keycloak access token of a ServiceAccount as the CONNECT password.",
+          "enum": [
+            "token"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A client certificate the project's client CA signed, its common name the ServiceAccount.",
+          "enum": [
+            "clientCertificate"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MqttLimits": {
       "additionalProperties": false,
