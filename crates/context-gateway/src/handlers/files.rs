@@ -58,7 +58,7 @@ pub(crate) async fn file_csv(
             return problem.with_detail(bad.to_string()).into_response();
         }
     };
-    let key = Key::of(&endpoint, &subject, &request);
+    let key = Key::of(gateway.resolver.table(), &endpoint, &subject, &request);
     let build = build(
         &gateway,
         &endpoint,

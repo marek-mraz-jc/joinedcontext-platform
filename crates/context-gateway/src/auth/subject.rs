@@ -217,7 +217,11 @@ pub(crate) fn subject_from(
         Some(preview) => preview_reader(gateway, endpoint, claims, &preview)?,
         None => subject_of(claims, endpoint, gateway)?,
     };
-    with_endpoint_roles(&mut subject, endpoint, &client_roles);
+    // A participant holds what its agreement's compiled Policies grant and no Endpoint role on
+    // top (DS-02, DS-03, F-SEC1-006).
+    if subject.agreement.is_none() {
+        with_endpoint_roles(&mut subject, endpoint, &client_roles);
+    }
     Ok(subject)
 }
 
@@ -242,13 +246,18 @@ fn preview_reader(
         tracing::info!(slug = %endpoint.slug, "a preview asked by someone who does not review it");
         return Err(Box::new(ProblemDetails::not_found()));
     }
+    let user = claims
+        .preferred_username
+        .clone()
+        .unwrap_or_else(|| claims.sub.clone());
+    // A reader is decided under their name as on a published Endpoint (T-5358, F-SEC1-031): a
+    // `service-account-…` name another client's token carries matches nobody's assignees.
+    if !owns_its_name(&user, claims.azp.as_deref()) {
+        tracing::warn!(slug = %endpoint.slug, "a preview reader with a service-account username");
+        return Err(Box::new(ProblemDetails::not_found()));
+    }
     Ok(Subject {
-        user: Some(
-            claims
-                .preferred_username
-                .clone()
-                .unwrap_or_else(|| claims.sub.clone()),
-        ),
+        user: Some(user),
         id: Some(claims.sub.clone()),
         service_account: None,
         service_account_project: None,
@@ -426,7 +435,7 @@ pub(crate) fn subject_of(
                 service_account_project: Some(account.project.clone()),
                 roles: roles_on(
                     endpoint.audience,
-                    account.roles_in(&account.project, &endpoint.space),
+                    account.roles_in(&endpoint.project, &endpoint.space),
                 ),
                 // A workload's grants are its manifest's (PF-35, T-2545): a group the token
                 // claims is Keycloak membership nobody reviewed, so it reaches no group Policy.

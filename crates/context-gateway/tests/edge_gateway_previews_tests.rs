@@ -828,7 +828,12 @@ async fn a_workload_or_a_refused_token_naming_a_reader_gets_the_unknown_slug_404
     let transfer = claims(json!({ "agreementId": "urn:ngsi-ld:Agreement:air-1" }));
     let expired =
         claims(json!({ "exp": common::in_seconds(-900), "iat": common::in_seconds(-1200) }));
+    // A reader's own id under a client's service-account username (F-SEC1-031, T-5358).
+    let named_as_a_client = claims(json!({
+        "preferred_username": "service-account-portal-reconciler",
+    }));
     for (who, token) in [
+        ("a reader named as a client's account", named_as_a_client),
         ("a ServiceAccount", workload),
         ("a data space consumer", transfer),
         ("an expired token", expired),
