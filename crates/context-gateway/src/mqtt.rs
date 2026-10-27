@@ -17,12 +17,12 @@ use crate::mqtt_refusals::{account_of, Reader, Reason, Refusal, Refusals};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
-use jc_core::kinds::mqtt_allowance::MqttDeviceAuth;
 use jc_core::kinds::mqtt_broker::{
     certificate_release_name, release_name, runner_username, MqttMode, MqttRole, SourceRange,
     RUNNER_USERNAME,
 };
 use jc_core::kinds::service_account::keycloak_client_id;
+use jc_core::kinds::MqttDeviceAuth;
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
 use jc_core::mqtt::{topics, Binding, Held};
 use jc_manifest::loader::Repository;
