@@ -15,7 +15,7 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
 use context_gateway::resolver::Endpoint;
-use jc_core::kinds::{Audience, Representation};
+use jc_core::kinds::{Audience, RateLimits, Representation};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -153,6 +153,41 @@ fn listed(answer: &Value) -> Vec<&str> {
         .iter()
         .filter_map(Value::as_str)
         .collect()
+}
+
+/// F-SEC1-017: the list probes the view once per type the space holds, so it costs the caller's
+/// rate limit one request per type; a bucket short of that is a 429 before any probe is sent.
+#[tokio::test]
+async fn the_type_list_costs_one_request_per_type_it_probes() {
+    let limited = |burst: u32| {
+        let mut endpoint = endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"]);
+        endpoint.rate_limit = Some(RateLimits {
+            requests_per_minute: 1,
+            burst: Some(burst),
+        });
+        endpoint
+    };
+    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
+    let (status, answer) = types(&broker, limited(4)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{answer}");
+    let probes = |asked: &Asked| {
+        asked
+            .lock()
+            .expect("no poisoned lock")
+            .iter()
+            .filter(|hop| hop.starts_with("/x/views/"))
+            .count()
+    };
+    assert_eq!(
+        probes(&asked),
+        0,
+        "no view read before the bucket is charged"
+    );
+
+    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
+    let (status, answer) = types(&broker, limited(5)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(probes(&asked), HELD.len());
 }
 
 /// A public Endpoint whose Policy grants 2 of the 5 types lists those 2, to anyone.

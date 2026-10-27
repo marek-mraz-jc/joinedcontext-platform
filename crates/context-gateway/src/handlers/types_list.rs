@@ -32,6 +32,11 @@ pub(crate) async fn listed_types(
     let slug = endpoint.slug.as_str();
     view_hop(endpoint, subject, request)?;
     let held = dataset_types(gateway, slug, request.headers()).await?;
+    // Each type is a view read of its own: the caller pays for every probe past the one
+    // request the rate limit already counted (F-SEC1-017), before any is sent.
+    let caller = crate::middleware::rate_limit::caller_of(gateway, request);
+    let extra = u32::try_from(held.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    crate::middleware::rate_limit::charge(gateway, endpoint, &caller, extra)?;
     let mut shown = Vec::new();
     let mut refused = 0;
     let headers = request.headers();

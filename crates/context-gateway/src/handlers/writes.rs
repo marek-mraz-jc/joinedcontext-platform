@@ -404,6 +404,10 @@ pub(crate) enum Unlinking {
 /// required end, or an entity the caller may not change), and otherwise the entities are changed
 /// or deleted first and the entity itself last. Nothing is changed until every rule has passed;
 /// a reference written after the read is the race window Architecture/11 §1.2 names.
+/// The most ids one batch delete names: the broker's own batch ceiling (Antares
+/// `ANTARES_MAX_BATCH_ITEMS`, 1000 unless raised).
+const MAX_DELETE_IDS: usize = 1_000;
+
 pub(crate) struct HeldDelete<'a> {
     pub(crate) gateway: &'a Gateway,
     pub(crate) subject: &'a Subject,
@@ -431,6 +435,13 @@ impl HeldDelete<'_> {
         let Ok(Value::Array(entries)) = serde_json::from_slice::<Value>(sent) else {
             return Ok(false);
         };
+        // Each id costs a relationship plan of broker reads, so the ids are counted before any
+        // is planned (F-SEC1-016); the broker refuses a larger batch anyway.
+        if entries.len() > MAX_DELETE_IDS {
+            return Err(answer(Box::new(ProblemDetails::bad_request().with_detail(
+                format!("a batch delete takes at most {MAX_DELETE_IDS} ids; send the rest in another batch"),
+            ))));
+        }
         let mut refused: Refused = Vec::new();
         let mut permitted = Vec::new();
         let mut plans = Vec::new();
