@@ -44,11 +44,16 @@ struct Store {
     calls: Vec<String>,
     /// Per call, in order, the `x-jc-client` it carried (T-3767).
     clients: Vec<Option<String>>,
+    /// Per call, in order, the provenance actor and the reason it carried (F-SEC1-026).
+    provenance: Vec<Provenance>,
     /// Writes to these paths are refused with 500, to stop a delete part way.
     failing: BTreeSet<String>,
 }
 
 type Shared = Arc<Mutex<Store>>;
+
+/// The `jc-provenance-actor` and `jc-reason` of one call.
+type Provenance = (Option<String>, Option<String>);
 
 /// The targets one attribute value names, in the forms the store holds.
 fn objects(value: &Value) -> Vec<String> {
@@ -76,12 +81,21 @@ async fn serve(State(store): State<Shared>, request: Request) -> axum::response:
         .get("x-jc-client")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let headers = request.headers().clone();
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let provenance = (header("jc-provenance-actor"), header("jc-reason"));
     let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
         .await
         .unwrap_or_default();
     let mut store = store.lock().expect("the store");
     store.calls.push(format!("{method} {path}?{query}"));
     store.clients.push(client);
+    store.provenance.push(provenance);
     let pairs: Vec<(String, String)> = query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -211,6 +225,7 @@ async fn broker(held: Vec<Value>, failing: &[&str]) -> (String, Shared) {
             .collect(),
         calls: Vec::new(),
         clients: Vec::new(),
+        provenance: Vec::new(),
         failing: failing.iter().map(|path| (*path).to_owned()).collect(),
     }));
     let app = Router::new()
@@ -658,6 +673,32 @@ async fn a_held_delete_unlinks_as_the_gateway() {
     );
     for (call, client) in unlinked {
         assert_eq!(*client, Some("context-gateway"), "{call}");
+    }
+}
+
+/// F-SEC1-026 (ADR-N-054 2.3, DM-113): the unlinking writes as the gateway's account, and the
+/// rows it changes still name the caller and the reason, as the caller's own delete does.
+#[tokio::test]
+async fn a_held_delete_unlinks_under_the_callers_provenance_and_reason() {
+    let answer = delete(CLASSES, &urn("Desk", "d1")).await;
+    assert_eq!(answer.status, StatusCode::NO_CONTENT, "{}", answer.body);
+    let store = answer.store.lock().expect("the store");
+    let writes: Vec<(&String, &Provenance)> = store
+        .calls
+        .iter()
+        .zip(store.provenance.iter())
+        .filter(|(call, _)| !call.starts_with("GET "))
+        .collect();
+    let (last, callers) = writes.last().expect("the caller's own delete");
+    assert!(last.contains("Desk"), "{writes:?}");
+    assert!(callers.0.is_some(), "the caller's delete names an actor");
+    assert_eq!(callers.1.as_deref(), Some("test"));
+    assert!(
+        writes.len() > 1,
+        "the desk's teacher was unlinked: {writes:?}"
+    );
+    for (call, provenance) in &writes {
+        assert_eq!(provenance, callers, "{call}");
     }
 }
 
