@@ -1,5 +1,6 @@
 //! A read through an Endpoint that serves a personal attribute is logged with the reader, the
-//! Endpoint and the Entities' URNs, never a value (ADR-N-054 2.6, DM-128, T-4666).
+//! Endpoint and the Entities' URNs, never a value (ADR-N-054 2.6, DM-128, T-4666): through
+//! NGSI-LD, with every Entity a join inlines, and through `file.csv` (F-SEC1-014, F-SEC1-025).
 //!
 //! Alone in its binary: it installs the process's subscriber.
 
@@ -82,7 +83,7 @@ fn endpoint(slug: &str, hidden: &[&str]) -> Endpoint {
         project: "trips".to_owned(),
         audience: Audience::Organization,
         allowed_projects: Vec::new(),
-        representations: vec![Representation::NgsiLd],
+        representations: vec![Representation::NgsiLd, Representation::Csv],
         rate_limit: None,
         creates: None,
         file_limits: None,
@@ -114,13 +115,22 @@ async fn a_read_of_a_personal_attribute_names_reader_endpoint_and_entities_never
     )
     .expect("the only subscriber of this binary");
 
+    let joined = json!([
+        {"id": "urn:ngsi-ld:BikeTrip:t1", "type": "BikeTrip",
+         "rider": {"type": "Property", "value": RIDER},
+         "follows": {"type": "Relationship", "object": "urn:ngsi-ld:BikeTrip:t9",
+          "entity": {"id": "urn:ngsi-ld:BikeTrip:t9", "type": "BikeTrip",
+           "rider": {"type": "Property", "value": RIDER}}}},
+        {"id": "urn:ngsi-ld:BikeTrip:t2", "type": "BikeTrip",
+         "rider": {"type": "Property", "value": RIDER}}
+    ]);
     let trips = json!([
         {"id": "urn:ngsi-ld:BikeTrip:t1", "type": "BikeTrip",
          "rider": {"type": "Property", "value": RIDER}},
         {"id": "urn:ngsi-ld:BikeTrip:t2", "type": "BikeTrip",
          "rider": {"type": "Property", "value": RIDER}}
     ]);
-    let broker = common::BrokerStub::start(vec![trips.clone(), trips]).await;
+    let broker = common::BrokerStub::start(vec![joined, trips.clone(), trips]).await;
     let realm = common::Realm::new();
     let app = router(Arc::new(
         Gateway::new(
@@ -145,21 +155,23 @@ async fn a_read_of_a_personal_attribute_names_reader_endpoint_and_entities_never
         "exp": common::in_seconds(300),
         "iat": common::in_seconds(-10),
     }));
-    for slug in [PERSONAL, PLAIN] {
+    for (slug, path) in [
+        (PERSONAL, "ngsi-ld/v1/entities?type=BikeTrip&join=inline"),
+        (PLAIN, "ngsi-ld/v1/entities?type=BikeTrip"),
+        (PERSONAL, "file.csv?type=BikeTrip"),
+    ] {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/endpoint/{slug}/ngsi-ld/v1/entities?type=BikeTrip"
-                    ))
+                    .uri(format!("/api/endpoint/{slug}/{path}"))
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .expect("a request"),
             )
             .await
             .expect("the gateway answers");
-        assert_eq!(response.status(), StatusCode::OK, "{slug}");
+        assert_eq!(response.status(), StatusCode::OK, "{slug}/{path}");
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .expect("a body");
@@ -176,17 +188,19 @@ async fn a_read_of_a_personal_attribute_names_reader_endpoint_and_entities_never
         .collect();
     assert_eq!(
         reads.len(),
-        1,
-        "only the Endpoint serving the rider logs: {log}"
+        2,
+        "only the Endpoint serving the rider logs, once per read: {log}"
     );
-    let line = reads[0];
-    for named in [
-        PERSONAL,
-        "BikeTrip.rider",
-        "urn:ngsi-ld:BikeTrip:t1,urn:ngsi-ld:BikeTrip:t2",
-        "jana",
+    for (line, entities) in [
+        (
+            reads[0],
+            "urn:ngsi-ld:BikeTrip:t1,urn:ngsi-ld:BikeTrip:t9,urn:ngsi-ld:BikeTrip:t2",
+        ),
+        (reads[1], "urn:ngsi-ld:BikeTrip:t1,urn:ngsi-ld:BikeTrip:t2"),
     ] {
-        assert!(line.contains(named), "{named} missing: {line}");
+        for named in [PERSONAL, "BikeTrip.rider", entities, "jana"] {
+            assert!(line.contains(named), "{named} missing: {line}");
+        }
     }
     assert!(!log.contains(RIDER), "a value reached the log: {log}");
 }

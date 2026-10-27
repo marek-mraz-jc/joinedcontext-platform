@@ -58,11 +58,13 @@ pub(crate) async fn file_csv(
             return problem.with_detail(bad.to_string()).into_response();
         }
     };
-    let key = Key::of(&endpoint, &subject, &request);
+    // A file holding personal data is built for each reader, so each read is logged (DM-128).
+    let personal = endpoint.personal_attributes();
+    let key = Key::of(&endpoint, &subject, &request).filter(|_| personal.is_empty());
     let build = build(
         &gateway,
-        &endpoint,
-        &subject,
+        (&endpoint, &subject),
+        &personal,
         &params,
         &mut request,
         dialect,
@@ -89,11 +91,11 @@ pub(crate) async fn file_csv(
 }
 
 /// The file `file_csv` answers with, in one of the bounded build slots (T-4782), and whether
-/// the view narrowed it.
+/// the view narrowed it. A file with `personal` attributes logs its reader and rows (DM-128).
 async fn build(
     gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
+    (endpoint, subject): (&Endpoint, &Subject),
+    personal: &[String],
     params: &[(String, String)],
     request: &mut Request,
     dialect: tabular::Dialect,
@@ -120,11 +122,28 @@ async fn build(
         .unwrap_or_default();
     let visible = schema::visible(subject, endpoint, crate::pdp::now());
     table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
+    if !personal.is_empty() {
+        let ids = table_ids(&table);
+        crate::handlers::ngsi_ld::log_personal_read(endpoint, subject, personal, &ids);
+    }
     if query::first(params, "humanHeaders") == Some("true") {
         tabular::humanize(&mut table);
     }
     let text = tabular::csv(&table, &limits, dialect).map_err(|_| Box::new(too_large()))?;
     Ok((Bytes::from(text), restricted))
+}
+
+/// The Entity ids of `table`'s rows, from its `id` column.
+fn table_ids(table: &tabular::Table) -> Vec<String> {
+    let Some(at) = table.columns.iter().position(|column| column == "id") else {
+        return Vec::new();
+    };
+    table
+        .rows
+        .iter()
+        .filter_map(|row| row.get(at).and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// This surface's routes; `app::router` merges them under its guards.

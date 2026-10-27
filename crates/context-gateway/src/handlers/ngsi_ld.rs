@@ -233,9 +233,11 @@ pub(crate) async fn broker_failure(
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
+    let (kind, detail) = explanation(&held);
     tracing::warn!(
         status = status.as_u16(),
-        broker = %String::from_utf8_lossy(&held),
+        broker_type = %kind,
+        broker_detail = %detail,
         "the broker failed; its own explanation is not passed on"
     );
     if timed_out(status, &held) {
@@ -252,6 +254,26 @@ pub(crate) async fn broker_failure(
         answer.headers_mut().insert("retry-after", retry_after);
     }
     answer
+}
+
+/// The longest piece of the broker's explanation the gateway logs: its body can hold up to 8 MiB
+/// of entity values, which never belong in a log line (F-SEC1-019).
+const LOGGED_EXPLANATION: usize = 300;
+
+/// The `type` and `detail` of the broker's problem document, each cut to [`LOGGED_EXPLANATION`]
+/// characters; a body that is no problem document logs neither.
+fn explanation(body: &[u8]) -> (String, String) {
+    let problem = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let member = |name: &str| {
+        problem
+            .get(name)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .take(LOGGED_EXPLANATION)
+            .collect()
+    };
+    (member("type"), member("detail"))
 }
 
 /// The broker's `500` for a query its database cancelled at the statement timeout (Antares names
@@ -663,20 +685,32 @@ async fn logged_read(
         *refused.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
         return refused;
     };
+    log_personal_read(endpoint, subject, &personal, &read_entities(&held));
+    proxy::with_body(parts, held)
+}
+
+/// The DM-128 line of one read of `personal` attributes: the reader, the Endpoint and the
+/// Entities' URNs, never a value.
+pub(crate) fn log_personal_read(
+    endpoint: &Endpoint,
+    subject: &Subject,
+    personal: &[String],
+    entities: &[String],
+) {
     tracing::info!(
         target: "personal_read",
         slug = %endpoint.slug,
         space = %endpoint.space,
         principal = %principal_of(subject),
         attributes = %personal.join(","),
-        entities = %read_entities(&held).join(","),
+        entities = %entities.join(","),
         "personal attributes read"
     );
-    proxy::with_body(parts, held)
 }
 
 /// The URNs of the Entities an NGSI-LD answer holds: one Entity, a list of them, or a GeoJSON
-/// FeatureCollection.
+/// FeatureCollection, and every Entity `join=inline` nested in a Relationship's `entity` or a
+/// ListRelationship's `entityList`, at any `joinLevel` (F-SEC1-025).
 fn read_entities(body: &[u8]) -> Vec<String> {
     let Ok(answer) = serde_json::from_slice::<Value>(body) else {
         return Vec::new();
@@ -689,11 +723,45 @@ fn read_entities(body: &[u8]) -> Vec<String> {
         },
         _ => &[],
     };
-    items
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect()
+    let mut ids = Vec::new();
+    for item in items {
+        inlined(item, &mut ids);
+    }
+    ids
+}
+
+/// Collects the id of `entity` and of every Entity inlined in its attributes.
+fn inlined(entity: &Value, ids: &mut Vec<String>) {
+    let Some(members) = entity.as_object() else {
+        return;
+    };
+    if let Some(id) = members.get("id").and_then(Value::as_str) {
+        ids.push(id.to_owned());
+    }
+    // A GeoJSON Feature carries the attributes under `properties`.
+    let feature = members.get("properties").and_then(Value::as_object);
+    for attribute in members
+        .values()
+        .chain(feature.into_iter().flat_map(|p| p.values()))
+    {
+        // An attribute with several instances is a list of them.
+        for instance in std::slice::from_ref(attribute)
+            .iter()
+            .chain(attribute.as_array().into_iter().flatten())
+        {
+            if let Some(nested) = instance.get("entity") {
+                inlined(nested, ids);
+            }
+            for nested in instance
+                .get("entityList")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                inlined(nested, ids);
+            }
+        }
+    }
 }
 
 /// The engine's refusal keeps the broker's type (plan O-8) and gains the platform's slug as
@@ -1213,6 +1281,44 @@ mod tests {
         );
         assert!(ids("not json").is_empty());
         assert!(ids("7").is_empty());
+    }
+
+    /// F-SEC1-025: an Entity `join=inline` nests in a Relationship, a ListRelationship or one
+    /// instance of several, at any level, is a read of that Entity too.
+    #[test]
+    fn a_read_names_every_entity_inlined_by_a_join() {
+        let body = r#"[{"id":"urn:a:1","type":"T",
+            "owner":{"type":"Relationship","object":"urn:p:1",
+                "entity":{"id":"urn:p:1","type":"Person",
+                    "employer":{"type":"Relationship","object":"urn:o:1",
+                        "entity":{"id":"urn:o:1","type":"Org"}}}},
+            "riders":{"type":"ListRelationship","objectList":[],
+                "entityList":[{"id":"urn:p:2","type":"Person"}]},
+            "seen":[{"type":"Relationship","datasetId":"urn:d:1","object":"urn:p:3",
+                "entity":{"id":"urn:p:3","type":"Person"}}]}]"#;
+        assert_eq!(
+            read_entities(body.as_bytes()),
+            ["urn:a:1", "urn:p:1", "urn:o:1", "urn:p:2", "urn:p:3"]
+        );
+        let feature = r#"{"type":"FeatureCollection","features":[{"id":"urn:a:4",
+            "properties":{"owner":{"type":"Relationship","object":"urn:p:4",
+                "entity":{"id":"urn:p:4","type":"Person"}}}}]}"#;
+        assert_eq!(read_entities(feature.as_bytes()), ["urn:a:4", "urn:p:4"]);
+    }
+
+    /// F-SEC1-019: the log holds the broker's `type` and a cut `detail`, never the rest of a body
+    /// that may carry entity values.
+    #[test]
+    fn a_broker_failure_logs_only_its_type_and_a_cut_detail() {
+        let long = "x".repeat(10_000);
+        let body = serde_json::json!({"type": "urn:t:Internal", "detail": long, "entity": {"rider": "jane"}});
+        let (kind, detail) = explanation(body.to_string().as_bytes());
+        assert_eq!(kind, "urn:t:Internal");
+        assert_eq!(detail.chars().count(), LOGGED_EXPLANATION);
+        assert_eq!(
+            explanation(b"rider jane doe"),
+            (String::new(), String::new())
+        );
     }
 
     fn answered(status: StatusCode, body: &'static str) -> Response<Body> {

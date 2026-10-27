@@ -300,6 +300,18 @@ pub fn as_gateway(headers: &mut HeaderMap) {
     headers.insert(ROLES, HeaderValue::from_static(""));
 }
 
+/// Copies the caller's provenance, reason and request id from `pinned` (the caller's hop after
+/// [`pin_caller`]) onto a hop the gateway makes for them as itself, so the rows it writes name
+/// the caller and why, as the caller's own write does (ADR-N-054 2.3, DM-113, F-SEC1-026). The
+/// grant stays the gateway's: no identity header is copied.
+pub fn keep_provenance(pinned: &HeaderMap, headers: &mut HeaderMap) {
+    for (name, value) in pinned {
+        if name.as_str().starts_with(PROVENANCE_PREFIX) || *name == REASON || *name == REQUEST_ID {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
