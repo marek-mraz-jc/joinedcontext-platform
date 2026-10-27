@@ -17,6 +17,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use crate::auth::accounts::ServiceAccounts;
 use crate::mqtt::{Broker, MESH_IDENTITY};
 
 /// The refusals kept per broker, newest first.
@@ -84,8 +85,16 @@ pub struct Refusal {
     pub account: Option<String>,
 }
 
-/// The ServiceAccount of `broker`'s roles that `username` names, if any.
-pub fn account_of(broker: &Broker, username: &str) -> Option<String> {
+/// The ServiceAccount of `broker`'s project that `username` names (`{project}-{account}`): one
+/// the repository declares, or one a deprecated role list names; `None` for any other name,
+/// which the client chose freely.
+pub fn account_of(broker: &Broker, accounts: &ServiceAccounts, username: &str) -> Option<String> {
+    if let Some(account) = accounts
+        .resolve(username)
+        .filter(|account| account.project == broker.project)
+    {
+        return Some(account.name.clone());
+    }
     let account = username
         .strip_prefix(broker.project.as_str())?
         .strip_prefix('-')?;
@@ -184,6 +193,7 @@ mod tests {
 
     fn broker() -> Broker {
         Broker {
+            name: "cameras".into(),
             project: "ovzdusie".into(),
             roles: vec![MqttRole {
                 name: "camera".into(),
@@ -191,6 +201,7 @@ mod tests {
                 publish: vec!["cameras/${clientid}/#".into()],
                 subscribe: Vec::new(),
                 shared_topics: false,
+                reason: None,
             }],
             runner_topics: Vec::new(),
             sources: Vec::new(),
@@ -213,7 +224,7 @@ mod tests {
     fn a_username_names_an_account_only_of_the_brokers_own_roles() {
         let broker = broker();
         assert_eq!(
-            account_of(&broker, "ovzdusie-cam-north"),
+            account_of(&broker, &ServiceAccounts::new(), "ovzdusie-cam-north"),
             Some("cam-north".to_owned())
         );
         for other in [
@@ -223,7 +234,11 @@ mod tests {
             "cam-north",
             "",
         ] {
-            assert_eq!(account_of(&broker, other), None, "{other}");
+            assert_eq!(
+                account_of(&broker, &ServiceAccounts::new(), other),
+                None,
+                "{other}"
+            );
         }
     }
 

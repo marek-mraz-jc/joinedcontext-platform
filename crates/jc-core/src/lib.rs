@@ -25,6 +25,7 @@ pub mod kpi;
 pub mod kpi_join;
 #[cfg(feature = "logs")]
 pub mod logs;
+pub mod mqtt;
 pub mod names;
 pub mod ngsi_catalog;
 #[cfg(feature = "outbound")]

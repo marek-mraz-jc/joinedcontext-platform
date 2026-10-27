@@ -21,6 +21,7 @@ use jc_core::kinds::mqtt_broker::{
     release_name, runner_username, MqttMode, MqttRole, SourceRange, RUNNER_USERNAME,
 };
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
+use jc_core::mqtt::{topics, Binding, Held};
 use jc_manifest::loader::Repository;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,6 +38,8 @@ pub const MESH_IDENTITY: &str = "l5d-client-id";
 /// One broker the repository declares, as the CONNECT check reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Broker {
+    /// The broker's name in its project, which an `mqtt/<broker>/<role>` grant names.
+    pub name: String,
     /// The broker's project.
     pub project: String,
     /// Its roles, from the manifest.
@@ -101,6 +104,7 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
                 brokers.insert(
                     release_name(&project, &id.name),
                     Broker {
+                        name: id.name.clone(),
                         project,
                         capture_topics: if spec.mode == Some(MqttMode::Capture) {
                             capture_topics(&spec.roles)
@@ -432,22 +436,28 @@ fn device(
     if let Some((why, reason)) = refused(broker, account, now) {
         return refuse(why, reason);
     }
-    let roles = || {
-        broker
-            .roles
-            .iter()
-            .filter(|role| role.service_accounts.contains(&account.name))
-    };
-    if roles().next().is_none() {
+    let held = roles_held(broker, account, now);
+    if held.is_empty() {
         return refuse("the account holds no role of this broker", Reason::NoRole);
     }
-    let acl = roles()
-        .flat_map(|role| &role.subscribe)
+    let acl = held
+        .iter()
+        .flat_map(|held| &held.role.subscribe)
         .map(|topic| rule(topic))
         .collect();
-    let expire_at = account
-        .credentials_end
-        .map_or(exp, |end| exp.min(end.timestamp()));
+    // The CONNECT ends when the last grant does too; each publish is decided again anyway.
+    let grants_end = held
+        .iter()
+        .map(|held| held.until.map(|end| end.timestamp()))
+        .collect::<Option<Vec<_>>>()
+        .and_then(|ends| ends.into_iter().max());
+    let expire_at = [
+        account.credentials_end.map(|end| end.timestamp()),
+        grants_end,
+    ]
+    .into_iter()
+    .flatten()
+    .fold(exp, i64::min);
     (
         Answer::allow(acl, Some(expire_at)),
         Why::unrecorded("a device"),
@@ -472,30 +482,31 @@ pub struct Access {
     pub topic: String,
 }
 
-/// Whether the topic `topic` is under the filter `filter`, `${clientid}` standing for the level
-/// `clientid` (MQTT 3.1.1 §4.7). A wildcard never reaches a `$` topic.
-pub fn filter_matches(filter: &str, topic: &str, clientid: &str) -> bool {
-    if topic.starts_with('$') || topic.contains(['+', '#']) {
-        return false;
-    }
-    let mut topic = topic.split('/');
-    for level in filter.split('/') {
-        if level == "#" {
-            return true;
-        }
-        let Some(part) = topic.next() else {
-            return false;
-        };
-        let hit = match level {
-            "+" => true,
-            jc_core::kinds::mqtt_broker::CLIENT_ID => part == clientid,
-            _ => part == level,
-        };
-        if !hit {
-            return false;
-        }
-    }
-    topic.next().is_none()
+/// The roles of `broker` that `account` holds at `now`, as jc-core decides it for the gateway
+/// and the Portal alike: a binding `mqtt/<broker>/<role>` in force or the deprecated
+/// `serviceAccounts` list (ADR-N-048 §2.13, PL-75).
+pub fn roles_held<'a>(
+    broker: &'a Broker,
+    account: &crate::auth::accounts::Account,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Held<'a>> {
+    jc_core::mqtt::roles_held(
+        jc_core::mqtt::Broker {
+            name: &broker.name,
+            project: &broker.project,
+            roles: &broker.roles,
+        },
+        jc_core::mqtt::Account {
+            name: &account.name,
+            project: &account.project,
+        },
+        account.roles.iter().map(|scoped| Binding {
+            role: &scoped.role,
+            project: scoped.project.as_deref(),
+            validity: scoped.validity.as_ref(),
+        }),
+        now,
+    )
 }
 
 /// Decides one publish (T-5560) against the repository as it is now: the account must still
@@ -531,12 +542,10 @@ pub fn publish_check(
     if let Some((why, _)) = refused(broker, account, chrono::Utc::now()) {
         return (false, why);
     }
-    let allowed = broker
-        .roles
+    let allowed = roles_held(broker, account, chrono::Utc::now())
         .iter()
-        .filter(|role| role.service_accounts.contains(&account.name))
-        .flat_map(|role| &role.publish)
-        .any(|filter| filter_matches(filter, &access.topic, &access.clientid));
+        .flat_map(|held| &held.role.publish)
+        .any(|filter| topics::matches(filter, &access.topic, &access.clientid));
     if allowed {
         (true, "a device's role")
     } else {
@@ -642,7 +651,7 @@ async fn auth(
             Refusal {
                 at: chrono::Utc::now(),
                 reason,
-                account: account_of(broker, &connect.username),
+                account: account_of(broker, &accounts, &connect.username),
             },
         );
     }
@@ -761,6 +770,7 @@ mod tests {
             publish: publish.iter().map(|t| (*t).to_owned()).collect(),
             subscribe: vec!["commands/${clientid}".into()],
             shared_topics: false,
+            reason: None,
         };
         assert_eq!(
             capture_topics(&[
@@ -777,6 +787,7 @@ mod tests {
         let brokers = Brokers::from([(
             "mqtt-p-b".to_owned(),
             Broker {
+                name: "b".into(),
                 project: "p".into(),
                 roles: Vec::new(),
                 runner_topics: Vec::new(),
@@ -818,7 +829,7 @@ mod tests {
             ("air/+/pm", "air/x/pm"),
             ("air/status", "air/status"),
         ] {
-            assert!(filter_matches(filter, topic, "cam-1"), "{filter} {topic}");
+            assert!(topics::matches(filter, topic, "cam-1"), "{filter} {topic}");
         }
         for (filter, topic) in [
             ("cameras/${clientid}/#", "cameras/cam-2/frame"),
@@ -829,7 +840,7 @@ mod tests {
             ("+/status", "$SYS/status"),
             ("air/+", "air/#"),
         ] {
-            assert!(!filter_matches(filter, topic, "cam-1"), "{filter} {topic}");
+            assert!(!topics::matches(filter, topic, "cam-1"), "{filter} {topic}");
         }
     }
 

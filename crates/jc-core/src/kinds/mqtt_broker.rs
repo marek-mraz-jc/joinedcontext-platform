@@ -6,7 +6,8 @@
 //! dedicated port is free across the repository is `jcctl validate`'s.
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::mqtt::topics::{self, invalid};
 use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -116,9 +117,6 @@ fn mask(address: IpAddr, prefix: u8) -> IpAddr {
     }
 }
 
-/// The longest topic filter, in bytes; a filter is a pattern, not a payload.
-const MAX_FILTER_BYTES: usize = 256;
-
 /// One MQTT edge broker (MF-54).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -209,13 +207,17 @@ impl MqttCapture {
     }
 }
 
-/// A role: the ServiceAccounts that hold it and the topic filters it grants.
+/// A role: the topic filters it grants. Who holds it is a ServiceAccount RoleBinding
+/// `mqtt/<broker>/<role>` (ADR-N-048 §2.13, [`crate::mqtt::roles_held`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct MqttRole {
     /// A DNS label, unique among the broker's roles.
     pub name: String,
-    /// ServiceAccounts of the broker's own project, by name.
+    /// Deprecated (T-5872): ServiceAccounts of the broker's own project, by name. Still read for
+    /// one release beside the bindings; `jcctl migrate` moves them to `mqtt/<broker>/<role>`
+    /// bindings on each account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_accounts: Vec<String>,
     /// Topic filters the role may publish to; `${clientid}` is the connecting client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -227,6 +229,9 @@ pub struct MqttRole {
     /// it every `publish` filter holds `${clientid}` before any wildcard (T-5561).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared_topics: bool,
+    /// Why the role's devices share their topics; required with `sharedTopics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The broker's limits (MF-54).
@@ -296,36 +301,10 @@ impl MqttBrokerSpec {
                     format!("role `{}` is declared twice", role.name),
                 ));
             }
-            if role.service_accounts.is_empty() {
-                return Err(invalid(
-                    "roles[].serviceAccounts",
-                    format!("role `{}` names no ServiceAccount", role.name),
-                ));
-            }
             for account in &role.service_accounts {
                 names::validate_dns1123_label(account)?;
             }
-            if role.publish.is_empty() && role.subscribe.is_empty() {
-                return Err(invalid(
-                    "roles[]",
-                    format!("role `{}` grants no topic", role.name),
-                ));
-            }
-            for filter in &role.publish {
-                check_filter("roles[].publish", filter)?;
-                if !role.shared_topics && !under_client_id(filter) {
-                    return Err(invalid(
-                        "roles[].publish",
-                        format!(
-                            "`{filter}` lets each device of role `{}` publish as any other: write \
-                             a {CLIENT_ID} level before any wildcard, or set sharedTopics: true \
-                             on the role",
-                            role.name
-                        ),
-                    ));
-                }
-            }
-            self.check_subscribe(role)?;
+            topics::check_role(role, self.mode)?;
         }
         let limits = [
             (
@@ -364,38 +343,6 @@ impl MqttBrokerSpec {
                         "{port} is outside the reserved range {}–{}",
                         DEDICATED_PORTS.start(),
                         DEDICATED_PORTS.end()
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// A device subscribes only on a relay broker, and only under its own `${clientid}`.
-    fn check_subscribe(&self, role: &MqttRole) -> Result<()> {
-        if !role.subscribe.is_empty() && self.mode != Some(MqttMode::Relay) {
-            let reason = match self.mode {
-                None => format!(
-                    "role `{}` lets devices subscribe, which only a relay broker allows: set \
-                     spec.mode: relay (ADR-N-048 §2.10)",
-                    role.name
-                ),
-                Some(mode) => format!(
-                    "role `{}` lets devices subscribe, and in {} mode devices get no \
-                     subscribe right; use spec.mode: relay",
-                    role.name,
-                    mode.word()
-                ),
-            };
-            return Err(invalid("roles[].subscribe", reason));
-        }
-        for filter in &role.subscribe {
-            check_filter("roles[].subscribe", filter)?;
-            if !under_client_id(filter) {
-                return Err(invalid(
-                    "roles[].subscribe",
-                    format!(
-                        "`{filter}` reaches beyond the client's own topics: a device subscribes only under {CLIENT_ID}, with no wildcard before it"
                     ),
                 ));
             }
@@ -471,59 +418,6 @@ impl MqttBrokerSpec {
     }
 }
 
-/// An MQTT topic filter as MQTT 3.1.1 §4.7 writes it, without `#` alone, without a `$` system
-/// topic, and with `${clientid}` as the one placeholder, standing for a whole level.
-fn check_filter(field: &str, filter: &str) -> Result<()> {
-    let refuse = |why: &str| Err(invalid(field, format!("`{filter}` {why}")));
-    if filter.is_empty() || filter.len() > MAX_FILTER_BYTES {
-        return refuse(&format!("is not 1 to {MAX_FILTER_BYTES} bytes long"));
-    }
-    if filter == "#" {
-        return refuse("is every topic");
-    }
-    if filter.starts_with('$') && !filter.starts_with(CLIENT_ID) {
-        return refuse("names a broker system topic");
-    }
-    let levels: Vec<&str> = filter.split('/').collect();
-    for (i, level) in levels.iter().enumerate() {
-        if level.contains('#') && (*level != "#" || i + 1 != levels.len()) {
-            return refuse("uses `#` other than as the whole last level");
-        }
-        if level.contains('+') && *level != "+" {
-            return refuse("uses `+` other than as a whole level");
-        }
-        if level.contains("${") && *level != CLIENT_ID {
-            return refuse(&format!(
-                "uses a placeholder other than {CLIENT_ID} as a whole level"
-            ));
-        }
-        if level.contains('\0') {
-            return refuse("holds a NUL");
-        }
-    }
-    Ok(())
-}
-
-/// Whether a filter reaches only topics under the client's own id: a `${clientid}` level comes
-/// before any wildcard.
-fn under_client_id(filter: &str) -> bool {
-    for level in filter.split('/') {
-        match level {
-            CLIENT_ID => return true,
-            "+" | "#" => return false,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn invalid(field: &str, reason: String) -> Error {
-    Error::Invalid {
-        field: format!("spec.{field}"),
-        reason: format!("{reason} (MF-54)"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +429,7 @@ mod tests {
             publish: publish.iter().map(|s| (*s).to_owned()).collect(),
             subscribe: subscribe.iter().map(|s| (*s).to_owned()).collect(),
             shared_topics: false,
+            reason: None,
         }
     }
 
@@ -587,9 +482,10 @@ mod tests {
             role("camera", &["${clientid}/b"], &[]),
         ]);
         assert!(refusal(&twice).contains("declared twice"));
+        // Who holds a role is a ServiceAccount binding now (T-5872): a role may list nobody.
         let mut nobody = role("camera", &["${clientid}/a"], &[]);
         nobody.service_accounts.clear();
-        assert!(refusal(&spec(vec![nobody])).contains("names no ServiceAccount"));
+        assert_eq!(spec(vec![nobody]).validate(), Ok(()));
         assert!(refusal(&spec(vec![role("camera", &[], &[])])).contains("grants no topic"));
         let mut bad_account = role("camera", &["${clientid}/a"], &[]);
         bad_account.service_accounts = vec!["Cam_North".into()];
@@ -599,7 +495,10 @@ mod tests {
     #[test]
     fn filters_follow_the_mqtt_grammar_and_never_reach_everything() {
         for (filter, why) in [
-            ("#", "every topic"),
+            ("#", "wildcards alone"),
+            ("+/#", "wildcards alone"),
+            ("a//${clientid}", "empty level"),
+            ("a/b/c/d/e/f/g/h/${clientid}", "8 levels"),
             ("$SYS/#", "system topic"),
             ("", "bytes long"),
             ("a/#/b", "`#`"),
@@ -612,13 +511,13 @@ mod tests {
             let message = refusal(&spec(vec![role("camera", &[filter], &[])]));
             assert!(message.contains(why), "{filter:?}: {message}");
         }
-        let long = "a/".repeat(200);
+        let long = format!("${{clientid}}/{}", "a".repeat(130));
         assert!(refusal(&spec(vec![role("camera", &[&long], &[])])).contains("bytes long"));
     }
 
     #[test]
     fn a_device_publish_filter_without_its_own_id_is_refused() {
-        for filter in ["cameras/+/#", "+/#", "cameras/x", "cameras/+/${clientid}"] {
+        for filter in ["cameras/+/#", "cameras/x", "cameras/+/${clientid}"] {
             let message = refusal(&spec(vec![role("camera", &[filter], &[])]));
             assert!(
                 message.contains("publish as any other"),
@@ -633,6 +532,8 @@ mod tests {
         }
         let mut shared = role("camera", &["cameras/+/#"], &[]);
         shared.shared_topics = true;
+        assert!(refusal(&spec(vec![shared.clone()])).contains("write why in `reason`"));
+        shared.reason = Some("a gateway forwards for every camera".into());
         assert_eq!(spec(vec![shared]).validate(), Ok(()));
     }
 
