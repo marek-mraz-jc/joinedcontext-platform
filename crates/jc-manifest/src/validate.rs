@@ -1829,17 +1829,8 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
                         }
                     }
                 }
-                if let (jc_core::kinds::MqttAddress::CustomHostname, Some(name)) =
-                    (broker.effective_address(), &broker.hostname)
-                {
-                    match hostnames.get(name) {
-                        Some(holder) => found.push((at.clone(), format!(
-                            "{id}: spec.hostname {name} is already served by {holder}; a hostname reaches one broker (MF-62)"
-                        ))),
-                        None => {
-                            hostnames.insert(name.clone(), id.to_string());
-                        }
-                    }
+                if let Some(problem) = broker_hostname(&broker, &id.to_string(), &mut hostnames) {
+                    found.push((at.clone(), problem));
                 }
                 if let Some(port) = broker.port {
                     match ports.get(&port) {
@@ -1877,23 +1868,10 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
                 }
             }
             "Project" => {
-                let names = resource
-                    .manifest
-                    .spec
-                    .pointer("/quotas/mqtt/customHostnames")
-                    .and_then(|v| v.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry.get("name")?.as_str());
-                for name in names {
-                    match assigned.get(name) {
-                        Some(holder) => found.push((at.clone(), format!(
-                            "{id}: spec.quotas.mqtt.customHostnames {name} is already assigned to {holder}; a hostname is assigned to one project at a time (ADR-N-048 §2.11, MF-62)"
-                        ))),
-                        None => {
-                            assigned.insert(name.to_owned(), id.to_string());
-                        }
-                    }
+                for problem in
+                    project_hostnames(&resource.manifest.spec, &id.to_string(), &mut assigned)
+                {
+                    found.push((at.clone(), problem));
                 }
             }
             "DataSource" => {
@@ -1915,6 +1893,55 @@ fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
         }
     }
     (found, warned)
+}
+
+/// A broker served on its own hostname claims it; a second broker naming it is refused (MF-62).
+fn broker_hostname(
+    broker: &jc_core::kinds::MqttBrokerSpec,
+    id: &str,
+    hostnames: &mut std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    let (jc_core::kinds::MqttAddress::CustomHostname, Some(name)) =
+        (broker.effective_address(), &broker.hostname)
+    else {
+        return None;
+    };
+    match hostnames.get(name) {
+        Some(holder) => Some(format!(
+            "{id}: spec.hostname {name} is already served by {holder}; a hostname reaches one broker (MF-62)"
+        )),
+        None => {
+            hostnames.insert(name.clone(), id.to_owned());
+            None
+        }
+    }
+}
+
+/// A Project's `quotas.mqtt.customHostnames` claim each name for that project alone
+/// (ADR-N-048 §2.11, MF-62).
+fn project_hostnames(
+    spec: &serde_json::Value,
+    id: &str,
+    assigned: &mut std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    let names = spec
+        .pointer("/quotas/mqtt/customHostnames")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name")?.as_str());
+    let mut found = Vec::new();
+    for name in names {
+        match assigned.get(name) {
+            Some(holder) => found.push(format!(
+                "{id}: spec.quotas.mqtt.customHostnames {name} is already assigned to {holder}; a hostname is assigned to one project at a time (ADR-N-048 §2.11, MF-62)"
+            )),
+            None => {
+                assigned.insert(name.to_owned(), id.to_owned());
+            }
+        }
+    }
+    found
 }
 
 /// The federation topology the registrations declare, checked as a whole (CC-13). Per project:
