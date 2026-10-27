@@ -96,18 +96,22 @@ impl DailyCreates {
     ) -> Result<(), (u64, Spent)> {
         let day = now / DAY;
         let wait = DAY - now % DAY;
+        let key = (slug.to_owned(), caller.to_owned());
         let mut callers = self.callers.lock().unwrap_or_else(|e| e.into_inner());
+        let used = callers
+            .get(&key)
+            .filter(|(when, _)| *when == day)
+            .map_or(0, |(_, n)| *n);
+        if used >= share(per_day) {
+            return Err((wait, Spent::Caller));
+        }
         if callers.len() >= MAX_CALLERS {
             callers.retain(|_, (when, _)| *when == day);
         }
-        let mine = callers
-            .entry((slug.to_owned(), caller.to_owned()))
-            .or_insert((day, 0));
-        if mine.0 != day {
-            *mine = (day, 0);
-        }
-        if mine.1 >= share(per_day) {
-            return Err((wait, Spent::Caller));
+        // A day that already counts MAX_CALLERS callers takes no new one: the map stays bounded
+        // however many addresses ask within one day (F-SEC1-027).
+        if callers.len() >= MAX_CALLERS && !callers.contains_key(&key) {
+            return Err((wait, Spent::Form));
         }
         let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
         let entry = counts.entry(slug.to_owned()).or_insert((day, 0));
@@ -118,7 +122,8 @@ impl DailyCreates {
             return Err((wait, Spent::Form));
         }
         entry.1 += 1;
-        mine.1 += 1;
+        // Only a caller who took a slot is kept: a refused one costs the map nothing.
+        callers.insert(key, (day, used.saturating_add(1)));
         Ok(())
     }
 
@@ -193,6 +198,37 @@ mod tests {
         creates.release("a", "y", noon);
         assert_eq!(creates.reserve("a", "z", 2, noon), Ok(()));
         assert_eq!(creates.reserve("a", "x", 2, 11 * DAY), Ok(()));
+    }
+
+    /// F-SEC1-027: a day full of distinct callers takes no new one, and a refused caller is
+    /// not kept, so the map never grows past MAX_CALLERS within one day.
+    #[test]
+    fn a_full_day_of_callers_refuses_a_new_one_and_keeps_the_map_bounded() {
+        let creates = DailyCreates::default();
+        let noon = 10 * DAY + DAY / 2;
+        let per_day = u32::try_from(MAX_CALLERS * 10).expect("fits");
+        for n in 0..MAX_CALLERS {
+            assert_eq!(creates.reserve("a", &n.to_string(), per_day, noon), Ok(()));
+        }
+        assert_eq!(
+            creates.reserve("a", "newcomer", per_day, noon),
+            Err((DAY / 2, Spent::Form))
+        );
+        assert_eq!(creates.reserve("a", "7", per_day, noon), Ok(()));
+        let held = |c: &DailyCreates| c.callers.lock().expect("lock").len();
+        assert_eq!(held(&creates), MAX_CALLERS);
+        // The next day drops the old callers and takes new ones again.
+        assert_eq!(creates.reserve("a", "newcomer", per_day, 11 * DAY), Ok(()));
+        assert_eq!(held(&creates), 1);
+
+        // A caller the spent form refuses leaves no entry behind.
+        let spent = DailyCreates::default();
+        assert_eq!(spent.reserve("b", "x", 1, noon), Ok(()));
+        assert_eq!(
+            spent.reserve("b", "y", 1, noon),
+            Err((DAY / 2, Spent::Form))
+        );
+        assert_eq!(held(&spent), 1);
     }
 
     /// T-3285: one caller takes a tenth of the day and no more, so a second caller still

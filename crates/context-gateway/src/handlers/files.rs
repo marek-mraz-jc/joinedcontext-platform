@@ -58,8 +58,8 @@ pub(crate) async fn file_csv(
             return problem.with_detail(bad.to_string()).into_response();
         }
     };
-    let personal = endpoint.personal_attributes().is_empty();
-    let key = Key::of(&endpoint, &subject, &request).filter(|_| personal);
+    let shared = endpoint.personal_attributes().is_empty();
+    let key = Key::of(gateway.resolver.table(), &endpoint, &subject, &request).filter(|_| shared);
     let build = build(
         &gateway,
         (&endpoint, &subject),

@@ -8,6 +8,7 @@
 //! to nothing has no grants: a token can be perfectly valid and still belong to an account
 //! this platform has never heard of.
 
+use jc_core::kinds::service_account::PLATFORM_CLIENTS;
 use jc_core::kinds::ServiceAccountSpec;
 use jc_manifest::loader::Repository;
 use std::collections::{BTreeSet, HashMap};
@@ -50,10 +51,13 @@ pub struct ScopedRole {
 }
 
 impl Account {
-    /// The roles that reach one space of one project.
+    /// The roles that reach one space of one project: the called Endpoint's.
     ///
     /// A role scoped to another space is not a role here: that is the whole point of
-    /// scoping it (PF-35).
+    /// scoping it (PF-35). A role scoped to a project reaches that project only when it is the
+    /// account's own: a project's manifest binds roles of its own project, so neither its own
+    /// project scope nor one naming another project reaches an Endpoint of another project that
+    /// admits the account (F-SEC1-001, T-5860).
     pub fn roles_in(&self, project: &str, space: &str) -> BTreeSet<String> {
         self.roles_in_at(project, space, chrono::Utc::now())
     }
@@ -71,7 +75,7 @@ impl Account {
             .filter(|scoped| scoped.validity.as_ref().is_none_or(|v| v.contains(now)))
             .filter(|scoped| {
                 scoped.organization
-                    || scoped.project.as_deref() == Some(project)
+                    || (project == self.project && scoped.project.as_deref() == Some(project))
                     || scoped.context_space.as_deref() == Some(space)
             })
             .map(|scoped| scoped.role.clone())
@@ -264,6 +268,16 @@ pub fn accounts_of(repo: &Repository) -> ServiceAccounts {
             },
         );
     }
+    // A derived id that is a platform workload's client (`portal` + `ui` is `portal-ui`, every
+    // person's Portal token) resolves to nobody: validation refuses such an account, and the
+    // table does not rely on it (T-1454, F-SEC1-021, T-5860).
+    by_client_id.retain(|client, _| {
+        let platform = PLATFORM_CLIENTS.contains(&client.as_str());
+        if platform {
+            tracing::warn!(client = %client, "an account derives a platform client id; it resolves to nobody");
+        }
+        !platform
+    });
     ServiceAccounts { by_client_id, apps }
 }
 

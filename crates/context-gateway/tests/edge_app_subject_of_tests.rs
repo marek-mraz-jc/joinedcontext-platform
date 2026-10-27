@@ -73,8 +73,12 @@ fn endpoint(audience: Audience) -> Endpoint {
         policies: vec![
             policy("role", "data-steward", "StewardView"),
             policy("role", "sensor-writer", "SensorWrite"),
-            policy("serviceAccount", "senzory", "AccountOwn"),
-            policy("serviceAccount", "asistent", "DelegateOwn"),
+            // The Portal names a bare assignee with the Policy's own project in the view
+            // (PL-92), so the broker compares `x-jc-client` with `ovzdusie/senzory`.
+            policy("serviceAccount", "ovzdusie/senzory", "AccountOwn"),
+            policy("serviceAccount", "senzory", "BareName"),
+            policy("serviceAccount", "doprava/senzory", "ForeignGrant"),
+            policy("serviceAccount", "ovzdusie/asistent", "DelegateOwn"),
             policy("group", "stewards", "GroupView"),
             policy("role", "public", "PublicView"),
             policy(
@@ -258,7 +262,7 @@ async fn an_azp_naming_a_real_service_account_ignores_any_human_claims_in_the_sa
     assert_eq!(status, StatusCode::OK, "{document}");
     assert_eq!(
         document["subject"],
-        json!({ "type": "serviceAccount", "id": "senzory" })
+        json!({ "type": "serviceAccount", "id": "ovzdusie/senzory" })
     );
     assert_eq!(
         granted(&document),
@@ -477,7 +481,7 @@ async fn a_delegated_token_is_decided_as_the_person_and_never_with_the_accounts_
     assert_eq!(status, StatusCode::OK, "{document}");
     assert_eq!(
         document["subject"],
-        json!({ "type": "serviceAccount", "id": "asistent" })
+        json!({ "type": "serviceAccount", "id": "ovzdusie/asistent" })
     );
     assert_eq!(
         granted(&document),
@@ -529,4 +533,41 @@ async fn a_service_account_username_from_another_client_is_refused() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{claims}: {document}");
         assert!(granted(&document).is_empty(), "{claims}: {document}");
     }
+}
+
+/// F-SEC1-001 (T-5860): a role the account's manifest scopes to its own project reaches that
+/// project's Endpoints only. On an Endpoint of another project that admits the account, the
+/// Endpoint's Policies naming the same role name are another project's role and grant nothing.
+#[tokio::test]
+async fn a_role_scoped_to_the_accounts_own_project_does_not_reach_another_projects_endpoint() {
+    let fixture = fixture(
+        "own-project-role-elsewhere",
+        Audience::ProjectList,
+        "doprava",
+    )
+    .await;
+    let (status, document) =
+        access(&fixture, json!({ "azp": client_id("doprava", "senzory") })).await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert!(
+        !granted(&document).contains(&"SensorWrite".to_owned()),
+        "{document}"
+    );
+}
+
+/// F-SEC1-003 (T-5860): the broker tells two projects' same-named accounts apart. The caller the
+/// gateway pins is `{project}/{name}`, so a grant to `ovzdusie/senzory` (or the bare name a
+/// Policy of another project might carry) never reaches `doprava`'s `senzory`, and a grant the
+/// owning project wrote for `doprava/senzory` does (PL-91, PL-92).
+#[tokio::test]
+async fn a_same_named_account_of_another_project_is_pinned_with_its_project() {
+    let fixture = fixture("same-name-elsewhere", Audience::ProjectList, "doprava").await;
+    let (status, document) =
+        access(&fixture, json!({ "azp": client_id("doprava", "senzory") })).await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert_eq!(
+        document["subject"],
+        json!({ "type": "serviceAccount", "id": "doprava/senzory" })
+    );
+    assert_eq!(granted(&document), ["ForeignGrant"], "{document}");
 }

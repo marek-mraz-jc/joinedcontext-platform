@@ -547,6 +547,18 @@ mod tests {
         }
     }
 
+    /// F-SEC1-015: a q nested past the parser's depth ceiling is refused as malformed, and its
+    /// parse returns instead of exhausting the stack.
+    #[test]
+    fn a_deeply_nested_q_is_refused_without_exhausting_the_stack() {
+        let deep = format!("{}a==1{}", "(".repeat(100_000), ")".repeat(100_000));
+        let params = vec![("q".to_owned(), deep)];
+        assert_eq!(
+            malformed(&params).as_deref(),
+            Some("q is not an NGSI-LD query")
+        );
+    }
+
     #[test]
     fn a_query_round_trips_through_encoding() {
         let raw = "q=pm10%3E%3D0&type=AirQualityObserved&limit=10";
