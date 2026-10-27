@@ -17,9 +17,10 @@ use context_gateway::app::{router, Gateway};
 use context_gateway::auth::accounts::ServiceAccounts;
 use context_gateway::auth::dataspace_token::{agreements_of, subject, Agreements, Refused};
 use context_gateway::auth::token::Claims;
+use context_gateway::middleware::tenancy::READ_VERSIONS;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
-use context_gateway::resolver::Endpoint;
+use context_gateway::resolver::{Endpoint, EndpointRoles};
 use jc_core::kinds::{Audience, PolicySpec, Representation};
 use jc_manifest::loader::Repository;
 use serde_json::{json, Value};
@@ -245,14 +246,18 @@ async fn a_transfer_token_reads_as_the_consumer_did_and_nothing_else() {
 /// the hop names the participant alone: its DID, no account, no role.
 #[tokio::test]
 async fn the_connectors_own_account_never_reaches_the_broker_under_a_transfer_token() {
-    let (hops, status) = transferred(Representation::NgsiLd, |request| {
-        request
-            .method(Method::GET)
-            .uri(format!(
-                "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
-            ))
-            .body(Body::empty())
-    })
+    let (hops, status) = transferred(
+        Representation::NgsiLd,
+        |_| {},
+        |request| {
+            request
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+                ))
+                .body(Body::empty())
+        },
+    )
     .await;
     assert_eq!(status, StatusCode::OK);
     the_participant_alone(&hops, &format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
@@ -266,17 +271,56 @@ async fn a_participants_mcp_call_reaches_the_brokers_view_as_its_did_alone() {
     let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                       "params": {"name": "query_entities",
                                  "arguments": {"type": ["AirQualityObserved"]}}});
-    let (hops, status) = transferred(Representation::Mcp, |request| {
-        request
-            .method(Method::POST)
-            .uri(format!("/api/endpoint/{SLUG}/mcp"))
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .body(Body::from(call.to_string()))
-    })
+    let (hops, status) = transferred(
+        Representation::Mcp,
+        |_| {},
+        |request| {
+            request
+                .method(Method::POST)
+                .uri(format!("/api/endpoint/{SLUG}/mcp"))
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .body(Body::from(call.to_string()))
+        },
+    )
     .await;
     assert_eq!(status, StatusCode::OK);
     the_participant_alone(&hops, &format!("/x/views/{SLUG}/mcp"));
+}
+
+/// F-SEC1-006 (T-5863): an Endpoint's `callerRole` is held by every caller it admits, but a
+/// participant holds what its agreement's compiled Policies grant and nothing more (DS-02,
+/// DS-03): a Policy granting the caller role `readVersions` never reaches the broker under a
+/// transfer token, and the hop carries no role.
+#[tokio::test]
+async fn a_participant_never_holds_the_endpoints_caller_role() {
+    let caller = jc_core::kinds::endpoint_role(PROJECT, "air", None);
+    let versions: PolicySpec = serde_norway::from_str(&format!(
+        "contextSpaceRef: {SPACE}\nassigner: did:web:{DOMAIN}\n\
+         assignee: {{ kind: role, id: {caller} }}\nactions: [readVersions]\n"
+    ))
+    .expect("the policy spec parses");
+    let (hops, status) = transferred(
+        Representation::NgsiLd,
+        |served| {
+            served.roles = EndpointRoles {
+                caller: Some(caller.clone()),
+                ..Default::default()
+            };
+            served.policies.push(versions);
+        },
+        |request| {
+            request
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=AirQualityObserved"
+                ))
+                .body(Body::empty())
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    the_participant_alone(&hops, &format!("/x/views/{SLUG}/ngsi-ld/v1/entities"));
 }
 
 type Hops = Vec<(String, HeaderMap)>;
@@ -285,6 +329,7 @@ type Hops = Vec<(String, HeaderMap)>;
 /// against a broker that records every hop and answers each with the station.
 async fn transferred(
     representation: Representation,
+    adjust: impl FnOnce(&mut Endpoint),
     build: impl FnOnce(axum::http::request::Builder) -> Result<Request<Body>, axum::http::Error>,
 ) -> (Hops, StatusCode) {
     let hops: Arc<Mutex<Hops>> = Arc::default();
@@ -310,6 +355,7 @@ async fn transferred(
     let token = realm.mint(&transfer(SLUG, 300, CONSUMER, AGREEMENT));
     let mut served = endpoint(SLUG, "{ kind: serviceAccount, id: dataspace-connector }");
     served.representations = vec![representation];
+    adjust(&mut served);
     let gateway = Arc::new(
         Gateway::new(Broker::new(upstream), Box::new(PolicyPdp), DOMAIN)
             .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None)
@@ -343,6 +389,7 @@ fn the_participant_alone(hops: &Hops, path: &str) {
         "x-jc-subject",
         "x-jc-roles",
         "x-jc-groups",
+        READ_VERSIONS,
         "authorization",
     ] {
         assert!(headers.get(name).is_none(), "{name}: {headers:?}");
