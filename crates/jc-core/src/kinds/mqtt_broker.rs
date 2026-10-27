@@ -7,7 +7,6 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::Result;
-use crate::kinds::mqtt_allowance::{listed_twice, MqttAddress, MqttDeviceAuth};
 use crate::mqtt::topics::{self, invalid};
 use crate::names;
 use schemars::JsonSchema;
@@ -29,6 +28,61 @@ pub const MAX_CONNECTIONS: u32 = 10_000;
 /// The prefix of the username a pipeline runner connects with on a broker's internal listener;
 /// no manifest may write a username that starts with it (PL-76).
 pub const RUNNER_USERNAME: &str = "pipeline-runner";
+
+/// How a broker is addressed from outside (ADR-N-048 §2.11).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MqttAddress {
+    /// `<name>.<project>.mqtt.<domain>` on 8883.
+    Platform,
+    /// A port of the allowance's `ports`.
+    DedicatedPort,
+    /// A name of the allowance's `customHostnames`, one the city owns, on 8883.
+    CustomHostname,
+}
+
+impl MqttAddress {
+    /// The word the manifest spells it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::DedicatedPort => "dedicatedPort",
+            Self::CustomHostname => "customHostname",
+        }
+    }
+}
+
+/// How a device proves who it is when it connects (ADR-N-048 §2.12).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum MqttDeviceAuth {
+    /// A Keycloak access token of a ServiceAccount as the CONNECT password.
+    Token,
+    /// A client certificate the project's client CA signed, its common name the ServiceAccount.
+    ClientCertificate,
+}
+
+impl MqttDeviceAuth {
+    /// The word the manifest spells it with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Token => "token",
+            Self::ClientCertificate => "clientCertificate",
+        }
+    }
+}
+
+/// The first device authentication a list names a second time.
+pub(crate) fn listed_twice(auth: &[MqttDeviceAuth]) -> Option<MqttDeviceAuth> {
+    auth.iter()
+        .enumerate()
+        .find(|(i, a)| auth[..*i].contains(a))
+        .map(|(_, a)| *a)
+}
 
 /// The username the runner reads a broker of `project` with, `pipeline-runner-{project}`: a
 /// broker admits only its own project's, so one project's stream never reads another's devices
