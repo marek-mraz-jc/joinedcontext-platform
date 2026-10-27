@@ -27,6 +27,9 @@ use jc_core::kinds::RateLimits;
 use jc_core::ProblemDetails;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use tower::layer::util::Stack;
+use tower_http::compression::predicate::{And, NotForContentType, Predicate, SizeAbove};
+use tower_http::compression::{CompressionLayer, CompressionLevel};
 
 /// The largest broker answer the gateway will hold in memory. A request body is held to the
 /// Organization's own limit instead ([`Gateway::max_request_body`], ADR-N-035).
@@ -697,14 +700,36 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         ))
 }
 
-/// gzip or br when the client's Accept-Encoding asks for it (T-5847). tower-http's default
-/// predicate leaves a body of known size up to 32 bytes, text/event-stream (MCP streams), images
-/// and gRPC plain, and a WebSocket upgrade has an empty body; an answer that already has a
-/// Content-Encoding or a Content-Range is never touched.
-fn compression() -> tower_http::compression::CompressionLayer {
-    tower_http::compression::CompressionLayer::new()
-        .gzip(true)
-        .br(true)
+/// gzip or br when the client's Accept-Encoding asks for it (T-5847). A WebSocket upgrade has an
+/// empty body; an answer that already has a Content-Encoding or a Content-Range is never touched.
+///
+/// Levels (T-5849, the best size per CPU on real answers): brotli quality 2 and gzip level 1, each
+/// its own layer because tower-http gives one layer one quality. The br layer sits inside: it packs
+/// whenever the client accepts br, and the gzip layer outside leaves an encoded answer alone, so
+/// gzip serves only a client without br. [`CompressWhen`] leaves a body of known size under 1 KiB
+/// plain, and text/event-stream (MCP streams), images and gRPC.
+pub fn compression() -> Stack<CompressionLayer<CompressWhen>, CompressionLayer<CompressWhen>> {
+    let br = CompressionLayer::new()
+        .gzip(false)
+        .quality(CompressionLevel::Precise(2))
+        .compress_when(compress_when());
+    let gzip = CompressionLayer::new()
+        .br(false)
+        .quality(CompressionLevel::Precise(1))
+        .compress_when(compress_when());
+    Stack::new(br, gzip)
+}
+
+/// The predicate of [`compression`]: tower-http's default with its 32-byte minimum raised to 1 KiB,
+/// since a smaller body saves under 700 bytes.
+pub type CompressWhen =
+    And<And<And<SizeAbove, NotForContentType>, NotForContentType>, NotForContentType>;
+
+fn compress_when() -> CompressWhen {
+    SizeAbove::new(1024)
+        .and(NotForContentType::GRPC)
+        .and(NotForContentType::IMAGES)
+        .and(NotForContentType::SSE)
 }
 
 async fn ok() -> &'static str {
