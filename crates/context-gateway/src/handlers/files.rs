@@ -58,11 +58,11 @@ pub(crate) async fn file_csv(
             return problem.with_detail(bad.to_string()).into_response();
         }
     };
-    let key = Key::of(gateway.resolver.table(), &endpoint, &subject, &request);
+    let shared = endpoint.personal_attributes().is_empty();
+    let key = Key::of(gateway.resolver.table(), &endpoint, &subject, &request).filter(|_| shared);
     let build = build(
         &gateway,
-        &endpoint,
-        &subject,
+        (&endpoint, &subject),
         &params,
         &mut request,
         dialect,
@@ -89,11 +89,10 @@ pub(crate) async fn file_csv(
 }
 
 /// The file `file_csv` answers with, in one of the bounded build slots (T-4782), and whether
-/// the view narrowed it.
+/// the view narrowed it; a file with personal data logs its reader and rows (DM-128), uncached.
 async fn build(
     gateway: &Gateway,
-    endpoint: &Endpoint,
-    subject: &Subject,
+    (endpoint, subject): (&Endpoint, &Subject),
     params: &[(String, String)],
     request: &mut Request,
     dialect: tabular::Dialect,
@@ -120,6 +119,7 @@ async fn build(
         .unwrap_or_default();
     let visible = schema::visible(subject, endpoint, crate::pdp::now());
     table.settle(&endpoint.csv_slots(&types, |class, name| visible.shows(class, name)));
+    super::ngsi_ld::log_personal_read(endpoint, subject, &table.ids());
     if query::first(params, "humanHeaders") == Some("true") {
         tabular::humanize(&mut table);
     }

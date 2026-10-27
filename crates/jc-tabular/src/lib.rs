@@ -160,6 +160,13 @@ fn entities_of(entities: &Value) -> Vec<&Value> {
 }
 
 impl Table {
+    /// The Entity ids of the rows, sorted: the reader log of a file with personal data (DM-128).
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.ids.iter().cloned().collect();
+        ids.sort_unstable();
+        ids
+    }
+
     /// Adds the rows of `entities` (an array, a single entity, or nothing), widening every row for a new column.
     /// A download appends each page and drops it: its parsed entities, about fifteen times their
     /// JSON, held whole put the gateway past its 1 Gi limit (T-4782).

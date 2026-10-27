@@ -745,6 +745,7 @@ impl HeldDelete<'_> {
                 headers.insert(tenancy::TENANT, tenant.clone());
             }
             tenancy::as_gateway(&mut headers);
+            tenancy::keep_provenance(self.headers, &mut headers);
             if body.is_some() {
                 headers.insert(
                     axum::http::header::CONTENT_TYPE,
