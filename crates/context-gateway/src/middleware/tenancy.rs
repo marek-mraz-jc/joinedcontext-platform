@@ -171,9 +171,19 @@ pub fn pin_caller(
         PROVENANCE_CLIENT,
         named.filter(|c| *c != GATEWAY_CLIENT),
     );
-    // Only the gateway's own hops speak as the gateway, never a token of its client.
-    let client = subject.service_account.as_deref();
-    one(headers, CLIENT, client.filter(|c| *c != GATEWAY_CLIENT));
+    // Only the gateway's own hops speak as the gateway, never a token of its client. A project's
+    // account is `{project}/{name}`, the form a Policy assignee names it by (PL-92): the broker
+    // compares the header with the assignee as written, and a bare name would let two projects'
+    // same-named accounts share each other's grants (F-SEC1-003, T-5860).
+    let client = subject
+        .service_account
+        .as_deref()
+        .filter(|c| *c != GATEWAY_CLIENT)
+        .map(|name| match subject.service_account_project.as_deref() {
+            Some(project) => format!("{project}/{name}"),
+            None => name.to_owned(),
+        });
+    one(headers, CLIENT, client.as_deref());
     list(headers, GROUPS, &subject.groups, false);
     list(headers, ROLES, &subject.roles, true);
     if asked {
