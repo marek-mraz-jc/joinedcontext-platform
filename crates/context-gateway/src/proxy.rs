@@ -13,7 +13,9 @@
 //! hop stays plain `http://` in the cluster, where Linkerd carries the mTLS.
 
 use axum::body::Body;
-use axum::http::header::{HeaderName, CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
+use axum::http::header::{
+    HeaderName, ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, HOST, TRANSFER_ENCODING,
+};
 use axum::http::{HeaderMap, Method, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use hyper_rustls::HttpsConnector;
@@ -317,6 +319,10 @@ impl Broker {
         copy_relayable(&headers, out);
         // The upstream authority is ours, not the client's.
         out.remove(HOST);
+        // The broker answers plain bytes: several routes parse or rewrite its body before it
+        // leaves, and the gateway's own compression layer packs the answer for the client
+        // (T-5847).
+        out.remove(ACCEPT_ENCODING);
         // The length is the body's that goes up, which a route may have rewritten: the MCP hop
         // sends its message re-serialised, and a client's spaced JSON then promised the broker
         // bytes that never came (T-4337). hyper writes it from the body itself.

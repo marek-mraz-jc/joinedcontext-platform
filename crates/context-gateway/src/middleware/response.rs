@@ -369,11 +369,13 @@ fn keep_out_of_shared_caches(headers: &mut axum::http::HeaderMap) {
     // `Authorization` is what the answer differs by; the request headers a caller may narrow
     // or shape the answer with are named so a cache keyed on them cannot mix them either.
     // `Accept-Language` is one of them since EP-37: it picks the text of a LanguageProperty in
-    // a GeoJSON feature and the title of the OGC landing page.
+    // a GeoJSON feature and the title of the OGC landing page. `Accept-Encoding` since T-5847:
+    // the compression layer inside this one packs the answer per that header, and its own
+    // appended `Vary` would be replaced here.
     headers.insert(
         axum::http::header::VARY,
         HeaderValue::from_static(
-            "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted",
+            "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted, Accept-Encoding",
         ),
     );
 }

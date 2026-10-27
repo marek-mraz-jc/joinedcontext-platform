@@ -124,11 +124,16 @@ async fn call(app: Router, request: Request<Body>) -> (StatusCode, HeaderMap, St
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("a body");
-    (
-        status,
-        headers,
-        String::from_utf8_lossy(&bytes).into_owned(),
-    )
+    // The client asked for gzip (`request` below): the gateway packs its own answer (T-5847).
+    let mut text = String::new();
+    match headers.get(axum::http::header::CONTENT_ENCODING) {
+        Some(encoding) if encoding == "gzip" => {
+            std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut text)
+                .expect("gzip");
+        }
+        _ => text = String::from_utf8_lossy(&bytes).into_owned(),
+    }
+    (status, headers, text)
 }
 
 fn get(accept: &str) -> Request<Body> {

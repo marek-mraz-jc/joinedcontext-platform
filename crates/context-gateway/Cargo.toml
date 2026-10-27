@@ -39,7 +39,7 @@ strsim = "0.11"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "compression-gzip", "compression-br"] }
 tracing = "0.1"
 jsonwebtoken.workspace = true
 # sha256 for the schema surface's strong ETags; jsonwebtoken already links it
@@ -82,6 +82,9 @@ tikv-jemallocator = "0.7"
 jcctl = { path = "../jcctl", version = "0.1.0" }
 # `oneshot`, so the tenancy middleware is tested through a real tower stack.
 tower = { version = "0.5", features = ["util"] }
+# `compression_tests` and `access_view_tests` decode the gzip answers the gateway sends (T-5847);
+# already in the graph.
+flate2 = "1"
 # `test-util` pauses the clock, so the reaper's five-second bound is measured
 # without a test that actually sleeps for five seconds.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util", "io-util"] }
