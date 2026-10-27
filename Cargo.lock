@@ -1305,6 +1305,7 @@ dependencies = [
  "arc-swap",
  "axum",
  "base64 0.22.1",
+ "brotli",
  "chrono",
  "flate2",
  "futures-util",

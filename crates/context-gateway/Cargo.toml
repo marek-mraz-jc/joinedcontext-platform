@@ -85,6 +85,9 @@ tower = { version = "0.5", features = ["util"] }
 # `compression_tests` and `access_view_tests` decode the gzip answers the gateway sends (T-5847);
 # already in the graph.
 flate2 = "1"
+# `compression_tests` decodes the br answers and pins quality 2 against brotli itself (T-5849);
+# tower-http's br codec already brings it into the graph.
+brotli = "9"
 # `test-util` pauses the clock, so the reaper's five-second bound is measured
 # without a test that actually sleeps for five seconds.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util", "io-util"] }

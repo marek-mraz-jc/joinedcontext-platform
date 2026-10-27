@@ -419,9 +419,12 @@ async fn an_oauth_answer_is_never_compressed() {
     let realm = common::Realm::new();
     let app = app(&realm, context_gateway::app::ANONYMOUS_MCP_RATE_LIMIT);
 
+    // A long reflected path lifts the answer over the 1 KiB minimum (T-5849), so it stays plain
+    // only because the route sits outside the layer.
+    let reflected = format!("{GEMINI}/{}", "x".repeat(400));
     let mut register = json_post(
         "/oauth/register",
-        &json!({ "redirect_uris": [GEMINI], "client_name": "Gemini" }),
+        &json!({ "redirect_uris": [reflected], "client_name": "Gemini" }),
         None,
     );
     register.headers_mut().insert(
@@ -434,6 +437,7 @@ async fn an_oauth_answer_is_never_compressed() {
         headers.get(header::CONTENT_ENCODING).is_none(),
         "{headers:?}"
     );
+    assert!(body.len() > 1024, "{}", body.len());
     let registered: Value = serde_json::from_str(&body).expect("plain JSON");
     assert!(registered["client_id"].is_string(), "{body}");
 
