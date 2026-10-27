@@ -10,11 +10,6 @@ pub const MAX_FILTER_BYTES: usize = 128;
 /// The most levels a filter has.
 pub const MAX_LEVELS: usize = 8;
 
-/// Every validator case as JSON: `{case, spec, refused}`, `refused` the field the refusal names
-/// or `null`. jc-core, the gateway and the Portal each run the whole table, so the three callers
-/// cannot drift apart.
-pub const CASES: &str = include_str!("topics_cases.json");
-
 /// One topic filter as MQTT 3.1.1 §4.7 writes it, narrowed: no filter of wildcards alone (`#`,
 /// `+/#`), no `$` system topic, no empty level, no NUL, at most [`MAX_LEVELS`] levels and
 /// [`MAX_FILTER_BYTES`] bytes, `${clientid}` the one placeholder, standing for a whole level.
@@ -227,6 +222,11 @@ pub(crate) fn invalid(field: &str, reason: String) -> Error {
 mod tests {
     use super::*;
     use crate::kinds::MqttBrokerSpec;
+
+    /// Every validator case as JSON: `{case, spec, refused}`, `refused` the field the refusal
+    /// names or `null`. jc-core and the gateway (tests/mqtt_auth_tests.rs) each run the whole
+    /// table, so the callers cannot drift apart.
+    const CASES: &str = include_str!("topics_cases.json");
 
     #[derive(serde::Deserialize)]
     struct Case {
