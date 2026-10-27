@@ -1309,6 +1309,7 @@ dependencies = [
  "chrono",
  "flate2",
  "futures-util",
+ "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",

@@ -21,6 +21,8 @@ axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 http-body-util = "0.1"
+# The Body trait's Frame and SizeHint for the coalescing body (T-5851); hyper and axum link it.
+http-body = "1"
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 regex.workspace = true
@@ -38,7 +40,9 @@ serde_json.workspace = true
 strsim = "0.11"
 thiserror.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
-tower = "0.5"
+# `util` for the MapResponseLayer that coalesces an answer before compression (T-5851); axum
+# already builds it.
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "compression-br"] }
 tracing = "0.1"
 jsonwebtoken.workspace = true

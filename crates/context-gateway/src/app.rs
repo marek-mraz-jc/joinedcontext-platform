@@ -11,8 +11,8 @@ use crate::handlers::{
     catalog, files, mappings, ngsi_ld, ogc, openapi_doc, schema_routes, space_routes, view_access,
     ws,
 };
-use crate::middleware::in_flight;
 use crate::middleware::rate_limit::{self, RateLimiter};
+use crate::middleware::{coalesce, in_flight};
 use crate::pdp::Pdp;
 use crate::proxy::Broker;
 use crate::resolver::{Endpoint, SlugResolver, Space};
@@ -708,7 +708,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
 /// whenever the client accepts br, and the gzip layer outside leaves an encoded answer alone, so
 /// gzip serves only a client without br. [`CompressWhen`] leaves a body of known size under 1 KiB
 /// plain, and text/event-stream (MCP streams), images and gRPC.
-pub fn compression() -> Stack<CompressionLayer<CompressWhen>, CompressionLayer<CompressWhen>> {
+///
+/// Innermost, [`coalesce::layer`] hands the encoders an answer in frames of up to
+/// [`coalesce::CAP`] bytes: the encoder ends a block each time the body answers `Pending`, and a
+/// proxied entity query comes one entity per frame, which packed 1.7x worse than the whole body
+/// (T-5851).
+pub fn compression() -> Compression {
     let br = CompressionLayer::new()
         .gzip(false)
         .quality(CompressionLevel::Precise(2))
@@ -717,8 +722,14 @@ pub fn compression() -> Stack<CompressionLayer<CompressWhen>, CompressionLayer<C
         .br(false)
         .quality(CompressionLevel::Precise(1))
         .compress_when(compress_when());
-    Stack::new(br, gzip)
+    Stack::new(coalesce::layer(), Stack::new(br, gzip))
 }
+
+/// The layers of [`compression`], innermost first.
+pub type Compression = Stack<
+    coalesce::Coalescing,
+    Stack<CompressionLayer<CompressWhen>, CompressionLayer<CompressWhen>>,
+>;
 
 /// The predicate of [`compression`]: tower-http's default with its 32-byte minimum raised to 1 KiB,
 /// since a smaller body saves under 700 bytes.

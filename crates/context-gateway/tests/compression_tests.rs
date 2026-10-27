@@ -313,3 +313,171 @@ async fn br_runs_at_quality_2() {
     assert_eq!(encoding(&headers), Some("br"));
     assert_eq!(got, want);
 }
+
+// T-5851: a proxied answer arrives in frames with a `Pending` between them, and the encoder ends
+// a block at each `Pending`. The gateway hands it one frame per `coalesce::CAP` bytes instead.
+
+/// `rows` stations, ~250 bytes each: 1600 make the 400 KB fixture.
+fn stations(rows: usize) -> Vec<u8> {
+    let rows: Vec<String> = (0..rows)
+        .map(|n| {
+            format!(
+                r#"{{"id":"urn:ngsi-ld:BikeHireDockingStation:{n:04}","type":"BikeHireDockingStation","name":{{"type":"Property","value":"Asema {}"}},"availableBikeNumber":{{"type":"Property","value":{},"observedAt":"2026-10-27T14:{:02}:00Z"}},"location":{{"type":"GeoProperty","value":{{"type":"Point","coordinates":[24.{:04},60.{:04}]}}}}}}"#,
+                n * 37 % 997,
+                n * 7 % 23,
+                n % 60,
+                n * 131 % 9973,
+                n * 89 % 9967
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(",")).into_bytes()
+}
+
+/// `body` in `frames` frames, each behind one `Pending`, as hyper hands a proxied answer on.
+fn framed(body: &[u8], frames: usize) -> Body {
+    use futures_util::StreamExt;
+    let size = body.len().div_ceil(frames);
+    let chunks: Vec<axum::body::Bytes> = body
+        .chunks(size)
+        .map(axum::body::Bytes::copy_from_slice)
+        .collect();
+    Body::from_stream(
+        futures_util::stream::unfold(chunks.into_iter(), |mut chunks| async move {
+            tokio::task::yield_now().await;
+            chunks
+                .next()
+                .map(|chunk| (Ok::<_, std::io::Error>(chunk), chunks))
+        })
+        .fuse(),
+    )
+}
+
+/// A route answering `make()`'s body with `content_type`, behind the gateway's compression.
+fn streamed(make: fn() -> Body, content_type: &'static str) -> Router {
+    Router::new()
+        .route(
+            "/",
+            axum::routing::get(
+                move || async move { ([(header::CONTENT_TYPE, content_type)], make()) },
+            ),
+        )
+        .layer(context_gateway::app::compression())
+}
+
+fn fixture_in_64_frames() -> Body {
+    framed(&stations(1600), 64)
+}
+
+/// One frame per station, as Antares streams an entity query (one chunk per entity).
+fn fixture_per_entity() -> Body {
+    framed(&stations(1600), 1600)
+}
+
+fn fixture_in_one_frame() -> Body {
+    Body::from(stations(1600))
+}
+
+/// A name and the body it makes.
+type Shape = (&'static str, fn() -> Body);
+
+#[tokio::test]
+async fn a_400_kb_answer_in_many_frames_packs_as_well_as_in_one() {
+    assert!(stations(1600).len() > 400_000);
+    let shapes: [Shape; 2] = [
+        ("64 frames", fixture_in_64_frames),
+        ("a frame per entity", fixture_per_entity),
+    ];
+    for offer in ["br", "gzip"] {
+        let (_, once) = fetch(streamed(fixture_in_one_frame, "application/json"), offer).await;
+        for (shape, make) in shapes {
+            let (headers, framed) = fetch(streamed(make, "application/json"), offer).await;
+            assert_eq!(encoding(&headers), Some(offer));
+            let plain = if offer == "br" {
+                unbrotli(&framed)
+            } else {
+                gunzip(&framed)
+            };
+            assert_eq!(plain, stations(1600), "{offer}, {shape}");
+            assert!(
+                framed.len() * 10 <= once.len() * 11,
+                "{offer}: {shape} packed to {} bytes, one frame to {}",
+                framed.len(),
+                once.len()
+            );
+        }
+    }
+}
+
+/// The first frame of `app`'s answer, or `None` when none comes within two seconds.
+async fn first_frame(app: Router, content_type: &str) -> Option<Vec<u8>> {
+    use http_body_util::BodyExt;
+    let response = app
+        .oneshot(
+            Request::get("/")
+                .header(header::ACCEPT_ENCODING, "br")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("an answer");
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.as_bytes()),
+        Some(content_type.as_bytes())
+    );
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame()).await;
+    frame
+        .ok()
+        .flatten()
+        .map(|f| f.expect("a frame").into_data().expect("data").to_vec())
+}
+
+/// `first` then a stream that never ends.
+fn then_open(first: Vec<u8>) -> Body {
+    use futures_util::StreamExt;
+    Body::from_stream(
+        futures_util::stream::once(async move {
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(first))
+        })
+        .chain(futures_util::stream::pending()),
+    )
+}
+
+fn one_event_then_open() -> Body {
+    then_open(b"event: message\ndata: {\"jsonrpc\":\"2.0\"}\n\n".to_vec())
+}
+
+fn over_the_cap_then_open() -> Body {
+    then_open(stations(1600).repeat(2))
+}
+
+#[tokio::test]
+async fn an_event_stream_is_not_held() {
+    let first = first_frame(
+        streamed(one_event_then_open, "text/event-stream"),
+        "text/event-stream",
+    )
+    .await;
+    assert_eq!(
+        first.as_deref(),
+        Some(&b"event: message\ndata: {\"jsonrpc\":\"2.0\"}\n\n"[..])
+    );
+}
+
+#[tokio::test]
+async fn a_body_over_the_cap_still_streams() {
+    assert!(stations(1600).len() * 2 > context_gateway::middleware::coalesce::CAP);
+    let first = first_frame(
+        streamed(over_the_cap_then_open, "application/json"),
+        "application/json",
+    )
+    .await;
+    assert!(
+        first.is_some_and(|f| !f.is_empty()),
+        "nothing came before the end"
+    );
+}
