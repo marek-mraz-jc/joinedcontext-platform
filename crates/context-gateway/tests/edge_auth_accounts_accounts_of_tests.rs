@@ -243,3 +243,33 @@ fn an_azp_that_is_a_prefix_a_suffix_or_the_bare_name_resolves_to_nobody() {
         );
     }
 }
+
+/// F-SEC1-021: an account whose derived client id is a platform client's (`portal` + `ui` is
+/// `portal-ui`, every person's Portal token) resolves to nobody, so no project's manifest takes
+/// over the tokens of a platform workload.
+#[test]
+fn an_account_deriving_a_platform_client_id_resolves_to_nobody() {
+    let repo = Repo::new("platform-client");
+    repo.simple(
+        "portal",
+        "ui",
+        "    - role: reader\n      scope:\n        project: portal\n",
+    );
+    repo.simple(
+        "portal",
+        "api",
+        "    - role: reader\n      scope:\n        project: portal\n",
+    );
+    repo.simple(
+        "portal",
+        "kiosk",
+        "    - role: reader\n      scope:\n        project: portal\n",
+    );
+    let accounts = accounts_of(&repo.load());
+    assert!(accounts.resolve("portal-ui").is_none());
+    assert!(accounts.resolve("portal-api").is_none());
+    assert!(
+        accounts.resolve("portal-kiosk").is_some(),
+        "an ordinary account still resolves"
+    );
+}

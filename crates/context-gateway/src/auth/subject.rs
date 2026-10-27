@@ -424,7 +424,7 @@ pub(crate) fn subject_of(
                 service_account_project: Some(account.project.clone()),
                 roles: roles_on(
                     endpoint.audience,
-                    account.roles_in(&account.project, &endpoint.space),
+                    account.roles_in(&endpoint.project, &endpoint.space),
                 ),
                 // A workload's grants are its manifest's (PF-35, T-2545): a group the token
                 // claims is Keycloak membership nobody reviewed, so it reaches no group Policy.

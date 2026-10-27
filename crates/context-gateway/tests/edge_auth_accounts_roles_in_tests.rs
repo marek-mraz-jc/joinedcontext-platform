@@ -5,11 +5,11 @@
 //! and the names are compared exactly, so nothing reaches a neighbouring space or project because
 //! its name merely looks similar.
 //!
-//! The one caller (`src/auth/subject.rs`, `roles_on(endpoint.audience, account.roles_in(&account.project,
-//! &endpoint.space))`) asks about the account's OWN project and the called endpoint's space, behind
-//! `endpoint.admits(Some(&account.project))`. So a role scoped to a third project can never be
-//! asked for in production; it is still tested here, because this function is public and the day a
-//! second caller passes the endpoint's project instead, the answer must stay narrow.
+//! The one caller (`src/auth/subject.rs`, `roles_on(endpoint.audience, account.roles_in(&endpoint.project,
+//! &endpoint.space))`) asks about the called Endpoint's project and space, behind
+//! `endpoint.admits(Some(&account.project))`. A project scope reaches only the account's own
+//! project: on another project's Endpoint neither the account's own project scope nor a scope its
+//! manifest wrote for that other project is a role (F-SEC1-001, T-5860).
 
 use context_gateway::auth::accounts::{Account, ScopedRole};
 use std::collections::BTreeSet;
@@ -121,6 +121,10 @@ fn an_empty_scope_name_matches_only_an_empty_name() {
     );
     // A repository without namespaces resolves every project to "", and then a project-scoped role
     // does reach it: that is the same project, not a wider one.
+    let unnamespaced = Account {
+        project: String::new(),
+        ..unnamespaced
+    };
     assert_eq!(unnamespaced.roles_in("", "mobility"), set(&["writer"]));
 }
 
@@ -150,7 +154,8 @@ fn a_scope_naming_a_space_and_another_project_reaches_the_space() {
     // of the code cannot quietly turn it into "both must match" or "the wider one wins".
     let a = account(vec![role("reader", Some("mobility"), Some("espoo"), false)]);
     assert_eq!(a.roles_in("helsinki", "mobility"), set(&["reader"]));
-    assert_eq!(a.roles_in("espoo", "waste"), set(&["reader"]));
+    // A helsinki manifest's scope naming espoo grants nothing on espoo's Endpoints (F-SEC1-001).
+    assert_eq!(a.roles_in("espoo", "waste"), BTreeSet::new());
     assert_eq!(a.roles_in("helsinki", "waste"), BTreeSet::new());
 }
 
@@ -214,4 +219,17 @@ fn a_grant_outside_its_validity_is_not_a_role() {
         ),
         set(&["reader"])
     );
+}
+
+/// F-SEC1-001 (T-5860): the caller asks about the Endpoint's project. A role the account's own
+/// project scopes stops at that project, so an Endpoint of `espoo` admitting the helsinki account
+/// meets none of helsinki's project roles, and a scope a helsinki manifest wrote for `espoo`
+/// reaches espoo neither.
+#[test]
+fn a_project_scope_reaches_only_the_accounts_own_project() {
+    let own = account(vec![role("writer", None, Some("helsinki"), false)]);
+    assert_eq!(own.roles_in("helsinki", "mobility"), set(&["writer"]));
+    assert_eq!(own.roles_in("espoo", "mobility"), BTreeSet::new());
+    let other = account(vec![role("writer", None, Some("espoo"), false)]);
+    assert_eq!(other.roles_in("espoo", "mobility"), BTreeSet::new());
 }
