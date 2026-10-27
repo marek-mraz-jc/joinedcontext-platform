@@ -215,7 +215,11 @@ pub(crate) fn subject_from(
         Some(preview) => preview_reader(gateway, endpoint, claims, &preview)?,
         None => subject_of(claims, endpoint, gateway)?,
     };
-    with_endpoint_roles(&mut subject, endpoint, &client_roles);
+    // A participant holds what its agreement's compiled Policies grant and no Endpoint role on
+    // top (DS-02, DS-03, F-SEC1-006).
+    if subject.agreement.is_none() {
+        with_endpoint_roles(&mut subject, endpoint, &client_roles);
+    }
     Ok(subject)
 }
 
