@@ -36,6 +36,10 @@ pub const IDENTITY_PREFIX: &str = "x-jc-";
 /// The prefix of the provenance headers the broker stores with a write (ADR-N-054 2.3, DM-112):
 /// only the gateway sets one, so a client's is removed whatever its name.
 pub const PROVENANCE_PREFIX: &str = "jc-provenance-";
+/// The prefix of the Linkerd mesh headers (T-5869, F-SEC1-028): the proxy in front of the broker
+/// sets `l5d-client-id` from the caller's mTLS certificate and the broker believes it (Antares
+/// `provenance.rs`), so a client's copy never crosses the gateway, whatever its name.
+pub const MESH_PREFIX: &str = "l5d-";
 /// The path a write came through: `pipeline`, `ui` or `api`.
 pub const PROVENANCE_CHANNEL: HeaderName = HeaderName::from_static("jc-provenance-channel");
 /// Who wrote, as the audit log names them (`user:…`, `serviceAccount:…`, a DID), percent-encoded.
@@ -64,7 +68,7 @@ const MAX_REQUEST_ID: usize = 128;
 /// The Keycloak client of the Portal's UI: a person's write through it is channel `ui`.
 pub const PORTAL_UI_CLIENT: &str = "portal-ui";
 
-/// Removes every header under [`IDENTITY_PREFIX`] and [`PROVENANCE_PREFIX`], and
+/// Removes every header under [`IDENTITY_PREFIX`], [`PROVENANCE_PREFIX`] and [`MESH_PREFIX`], and
 /// [`READ_VERSIONS`], each with all its values.
 fn drop_identity(headers: &mut HeaderMap) {
     let names: Vec<HeaderName> = headers
@@ -73,6 +77,7 @@ fn drop_identity(headers: &mut HeaderMap) {
             let name = name.as_str();
             name.starts_with(IDENTITY_PREFIX)
                 || name.starts_with(PROVENANCE_PREFIX)
+                || name.starts_with(MESH_PREFIX)
                 || name == READ_VERSIONS
         })
         .cloned()
@@ -313,6 +318,24 @@ pub fn as_gateway(headers: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clients_mesh_headers_never_reach_the_broker() {
+        let mut request = Request::builder()
+            .uri("/ngsi-ld/v1/entities")
+            .header(
+                "l5d-client-id",
+                "context-gateway.jc.serviceaccount.identity.linkerd.cluster.local",
+            )
+            .header("l5d-dst-override", "broker.other:8080")
+            .header("L5D-Remote-Ip", "10.0.0.1")
+            .header("jc-reason", "kept")
+            .body(axum::body::Body::empty())
+            .expect("request");
+        strip_client_headers(&mut request);
+        let left: Vec<&str> = request.headers().keys().map(HeaderName::as_str).collect();
+        assert_eq!(left, ["jc-reason"]);
+    }
 
     #[test]
     fn the_channel_and_actor_come_from_the_verified_subject() {
