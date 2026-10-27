@@ -52,6 +52,10 @@ pub enum Reason {
     NoSubscription,
     /// The device's address lies outside the broker's `allowedSources` (PF-129).
     SourceAddress,
+    /// A token on a broker whose `deviceAuth` names client certificates only (ADR-N-048 §2.12).
+    TokenNotAllowed,
+    /// On the certificate door: a password, or a subject without exactly one common name.
+    Certificate,
 }
 
 impl Reason {
@@ -69,6 +73,8 @@ impl Reason {
             Self::NoRole => "no_role",
             Self::NoSubscription => "no_subscription",
             Self::SourceAddress => "source_address",
+            Self::TokenNotAllowed => "token_not_allowed",
+            Self::Certificate => "certificate",
         }
     }
 }
@@ -207,6 +213,8 @@ mod tests {
             sources: Vec::new(),
             capture_topics: Vec::new(),
             messages_per_second: 10,
+            tokens: true,
+            certificate_door: false,
         }
     }
 

@@ -1005,3 +1005,233 @@ fn the_gateway_serves_only_the_brokers_the_shared_validator_admits() {
         assert_eq!(served, case.refused.is_none(), "{}", case.case);
     }
 }
+
+const DOORS: &str = "mqtt-ovzdusie-doors.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const DOOR: &str = "mqtt-ovzdusie-doors-cert.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const ONLY_DOOR: &str =
+    "mqtt-ovzdusie-certonly-cert.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+const ONLY: &str = "mqtt-ovzdusie-certonly.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+
+/// The repository of [`repository`] with two brokers whose devices may use client certificates
+/// (ADR-N-048 §2.12, T-5875): `doors` with tokens too, `certonly` with certificates alone. The
+/// allowance that lets the project name them is the Portal's to check, not the gateway's.
+fn door_fixture(test: &str) -> Fixture {
+    let dir = repository(test);
+    for (name, auth) in [
+        ("doors", "[token, clientCertificate]"),
+        ("certonly", "[clientCertificate]"),
+    ] {
+        write(
+            &dir,
+            &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: relay\n  deviceAuth: {auth}\n  roles:\n    - name: camera\n      serviceAccounts: [cam-north, cam-gone]\n      publish: [\"cameras/${{clientid}}/#\"]\n      subscribe: [\"commands/${{clientid}}/+\"]\n"),
+        );
+    }
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
+    Fixture {
+        realm: common::Realm::new(),
+        brokers: brokers_of(&repo),
+        accounts: accounts_of(&repo),
+        dir,
+    }
+}
+
+/// What RMQTT posts for a device whose verified certificate has the subject `dn`: the DN as the
+/// username, the client id the device chose and no password.
+fn certified(dn: &str, clientid: &str) -> Connect {
+    Connect {
+        clientid: clientid.to_owned(),
+        username: dn.to_owned(),
+        password: String::new(),
+        ipaddr: "203.0.113.7".to_owned(),
+    }
+}
+
+/// T-5875 (T-4861 option (a)): the certificate door is a release of its own, and only its mesh
+/// identity vouches for a certificate RMQTT verified. A device whose common name is a
+/// ServiceAccount of the broker's project, under that account's client id, gets the account's
+/// roles for an hour at most; a certificate RMQTT refused (another CA, expired) never reaches the
+/// gateway (tests/test_mqtt_brokers.py in the deployment runs that against the pinned RMQTT).
+#[test]
+fn a_certificate_device_is_its_common_names_account_for_an_hour() {
+    let f = door_fixture("certificate-good");
+    let answer = f.decide(
+        Some(DOOR),
+        &certified("O=ovzdusie, CN=cam-north", "ovzdusie-cam-north"),
+    );
+    assert_eq!(answer["result"], "allow", "{answer}");
+    assert_eq!(answer["acl"][0]["topic"], "commands/${clientid}/+");
+    let expire_at = answer["expire_at"].as_i64().expect("an expiry");
+    let hour = chrono::Utc::now().timestamp() + 3600;
+    assert!((hour - 5..=hour).contains(&expire_at), "{expire_at}");
+    // The same broker's token door still admits a token (deviceAuth names both).
+    let token = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-doors", 300);
+    assert_eq!(
+        f.decide(Some(DOORS), &device("ovzdusie-cam-north", token))["result"],
+        "allow"
+    );
+    // A publish through the door is checked on the DN's account, as a token device's is.
+    let publish = |dn: &str, clientid: &str| {
+        publish_check(
+            &f.brokers,
+            &f.accounts,
+            Some(DOOR),
+            &Access {
+                access: "2".into(),
+                clientid: clientid.into(),
+                username: dn.into(),
+                topic: format!("cameras/{clientid}/frame"),
+            },
+        )
+    };
+    assert_eq!(
+        publish("O=ovzdusie, CN=cam-north", "ovzdusie-cam-north"),
+        (true, "a device's role")
+    );
+    assert_eq!(
+        publish("CN=cam-idle", "ovzdusie-cam-north").1,
+        "no device",
+        "a DN of another account under this client id"
+    );
+    assert!(!publish("ovzdusie-cam-north", "ovzdusie-cam-north").0);
+}
+
+/// Every way a CONNECT through the door, or a passwordless one beside it, is refused.
+#[test]
+fn every_way_a_certificate_device_is_refused() {
+    let f = door_fixture("certificate-refused");
+    let refused = |caller, connect: &Connect, reason| {
+        let (answer, why) = f.decide_why(Some(caller), connect);
+        assert_eq!(answer["result"], "deny", "{answer}");
+        assert_eq!(why, Some(reason), "{}", connect.username);
+    };
+    // The common name is not the client id's account.
+    refused(
+        DOOR,
+        &certified("CN=cam-north", "ovzdusie-cam-idle"),
+        "wrong_client",
+    );
+    refused(
+        DOOR,
+        &certified("CN=cam-north", "cam-north"),
+        "wrong_client",
+    );
+    // A certificate without a common name, with two, or with one no account could carry.
+    for dn in [
+        "O=ovzdusie",
+        "CN=cam-north, CN=cam-idle",
+        "CN=",
+        "CN=Cam North",
+        "",
+    ] {
+        refused(DOOR, &certified(dn, "ovzdusie-cam-north"), "certificate");
+    }
+    // A password on the door: the door is for certificates; a token goes to the token door.
+    let mut with_password = certified("CN=cam-north", "ovzdusie-cam-north");
+    with_password.password = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-doors", 300);
+    refused(DOOR, &with_password, "certificate");
+    // A common name that is no account, an account without a role, one whose credentials ended
+    // (the revocation RMQTT 0.24 cannot do by CRL), one of another project.
+    refused(
+        DOOR,
+        &certified("CN=cam-nobody", "ovzdusie-cam-nobody"),
+        "unknown_account",
+    );
+    refused(
+        DOOR,
+        &certified("CN=cam-idle", "ovzdusie-cam-idle"),
+        "no_role",
+    );
+    refused(
+        DOOR,
+        &certified("CN=cam-gone", "ovzdusie-cam-gone"),
+        "expired",
+    );
+    // espoo/cam-north is no account of ovzdusie: its client id names espoo.
+    refused(
+        DOOR,
+        &certified("CN=cam-north", "espoo-cam-north"),
+        "wrong_client",
+    );
+    // The token door never takes a passwordless CONNECT for a certificate: the username is the
+    // device's to choose there, so the same DN gets nothing.
+    let (answer, why) = f.decide_why(
+        Some(DOORS),
+        &certified("CN=cam-north", "ovzdusie-cam-north"),
+    );
+    assert_eq!(
+        (answer["result"].as_str(), why),
+        (Some("deny"), Some("no_token"))
+    );
+    // A broker that names certificates only refuses a token on its token door, and serves its
+    // certificate door; a broker without clientCertificate has no door at all.
+    let token = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-certonly", 300);
+    refused(
+        ONLY,
+        &device("ovzdusie-cam-north", token),
+        "token_not_allowed",
+    );
+    assert_eq!(
+        f.decide(
+            Some(ONLY_DOOR),
+            &certified("CN=cam-north", "ovzdusie-cam-north")
+        )["result"],
+        "allow"
+    );
+    assert!(!f.brokers.contains_key("mqtt-ovzdusie-cameras-cert"));
+    // The door outside allowedSources is refused like the token door.
+    let mut far = certified("CN=cam-north", "ovzdusie-cam-north");
+    far.ipaddr = "not an address".into();
+    let door = f
+        .brokers
+        .get("mqtt-ovzdusie-doors-cert")
+        .expect("the door")
+        .clone();
+    let mut brokers = f.brokers.clone();
+    brokers.insert(
+        "mqtt-ovzdusie-doors-cert".into(),
+        context_gateway::mqtt::Broker {
+            sources: vec![
+                jc_core::kinds::mqtt_broker::SourceRange::parse("203.0.113.0/24").expect("a range"),
+            ],
+            ..door
+        },
+    );
+    let (answer, why) = decide(
+        &brokers,
+        None,
+        &f.accounts,
+        Some(DOOR),
+        &Pods::default(),
+        &far,
+    );
+    assert_eq!(answer.result, "deny");
+    assert_eq!(
+        why.refused.map(|reason| reason.code()),
+        Some("source_address")
+    );
+}
+
+/// A broker named `<name>-cert` holds the release another broker's door would take: that door
+/// is not served, and the release stays the other broker's token door.
+#[test]
+fn a_door_whose_release_is_another_brokers_is_not_served() {
+    let dir = repository("certificate-collision");
+    for (name, auth) in [("x", "[clientCertificate]"), ("x-cert", "[token]")] {
+        write(
+            &dir,
+            &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  deviceAuth: {auth}\n  roles:\n    - name: camera\n      serviceAccounts: [cam-north]\n      publish: [\"cameras/${{clientid}}/#\"]\n"),
+        );
+    }
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
+    let brokers = brokers_of(&repo);
+    let _ = std::fs::remove_dir_all(&dir);
+    let entry = brokers
+        .get("mqtt-ovzdusie-x-cert")
+        .expect("the token broker");
+    assert_eq!(
+        (entry.name.as_str(), entry.certificate_door),
+        ("x-cert", false)
+    );
+}

@@ -99,6 +99,19 @@ pub fn release_name(project: &str, name: &str) -> String {
     crate::kinds::pipeline_identity::bounded(&format!("mqtt-{project}-{name}"))
 }
 
+/// The release of a broker's certificate door, `mqtt-{project}-{name}-cert` bounded to a DNS
+/// label: its own Deployment and ServiceAccount, so its own mesh identity, which is how the
+/// gateway knows a CONNECT came through a verified client certificate (ADR-N-048 §2.12, T-5875).
+pub fn certificate_release_name(project: &str, name: &str) -> String {
+    crate::kinds::pipeline_identity::bounded(&format!("mqtt-{project}-{name}-cert"))
+}
+
+/// The host devices with a client certificate connect to, `cert.{name}.{project}.mqtt.{domain}`:
+/// one label below the broker's own host, so no other broker's host can take it.
+pub fn certificate_host(project: &str, name: &str, domain: &str) -> String {
+    format!("cert.{name}.{project}.mqtt.{domain}")
+}
+
 /// The URL a pipeline reads a broker of its project at: the internal listener, plain MQTT on
 /// 1883 inside the mesh (PL-76).
 pub fn internal_url(project: &str, name: &str) -> String {
@@ -909,6 +922,17 @@ mod tests {
     fn a_broker_is_named_once_for_its_release_and_its_url() {
         assert_eq!(release_name("helsinki", "cameras"), "mqtt-helsinki-cameras");
         assert_eq!(release_name(&"p".repeat(40), &"n".repeat(40)).len(), 63);
+        assert_eq!(
+            certificate_release_name("helsinki", "cameras"),
+            "mqtt-helsinki-cameras-cert"
+        );
+        let long = certificate_release_name(&"p".repeat(30), &"n".repeat(30));
+        assert_eq!(long.len(), 63);
+        assert_ne!(long, release_name(&"p".repeat(30), &"n".repeat(30)));
+        assert_eq!(
+            certificate_host("helsinki", "cameras", "dev.example.org"),
+            "cert.cameras.helsinki.mqtt.dev.example.org"
+        );
         assert_eq!(
             internal_url("helsinki", "cameras"),
             "tcp://mqtt-helsinki-cameras.${JC_MQTT_NAMESPACE}.svc.cluster.local:1883"
