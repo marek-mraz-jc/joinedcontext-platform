@@ -410,3 +410,41 @@ async fn a_refused_authorize_never_redirects() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(headers.get(header::LOCATION).is_none());
 }
+
+/// EP-166, T-5847: the OAuth answers are never compressed: the registration answer carries a
+/// fresh client next to the redirect URI the caller sent, and a compressed length beside
+/// reflected text is the BREACH oracle. The data answers are (compression_tests.rs).
+#[tokio::test]
+async fn an_oauth_answer_is_never_compressed() {
+    let realm = common::Realm::new();
+    let app = app(&realm, context_gateway::app::ANONYMOUS_MCP_RATE_LIMIT);
+
+    let mut register = json_post(
+        "/oauth/register",
+        &json!({ "redirect_uris": [GEMINI], "client_name": "Gemini" }),
+        None,
+    );
+    register.headers_mut().insert(
+        header::ACCEPT_ENCODING,
+        "gzip, br".parse().expect("a value"),
+    );
+    let (status, headers, body) = send(&app, register).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        headers.get(header::CONTENT_ENCODING).is_none(),
+        "{headers:?}"
+    );
+    let registered: Value = serde_json::from_str(&body).expect("plain JSON");
+    assert!(registered["client_id"].is_string(), "{body}");
+
+    let mut metadata = get("/.well-known/oauth-authorization-server");
+    metadata
+        .headers_mut()
+        .insert(header::ACCEPT_ENCODING, "gzip".parse().expect("a value"));
+    let (status, headers, body) = send(&app, metadata).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        headers.get(header::CONTENT_ENCODING).is_none(),
+        "{headers:?}"
+    );
+}

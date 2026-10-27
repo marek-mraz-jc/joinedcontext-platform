@@ -651,6 +651,12 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
         .merge(schema_routes::routes())
         .merge(openapi_doc::routes())
         .merge(mappings::routes())
+        // gzip or br for every surface (T-5847), but not for the OAuth answers merged below:
+        // they carry a fresh client or token next to the redirect URI the caller sent, and a
+        // compressed length beside reflected text is the BREACH oracle. Data answers are safe
+        // to pack because the gateway authenticates by bearer header only, never by a cookie a
+        // third-party page could make a browser send.
+        .layer(compression())
         .merge(oauth::routes())
         // Every endpoint surface passes the limiter; the two probes do not, so a full
         // bucket can never make a pod look unhealthy (EP-20).
@@ -689,6 +695,16 @@ pub fn router(gateway: Arc<Gateway>) -> Router {
             gateway_for_telemetry,
             telemetry::record,
         ))
+}
+
+/// gzip or br when the client's Accept-Encoding asks for it (T-5847). tower-http's default
+/// predicate leaves a body of known size up to 32 bytes, text/event-stream (MCP streams), images
+/// and gRPC plain, and a WebSocket upgrade has an empty body; an answer that already has a
+/// Content-Encoding or a Content-Range is never touched.
+fn compression() -> tower_http::compression::CompressionLayer {
+    tower_http::compression::CompressionLayer::new()
+        .gzip(true)
+        .br(true)
 }
 
 async fn ok() -> &'static str {
