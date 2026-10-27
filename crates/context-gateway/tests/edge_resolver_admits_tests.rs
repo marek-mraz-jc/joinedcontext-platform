@@ -158,19 +158,16 @@ fn every_entry_of_a_long_list_is_asked() {
     assert!(!listed.admits(Some("project-256")));
 }
 
-/// A caller name the gateway could not resolve to a project arrives as an empty string on an
-/// organization endpoint, and is admitted as "some caller". Struck as unreachable: every project
-/// the enforcement point passes comes from a manifest namespace (`store.rs`'s
-/// `id.namespace.clone().unwrap_or_default()`) and the reconciler namespaces every manifest, so
-/// the empty string is a shape that no request produces. Written down because the audience check
-/// would not catch it if that ever changed.
+/// F-SEC1-009: a person whose groups name no project reaches the enforcement point as the empty
+/// project, and no audience but public admits it.
 #[test]
-fn an_empty_project_name_counts_as_a_caller_on_an_organization_endpoint() {
-    assert!(endpoint(Audience::Organization, &[]).admits(Some("")));
+fn an_empty_project_name_is_no_caller_on_an_organization_endpoint() {
+    assert!(!endpoint(Audience::Organization, &[]).admits(Some("")));
     assert!(
         !endpoint(Audience::ProjectList, &["doprava"]).admits(Some("")),
         "a project list still compares it to the names, and no name is empty"
     );
+    assert!(endpoint(Audience::Public, &[]).admits(Some("")));
 }
 
 /// Asking twice answers the same, and asking does not change the endpoint.

@@ -384,7 +384,11 @@ async fn a_group_with_a_leading_slash_is_trimmed_before_matching() {
 #[tokio::test]
 async fn no_roles_claim_yields_an_empty_role_set_rather_than_a_default_grant() {
     let organization = fixture("no-roles", Audience::Organization, PROJECT).await;
-    let (status, document) = access(&organization, json!({ "preferred_username": "jana" })).await;
+    let (status, document) = access(
+        &organization,
+        json!({ "preferred_username": "jana", "groups": [PROJECT] }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{document}");
     assert!(granted(&document).is_empty(), "{document}");
 

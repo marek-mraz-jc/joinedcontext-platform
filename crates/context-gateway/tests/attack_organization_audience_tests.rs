@@ -107,6 +107,11 @@ struct Fixture {
 }
 
 async fn fixture(name: &str) -> Fixture {
+    fixture_of(name, true).await
+}
+
+/// The fixture, with every project's Organization known or, before ADR-N-058, none.
+async fn fixture_of(name: &str, organizations_known: bool) -> Fixture {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let repo = Repo::new(name, &[PROJECT, OUTSIDER]);
@@ -119,13 +124,15 @@ async fn fixture(name: &str) -> Fixture {
     )
     .serve([endpoint()])
     .authenticate(Arc::new(realm.verifier()), accounts, None);
-    gateway.replace_provenance(Provenance {
-        organizations: [(PROJECT, "hel"), (SIBLING, "hel"), (OUTSIDER, "zilina")]
-            .into_iter()
-            .map(|(project, organization)| (project.to_owned(), organization.to_owned()))
-            .collect(),
-        ..Default::default()
-    });
+    if organizations_known {
+        gateway.replace_provenance(Provenance {
+            organizations: [(PROJECT, "hel"), (SIBLING, "hel"), (OUTSIDER, "zilina")]
+                .into_iter()
+                .map(|(project, organization)| (project.to_owned(), organization.to_owned()))
+                .collect(),
+            ..Default::default()
+        });
+    }
     Fixture {
         realm,
         app: router(Arc::new(gateway)),
@@ -229,6 +236,21 @@ async fn a_workload_of_another_organization_is_not_admitted_to_an_organization_e
     let member = fixture
         .realm
         .workload_token(&client_id(PROJECT, "senzory"), json!(SLUG));
+    let (status, body) = read(&fixture, SLUG, &member).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// F-SEC1-009: while the gateway holds no Organization for the Endpoint's project (one
+/// Organization per installation), a person whose token names no group at all is still no member
+/// of it: the empty project is refused, a person of any project is admitted.
+#[tokio::test]
+async fn a_person_of_no_group_is_not_admitted_while_the_organization_is_unknown() {
+    let fixture = fixture_of("no-group-unknown-organization", false).await;
+    let nobody = person(&fixture.realm, SLUG, &[]);
+    let (status, body) = read(&fixture, SLUG, &nobody).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(fixture.broker.hops().len(), 0, "the broker was never asked");
+    let member = person(&fixture.realm, SLUG, &[SIBLING]);
     let (status, body) = read(&fixture, SLUG, &member).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }

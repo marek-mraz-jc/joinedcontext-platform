@@ -34,6 +34,8 @@ const PROJECT: &str = "helsinki";
 const HUB: &str = "hub";
 const HUB_SLUG: &str = "h4y7pq2mzt6vhx3nbwrs5cjd8f";
 const MEMBER_SLUG: &str = "m4y7pq2mzt6vhx3nbwrs5cjd8f";
+/// An Endpoint on the member's broker that no registration names.
+const BYSTANDER_SLUG: &str = "b4y7pq2mzt6vhx3nbwrs5cjd8f";
 const EXCHANGED: &str = "exchanged-for-archive";
 
 fn policy(space: &str) -> PolicySpec {
@@ -199,6 +201,7 @@ fn gateway(
     .serve([
         endpoint(HUB_SLUG, HUB, Audience::Public),
         endpoint(MEMBER_SLUG, "air", Audience::Organization),
+        endpoint(BYSTANDER_SLUG, "air", Audience::Organization),
     ])
     .authenticate(Arc::new(realm.verifier()), ServiceAccounts::new(), None);
     let gateway = match token_url {
@@ -214,6 +217,9 @@ fn gateway(
     homes
         .by_view
         .insert(MEMBER_SLUG.to_owned(), broker_of(broker));
+    homes
+        .by_view
+        .insert(BYSTANDER_SLUG.to_owned(), broker_of(broker));
     homes.by_space.insert("air".to_owned(), broker_of(broker));
     gateway.broker.route(&homes);
     Arc::new(gateway)
@@ -378,7 +384,7 @@ async fn the_member_admits_the_exchanged_token_for_a_read_and_refuses_it_a_write
         json!(format!("context-broker-{}", broker_of(&broker.url))),
         "context-gateway",
     );
-    let member = || gateway(&realm, &broker.url, Federations::new(), None);
+    let member = || gateway(&realm, &broker.url, federations(false), None);
 
     let (status, body) = send(member(), Method::GET, MEMBER_SLUG, Some(&exchanged)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -395,7 +401,7 @@ async fn the_member_admits_the_exchanged_token_for_a_read_and_refuses_it_a_write
 async fn a_broker_audience_token_of_another_client_or_another_broker_is_refused() {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
-    let member = || gateway(&realm, &broker.url, Federations::new(), None);
+    let member = || gateway(&realm, &broker.url, federations(false), None);
 
     let minted_elsewhere = person(
         &realm,
@@ -466,7 +472,7 @@ async fn the_exchanged_token_neither_writes_with_if_match_nor_touches_a_subscrip
             }
             None => Body::empty(),
         };
-        let response = router(gateway(&realm, &broker.url, Federations::new(), None))
+        let response = router(gateway(&realm, &broker.url, federations(false), None))
             .oneshot(request.body(body).expect("a request"))
             .await
             .expect("the gateway answers");
@@ -482,4 +488,29 @@ async fn the_exchanged_token_neither_writes_with_if_match_nor_touches_a_subscrip
         broker.hops.lock().expect("hops").is_empty(),
         "nothing reached the broker"
     );
+}
+
+/// F-SEC1-010: the exchanged token reaches only an Endpoint a caller-identity registration names
+/// as its member; another Endpoint on the same broker refuses it as it refuses any token of a
+/// foreign audience, and the broker is never asked.
+#[tokio::test]
+async fn the_exchanged_token_is_refused_on_an_endpoint_no_registration_names() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let exchanged = person(
+        &realm,
+        json!(format!("context-broker-{}", broker_of(&broker.url))),
+        "context-gateway",
+    );
+    let member = || gateway(&realm, &broker.url, federations(false), None);
+
+    let (status, body) = send(member(), Method::GET, BYSTANDER_SLUG, Some(&exchanged)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(broker.hops.lock().expect("hops").is_empty());
+
+    // No registration at all: the member is a bystander too.
+    let unregistered = gateway(&realm, &broker.url, Federations::new(), None);
+    let (status, body) = send(unregistered, Method::GET, MEMBER_SLUG, Some(&exchanged)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(broker.hops.lock().expect("hops").is_empty());
 }
