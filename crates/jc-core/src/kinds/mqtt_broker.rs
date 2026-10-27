@@ -458,14 +458,6 @@ impl MqttBrokerSpec {
         Ok(ranges)
     }
 
-    /// Whether a device at `address` may connect: any address when the list is empty.
-    pub fn admits_source(&self, address: IpAddr) -> bool {
-        match self.source_ranges() {
-            Ok(ranges) => ranges.is_empty() || ranges.iter().any(|r| r.contains(address)),
-            Err(_) => false,
-        }
-    }
-
     /// The mode in force: `ingest` when the manifest names none.
     pub fn effective_mode(&self) -> MqttMode {
         self.mode.unwrap_or(MqttMode::Ingest)
@@ -788,7 +780,11 @@ mod tests {
     fn allowed_sources_take_v4_and_v6_networks_and_admit_only_inside() {
         let broker = sources(&["203.0.113.0/24", "2001:db8::/48", "198.51.100.7/32"]);
         assert_eq!(broker.validate().map_err(|e| e.to_string()), Ok(()));
-        let admits = |ip: &str| broker.admits_source(ip.parse().expect("an address"));
+        let ranges = broker.source_ranges().expect("readable");
+        let admits = |ip: &str| {
+            let ip = ip.parse().expect("an address");
+            ranges.iter().any(|range| range.contains(ip))
+        };
         assert!(admits("203.0.113.200"));
         assert!(admits("::ffff:203.0.113.9"));
         assert!(admits("2001:db8:0:ffff::1"));
@@ -796,7 +792,10 @@ mod tests {
         assert!(!admits("198.51.100.8"));
         assert!(!admits("203.0.114.1"));
         assert!(!admits("2001:db9::1"));
-        assert!(sources(&[]).admits_source("192.0.2.1".parse().expect("an address")));
+        assert_eq!(
+            sources(&[]).source_ranges().map_err(|e| e.to_string()),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
@@ -820,7 +819,6 @@ mod tests {
             let refused = refusal(&sources(&list));
             assert!(refused.contains("spec.allowedSources"), "{refused}");
             assert!(refused.contains(why), "{list:?}: {refused}");
-            assert!(!sources(&list).admits_source("203.0.113.5".parse().expect("an address")));
         }
         let many: Vec<String> = (0..33).map(|i| format!("10.0.{i}.0/24")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
