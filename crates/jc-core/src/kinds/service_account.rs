@@ -373,17 +373,25 @@ pub fn keycloak_client_id(project: &str, name: &str) -> String {
 
 /// The realm's clients that belong to the platform itself and have no `ServiceAccount` manifest:
 /// the keys of `components/*/keycloak-clients.yaml` in `joinedcontext-deployment`, less the ones
-/// the seed declares as accounts (`helsinki-pipelines`, `helsinki-agent-proxy`,
-/// `banskabystrica-conformance`, `mcp-mobile`). A token's `azp` is the one claim that tells these
-/// workloads apart (the Portal's activity ingest admits `activity-ingest` alone), so an account
-/// that derives one of them is refused (T-1454). A new platform client is added here too.
+/// the seed declares as accounts (each project's `{project}-pipelines`, `helsinki-agent-proxy`,
+/// `helsinki-pipeline-proposer`, `banskabystrica-conformance`) and the ids without a `-`, which no
+/// account derives (`argocd`, `jcctl`). A token's `azp` is the one claim that tells these
+/// workloads apart (the Portal's activity ingest admits `activity-ingest` alone), and the `mcp-*`
+/// ids are the public clients MCP connectors sign in with, so an account that derives one of them
+/// is refused (T-1454, T-5647). A new platform client is added here too.
 pub const PLATFORM_CLIENTS: &[&str] = &[
     "activity-ingest",
     "apisix-gateway",
     "ckan",
+    "context-gateway",
     "edge",
     "gitea",
     "grafana",
+    "jc-assistant",
+    "jc-build-lane",
+    "mcp-hub",
+    "mcp-local",
+    "mcp-mobile",
     "portal-api",
     "portal-reconciler",
     "portal-ui",
