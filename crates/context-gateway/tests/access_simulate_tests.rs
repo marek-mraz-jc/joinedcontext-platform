@@ -263,6 +263,10 @@ async fn nobody_but_the_portals_account_may_simulate() {
 
     let (status, _) = post(&app, &path, None, &body).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "no token");
+    // A slug nobody serves answers the same, so no token tells which slugs exist (F-SEC1-029).
+    let unknown = "/api/endpoint/zzzzzzzzzzzzzzzzzzzzzzzzzz/access/simulate";
+    let (status, _) = post(&app, unknown, None, &body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no token, unknown slug");
 
     // A person signed in through the Portal's own client is not the Portal.
     let person = token_of(&realm, PORTAL_CLIENT, "ada");
