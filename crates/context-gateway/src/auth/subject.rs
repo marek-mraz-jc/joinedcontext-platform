@@ -130,7 +130,9 @@ fn admit_on(
     let endpoint_audiences = gateway.audiences_for(endpoint);
     let mut audiences = endpoint_audiences.clone();
     audiences.push(CLI_AUDIENCE.to_owned());
-    if federated {
+    // A token exchanged for the broker reaches only an Endpoint a hub reads with the caller's
+    // identity; on any other Endpoint of that broker it is a token of a foreign audience.
+    if federated && gateway.is_caller_member(&endpoint.slug) {
         audiences.push(gateway.broker_audience(endpoint));
     }
     let claims = verifier
@@ -244,13 +246,18 @@ fn preview_reader(
         tracing::info!(slug = %endpoint.slug, "a preview asked by someone who does not review it");
         return Err(Box::new(ProblemDetails::not_found()));
     }
+    let user = claims
+        .preferred_username
+        .clone()
+        .unwrap_or_else(|| claims.sub.clone());
+    // A reader is decided under their name as on a published Endpoint (T-5358, F-SEC1-031): a
+    // `service-account-…` name another client's token carries matches nobody's assignees.
+    if !owns_its_name(&user, claims.azp.as_deref()) {
+        tracing::warn!(slug = %endpoint.slug, "a preview reader with a service-account username");
+        return Err(Box::new(ProblemDetails::not_found()));
+    }
     Ok(Subject {
-        user: Some(
-            claims
-                .preferred_username
-                .clone()
-                .unwrap_or_else(|| claims.sub.clone()),
-        ),
+        user: Some(user),
         id: Some(claims.sub.clone()),
         service_account: None,
         service_account_project: None,

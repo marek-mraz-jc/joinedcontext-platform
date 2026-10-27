@@ -68,6 +68,15 @@ impl Federations {
             .filter(|member| member.identity == FederationIdentity::Caller)
     }
 
+    /// Whether a registration asking for the caller's identity names the Endpoint `slug` as its
+    /// member: the only Endpoints a token exchanged for a broker's audience reaches (PF-48,
+    /// F-SEC1-010).
+    pub fn is_caller_member(&self, slug: &str) -> bool {
+        self.by_space.values().flatten().any(|member| {
+            member.identity == FederationIdentity::Caller && member.view.as_deref() == Some(slug)
+        })
+    }
+
     /// Whether this space federates at all.
     pub fn is_federated(&self, project: &str, space: &str) -> bool {
         !self.members(project, space).is_empty()

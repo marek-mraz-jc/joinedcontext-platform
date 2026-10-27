@@ -230,11 +230,12 @@ impl Endpoint {
 
     /// Whether a caller from `project` may use this endpoint at all (EP-14, EP-15).
     ///
-    /// `None` is an anonymous caller: only a public endpoint serves one.
+    /// `None` is an anonymous caller: only a public endpoint serves one. An empty project is a
+    /// person whose groups name no project, a member of nothing (F-SEC1-009).
     pub fn admits(&self, project: Option<&str>) -> bool {
         match self.audience {
             Audience::Public => true,
-            Audience::Organization => project.is_some(),
+            Audience::Organization => project.is_some_and(|caller| !caller.is_empty()),
             Audience::ProjectList => project.is_some_and(|caller| {
                 caller == self.project || self.allowed_projects.iter().any(|p| p == caller)
             }),

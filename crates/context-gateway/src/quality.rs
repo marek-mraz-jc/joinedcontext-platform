@@ -67,9 +67,7 @@ pub fn names(name: &str, term: &str) -> bool {
 /// The refusal of a write whose path addresses an attribute the gateway owns, a `DELETE`
 /// included, the attribute written as a term or a percent-encoded IRI; `None` otherwise.
 pub fn owned_path(targeted: Option<&str>) -> Option<ProblemDetails> {
-    let attribute = targeted
-        .map(crate::query::decode)
-        .filter(|attribute| is_owned(attribute))?;
+    let attribute = targeted.filter(|attribute| is_owned(attribute))?;
     Some(ProblemDetails::bad_request().with_detail(format!(
         "`{attribute}` is written by the space's quality rules alone; a write may not set or \
          delete it (DM-90)"
@@ -403,8 +401,11 @@ mod tests {
             "quarantineRules",
             "https%3A%2F%2Furi.etsi.org%2Fngsi-ld%2Fdefault-context%2FquarantinedAt",
             "jc:quarantineRules",
+            "%71uarantinedAt",
         ] {
-            assert!(owned_path(Some(owned)).is_some(), "{owned}");
+            let path = format!("entities/urn:x/attrs/{owned}");
+            let targeted = crate::operations::targeted_attribute(&path);
+            assert!(owned_path(targeted.as_deref()).is_some(), "{owned}");
         }
         for free in ["speed", "notquarantinedAt", "quarantinedAtX"] {
             assert!(owned_path(Some(free)).is_none(), "{free}");

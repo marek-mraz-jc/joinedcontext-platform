@@ -109,12 +109,13 @@ pub fn sets_attribute_value<'a>(method: &Method, path: &'a str) -> Option<&'a st
 ///
 /// The body of such a write is the bare attribute value, so the enforcement point has to
 /// learn the attribute's name from the path before it can ask whether the grant covers it
-/// (GW17).
-pub fn targeted_attribute(path: &str) -> Option<&str> {
+/// (GW17). The name comes back percent-decoded, as the broker reads it: `attrs/%6fwner` writes
+/// `owner`, so every guard judges `owner` (SEC1 F-007).
+pub fn targeted_attribute(path: &str) -> Option<String> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match segments.as_slice() {
-        ["entities", _, "attrs", attr] => Some(attr),
-        ["temporal", "entities", _, "attrs", attr, ..] => Some(attr),
+        ["entities", _, "attrs", attr] => Some(crate::query::decode(attr)),
+        ["temporal", "entities", _, "attrs", attr, ..] => Some(crate::query::decode(attr)),
         _ => None,
     }
 }
@@ -200,11 +201,15 @@ mod tests {
     #[test]
     fn a_single_attribute_path_names_the_attribute_it_addresses() {
         assert_eq!(
-            targeted_attribute("entities/urn:x/attrs/pm10"),
+            targeted_attribute("entities/urn:x/attrs/pm10").as_deref(),
             Some("pm10")
         );
         assert_eq!(
-            targeted_attribute("temporal/entities/urn:x/attrs/pm10/inst-1"),
+            targeted_attribute("entities/urn:x/attrs/%70m%31%30").as_deref(),
+            Some("pm10")
+        );
+        assert_eq!(
+            targeted_attribute("temporal/entities/urn:x/attrs/pm10/inst-1").as_deref(),
             Some("pm10")
         );
         assert_eq!(targeted_attribute("entities/urn:x/attrs"), None);

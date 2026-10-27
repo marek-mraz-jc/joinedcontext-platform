@@ -46,6 +46,7 @@ impl HeldWrite<'_> {
 
         let addressed = operations::addressed_entity(self.path).map(query::decode);
         let targeted = operations::targeted_attribute(self.path);
+        let targeted = targeted.as_deref();
         // Removing a required end outright empties it as surely as a null does.
         if self.operation == Operation::DeleteAttrs {
             if let (Some(id), Some(attribute)) = (addressed.as_deref(), targeted) {
@@ -810,9 +811,10 @@ pub(crate) fn filled_units(
         return Ok(Vec::new());
     };
     let addressed = operations::addressed_entity(path).map(query::decode);
+    let targeted = operations::targeted_attribute(path);
     let shape = crate::units::Shape {
         addressed: addressed.as_deref(),
-        targeted: operations::targeted_attribute(path),
+        targeted: targeted.as_deref(),
     };
     let filled = crate::units::enforce(&mut payload, shape, rules)
         .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
@@ -846,9 +848,10 @@ pub(crate) async fn minimised(
         ));
     };
     let addressed = operations::addressed_entity(path).map(query::decode);
+    let targeted = operations::targeted_attribute(path);
     let shape = crate::units::Shape {
         addressed: addressed.as_deref(),
-        targeted: operations::targeted_attribute(path),
+        targeted: targeted.as_deref(),
     };
     match ingest::apply(&mut payload, shape, schema, key.as_ref()) {
         Ok(false) => Ok(()),
@@ -889,6 +892,7 @@ pub(crate) async fn minimised(
 /// the body changed.
 pub(crate) fn owned_guarded(sent: &mut Vec<u8>, path: &str) -> Result<bool, Box<ProblemDetails>> {
     let targeted = operations::targeted_attribute(path);
+    let targeted = targeted.as_deref();
     if let Some(problem) = crate::quality::owned_path(targeted) {
         tracing::info!("write refused: it addresses the quarantine mark");
         return Err(Box::new(problem));
@@ -934,9 +938,10 @@ pub(crate) fn quality_judged(
         return Ok(());
     };
     let addressed = operations::addressed_entity(path).map(query::decode);
+    let targeted = operations::targeted_attribute(path);
     let shape = crate::units::Shape {
         addressed: addressed.as_deref(),
-        targeted: operations::targeted_attribute(path),
+        targeted: targeted.as_deref(),
     };
     // A create or a replace carries the whole entity; every other write a part of it.
     let whole = matches!(
