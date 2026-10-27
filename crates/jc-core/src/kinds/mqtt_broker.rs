@@ -7,6 +7,7 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::Result;
+use crate::kinds::mqtt_allowance::{listed_twice, MqttAddress, MqttDeviceAuth};
 use crate::mqtt::topics::{self, invalid};
 use crate::names;
 use schemars::JsonSchema;
@@ -126,9 +127,22 @@ pub struct MqttBrokerSpec {
     /// Per-client and per-broker limits, each within the platform ceiling.
     #[serde(default)]
     pub limits: MqttLimits,
-    /// A dedicated port from 18830–18849 instead of TLS by SNI on 8883.
+    /// A dedicated port from 18830–18849 instead of TLS by SNI on 8883; required with
+    /// `address: dedicatedPort` and read only there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    /// How the broker is reached from outside; absent is `dedicatedPort` when `port` is set, else
+    /// `platform` (ADR-N-048 §2.11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<MqttAddress>,
+    /// One of the allowance's `customHostnames`, e.g. `mqtt.city.example`; required with
+    /// `address: customHostname` and read only there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+    /// How devices may authenticate, a non-empty subset of `token` and `clientCertificate`;
+    /// absent is `[token]` (ADR-N-048 §2.12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_auth: Option<Vec<MqttDeviceAuth>>,
     /// What the broker does with a message; absent is `ingest` (ADR-N-048 §2.10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<MqttMode>,
@@ -335,6 +349,7 @@ impl MqttBrokerSpec {
             self.check_capture(capture)?;
         }
         self.source_ranges()?;
+        self.check_address()?;
         if let Some(port) = self.port {
             if !DEDICATED_PORTS.contains(&port) {
                 return Err(invalid(
@@ -348,6 +363,99 @@ impl MqttBrokerSpec {
             }
         }
         Ok(())
+    }
+
+    /// `spec.address` with the one field its kind reads, and `spec.deviceAuth` (MF-62).
+    fn check_address(&self) -> Result<()> {
+        let invalid62 = |field: &str, reason: String| crate::error::Error::Invalid {
+            field: format!("spec.{field}"),
+            reason: format!("{reason} (MF-62)"),
+        };
+        let address = self.effective_address();
+        match (address, self.port) {
+            (MqttAddress::DedicatedPort, None) => {
+                return Err(invalid62(
+                    "port",
+                    "is required with spec.address: dedicatedPort; pick a port the project's \
+                     allowance assigns"
+                        .into(),
+                ))
+            }
+            (MqttAddress::Platform | MqttAddress::CustomHostname, Some(_)) => {
+                return Err(invalid62(
+                    "port",
+                    format!(
+                        "is read only with spec.address: dedicatedPort, and this broker's address \
+                         is {}",
+                        address.word()
+                    ),
+                ))
+            }
+            _ => {}
+        }
+        match (address, &self.hostname) {
+            (MqttAddress::CustomHostname, None) => {
+                return Err(invalid62(
+                    "hostname",
+                    "is required with spec.address: customHostname; name one of the project's \
+                     customHostnames, such as mqtt.city.example"
+                        .into(),
+                ))
+            }
+            (MqttAddress::CustomHostname, Some(name)) => {
+                names::validate_org_domain(name).map_err(|_| {
+                    invalid62(
+                        "hostname",
+                        format!(
+                            "`{name}` is not a lowercase DNS name of at least two labels, such as \
+                             mqtt.city.example, with no scheme, port, path or wildcard"
+                        ),
+                    )
+                })?;
+            }
+            (_, Some(_)) => {
+                return Err(invalid62(
+                    "hostname",
+                    format!(
+                        "is read only with spec.address: customHostname, and this broker's \
+                         address is {}",
+                        address.word()
+                    ),
+                ))
+            }
+            (_, None) => {}
+        }
+        if let Some(auth) = &self.device_auth {
+            if auth.is_empty() {
+                return Err(invalid62(
+                    "deviceAuth",
+                    "names no authentication; leave it out for [token]".into(),
+                ));
+            }
+            if let Some(twice) = listed_twice(auth) {
+                return Err(invalid62(
+                    "deviceAuth",
+                    format!("{} is listed twice", twice.word()),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The address in force: the one named, else `dedicatedPort` with a port, else `platform`.
+    pub fn effective_address(&self) -> MqttAddress {
+        self.address.unwrap_or(if self.port.is_some() {
+            MqttAddress::DedicatedPort
+        } else {
+            MqttAddress::Platform
+        })
+    }
+
+    /// The device authentications in force: `[token]` when the manifest names none.
+    pub fn effective_device_auth(&self) -> Vec<MqttDeviceAuth> {
+        self.device_auth
+            .clone()
+            .unwrap_or_else(|| vec![MqttDeviceAuth::Token])
     }
 
     /// `spec.capture` of a capture broker, within its bounds.
@@ -438,6 +546,9 @@ mod tests {
             roles,
             limits: MqttLimits::default(),
             port: None,
+            address: None,
+            hostname: None,
+            device_auth: None,
             mode: Some(MqttMode::Relay),
             capture: None,
             allowed_sources: Vec::new(),
@@ -446,6 +557,96 @@ mod tests {
 
     fn refusal(spec: &MqttBrokerSpec) -> String {
         spec.validate().expect_err("refused").to_string()
+    }
+
+    #[test]
+    fn each_address_reads_its_one_field_and_refuses_the_others() {
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
+        assert_eq!(broker.effective_address(), MqttAddress::Platform);
+        // A broker committed before spec.address with a port keeps its dedicated port.
+        broker.port = Some(18831);
+        assert_eq!(broker.validate().map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(broker.effective_address(), MqttAddress::DedicatedPort);
+        broker.address = Some(MqttAddress::Platform);
+        let message = refusal(&broker);
+        assert!(
+            message.contains("invalid spec.port: is read only with spec.address: dedicatedPort"),
+            "{message}"
+        );
+        broker.address = Some(MqttAddress::DedicatedPort);
+        broker.port = None;
+        let message = refusal(&broker);
+        assert!(
+            message.contains("invalid spec.port: is required with spec.address: dedicatedPort"),
+            "{message}"
+        );
+        broker.address = Some(MqttAddress::CustomHostname);
+        let message = refusal(&broker);
+        assert!(
+            message
+                .contains("invalid spec.hostname: is required with spec.address: customHostname"),
+            "{message}"
+        );
+        broker.hostname = Some("mqtt.city.example".into());
+        assert_eq!(broker.validate().map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(broker.effective_address(), MqttAddress::CustomHostname);
+        broker.port = Some(18831);
+        assert!(refusal(&broker).contains("this broker's address is customHostname"));
+        broker.port = None;
+        for bad in [
+            "*.city.example",
+            "MQTT.city.example",
+            "city",
+            "mqtt.city.example:8883",
+            "https://mqtt.city.example",
+        ] {
+            broker.hostname = Some(bad.into());
+            let message = refusal(&broker);
+            assert!(
+                message.contains("invalid spec.hostname: `"),
+                "{bad}: {message}"
+            );
+            assert!(message.ends_with("(MF-62)"), "{message}");
+        }
+        broker.address = None;
+        broker.hostname = Some("mqtt.city.example".into());
+        assert!(refusal(&broker).contains("this broker's address is platform"));
+    }
+
+    #[test]
+    fn device_auth_is_a_non_empty_set_and_token_by_default() {
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
+        assert_eq!(broker.effective_device_auth(), vec![MqttDeviceAuth::Token]);
+        broker.device_auth = Some(Vec::new());
+        assert!(refusal(&broker).contains("invalid spec.deviceAuth: names no authentication"));
+        broker.device_auth = Some(vec![
+            MqttDeviceAuth::ClientCertificate,
+            MqttDeviceAuth::ClientCertificate,
+        ]);
+        assert!(refusal(&broker).contains("clientCertificate is listed twice"));
+        let read: MqttBrokerSpec = serde_json::from_value(serde_json::json!({
+            "address": "customHostname", "hostname": "mqtt.city.example",
+            "deviceAuth": ["token", "clientCertificate"],
+            "roles": [{"name": "camera", "publish": ["${clientid}/a"]}]
+        }))
+        .expect("reads");
+        assert_eq!(read.validate().map_err(|e| e.to_string()), Ok(()));
+        assert_eq!(
+            read.effective_device_auth(),
+            vec![MqttDeviceAuth::Token, MqttDeviceAuth::ClientCertificate]
+        );
+        for unknown in [
+            serde_json::json!({"deviceAuth": ["password"]}),
+            serde_json::json!({"address": "anywhere"}),
+        ] {
+            let mut value =
+                serde_json::json!({"roles": [{"name": "camera", "publish": ["${clientid}/a"]}]});
+            value
+                .as_object_mut()
+                .expect("object")
+                .extend(unknown.as_object().expect("object").clone());
+            assert!(serde_json::from_value::<MqttBrokerSpec>(value).is_err());
+        }
     }
 
     #[test]
