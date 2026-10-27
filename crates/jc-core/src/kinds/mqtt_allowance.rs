@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::envelope::SecretRef;
 use crate::error::{Error, Result};
-use crate::kinds::mqtt_broker::{MqttBrokerSpec, MqttMode, DEDICATED_PORTS};
+use crate::kinds::mqtt_broker::{
+    listed_twice, MqttAddress, MqttBrokerSpec, MqttDeviceAuth, MqttMode, DEDICATED_PORTS,
+};
 
 /// The default `brokers` once MQTT is on.
 pub const DEFAULT_BROKERS: u32 = 1;
@@ -24,53 +26,6 @@ pub const DEFAULT_MESSAGES_PER_SECOND: u32 = 10_000;
 pub const DEFAULT_MAX_MESSAGE_BYTES: u32 = 64 * 1024;
 /// The most `customHostnames` one allowance lists (ADR-N-048 §2.9).
 pub const MAX_CUSTOM_HOSTNAMES: usize = 10;
-
-/// How a broker is addressed from outside (ADR-N-048 §2.11).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "camelCase")]
-pub enum MqttAddress {
-    /// `<name>.<project>.mqtt.<domain>` on 8883.
-    Platform,
-    /// A port of the allowance's `ports`.
-    DedicatedPort,
-    /// A name of the allowance's `customHostnames`, one the city owns, on 8883.
-    CustomHostname,
-}
-
-impl MqttAddress {
-    /// The word the manifest spells it with.
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Platform => "platform",
-            Self::DedicatedPort => "dedicatedPort",
-            Self::CustomHostname => "customHostname",
-        }
-    }
-}
-
-/// How a device proves who it is when it connects (ADR-N-048 §2.12).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "camelCase")]
-pub enum MqttDeviceAuth {
-    /// A Keycloak access token of a ServiceAccount as the CONNECT password.
-    Token,
-    /// A client certificate the project's client CA signed, its common name the ServiceAccount.
-    ClientCertificate,
-}
-
-impl MqttDeviceAuth {
-    /// The word the manifest spells it with.
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Token => "token",
-            Self::ClientCertificate => "clientCertificate",
-        }
-    }
-}
 
 /// One hostname an org admin assigned to a project (ADR-N-048 §2.11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -427,14 +382,6 @@ impl MqttAllowance {
                 )
             })
     }
-}
-
-/// The first device authentication a list names a second time.
-pub(crate) fn listed_twice(auth: &[MqttDeviceAuth]) -> Option<MqttDeviceAuth> {
-    auth.iter()
-        .enumerate()
-        .find(|(i, a)| auth[..*i].contains(a))
-        .map(|(_, a)| *a)
 }
 
 /// A list joined with commas, or `none`.

@@ -107,8 +107,10 @@ pub use mapping::{
 };
 pub use mcp_server::McpServerSpec;
 pub use model_projection::{ModelProjectionSpec, ProjectedClass, ProjectionFilter};
-pub use mqtt_allowance::{MqttAddress, MqttAllowance, MqttDeviceAuth, MqttHostname, MqttUsage};
-pub use mqtt_broker::{MqttBrokerSpec, MqttCapture, MqttLimits, MqttMode, MqttRole};
+pub use mqtt_allowance::{MqttAllowance, MqttHostname, MqttUsage};
+pub use mqtt_broker::{
+    MqttAddress, MqttBrokerSpec, MqttCapture, MqttDeviceAuth, MqttLimits, MqttMode, MqttRole,
+};
 pub use org_settings::{OrganizationBounds, OrganizationLimits, OrganizationPolicies, PublicApps};
 pub use organization::{
     Contact, ContactRole, DcatProfile, OrganizationSpec, ProjectsPolicy,
