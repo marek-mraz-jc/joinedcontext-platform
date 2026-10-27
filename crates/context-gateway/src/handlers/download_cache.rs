@@ -35,6 +35,7 @@ const MAX_HELD_BYTES: usize = 1024 * 1024;
 /// Everything of a request the view's answer to an anonymous caller depends on besides the data.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Key {
+    table: Table,
     slug: String,
     query: String,
     link: Option<Vec<u8>>,
@@ -42,14 +43,42 @@ pub(crate) struct Key {
 }
 
 impl Key {
-    /// The key of `request`, or `None` for any caller but the Endpoint's anonymous one.
-    pub(crate) fn of(endpoint: &Endpoint, subject: &Subject, request: &Request) -> Option<Self> {
+    /// The key of `request` under the Endpoint `table` admitted it from, or `None` for any caller
+    /// but the Endpoint's anonymous one.
+    pub(crate) fn of(
+        table: EndpointTable,
+        endpoint: &Endpoint,
+        subject: &Subject,
+        request: &Request,
+    ) -> Option<Self> {
         (*subject == anonymous_on(endpoint)).then(|| Self {
+            table: Table(table),
             slug: endpoint.slug.clone(),
             query: request.uri().query().unwrap_or_default().to_owned(),
             link: request.headers().get(LINK).map(|v| v.as_bytes().to_vec()),
             narrowing: asked_about_narrowing(request),
         })
+    }
+}
+
+/// The Endpoint table an answer was built under, compared by identity (T-5869, F-SEC1-022): a
+/// reload of the Endpoints or their Policies replaces the table, so a withdrawn public grant is
+/// never served from an answer built before it. The key holds the table, so its address is not
+/// reused while the answer is.
+#[derive(Clone, Debug)]
+struct Table(EndpointTable);
+
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Table {}
+
+impl std::hash::Hash for Table {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).hash(state);
     }
 }
 
@@ -178,7 +207,7 @@ pub(crate) struct CatalogRecords {
     held: Mutex<HashMap<String, HeldRecords>>,
 }
 
-type EndpointTable = Arc<HashMap<String, Arc<Endpoint>>>;
+pub(crate) type EndpointTable = Arc<HashMap<String, Arc<Endpoint>>>;
 type HeldRecords = (Instant, EndpointTable, Arc<Vec<serde_json::Value>>);
 
 impl CatalogRecords {
@@ -223,8 +252,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// The one table every test key is built under, as between two reloads.
+    static TABLE: std::sync::LazyLock<EndpointTable> = std::sync::LazyLock::new(Arc::default);
+
     fn key(query: &str) -> Option<Key> {
         Some(Key {
+            table: Table(Arc::clone(&TABLE)),
             slug: "s".to_owned(),
             query: query.to_owned(),
             link: None,
@@ -283,6 +316,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_reload_builds_afresh() {
+        let downloads = Downloads::default();
+        let builds = AtomicUsize::new(0);
+        let _ = downloads.get_or_build(key("q"), counted(&builds, 1)).await;
+        let reloaded = key("q").map(|key| Key {
+            table: Table(Arc::default()),
+            ..key
+        });
+        let _ = downloads.get_or_build(reloaded, counted(&builds, 1)).await;
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "a withdrawn grant is never served"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn an_answer_goes_stale() {
         let downloads = Downloads::default();
         let builds = AtomicUsize::new(0);
@@ -300,7 +350,7 @@ mod tests {
             .body(axum::body::Body::empty())
             .expect("a request");
         let anonymous = anonymous_on(&endpoint);
-        assert!(Key::of(&endpoint, &anonymous, &request).is_some());
+        assert!(Key::of(Arc::default(), &endpoint, &anonymous, &request).is_some());
         let person = Subject {
             user: Some("anna".to_owned()),
             ..anonymous.clone()
@@ -316,7 +366,11 @@ mod tests {
         let mut steward = anonymous.clone();
         steward.roles.insert("steward".to_owned());
         for caller in [person, account, participant, steward] {
-            assert_eq!(Key::of(&endpoint, &caller, &request), None, "{caller:?}");
+            assert_eq!(
+                Key::of(Arc::default(), &endpoint, &caller, &request),
+                None,
+                "{caller:?}"
+            );
         }
     }
 
