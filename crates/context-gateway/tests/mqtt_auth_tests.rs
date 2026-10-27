@@ -982,7 +982,8 @@ fn the_gateway_serves_only_the_brokers_the_shared_validator_admits() {
         refused: Option<String>,
     }
     let cases: Vec<Case> =
-        serde_json::from_str(jc_core::mqtt::topics::CASES).expect("the table is JSON");
+        serde_json::from_str(include_str!("../../jc-core/src/mqtt/topics_cases.json"))
+            .expect("the table is JSON");
     for (i, case) in cases.iter().enumerate() {
         let dir = std::env::temp_dir().join(format!("gateway-mqtt-table-{i}"));
         let _ = std::fs::remove_dir_all(&dir);
