@@ -318,7 +318,7 @@ impl MqttBrokerSpec {
             for account in &role.service_accounts {
                 names::validate_dns1123_label(account)?;
             }
-            topics::check_role(role, self.mode)?;
+            check_role(role, self.mode)?;
         }
         let limits = [
             (
@@ -524,6 +524,69 @@ impl MqttBrokerSpec {
             .iter()
             .filter(move |role| role.service_accounts.iter().any(|a| a == account))
     }
+}
+
+/// Every rule one role is judged by on a broker of `mode`.
+fn check_role(role: &MqttRole, mode: Option<MqttMode>) -> Result<()> {
+    if role.publish.is_empty() && role.subscribe.is_empty() {
+        return Err(invalid(
+            "roles[]",
+            format!("role `{}` grants no topic", role.name),
+        ));
+    }
+    if role.shared_topics && role.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
+        return Err(invalid(
+            "roles[].reason",
+            format!(
+                "role `{}` sets sharedTopics, so each of its devices may publish as any other: \
+                 write why in `reason`",
+                role.name
+            ),
+        ));
+    }
+    for filter in &role.publish {
+        topics::check("roles[].publish", filter)?;
+        if !role.shared_topics && !topics::under_client_id(filter) {
+            return Err(invalid(
+                "roles[].publish",
+                format!(
+                    "`{filter}` lets each device of role `{}` publish as any other: write a \
+                     {CLIENT_ID} level before any wildcard, or set sharedTopics: true with a \
+                     reason on the role",
+                    role.name
+                ),
+            ));
+        }
+    }
+    if !role.subscribe.is_empty() && mode != Some(MqttMode::Relay) {
+        let reason = match mode {
+            None => format!(
+                "role `{}` lets devices subscribe, which only a relay broker allows: set \
+                 spec.mode: relay (ADR-N-048 §2.10)",
+                role.name
+            ),
+            Some(mode) => format!(
+                "role `{}` lets devices subscribe, and in {} mode devices get no subscribe \
+                 right; use spec.mode: relay",
+                role.name,
+                mode.word()
+            ),
+        };
+        return Err(invalid("roles[].subscribe", reason));
+    }
+    for filter in &role.subscribe {
+        topics::check("roles[].subscribe", filter)?;
+        if !topics::under_client_id(filter) {
+            return Err(invalid(
+                "roles[].subscribe",
+                format!(
+                    "`{filter}` reaches beyond the client's own topics: a device subscribes only \
+                     under {CLIENT_ID}, with no wildcard before it"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

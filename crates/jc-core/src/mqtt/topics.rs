@@ -3,7 +3,7 @@
 //! refused by is the grammar a publish is decided by.
 
 use crate::error::{Error, Result};
-use crate::kinds::mqtt_broker::{MqttMode, MqttRole, CLIENT_ID};
+use crate::kinds::mqtt_broker::{MqttRole, CLIENT_ID};
 
 /// The longest filter, in bytes.
 pub const MAX_FILTER_BYTES: usize = 128;
@@ -61,69 +61,6 @@ pub fn under_client_id(filter: &str) -> bool {
         }
     }
     false
-}
-
-/// Every rule one role is judged by on a broker of `mode`.
-pub fn check_role(role: &MqttRole, mode: Option<MqttMode>) -> Result<()> {
-    if role.publish.is_empty() && role.subscribe.is_empty() {
-        return Err(invalid(
-            "roles[]",
-            format!("role `{}` grants no topic", role.name),
-        ));
-    }
-    if role.shared_topics && role.reason.as_deref().is_none_or(|r| r.trim().is_empty()) {
-        return Err(invalid(
-            "roles[].reason",
-            format!(
-                "role `{}` sets sharedTopics, so each of its devices may publish as any other: \
-                 write why in `reason`",
-                role.name
-            ),
-        ));
-    }
-    for filter in &role.publish {
-        check("roles[].publish", filter)?;
-        if !role.shared_topics && !under_client_id(filter) {
-            return Err(invalid(
-                "roles[].publish",
-                format!(
-                    "`{filter}` lets each device of role `{}` publish as any other: write a \
-                     {CLIENT_ID} level before any wildcard, or set sharedTopics: true with a \
-                     reason on the role",
-                    role.name
-                ),
-            ));
-        }
-    }
-    if !role.subscribe.is_empty() && mode != Some(MqttMode::Relay) {
-        let reason = match mode {
-            None => format!(
-                "role `{}` lets devices subscribe, which only a relay broker allows: set \
-                 spec.mode: relay (ADR-N-048 §2.10)",
-                role.name
-            ),
-            Some(mode) => format!(
-                "role `{}` lets devices subscribe, and in {} mode devices get no subscribe \
-                 right; use spec.mode: relay",
-                role.name,
-                mode.word()
-            ),
-        };
-        return Err(invalid("roles[].subscribe", reason));
-    }
-    for filter in &role.subscribe {
-        check("roles[].subscribe", filter)?;
-        if !under_client_id(filter) {
-            return Err(invalid(
-                "roles[].subscribe",
-                format!(
-                    "`{filter}` reaches beyond the client's own topics: a device subscribes only \
-                     under {CLIENT_ID}, with no wildcard before it"
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// What two roles of one broker grant twice: a filter both list, or one role's filter that
