@@ -300,6 +300,7 @@ mod tests {
             port: None,
             mode: None,
             capture: None,
+            allowed_sources: Vec::new(),
         }
     }
 

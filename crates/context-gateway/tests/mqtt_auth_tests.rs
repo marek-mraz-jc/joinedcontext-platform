@@ -68,10 +68,16 @@ fn repository(test: &str) -> PathBuf {
         ("cameras", "[cam-north, cam-soon, cam-gone]"),
         ("meters", "[cam-idle]"),
     ] {
+        // The meters broker admits devices from 203.0.113.0/24 alone (PF-129).
+        let sources = if name == "meters" {
+            "  allowedSources: [203.0.113.0/24, \"2001:db8::/48\"]\n"
+        } else {
+            ""
+        };
         write(
             &dir,
             &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
-            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: relay\n  roles:\n    - name: camera\n      serviceAccounts: {accounts}\n      publish: [\"cameras/${{clientid}}/#\"]\n      subscribe: [\"commands/${{clientid}}/+\"]\n"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n{sources}  mode: relay\n  roles:\n    - name: camera\n      serviceAccounts: {accounts}\n      publish: [\"cameras/${{clientid}}/#\"]\n      subscribe: [\"commands/${{clientid}}/+\"]\n"),
         );
     }
     for (name, mode) in [("probe", "capture"), ("plain", "ingest")] {
@@ -804,4 +810,36 @@ async fn a_refusal_is_kept_without_its_token_and_read_by_the_portal_alone() {
         let answer = read(other).await.expect("answers");
         assert_eq!(answer.status(), StatusCode::FORBIDDEN, "{other:?}");
     }
+}
+
+/// PF-129: on a broker with allowedSources a device's token admits it only from an address
+/// inside a listed network, as the PROXY header carried it; outside, or unreadable, it is refused
+/// and recorded as `source_address` before the token is read.
+#[test]
+fn a_device_outside_the_brokers_allowed_sources_is_refused() {
+    let f = Fixture::new("sources");
+    let at = |ipaddr: &str| {
+        let token = f.token("ovzdusie-cam-idle", "mqtt-ovzdusie-meters", 300);
+        let mut connect = device("ovzdusie-cam-idle", token);
+        connect.ipaddr = ipaddr.to_owned();
+        f.decide_why(Some(METERS), &connect)
+    };
+    for inside in ["203.0.113.7", "::ffff:203.0.113.200", "2001:db8::9"] {
+        let (answer, why) = at(inside);
+        assert_eq!(answer["result"], "allow", "{inside}: {answer}");
+        assert_eq!(why, None);
+    }
+    for outside in ["198.51.100.7", "2001:db9::1", "", "not-an-address"] {
+        let (answer, why) = at(outside);
+        assert_eq!(answer["result"], "deny", "{outside}: {answer}");
+        assert_eq!(why, Some("source_address"), "{outside}");
+    }
+    let mut forged = device("ovzdusie-cam-idle", "not-a-token".to_owned());
+    forged.ipaddr = "203.0.113.7".to_owned();
+    assert_eq!(f.decide_why(Some(METERS), &forged).1, Some("invalid_token"));
+    // A broker without the list keeps admitting any address.
+    let token = f.token("ovzdusie-cam-north", "mqtt-ovzdusie-cameras", 300);
+    let mut anywhere = device("ovzdusie-cam-north", token);
+    anywhere.ipaddr = "198.51.100.7".to_owned();
+    assert_eq!(f.decide(Some(CAMERAS), &anywhere)["result"], "allow");
 }

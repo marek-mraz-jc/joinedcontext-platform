@@ -1440,6 +1440,38 @@ fn an_unknown_account_a_taken_port_and_a_missing_broker_are_named() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// PF-129: a broker's allowedSources of CIDR networks validate; one entry with host bits set
+/// refuses the manifest with the field named.
+#[test]
+fn allowed_sources_validate_and_a_bad_range_is_named() {
+    let dir = valid_repo("mqtt-broker-sources");
+    camera_account(&dir, "cam-north");
+    mqtt_broker(
+        &dir,
+        "cameras",
+        "cam-north",
+        "  allowedSources: [203.0.113.0/24, \"2001:db8::/48\"]\n",
+    );
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    mqtt_broker(
+        &dir,
+        "cameras",
+        "cam-north",
+        "  allowedSources: [203.0.113.1/24]\n",
+    );
+    let report = validate::run(&dir);
+    let found = with_mqtt(&report);
+    assert!(
+        found
+            .iter()
+            .any(|m| m.contains("spec.allowedSources") && m.contains("host bits set")),
+        "{:?}",
+        report.findings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// T-4177, MF-52: a connector reaches another project's Endpoint as `{project}/{endpoint}` when
 /// the project declares it `audience: public`; an unknown one, or one that is not public, is
 /// named with the field to change.

@@ -18,7 +18,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use jc_core::kinds::mqtt_broker::{
-    release_name, runner_username, MqttMode, MqttRole, RUNNER_USERNAME,
+    release_name, runner_username, MqttMode, MqttRole, SourceRange, RUNNER_USERNAME,
 };
 use jc_core::kinds::{DataSourceSpec, MqttBrokerSpec};
 use jc_manifest::loader::Repository;
@@ -44,6 +44,9 @@ pub struct Broker {
     /// The topic filters of the DataSources of its project that name it, which the runner may
     /// subscribe to (PL-76).
     pub runner_topics: Vec<String>,
+    /// The manifest's `allowedSources`: the networks a device may connect from, empty for any
+    /// (PF-129). The runner and the capture read on the internal listener and are not judged.
+    pub sources: Vec<SourceRange>,
     /// The manifest's `limits.messagesPerSecond`: what one client may publish per second
     /// before [`Rates`] refuses it and the broker disconnects it (T-5562).
     pub messages_per_second: u32,
@@ -88,9 +91,13 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
         let project = id.namespace.clone().unwrap_or_default();
         let spec = serde_json::from_value::<MqttBrokerSpec>(resource.manifest.spec.clone())
             .map_err(|error| error.to_string())
-            .and_then(|spec| spec.validate().map(|()| spec).map_err(|e| e.to_string()));
+            .and_then(|spec| spec.validate().map(|()| spec).map_err(|e| e.to_string()))
+            .and_then(|spec| {
+                let sources = spec.source_ranges().map_err(|e| e.to_string())?;
+                Ok((spec, sources))
+            });
         match spec {
-            Ok(spec) => {
+            Ok((spec, sources)) => {
                 brokers.insert(
                     release_name(&project, &id.name),
                     Broker {
@@ -102,6 +109,7 @@ pub fn brokers_of(repo: &Repository) -> Brokers {
                         },
                         roles: spec.roles,
                         runner_topics: Vec::new(),
+                        sources,
                         messages_per_second: spec.limits.messages_per_second,
                     },
                 );
@@ -345,6 +353,12 @@ pub fn decide(
     if connect.password.is_empty() {
         return tokenless(broker, pods, connect);
     }
+    if !admits_source(&broker.sources, &connect.ipaddr) {
+        return refuse(
+            "the client's address is outside the broker's allowedSources",
+            Reason::SourceAddress,
+        );
+    }
     let Some(verifier) = verifier else {
         return refuse("no realm configured", Reason::NoRealm);
     };
@@ -378,6 +392,16 @@ pub fn decide(
         Some(account) => device(broker, account, claims.exp, now),
         None => refuse("the client is no ServiceAccount", Reason::UnknownAccount),
     }
+}
+
+/// Whether a device at `ipaddr`, the address Traefik's PROXY header carried, may connect: any
+/// address when `sources` is empty, else only one inside a listed network; an address that does
+/// not parse is refused (PF-129).
+fn admits_source(sources: &[SourceRange], ipaddr: &str) -> bool {
+    sources.is_empty()
+        || ipaddr
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| sources.iter().any(|range| range.contains(ip)))
 }
 
 /// Why `account` is no device of `broker` at `now`: another project's, or every credential ended.
@@ -756,6 +780,7 @@ mod tests {
                 project: "p".into(),
                 roles: Vec::new(),
                 runner_topics: Vec::new(),
+                sources: Vec::new(),
                 capture_topics: Vec::new(),
                 messages_per_second: 10,
             },

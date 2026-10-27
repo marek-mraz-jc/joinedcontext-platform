@@ -84,6 +84,13 @@
       "additionalProperties": false,
       "description": "One MQTT edge broker (MF-54).",
       "properties": {
+        "allowedSources": {
+          "description": "The networks devices may connect from, in CIDR notation, at most 32; empty admits any address (PF-129). The edge and the gateway both hold a device to it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "capture": {
           "anyOf": [
             {

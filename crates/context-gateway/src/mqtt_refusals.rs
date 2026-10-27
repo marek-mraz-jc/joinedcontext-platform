@@ -49,6 +49,8 @@ pub enum Reason {
     NoRole,
     /// The runner or the capture has nothing to subscribe to on this broker.
     NoSubscription,
+    /// The device's address lies outside the broker's `allowedSources` (PF-129).
+    SourceAddress,
 }
 
 impl Reason {
@@ -65,6 +67,7 @@ impl Reason {
             Self::OtherProject => "other_project",
             Self::NoRole => "no_role",
             Self::NoSubscription => "no_subscription",
+            Self::SourceAddress => "source_address",
         }
     }
 }
@@ -190,6 +193,7 @@ mod tests {
                 shared_topics: false,
             }],
             runner_topics: Vec::new(),
+            sources: Vec::new(),
             capture_topics: Vec::new(),
             messages_per_second: 10,
         }

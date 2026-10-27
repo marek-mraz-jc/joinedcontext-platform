@@ -11,6 +11,7 @@ use crate::names;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::ops::RangeInclusive;
 
 /// The placeholder RMQTT replaces with the verified client id (the token's `azp`).
@@ -51,6 +52,70 @@ pub fn internal_url(project: &str, name: &str) -> String {
     )
 }
 
+/// The most networks `spec.allowedSources` may list (PF-129).
+pub const MAX_ALLOWED_SOURCES: usize = 32;
+
+/// One network of `spec.allowedSources`: an address with every host bit zero and its prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceRange {
+    /// The network address.
+    pub network: IpAddr,
+    /// The prefix length, at most 32 for IPv4 and 128 for IPv6.
+    pub prefix: u8,
+}
+
+impl SourceRange {
+    /// Reads `203.0.113.0/24` or `2001:db8::/48`; refuses a hostname, a missing or too long
+    /// prefix, host bits set and a network of every address.
+    pub fn parse(text: &str) -> std::result::Result<Self, String> {
+        let (address, prefix) = text.split_once('/').ok_or_else(|| {
+            format!("`{text}` is no CIDR range: write an address and a prefix, e.g. 203.0.113.0/24")
+        })?;
+        let network: IpAddr = address
+            .parse()
+            .map_err(|_| format!("`{text}` names no IP address (a hostname is not accepted)"))?;
+        let bits: u8 = if network.is_ipv4() { 32 } else { 128 };
+        let prefix: u8 = prefix
+            .parse()
+            .ok()
+            .filter(|p| *p <= bits)
+            .ok_or_else(|| format!("`{text}` has no prefix from 0 to {bits}"))?;
+        if prefix == 0 {
+            return Err(format!(
+                "`{text}` is every address: leave allowedSources out instead"
+            ));
+        }
+        let masked = mask(network, prefix);
+        if masked != network {
+            return Err(format!(
+                "`{text}` has host bits set: the network is {masked}/{prefix}"
+            ));
+        }
+        Ok(Self { network, prefix })
+    }
+
+    /// Whether `address` lies in the network; an IPv4-mapped IPv6 address counts as IPv4.
+    pub fn contains(&self, address: IpAddr) -> bool {
+        let address = address.to_canonical();
+        address.is_ipv4() == self.network.is_ipv4() && mask(address, self.prefix) == self.network
+    }
+}
+
+/// `address` with every bit past `prefix` cleared; `prefix` is at most the address's width.
+fn mask(address: IpAddr, prefix: u8) -> IpAddr {
+    let prefix = u32::from(prefix);
+    match address {
+        IpAddr::V4(ip) => {
+            let keep = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
+            IpAddr::V4((u32::from(ip) & keep).into())
+        }
+        IpAddr::V6(ip) => {
+            let keep = u128::MAX.checked_shl(128 - prefix).unwrap_or(0);
+            IpAddr::V6((u128::from(ip) & keep).into())
+        }
+    }
+}
+
 /// The longest topic filter, in bytes; a filter is a pattern, not a payload.
 const MAX_FILTER_BYTES: usize = 256;
 
@@ -72,6 +137,10 @@ pub struct MqttBrokerSpec {
     /// How much a `capture` broker keeps; read only in that mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<MqttCapture>,
+    /// The networks devices may connect from, in CIDR notation, at most 32; empty admits any
+    /// address (PF-129). The edge and the gateway both hold a device to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_sources: Vec<String>,
 }
 
 /// What a broker does with a message (ADR-N-048 §2.10).
@@ -286,6 +355,7 @@ impl MqttBrokerSpec {
         if let Some(capture) = &self.capture {
             self.check_capture(capture)?;
         }
+        self.source_ranges()?;
         if let Some(port) = self.port {
             if !DEDICATED_PORTS.contains(&port) {
                 return Err(invalid(
@@ -360,6 +430,40 @@ impl MqttBrokerSpec {
             ));
         }
         Ok(())
+    }
+
+    /// `spec.allowedSources` read, each entry a [`SourceRange`]; any unreadable entry, a repeat
+    /// or more than [`MAX_ALLOWED_SOURCES`] refuses the whole list (PF-129).
+    pub fn source_ranges(&self) -> Result<Vec<SourceRange>> {
+        if self.allowed_sources.len() > MAX_ALLOWED_SOURCES {
+            return Err(invalid(
+                "allowedSources",
+                format!(
+                    "{} networks are more than {MAX_ALLOWED_SOURCES}: merge neighbouring ranges",
+                    self.allowed_sources.len()
+                ),
+            ));
+        }
+        let mut ranges = Vec::with_capacity(self.allowed_sources.len());
+        for text in &self.allowed_sources {
+            let range = SourceRange::parse(text).map_err(|why| invalid("allowedSources", why))?;
+            if ranges.contains(&range) {
+                return Err(invalid(
+                    "allowedSources",
+                    format!("`{text}` is listed twice"),
+                ));
+            }
+            ranges.push(range);
+        }
+        Ok(ranges)
+    }
+
+    /// Whether a device at `address` may connect: any address when the list is empty.
+    pub fn admits_source(&self, address: IpAddr) -> bool {
+        match self.source_ranges() {
+            Ok(ranges) => ranges.is_empty() || ranges.iter().any(|r| r.contains(address)),
+            Err(_) => false,
+        }
     }
 
     /// The mode in force: `ingest` when the manifest names none.
@@ -449,6 +553,7 @@ mod tests {
             port: None,
             mode: Some(MqttMode::Relay),
             capture: None,
+            allowed_sources: Vec::new(),
         }
     }
 
@@ -671,5 +776,58 @@ mod tests {
         }))
         .expect("reads");
         assert_eq!(read.capture.and_then(|c| c.window_seconds()), Some(3600));
+    }
+
+    fn sources(list: &[&str]) -> MqttBrokerSpec {
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
+        broker.allowed_sources = list.iter().map(|s| (*s).to_owned()).collect();
+        broker
+    }
+
+    #[test]
+    fn allowed_sources_take_v4_and_v6_networks_and_admit_only_inside() {
+        let broker = sources(&["203.0.113.0/24", "2001:db8::/48", "198.51.100.7/32"]);
+        assert_eq!(broker.validate().map_err(|e| e.to_string()), Ok(()));
+        let admits = |ip: &str| broker.admits_source(ip.parse().expect("an address"));
+        assert!(admits("203.0.113.200"));
+        assert!(admits("::ffff:203.0.113.9"));
+        assert!(admits("2001:db8:0:ffff::1"));
+        assert!(admits("198.51.100.7"));
+        assert!(!admits("198.51.100.8"));
+        assert!(!admits("203.0.114.1"));
+        assert!(!admits("2001:db9::1"));
+        assert!(sources(&[]).admits_source("192.0.2.1".parse().expect("an address")));
+    }
+
+    #[test]
+    fn a_bad_source_list_is_refused_whole_with_the_field_named() {
+        for (list, why) in [
+            (
+                vec!["203.0.113.1/24"],
+                "host bits set: the network is 203.0.113.0/24",
+            ),
+            (vec!["2001:db8::1/48"], "host bits set"),
+            (
+                vec!["sensors.city.example/24"],
+                "a hostname is not accepted",
+            ),
+            (vec!["203.0.113.0"], "no CIDR range"),
+            (vec!["203.0.113.0/33"], "no prefix from 0 to 32"),
+            (vec!["0.0.0.0/0"], "every address"),
+            (vec!["::/0"], "every address"),
+            (vec!["203.0.113.0/24", "203.0.113.0/24"], "listed twice"),
+        ] {
+            let refused = refusal(&sources(&list));
+            assert!(refused.contains("spec.allowedSources"), "{refused}");
+            assert!(refused.contains(why), "{list:?}: {refused}");
+            assert!(!sources(&list).admits_source("203.0.113.5".parse().expect("an address")));
+        }
+        let many: Vec<String> = (0..33).map(|i| format!("10.0.{i}.0/24")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(refusal(&sources(&many)).contains("more than 32"));
+        assert_eq!(
+            sources(&many[..32]).validate().map_err(|e| e.to_string()),
+            Ok(())
+        );
     }
 }
