@@ -107,11 +107,22 @@ fn licence_duties(endpoint: &Endpoint) -> Vec<Value> {
 /// A DID and a URL are IRIs; a role name like `public` is not, and inventing an IRI scheme for
 /// it here would put a term in the graph that nothing else in the platform uses.
 fn party_term(id: &str) -> String {
-    let iri = id.contains(':') && !id.contains(char::is_whitespace) && !id.contains('"');
-    match iri {
-        true => format!("<{id}>"),
-        false => literal(id),
-    }
+    iri_ref(id).unwrap_or_else(|| literal(id))
+}
+
+/// `<text>` when `text` is an absolute IRI Turtle can write between angle brackets: a scheme and
+/// none of the characters the IRIREF production excludes (Turtle 1.1 section 6.5), so no value
+/// closes the bracket and goes on as Turtle of its own (F-SEC1-020).
+fn iri_ref(text: &str) -> Option<String> {
+    let excluded =
+        |c: char| c <= ' ' || matches!(c, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`' | '\\');
+    (text.contains(':') && !text.contains(excluded)).then(|| format!("<{text}>"))
+}
+
+/// Whether `name` can follow a prefix as it is: letters, digits, `_` and `-`.
+fn local_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// One permission or prohibition as a Turtle blank node.
@@ -140,10 +151,10 @@ fn rule_node(rule: &Value) -> String {
         .flatten()
     {
         if let Some(action) = duty.get("action").and_then(Value::as_str) {
-            let action = if action.contains("://") {
-                format!("<{action}>")
-            } else {
-                format!("odrl:{action}")
+            let action = match iri_ref(action) {
+                Some(iri) if action.contains("://") => iri,
+                _ if local_name(action) => format!("odrl:{action}"),
+                _ => literal(action),
             };
             parts.push(format!("odrl:duty [ odrl:action {action} ]"));
         }
@@ -187,10 +198,12 @@ fn constraint_node(item: &Value) -> String {
     let operator = item
         .get("operator")
         .and_then(Value::as_str)
-        .map(|operator| match operator.contains(':') {
-            true => term_or_literal(operator),
-            false => format!("odrl:{operator}"),
-        })
+        .map(
+            |operator| match local_name(operator) && !operator.is_empty() {
+                true => format!("odrl:{operator}"),
+                false => term_or_literal(operator),
+            },
+        )
         .unwrap_or_default();
     let right = item
         .get("rightOperand")
@@ -211,7 +224,7 @@ fn right_node(value: &Value) -> String {
                 parts.push(format!("a {}", term_or_literal(kind)));
             }
             for (key, member) in object {
-                if key == "@type" {
+                if key == "@type" || !local_name(key) {
                     continue;
                 }
                 parts.push(format!("geojson:{key} {}", right_node(member)));
@@ -227,7 +240,9 @@ fn right_node(value: &Value) -> String {
 /// A prefixed name when the value carries a known prefix, a literal otherwise.
 fn term_or_literal(value: &str) -> String {
     match value.split_once(':') {
-        Some((prefix, local)) if matches!(prefix, "ngsi-ld" | "odrl" | "geojson") => {
+        Some((prefix, local))
+            if matches!(prefix, "ngsi-ld" | "odrl" | "geojson") && local_name(local) =>
+        {
             format!("{prefix}:{local}")
         }
         _ => literal(value),
@@ -250,4 +265,85 @@ fn literal(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A document whose every value tries to close the Turtle term it is written into.
+    fn hostile() -> Value {
+        json!({
+            "uid": "https://gw.example/api/endpoint/air/access#sha256:00",
+            "assignee": "did:web:a.example> odrl:assigner <did:web:b.example",
+            "permission": [{
+                "action": ["ngsi-ld:read ; odrl:x ngsi-ld:y"],
+                "assigner": "urn:x:a\u{1}b",
+                "duty": [
+                    {"action": "https://a.example/x> ; odrl:y <z"},
+                    {"action": "attribute ] ; odrl:z [ odrl:action odrl:w"},
+                ],
+                "constraint": [{
+                    "leftOperand": "ngsi-ld:q",
+                    "operator": "eq ; odrl:extra odrl:eq",
+                    "rightOperand": {"@type": "geojson:Point", "x ; odrl:y": 1, "coordinates": [1, 2]},
+                }],
+            }],
+        })
+    }
+
+    #[test]
+    fn an_identifier_closing_its_iri_is_written_as_a_literal() {
+        let out = turtle(&hostile());
+        assert!(
+            out.contains(r#"odrl:assignee "did:web:a.example> odrl:assigner <did:web:b.example""#),
+            "{out}"
+        );
+        assert!(!out.contains("<did:web:a.example>"), "{out}");
+        assert!(
+            out.contains(r#"odrl:action "https://a.example/x> ; odrl:y <z""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn operators_terms_and_keys_are_names_or_literals() {
+        let out = turtle(&hostile());
+        assert!(
+            out.contains(r#"odrl:operator "eq ; odrl:extra odrl:eq""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"odrl:action "ngsi-ld:read ; odrl:x ngsi-ld:y""#),
+            "{out}"
+        );
+        assert!(
+            out.contains(r#"odrl:action "attribute ] ; odrl:z [ odrl:action odrl:w""#),
+            "{out}"
+        );
+        assert!(!out.contains("geojson:x"), "{out}");
+        assert!(out.contains("odrl:assigner \"urn:x:a\u{1}b\""), "{out}");
+    }
+
+    #[test]
+    fn plain_names_and_iris_keep_their_terms() {
+        let out = turtle(&json!({
+            "uid": "https://gw.example/a",
+            "assignee": "did:web:a.example",
+            "permission": [{
+                "action": ["ngsi-ld:retrieveEntity"],
+                "duty": [{"action": "attribute"}, {"action": "https://a.example/share-alike"}],
+                "constraint": [{"leftOperand": "ngsi-ld:q", "operator": "eq", "rightOperand": "x"}],
+            }],
+        }));
+        for term in [
+            "odrl:assignee <did:web:a.example>",
+            "odrl:action ngsi-ld:retrieveEntity",
+            "odrl:duty [ odrl:action odrl:attribute ]",
+            "odrl:duty [ odrl:action <https://a.example/share-alike> ]",
+            "odrl:operator odrl:eq",
+        ] {
+            assert!(out.contains(term), "{term} in {out}");
+        }
+    }
 }
