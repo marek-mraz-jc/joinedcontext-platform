@@ -24,9 +24,10 @@ use serde_json::{json, Value};
 use std::process::Command;
 use tower::ServiceExt;
 
-/// Antares dev dfe4502 by image-jc.yml run 38152236779: the first -jc build whose engine reads a
-/// rule document's per-view bindings (T-3702).
-const IMAGE: &str = "ghcr.io/marek-mraz-jc/antares-broker-jc:dfe4502@sha256:54e81850572cd4200a79c94f7a3f9105f06255afa8495f65c4cfa458a0afbfd1";
+/// Antares dev 0e5bc9a (dev-87), the image dev runs (deployment components/context-broker/images.yaml):
+/// its engine percent-decodes `x-jc-client` (T-3880), so a project's `{project}/{name}` account
+/// (PL-92, T-5860) matches the assignee as the Portal writes it.
+const IMAGE: &str = "ghcr.io/marek-mraz-jc/antares-broker-jc:dev-87@sha256:49ff8ef628cacc3212ebcdb4221a9bf6673a8185b8a1f0817c75903fb9dc64fe";
 const SPACE: &str = "ovzdusie";
 const ORG: &str = "banskabystrica.sk";
 const PUBLIC_SLUG: &str = "k4y7pq2mzt6vhx3nbwrs5cjd8f";
@@ -1021,7 +1022,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
             json!({
                 "policies": [rule(
                     "writer",
-                    json!({"kind": "serviceAccount", "id": "writer"}),
+                    json!({"kind": "serviceAccount", "id": format!("{SPACE}/writer")}),
                     &["5.6.1", "5.7.1", "5.7.2", "5.6.6"],
                     Some(json!([{
                         "entities": [{"type": "AirQualityObserved"}],
