@@ -223,7 +223,7 @@
     },
     "MqttRole": {
       "additionalProperties": false,
-      "description": "A role: the ServiceAccounts that hold it and the topic filters it grants.",
+      "description": "A role: the topic filters it grants. Who holds it is a ServiceAccount RoleBinding `mqtt/<broker>/<role>` (ADR-N-048 §2.13, [`crate::mqtt::roles_held`]).",
       "properties": {
         "name": {
           "description": "A DNS label, unique among the broker's roles.",
@@ -236,8 +236,15 @@
           },
           "type": "array"
         },
+        "reason": {
+          "description": "Why the role's devices share their topics; required with `sharedTopics`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "serviceAccounts": {
-          "description": "ServiceAccounts of the broker's own project, by name.",
+          "description": "Deprecated (T-5872): ServiceAccounts of the broker's own project, by name. Still read for one release beside the bindings; `jcctl migrate` moves them to `mqtt/<broker>/<role>` bindings on each account.",
           "items": {
             "type": "string"
           },
@@ -256,8 +263,7 @@
         }
       },
       "required": [
-        "name",
-        "serviceAccounts"
+        "name"
       ],
       "type": "object"
     },

@@ -442,8 +442,17 @@ fn check(repo_dir: &Path, repo: Repository, organization: bool) -> Report {
         });
     }
 
-    for (location, message) in mqtt_brokers(&repo) {
+    let (mqtt_found, mqtt_warned) = mqtt_brokers(&repo);
+    for (location, message) in mqtt_found {
         report.findings.push(Finding {
+            path: location.0,
+            document: location.1,
+            line: location.2,
+            message,
+        });
+    }
+    for (location, message) in mqtt_warned {
+        report.warnings.push(Finding {
             path: location.0,
             document: location.1,
             line: location.2,
@@ -1761,8 +1770,11 @@ fn deployment_reach(
 /// The MQTT edge brokers checked against the repository (MF-54, PL-76): every role names
 /// ServiceAccounts its project declares, no two brokers hold one dedicated port (the finding
 /// names the holder), and a DataSource's `brokerRef` names a broker of its own project.
-fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
-    use jc_core::kinds::MqttBrokerSpec;
+/// Findings and warnings, each at its manifest.
+type Found = Vec<(Location, String)>;
+
+fn mqtt_brokers(repo: &Repository) -> (Found, Found) {
+    use jc_core::kinds::{MqttBrokerSpec, ServiceAccountSpec};
     use std::collections::{BTreeMap, BTreeSet};
 
     let accounts: BTreeSet<(Option<String>, String)> = repo
@@ -1770,13 +1782,21 @@ fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
         .filter(|(id, _)| id.kind == "ServiceAccount")
         .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
         .collect();
-    let brokers: BTreeSet<(Option<String>, String)> = repo
+    // Each broker of each project with the roles it declares, for the bindings that name them.
+    let declared: BTreeMap<(Option<String>, String), BTreeSet<String>> = repo
         .iter()
         .filter(|(id, _)| id.kind == "MqttBroker")
-        .map(|(id, _)| (id.namespace.clone(), id.name.clone()))
+        .map(|(id, resource)| {
+            let roles = serde_json::from_value::<MqttBrokerSpec>(resource.manifest.spec.clone())
+                .map(|spec| spec.roles.into_iter().map(|role| role.name).collect())
+                .unwrap_or_default();
+            ((id.namespace.clone(), id.name.clone()), roles)
+        })
         .collect();
+    let brokers: BTreeSet<&(Option<String>, String)> = declared.keys().collect();
     let mut ports: BTreeMap<u16, String> = BTreeMap::new();
     let mut found = Vec::new();
+    let mut warned = Vec::new();
     for (id, resource) in repo.iter() {
         let at = (resource.path.clone(), resource.document, resource.line);
         match id.kind.as_str() {
@@ -1787,7 +1807,16 @@ fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
                 else {
                     continue;
                 };
+                for overlap in jc_core::mqtt::topics::overlaps(&broker.roles) {
+                    warned.push((at.clone(), format!("{id}: {overlap} (MF-54)")));
+                }
                 for role in &broker.roles {
+                    if !role.service_accounts.is_empty() {
+                        warned.push((at.clone(), format!(
+                            "{id}: role `{}` lists serviceAccounts, which is deprecated: `jcctl migrate mqtt-roles` moves them to `mqtt/{}/{}` bindings on each account (ADR-N-048 §2.13)",
+                            role.name, id.name, role.name
+                        )));
+                    }
                     for account in &role.service_accounts {
                         if !accounts.contains(&(id.namespace.clone(), account.clone())) {
                             found.push((at.clone(), format!(
@@ -1805,6 +1834,30 @@ fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
                         None => {
                             ports.insert(port, id.to_string());
                         }
+                    }
+                }
+            }
+            "ServiceAccount" => {
+                let Ok(account) =
+                    serde_json::from_value::<ServiceAccountSpec>(resource.manifest.spec.clone())
+                else {
+                    continue;
+                };
+                for binding in &account.roles {
+                    let Some(Ok(grant)) = jc_core::mqtt::Grant::parse(&binding.role) else {
+                        continue;
+                    };
+                    let holds = |(project, broker): &(Option<String>, String),
+                                 roles: &BTreeSet<String>| {
+                        *project == id.namespace
+                            && grant.broker.is_none_or(|name| name == broker)
+                            && roles.contains(grant.role)
+                    };
+                    if !declared.iter().any(|(key, roles)| holds(key, roles)) {
+                        found.push((at.clone(), format!(
+                            "{id}: spec.roles `{}` names a role no MqttBroker of this project declares (ADR-N-048 §2.13)",
+                            binding.role
+                        )));
                     }
                 }
             }
@@ -1826,7 +1879,7 @@ fn mqtt_brokers(repo: &Repository) -> Vec<(Location, String)> {
             _ => {}
         }
     }
-    found
+    (found, warned)
 }
 
 /// The federation topology the registrations declare, checked as a whole (CC-13). Per project:

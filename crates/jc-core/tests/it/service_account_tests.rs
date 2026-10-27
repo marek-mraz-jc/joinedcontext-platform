@@ -404,3 +404,43 @@ fn a_grant_with_a_validity_window_is_in_force_only_inside_it() {
     );
     assert!(refusal(&backwards).contains("notAfter must be after notBefore"));
 }
+
+/// T-5872, ADR-N-048 §2.13: a device fleet holds a broker role by a binding on its own account.
+fn fleet(binding: &str) -> String {
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: air-fleet
+  namespace: helsinki
+spec:
+  owner: {{ user: \"jana.k@bb\" }}
+  purpose: \"Air sensors north publish to the air broker\"
+  roles:
+    - {binding}
+  credentials:
+    - {{ kind: oauth-client, name: main }}
+"
+    )
+}
+
+#[test]
+fn an_mqtt_grant_names_a_broker_role_of_the_accounts_own_project() {
+    for ok in [
+        "{ role: mqtt/air/air-sensor, scope: { project: helsinki } }",
+        "{ role: mqtt/*/air-sensor, scope: { project: helsinki }, validity: { notAfter: \"2027-03-31T23:59:59Z\" } }",
+    ] {
+        let account = ServiceAccount::from_yaml(&fleet(ok)).expect("parses");
+        account.validate().expect(ok);
+    }
+    for (bad, field) in [
+        ("{ role: mqtt/air, scope: { project: helsinki } }", "spec.roles.role"),
+        ("{ role: mqtt/Air/x, scope: { project: helsinki } }", "spec.roles.role"),
+        ("{ role: mqtt/air/air-sensor, scope: { project: kosice } }", "spec.roles.scope.project"),
+        ("{ role: mqtt/air/air-sensor, scope: { contextSpace: air } }", "spec.roles.scope"),
+        ("{ role: mqtt/air/air-sensor, scope: { project: helsinki }, types: [AirQualityObserved] }", "spec.roles"),
+    ] {
+        let why = refusal(&fleet(bad));
+        assert!(why.contains(field), "{bad}: {why}");
+    }
+}

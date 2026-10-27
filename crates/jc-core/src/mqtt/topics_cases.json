@@ -1,0 +1,238 @@
+[
+  {
+    "case": "a publish under its own id",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/${clientid}/pm10"
+          ]
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "case": "bare #",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "#"
+          ],
+          "sharedTopics": true,
+          "reason": "fleet"
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "+/# at the root",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "+/#"
+          ],
+          "sharedTopics": true,
+          "reason": "fleet"
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "a $ system topic",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "$SYS/x"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "nine levels",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "a/b/c/d/e/f/g/h/${clientid}"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "129 bytes",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/${clientid}/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "an empty level",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air//${clientid}"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "a NUL",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/${clientid}/a\u0000b"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "publish without ${clientid}",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/+/pm10"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].publish"
+  },
+  {
+    "case": "sharedTopics without a reason",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/+/pm10"
+          ],
+          "sharedTopics": true
+        }
+      ]
+    },
+    "refused": "spec.roles[].reason"
+  },
+  {
+    "case": "sharedTopics with a reason",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/+/pm10"
+          ],
+          "sharedTopics": true,
+          "reason": "the gateway forwards for every sensor"
+        }
+      ]
+    },
+    "refused": null
+  },
+  {
+    "case": "subscribe on an ingest broker",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "publish": [
+            "air/${clientid}/pm10"
+          ],
+          "subscribe": [
+            "cmd/${clientid}"
+          ]
+        }
+      ]
+    },
+    "refused": "spec.roles[].subscribe"
+  },
+  {
+    "case": "subscribe under its own id on a relay",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "subscribe": [
+            "cmd/${clientid}/#"
+          ]
+        }
+      ],
+      "mode": "relay"
+    },
+    "refused": null
+  },
+  {
+    "case": "subscribe beyond its own id on a relay",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "subscribe": [
+            "cmd/+"
+          ]
+        }
+      ],
+      "mode": "relay"
+    },
+    "refused": "spec.roles[].subscribe"
+  },
+  {
+    "case": "a role granting no topic",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor"
+        }
+      ]
+    },
+    "refused": "spec.roles[]"
+  },
+  {
+    "case": "the deprecated serviceAccounts list still reads",
+    "spec": {
+      "roles": [
+        {
+          "name": "air-sensor",
+          "serviceAccounts": [
+            "cam-north"
+          ],
+          "publish": [
+            "air/${clientid}/pm10"
+          ]
+        }
+      ]
+    },
+    "refused": null
+  }
+]

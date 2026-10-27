@@ -352,6 +352,18 @@ impl Kind for ServiceAccountSpec {
             });
         }
         if let Some(project) = meta.namespace.as_deref() {
+            let foreign = self.roles.iter().find(|b| {
+                crate::mqtt::Grant::parse(&b.role).is_some()
+                    && b.scope.project.as_deref() != Some(project)
+            });
+            if let Some(binding) = foreign {
+                return Err(Error::Name {
+                    field: "spec.roles.scope.project",
+                    value: binding.scope.project.clone().unwrap_or_default(),
+                    reason: "an MQTT grant reaches only brokers of the account's own project: \
+                             scope it to that project (ADR-N-048 §2.13)",
+                });
+            }
             let id = keycloak_client_id(project, &meta.name);
             if PLATFORM_CLIENTS.contains(&id.as_str()) {
                 return Err(Error::Name {
@@ -364,6 +376,27 @@ impl Kind for ServiceAccountSpec {
         }
         self.validate()
     }
+}
+
+/// An MQTT grant is scoped to a project and carries no entity types or operations: the broker's
+/// role says what it may do (ADR-N-048 §2.13).
+fn check_mqtt_binding(binding: &RoleBinding) -> Result<()> {
+    if binding.scope.project.is_none() {
+        return Err(Error::Name {
+            field: "spec.roles.scope",
+            value: binding.role.clone(),
+            reason: "an MQTT grant is scoped to `project`, the account's own",
+        });
+    }
+    if !binding.types.is_empty() || !binding.operations.is_empty() {
+        return Err(Error::Name {
+            field: "spec.roles",
+            value: binding.role.clone(),
+            reason: "an MQTT grant carries no `types` or `operations`: the broker's role lists \
+                     its topics",
+        });
+    }
+    Ok(())
 }
 
 /// The Keycloak client id of a service account: derived, never chosen (Architecture/12 §3).
@@ -424,7 +457,13 @@ impl ServiceAccountSpec {
         }
 
         for role_binding in &self.roles {
-            names::validate_dns1123_label(&role_binding.role)?;
+            match crate::mqtt::Grant::parse(&role_binding.role) {
+                Some(grant) => {
+                    grant?;
+                    check_mqtt_binding(role_binding)?;
+                }
+                None => names::validate_dns1123_label(&role_binding.role)?,
+            }
 
             role_binding.scope.validate("spec.roles.scope")?;
             if let Some(validity) = &role_binding.validity {

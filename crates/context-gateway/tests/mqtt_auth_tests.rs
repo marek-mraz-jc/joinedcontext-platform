@@ -84,7 +84,7 @@ fn repository(test: &str) -> PathBuf {
         write(
             &dir,
             &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
-            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: {mode}\n  roles:\n    - name: sensor\n      serviceAccounts: [cam-north]\n      sharedTopics: true\n      publish: [\"air/${{clientid}}/pm\", \"air/status\"]\n"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  mode: {mode}\n  roles:\n    - name: sensor\n      serviceAccounts: [cam-north]\n      sharedTopics: true\n      reason: \"a gateway forwards for every sensor\"\n      publish: [\"air/${{clientid}}/pm\", \"air/status\"]\n"),
         );
     }
     write(
@@ -842,4 +842,165 @@ fn a_device_outside_the_brokers_allowed_sources_is_refused() {
     let mut anywhere = device("ovzdusie-cam-north", token);
     anywhere.ipaddr = "198.51.100.7".to_owned();
     assert_eq!(f.decide(Some(CAMERAS), &anywhere)["result"], "allow");
+}
+
+const AIR: &str = "mqtt-ovzdusie-air.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+
+/// An account holding `roles` (YAML list items, each indented by four spaces).
+fn bound_account(dir: &Path, project: &str, name: &str, roles: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/access/serviceaccounts/{name}.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"air sensors\"\n  roles:\n{roles}  credentials:\n    - kind: oauth-client\n      name: default\n"),
+    );
+}
+
+/// The brokers `air` (role air-sensor) and `noise` (role camera) of `ovzdusie`, which list no
+/// account: every holder is a ServiceAccount binding (T-5872, ADR-N-048 §2.13).
+fn bound_fixture(test: &str) -> Fixture {
+    let dir = std::env::temp_dir().join(format!("gateway-mqtt-{test}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let until = |seconds: i64| {
+        format!(
+            "      validity:\n        notAfter: \"{}\"\n",
+            (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()
+        )
+    };
+    let grant = |role: &str, project: &str, validity: &str| {
+        format!("    - role: {role}\n      scope:\n        project: {project}\n{validity}")
+    };
+    bound_account(
+        &dir,
+        "ovzdusie",
+        "air-fleet",
+        &grant("mqtt/air/air-sensor", "ovzdusie", &until(100)),
+    );
+    bound_account(
+        &dir,
+        "ovzdusie",
+        "air-old",
+        &grant("mqtt/*/air-sensor", "ovzdusie", &until(-5)),
+    );
+    bound_account(
+        &dir,
+        "ovzdusie",
+        "noise-fleet",
+        &grant("mqtt/noise/air-sensor", "ovzdusie", ""),
+    );
+    bound_account(
+        &dir,
+        "espoo",
+        "air-fleet",
+        &grant("mqtt/air/air-sensor", "espoo", ""),
+    );
+    for (name, role) in [("air", "air-sensor"), ("noise", "camera")] {
+        write(
+            &dir,
+            &format!("projects/ovzdusie/mqttbrokers/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  roles:\n    - name: {role}\n      publish: [\"air/${{clientid}}/pm10\"]\n"),
+        );
+    }
+    write(
+        &dir,
+        "projects/espoo/mqttbrokers/air.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: air\n  namespace: espoo\nspec:\n  roles:\n    - name: air-sensor\n      publish: [\"air/${clientid}/pm10\"]\n",
+    );
+    let repo = jc_manifest::loader::Repository::load(&dir).expect("the repository loads");
+    Fixture {
+        realm: common::Realm::new(),
+        brokers: brokers_of(&repo),
+        accounts: accounts_of(&repo),
+        dir,
+    }
+}
+
+fn publish_on_air(f: &Fixture, clientid: &str) -> (bool, &'static str) {
+    publish_check(
+        &f.brokers,
+        &f.accounts,
+        Some(AIR),
+        &Access {
+            access: "2".into(),
+            clientid: clientid.into(),
+            username: clientid.into(),
+            topic: format!("air/{clientid}/pm10"),
+        },
+    )
+}
+
+/// T-5872: a fleet holds a broker role by a binding on its own ServiceAccount, until the
+/// binding's `notAfter`; the broker lists nobody. Another project's account with the same role
+/// name, an expired binding and a binding to a role the broker does not declare get nothing.
+#[test]
+fn a_service_account_binding_admits_a_fleet_until_its_validity_ends() {
+    let f = bound_fixture("bindings");
+    let token = f.token("ovzdusie-air-fleet", "mqtt-ovzdusie-air", 300);
+    let answer = f.decide(Some(AIR), &device("ovzdusie-air-fleet", token));
+    assert_eq!(answer["result"], "allow", "{answer}");
+    // The CONNECT ends with the binding (100 s), before the token (300 s).
+    let expire_at = answer["expire_at"].as_i64().expect("an expiry");
+    assert!(expire_at <= common::in_seconds(101), "{answer}");
+    assert!(expire_at > common::in_seconds(90), "{answer}");
+    assert_eq!(
+        publish_on_air(&f, "ovzdusie-air-fleet"),
+        (true, "a device's role")
+    );
+
+    for (azp, reason, published) in [
+        (
+            "ovzdusie-air-old",
+            "no_role",
+            "no role of the account covers the topic",
+        ),
+        (
+            "ovzdusie-noise-fleet",
+            "no_role",
+            "no role of the account covers the topic",
+        ),
+        (
+            "espoo-air-fleet",
+            "other_project",
+            "the account belongs to another project",
+        ),
+    ] {
+        let token = f.token(azp, "mqtt-ovzdusie-air", 300);
+        let (answer, why) = f.decide_why(Some(AIR), &device(azp, token));
+        assert_eq!(answer["result"], "deny", "{azp}: {answer}");
+        assert_eq!(why, Some(reason), "{azp}");
+        assert_eq!(publish_on_air(&f, azp), (false, published), "{azp}");
+    }
+}
+
+/// T-5872: the gateway serves a broker only when the one jc-core validator admits it, over the
+/// same table jc-core and the Portal run.
+#[test]
+fn the_gateway_serves_only_the_brokers_the_shared_validator_admits() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        case: String,
+        spec: Value,
+        refused: Option<String>,
+    }
+    let cases: Vec<Case> =
+        serde_json::from_str(jc_core::mqtt::topics::CASES).expect("the table is JSON");
+    for (i, case) in cases.iter().enumerate() {
+        let dir = std::env::temp_dir().join(format!("gateway-mqtt-table-{i}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let manifest = json!({
+            "apiVersion": "joinedcontext.com/v1alpha1",
+            "kind": "MqttBroker",
+            "metadata": {"name": "air", "namespace": "ovzdusie"},
+            "spec": case.spec,
+        });
+        write(
+            &dir,
+            "projects/ovzdusie/mqttbrokers/air.yaml",
+            &serde_json::to_string(&manifest).expect("json"),
+        );
+        let served = jc_manifest::loader::Repository::load(&dir)
+            .map(|repo| brokers_of(&repo).contains_key("mqtt-ovzdusie-air"))
+            .unwrap_or(false);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(served, case.refused.is_none(), "{}", case.case);
+    }
 }

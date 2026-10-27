@@ -2271,3 +2271,56 @@ fn a_write_policy_listed_in_policy_refs_passes() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// T-5872, ADR-N-048 §2.13: a binding names a broker role the project declares; one naming a
+/// broker or role nobody declares is a finding. The deprecated list and two roles granting one
+/// filter are warnings, never findings.
+#[test]
+fn an_mqtt_binding_names_a_declared_role_and_the_old_list_is_a_warning() {
+    let dir = valid_repo("mqtt-broker-bindings");
+    let fleet = |name: &str, role: &str| {
+        write(
+            &dir,
+            &format!("projects/ovzdusie/access/serviceaccounts/{name}.yaml"),
+            &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: {name}\n  namespace: ovzdusie\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"air sensors\"\n  roles:\n    - role: {role}\n      scope:\n        project: ovzdusie\n  credentials:\n    - kind: oauth-client\n      name: default\n"),
+        );
+    };
+    camera_account(&dir, "cam-north");
+    mqtt_broker(&dir, "cameras", "cam-north", "");
+    write(
+        &dir,
+        "projects/ovzdusie/mqttbrokers/air.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: MqttBroker\nmetadata:\n  name: air\n  namespace: ovzdusie\nspec:\n  roles:\n    - name: sensor\n      publish: [\"air/${clientid}/pm10\"]\n    - name: sensor-all\n      publish: [\"air/${clientid}/#\"]\n",
+    );
+    fleet("air-fleet", "mqtt/air/sensor");
+    fleet("any-fleet", "mqtt/*/camera");
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let warned: Vec<&str> = report.warnings.iter().map(|w| w.message.as_str()).collect();
+    assert!(
+        warned
+            .iter()
+            .any(|m| m.contains("deprecated") && m.contains("mqtt/cameras/camera")),
+        "{warned:?}"
+    );
+    assert!(
+        warned
+            .iter()
+            .any(|m| m
+                .contains("role `sensor-all` publish `air/${clientid}/#` covers role `sensor`")),
+        "{warned:?}"
+    );
+
+    fleet("lost-fleet", "mqtt/air/camera");
+    fleet("gone-fleet", "mqtt/nowhere/sensor");
+    let report = validate::run(&dir);
+    for name in ["lost-fleet", "gone-fleet"] {
+        assert!(
+            report.findings.iter().any(|f| f.message.contains(name)
+                && f.message.contains("no MqttBroker of this project declares")),
+            "{name}: {:?}",
+            report.findings
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -9,6 +9,7 @@ pub mod export;
 pub mod git_bundle;
 pub mod import;
 pub mod migrate;
+pub mod mqtt_roles;
 pub mod plan;
 pub mod policy;
 pub mod publish_ckan;

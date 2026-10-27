@@ -291,6 +291,7 @@ mod tests {
                 publish: vec!["cams/${clientid}/#".into()],
                 subscribe: Vec::new(),
                 shared_topics: false,
+                reason: None,
             }],
             limits: MqttLimits {
                 max_connections: connections,
