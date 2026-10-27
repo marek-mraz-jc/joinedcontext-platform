@@ -751,6 +751,33 @@ async fn a_batch_delete_refuses_the_kept_id_and_deletes_the_rest() {
     );
 }
 
+/// F-SEC1-016: a batch past the broker's ceiling is refused before a single id is planned.
+#[tokio::test]
+async fn a_batch_delete_of_more_ids_than_the_broker_takes_is_refused_unplanned() {
+    let ids: Vec<String> = (0..1_001).map(|n| urn("Desk", &format!("d{n}"))).collect();
+    let answer = send(
+        CLASSES,
+        &[],
+        Method::POST,
+        "/entityOperations/delete",
+        Some(json!(ids)),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    assert!(
+        answer.body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("at most 1000 ids")),
+        "{}",
+        answer.body
+    );
+    assert_eq!(
+        answer.store.lock().expect("the store").calls,
+        Vec::<String>::new()
+    );
+}
+
 #[tokio::test]
 async fn a_change_the_broker_refuses_stops_the_delete_with_the_entity_in_place() {
     // The lessons go first, l2 then l1; l1 is refused, so the teacher and the school are never
