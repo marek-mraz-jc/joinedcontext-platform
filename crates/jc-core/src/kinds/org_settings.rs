@@ -810,6 +810,27 @@ impl OrganizationSpec {
             }
         }
         self.limits.mqtt.validate("spec.limits.mqtt")?;
+        // Every project inherits spec.limits.mqtt: a hostname or a client CA there would be held
+        // by all of them, and a certificate of one project would log in to another's broker.
+        for (set, field) in [
+            (
+                !self.limits.mqtt.custom_hostnames.is_empty(),
+                "spec.limits.mqtt.customHostnames",
+            ),
+            (
+                self.limits.mqtt.client_ca_ref.is_some(),
+                "spec.limits.mqtt.clientCaRef",
+            ),
+        ] {
+            if set {
+                return Err(invalid(
+                    field,
+                    "is assigned to one project at a time: set it in that project's \
+                     spec.quotas.mqtt (ADR-N-048 §2.11, §2.12)"
+                        .to_owned(),
+                ));
+            }
+        }
         if quota_mqtt(self).is_some() {
             return Err(invalid(
                 "spec.projects.quota.mqtt",

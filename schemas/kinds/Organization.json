@@ -465,6 +465,13 @@
             "dedicatedPort"
           ],
           "type": "string"
+        },
+        {
+          "description": "A name of the allowance's `customHostnames`, one the city owns, on 8883.",
+          "enum": [
+            "customHostname"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -491,12 +498,40 @@
             "null"
           ]
         },
+        "clientCaRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The secret holding the project's device client CA certificate (never its key), required when `deviceAuth` holds `clientCertificate`; only a project's own `spec.quotas.mqtt` sets it."
+        },
         "connections": {
           "description": "The sum of `spec.limits.maxConnections` over the project's brokers.",
           "format": "uint32",
           "minimum": 0.0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "customHostnames": {
+          "description": "Hostnames the city owns that an org admin assigned to this project, at most 10; only a project's own `spec.quotas.mqtt` lists them.",
+          "items": {
+            "$ref": "#/definitions/MqttHostname"
+          },
+          "type": "array"
+        },
+        "deviceAuth": {
+          "description": "How devices may authenticate; absent is `[token]`.",
+          "items": {
+            "$ref": "#/definitions/MqttDeviceAuth"
+          },
+          "type": [
+            "array",
             "null"
           ]
         },
@@ -543,6 +578,50 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "MqttDeviceAuth": {
+      "description": "How a device proves who it is when it connects (ADR-N-048 §2.12).",
+      "oneOf": [
+        {
+          "description": "A Keycloak access token of a ServiceAccount as the CONNECT password.",
+          "enum": [
+            "token"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A client certificate the project's client CA signed, its common name the ServiceAccount.",
+          "enum": [
+            "clientCertificate"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "MqttHostname": {
+      "additionalProperties": false,
+      "description": "One hostname an org admin assigned to a project (ADR-N-048 §2.11).",
+      "properties": {
+        "certificateRef": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SecretRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The secret holding the certificate the edge serves for `name`; absent, cert-manager issues one by HTTP-01 once the name resolves to the edge."
+        },
+        "name": {
+          "description": "A lowercase DNS name the city owns and points at the edge by CNAME, e.g. `mqtt.city.example`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
       "type": "object"
     },
     "MqttMode": {
@@ -1209,6 +1288,34 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "SecretRef": {
+      "additionalProperties": false,
+      "description": "Reference to a credential stored in SOPS or OpenBao (PF-36).\n\n`deny_unknown_fields` is a security control: it rejects inline `value:` or `password:` fields at parse time, enforcing that secrets never appear in Git or manifest files.",
+      "properties": {
+        "envVar": {
+          "description": "Optional environment variable name for injection into runners.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Optional key within secret.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Secret name in secret store.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
       "type": "object"
     },
     "SignInLimits": {

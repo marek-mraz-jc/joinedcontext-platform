@@ -1392,9 +1392,58 @@ fn with_mqtt(report: &validate::Report) -> Vec<&str> {
     report
         .findings
         .iter()
-        .filter(|f| f.message.contains("MF-54") || f.message.contains("PL-76"))
+        .filter(|f| {
+            ["MF-54", "MF-62", "PL-76"]
+                .iter()
+                .any(|r| f.message.contains(r))
+        })
         .map(|f| f.message.as_str())
         .collect()
+}
+
+fn project_with_hostname(dir: &Path, project: &str, hostname: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/project.yaml"),
+        &format!("apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: {project}\n  namespace: org\nspec:\n  organizationRef: banskabystrica\n  quotas:\n    mqtt:\n      enabled: true\n      addresses: [customHostname]\n      customHostnames:\n        - name: {hostname}\n"),
+    );
+}
+
+/// MF-62: a hostname assigned to two projects, and one served by two brokers, are each named
+/// with their holder; one project and one broker per hostname is no finding.
+#[test]
+fn a_custom_hostname_is_held_by_one_project_and_one_broker() {
+    let dir = valid_repo("mqtt-hostname-ok");
+    camera_account(&dir, "cam-north");
+    project_with_hostname(&dir, "ovzdusie", "mqtt.banskabystrica.sk");
+    let hostname = "  address: customHostname\n  hostname: mqtt.banskabystrica.sk\n";
+    mqtt_broker(&dir, "cameras", "cam-north", hostname);
+    let report = validate::run(&dir);
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir = valid_repo("mqtt-hostname-refused");
+    camera_account(&dir, "cam-north");
+    project_with_hostname(&dir, "ovzdusie", "mqtt.banskabystrica.sk");
+    project_with_hostname(&dir, "doprava", "mqtt.banskabystrica.sk");
+    mqtt_broker(&dir, "cameras", "cam-north", hostname);
+    mqtt_broker(&dir, "meters", "cam-north", hostname);
+    let report = validate::run(&dir);
+    let found = with_mqtt(&report);
+    assert!(
+        found.iter().any(
+            |m| m.contains("mqtt.banskabystrica.sk is already assigned to")
+                && m.contains("one project at a time")
+        ),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|m| m
+            .contains("spec.hostname mqtt.banskabystrica.sk is already served by")
+            && m.contains("cameras")),
+        "{found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// MF-54, PL-76: two brokers of a project, each on its own port, with their cameras declared
