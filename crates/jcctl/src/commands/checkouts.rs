@@ -6,6 +6,10 @@
 //! `{projects}/{slug}` at the tree of the entry's commit, swapped in one rename, so a reader sees
 //! the old tree or the new one and never half of either. A project taken out of the registry
 //! loses its link; one whose fetch fails keeps the link it had and says why.
+//!
+//! Passes take turns on `{projects}/.lock`, so the pass `emergency-revoke.sh` starts inside the
+//! sidecar (`--once --only <slug>`, OPS-45, T-5650) never fetches into a mirror or prunes a tree
+//! the sidecar's own loop is using.
 
 use crate::assemble::{read_registry, Basic, GitCheckouts, Resolver};
 use jc_core::{Secret, SecretRef};
@@ -32,6 +36,8 @@ pub struct Options {
     /// The mounted Secrets an external entry's `secretRef` names: `{dir}/{name}/username` and
     /// `{dir}/{name}/password`.
     pub secrets_dir: Option<PathBuf>,
+    /// One registry slug to fetch and link now, the others left as they are; `None` is every one.
+    pub only: Option<String>,
 }
 
 fn read_trimmed(path: &Path) -> Result<String, String> {
@@ -75,9 +81,23 @@ pub fn sync(org_dir: &Path, projects: &Path, options: &Options) -> Result<Vec<Li
         secrets: &secrets,
     };
     std::fs::create_dir_all(projects).map_err(|err| format!("{}: {err}", projects.display()))?;
+    // Held until the pass returns; the kernel releases it when a killed pass's process ends.
+    let lock_path = projects.join(".lock");
+    let lock = std::fs::File::create(&lock_path)
+        .map_err(|err| format!("{}: {err}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|err| format!("{}: {err}", lock_path.display()))?;
 
+    if let Some(only) = &options.only {
+        if !registry.contains_key(only) {
+            return Err(format!("`{only}` is not in the organization's registry"));
+        }
+    }
     let mut linked = Vec::new();
-    for (slug, entry) in &registry {
+    for (slug, entry) in registry
+        .iter()
+        .filter(|(slug, _)| options.only.as_ref().is_none_or(|only| only == *slug))
+    {
         let (result, moved) = match resolver
             .checkout(slug, &entry.spec)
             .and_then(|tree| link(projects, slug, &tree).map(|moved| (tree, moved)))
@@ -95,6 +115,9 @@ pub fn sync(org_dir: &Path, projects: &Path, options: &Options) -> Result<Vec<Li
         });
     }
 
+    if options.only.is_some() {
+        return Ok(linked);
+    }
     let registered: BTreeSet<&String> = registry.keys().collect();
     let listing =
         std::fs::read_dir(projects).map_err(|err| format!("{}: {err}", projects.display()))?;

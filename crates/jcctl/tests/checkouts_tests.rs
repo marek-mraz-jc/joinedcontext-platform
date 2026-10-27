@@ -54,6 +54,7 @@ fn setup(test: &str) -> (PathBuf, PathBuf, PathBuf, Options) {
         forge: format!("file://{}", forge.display()),
         token_file: None,
         secrets_dir: None,
+        only: None,
     };
     (forge, work, org, options)
 }
@@ -178,4 +179,57 @@ fn a_link_that_cannot_move_keeps_resolving() {
         })
         .count();
     assert_eq!(trees, 1, "the old tree is pruned once the link moved");
+}
+
+/// OPS-45 (T-5650): `--only` fetches the one project a revocation changed and leaves every other
+/// link where it is, an unregistered link included; a slug the registry lacks is refused.
+#[test]
+fn only_one_project_is_fetched_and_nothing_else_moves() {
+    let (forge, work, org, mut options) = setup("checkouts-only");
+    let projects = temp_dir("checkouts-only-projects");
+    sync(&org, &projects, &options).expect("a pass");
+    std::fs::create_dir_all(projects.join("leftover")).expect("a stray project");
+
+    write(&work, "spaces/ovzdusie/endpoints/public-air.yaml", ENDPOINT);
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "-m", "the endpoint"]);
+    push(&forge, &work);
+    options.only = Some("ovzdusie".to_owned());
+    let pass = sync(&org, &projects, &options).expect("a pass");
+    assert_eq!(pass.len(), 1);
+    assert!(pass[0].moved);
+    assert!(projects
+        .join("ovzdusie/spaces/ovzdusie/endpoints/public-air.yaml")
+        .is_file());
+    assert!(
+        projects.join("leftover").is_dir(),
+        "a pass over one project removes no other"
+    );
+
+    options.only = Some("doprava".to_owned());
+    let refused = sync(&org, &projects, &options).expect_err("not registered");
+    assert!(refused.contains("doprava"), "{refused}");
+}
+
+/// T-5650: a pass waits for the pass that holds `{projects}/.lock`, so the revocation's pass
+/// never fetches into a mirror the sidecar's loop is writing.
+#[test]
+fn a_pass_waits_for_the_one_holding_the_lock() {
+    let (_forge, _work, org, options) = setup("checkouts-lock");
+    let projects = temp_dir("checkouts-lock-projects");
+    std::fs::create_dir_all(&projects).expect("projects dir");
+    let held = std::fs::File::create(projects.join(".lock")).expect("lock file");
+    held.lock().expect("the other pass holds it");
+
+    let (org2, projects2) = (org.clone(), projects.clone());
+    let pass = std::thread::spawn(move || sync(&org2, &projects2, &options));
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        !projects.join("ovzdusie").exists(),
+        "no link while the other pass holds the lock"
+    );
+    held.unlock().expect("release");
+    let linked = pass.join().expect("the pass ends").expect("a pass");
+    assert!(linked[0].moved);
+    assert!(projects.join("ovzdusie/project.yaml").is_file());
 }
