@@ -4,12 +4,15 @@
 //! when the admitted requests are answered. T-5124: anonymous requests share half of the slots, so
 //! an anonymous flood is answered 429 and a signed-in caller still gets in.
 
+mod common;
+
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::routing::any;
 use axum::Router;
 use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::{accounts_of, ServiceAccounts};
 use context_gateway::middleware::in_flight::anonymous_share;
 use context_gateway::pdp::PolicyPdp;
 use context_gateway::proxy::Broker;
@@ -530,4 +533,181 @@ async fn the_memory_of_a_load_comes_back_once_it_ends() {
         idle < 128,
         "the load left {idle} MiB of its {peak} MiB peak behind"
     );
+}
+
+/// The gateway of `gateway`, with `realm`'s tokens verified and `loadtest` the load generator's
+/// client (T-5921).
+fn loadtest_gateway(
+    broker: &Slow,
+    realm: &common::Realm,
+    loadtest: Option<&str>,
+    per_caller: usize,
+) -> Router {
+    router(Arc::new(
+        Gateway::new(Broker::new(broker.url.clone()), Box::new(PolicyPdp), DOMAIN)
+            .limit_in_flight(16, per_caller, 1)
+            .serve_loadtest(loadtest.map(str::to_owned), 8)
+            .serve([endpoint()])
+            .authenticate(Arc::new(realm.verifier()), loadtest_account(), None),
+    ))
+}
+
+/// The client of the load generator's ServiceAccount, `perf/loadtest`.
+const LOADTEST: &str = "perf-loadtest";
+
+/// The identity table of a repository holding the ServiceAccount `loadtest` of project `perf`,
+/// the public's reader as the deployment seeds it (T-5921).
+fn loadtest_account() -> ServiceAccounts {
+    let dir = std::env::temp_dir().join(format!(
+        "gateway-in-flight-loadtest-{}-{}",
+        std::process::id(),
+        LOADS.fetch_add(1, Ordering::SeqCst)
+    ));
+    let space = dir.join("projects/perf/spaces/perf");
+    std::fs::create_dir_all(&space).expect("a space directory");
+    std::fs::write(
+        space.join("space.yaml"),
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: perf\n  namespace: perf\nspec:\n  urnSegment: perf\n",
+    )
+    .expect("the space");
+    let accounts = dir.join("projects/perf/access/serviceaccounts");
+    std::fs::create_dir_all(&accounts).expect("an account directory");
+    std::fs::write(
+        accounts.join("loadtest.yaml"),
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: loadtest\n  namespace: perf\nspec:\n  owner:\n    user: demo.steward\n  purpose: \"load runs\"\n  roles:\n    - role: public\n      scope: { contextSpace: perf }\n  credentials:\n    - kind: oauth-client\n      name: main\n",
+    )
+    .expect("the account");
+    let table =
+        accounts_of(&jc_manifest::loader::Repository::load(&dir).expect("the repository loads"));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(table.resolve(LOADTEST).is_some(), "the account resolves");
+    table
+}
+
+static LOADS: AtomicUsize = AtomicUsize::new(0);
+
+/// `request` with `token` as its bearer.
+fn bearing(mut request: Request<Body>, token: &str) -> Request<Body> {
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_str(&format!("Bearer {token}")).expect("a header value"),
+    );
+    request
+}
+
+/// Holds `count` reads of `token` from `address` in the broker.
+async fn hold(
+    app: &Router,
+    broker: &Slow,
+    token: Option<&str>,
+    address: &str,
+    count: usize,
+) -> Vec<tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>>> {
+    let held: Vec<_> = (0..count)
+        .map(|_| {
+            let request = match token {
+                Some(token) => bearing(read(address), token),
+                None => read(address),
+            };
+            tokio::spawn(app.clone().oneshot(request))
+        })
+        .collect();
+    holding(broker, count).await;
+    held
+}
+
+async fn release(
+    broker: &Slow,
+    held: Vec<tokio::task::JoinHandle<Result<axum::response::Response, std::convert::Infallible>>>,
+) {
+    broker.release.add_permits(held.len());
+    for answer in held {
+        assert_eq!(
+            answer.await.expect("joined").expect("answered").status(),
+            StatusCode::OK
+        );
+    }
+}
+
+/// T-5921: the load generator's verified reads hold its share, past a caller's.
+#[tokio::test]
+async fn a_verified_loadtest_token_holds_the_loadtest_share() {
+    let broker = slow_broker(ENTITIES).await;
+    let realm = common::Realm::new();
+    let app = loadtest_gateway(&broker, &realm, Some(LOADTEST), 2);
+    let token = realm.workload_token(LOADTEST, json!(SLUG));
+    let held = hold(&app, &broker, Some(&token), "192.0.2.1", 8).await;
+    assert_busy(
+        app.clone()
+            .oneshot(bearing(read("192.0.2.1"), &token))
+            .await
+            .expect("an answer"),
+    )
+    .await;
+    release(&broker, held).await;
+}
+
+/// T-5921: a token naming the load generator but not signed by the realm is the address's.
+#[tokio::test]
+async fn a_forged_loadtest_token_meets_the_callers_share() {
+    let broker = slow_broker(ENTITIES).await;
+    let realm = common::Realm::new();
+    let app = loadtest_gateway(&broker, &realm, Some(LOADTEST), 2);
+    let forged = common::Realm::new().workload_token(LOADTEST, json!(SLUG));
+    let held = hold(&app, &broker, None, "192.0.2.1", 2).await;
+    assert_busy(
+        app.clone()
+            .oneshot(bearing(read("192.0.2.1"), &forged))
+            .await
+            .expect("an answer"),
+    )
+    .await;
+    release(&broker, held).await;
+}
+
+/// T-5921: with no load generator configured, its client's token is one caller among others.
+#[tokio::test]
+async fn without_a_loadtest_client_its_token_meets_the_callers_share() {
+    let broker = slow_broker(ENTITIES).await;
+    let realm = common::Realm::new();
+    let app = loadtest_gateway(&broker, &realm, None, 2);
+    let token = realm.workload_token(LOADTEST, json!(SLUG));
+    let held = hold(&app, &broker, Some(&token), "192.0.2.1", 2).await;
+    assert_busy(
+        app.clone()
+            .oneshot(bearing(read("192.0.2.2"), &token))
+            .await
+            .expect("an answer"),
+    )
+    .await;
+    release(&broker, held).await;
+}
+
+/// T-5921: the load generator only reads; its write is refused before the broker sees it.
+#[tokio::test]
+async fn a_loadtest_write_is_refused() {
+    let broker = slow_broker(ENTITIES).await;
+    let realm = common::Realm::new();
+    let app = loadtest_gateway(&broker, &realm, Some(LOADTEST), 2);
+    let token = realm.workload_token(LOADTEST, json!(SLUG));
+    let write = Request::builder()
+        .method("POST")
+        .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1/entities"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"id":"urn:ngsi-ld:AirQualityObserved:x","type":"AirQualityObserved"}"#,
+        ))
+        .expect("a request");
+    let answer = app
+        .clone()
+        .oneshot(bearing(write, &token))
+        .await
+        .expect("an answer");
+    assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(answer.into_body(), 1 << 16)
+        .await
+        .expect("the body");
+    let problem: serde_json::Value = serde_json::from_slice(&body).expect("a problem");
+    assert_eq!(problem["status"], 403, "{problem}");
+    assert_eq!(broker.reads.load(Ordering::SeqCst), 0);
 }

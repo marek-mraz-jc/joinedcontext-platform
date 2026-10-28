@@ -34,6 +34,13 @@
 //! answered 429 with `Retry-After`. A made-up bearer counts as signed in here, and the handler
 //! refuses it 401 in microseconds, before any broker call: it holds a slot for no time worth having.
 //! The probes (`/healthz`, `/livez`) and `/metrics` never pass this layer.
+//!
+//! One load generator may hold more than a caller's share (T-5921): a read whose token the realm
+//! signed for the deployment's `JC_GATEWAY_LOADTEST_CLIENT` (its `azp`, checked by
+//! `Verifier::identify`) is held to the loadtest share instead, while it still takes the total's
+//! and the readers' slots like any signed-in read. Any other request of that client is refused
+//! 403: the class reads only. An unsigned or forged token naming the same client is no class
+//! here, and an address never is one.
 // ponytail: counts, not bytes. An answer's size is unknown until the broker sends it; the
 // per-request ceiling is MAX_BODY. A byte budget like the writes' when a measurement shows
 // large pages in flight together.
@@ -57,6 +64,11 @@ pub const MAX_IN_FLIGHT: usize = 128;
 /// Requests in flight at once for one caller unless the deployment names another
 /// (`JC_GATEWAY_MAX_IN_FLIGHT_PER_CALLER`).
 pub const MAX_IN_FLIGHT_PER_CALLER: usize = 32;
+
+/// Requests in flight at once for the load generator unless the deployment names another
+/// (`JC_GATEWAY_LOADTEST_IN_FLIGHT`): above the readers' share of [`MAX_IN_FLIGHT`], so the total
+/// is what holds it (T-5921).
+pub const LOADTEST_IN_FLIGHT: usize = 512;
 
 /// `file.csv` downloads at once unless the deployment names another
 /// (`JC_GATEWAY_MAX_DOWNLOADS`): one holds up to `MAX_COLLECTED` of broker JSON,
@@ -97,6 +109,8 @@ pub(crate) struct Class {
     pub anonymous: bool,
     /// A GET, HEAD or OPTIONS, the WebSocket upgrade included.
     pub read: bool,
+    /// A read of the load generator's verified token (T-5921).
+    pub loadtest: bool,
 }
 
 impl Class {
@@ -105,6 +119,7 @@ impl Class {
         Self {
             anonymous: !jc_core::auth::token::presents(request.headers()),
             read: method == Method::GET || method == Method::HEAD || method == Method::OPTIONS,
+            loadtest: false,
         }
     }
 }
@@ -122,6 +137,8 @@ pub(crate) enum Refused {
 pub struct InFlight {
     total: Arc<Semaphore>,
     per_caller: usize,
+    /// The load generator's share, in place of `per_caller` (T-5921).
+    loadtest_per_caller: usize,
     callers: Arc<Mutex<HashMap<String, usize>>>,
     downloads: Arc<Semaphore>,
     slow: Arc<Semaphore>,
@@ -140,6 +157,8 @@ pub(crate) struct Ticket {
     anonymous: bool,
     caller: String,
     weight: usize,
+    /// The caller's share this request counts against.
+    cap: usize,
     callers: Arc<Mutex<HashMap<String, usize>>>,
 }
 
@@ -164,6 +183,7 @@ impl InFlight {
         Self {
             total: Arc::new(Semaphore::new(total)),
             per_caller: per_caller.max(1),
+            loadtest_per_caller: LOADTEST_IN_FLIGHT,
             callers: Arc::default(),
             downloads: Arc::new(Semaphore::new(downloads.max(1))),
             slow: Arc::new(Semaphore::new(slow)),
@@ -175,6 +195,12 @@ impl InFlight {
         }
     }
 
+    /// Holds the load generator to `per_caller` at once (T-5921).
+    pub fn with_loadtest(mut self, per_caller: usize) -> Self {
+        self.loadtest_per_caller = per_caller.max(1);
+        self
+    }
+
     /// A slot for one `file.csv` download, or `None` while every slot is taken.
     pub(crate) fn download(&self) -> Option<OwnedSemaphorePermit> {
         Arc::clone(&self.downloads).try_acquire_owned().ok()
@@ -184,9 +210,13 @@ impl InFlight {
     /// the caller holds all it may.
     pub(crate) fn admit(&self, caller: String, class: Class) -> Result<Ticket, Refused> {
         let slots = self.slots(class)?;
+        let cap = match class.loadtest {
+            true => self.loadtest_per_caller,
+            false => self.per_caller,
+        };
         let mut callers = self.callers.lock().unwrap_or_else(|held| held.into_inner());
         let count = callers.entry(caller.clone()).or_insert(0);
-        if *count >= self.per_caller {
+        if *count >= cap {
             return Err(Refused::Busy);
         }
         *count += 1;
@@ -195,6 +225,7 @@ impl InFlight {
             anonymous: class.anonymous,
             caller,
             weight: 1,
+            cap,
             callers: Arc::clone(&self.callers),
         })
     }
@@ -237,7 +268,7 @@ impl InFlight {
         let Some(count) = callers.get_mut(&ticket.caller) else {
             return false;
         };
-        if *count + extra > self.per_caller {
+        if *count + extra > ticket.cap {
             return false;
         }
         *count += extra;
@@ -308,11 +339,14 @@ pub async fn enforce(
     mut request: Request,
     next: Next,
 ) -> Response<Body> {
-    let caller = rate_limit::caller_key(&gateway, request.headers());
+    let (caller, class) = match caller_of(&gateway, &request) {
+        Ok(found) => found,
+        Err(refused) => return *refused,
+    };
     request
         .extensions_mut()
         .insert(rate_limit::CallerKey(caller.clone()));
-    let ticket = match gateway.in_flight.admit(caller, Class::of(&request)) {
+    let ticket = match gateway.in_flight.admit(caller, class) {
         Ok(ticket) => ticket,
         Err(Refused::AnonymousShare) => {
             tracing::info!(path = %request.uri().path(), "answered 429: the anonymous share of the gateway is taken");
@@ -327,6 +361,45 @@ pub async fn enforce(
         return next.run(request).await;
     }
     gateway.in_flight.time(ticket, next.run(request)).await
+}
+
+/// The caller key and class of `request`, or the 403 of a load generator's request other than a
+/// read (T-5921).
+fn caller_of(gateway: &Gateway, request: &Request) -> Result<(String, Class), Box<Response<Body>>> {
+    let claims = rate_limit::verified(gateway, request.headers());
+    let caller = match &claims {
+        Some(claims) => rate_limit::subject_key(claims),
+        None => rate_limit::address_key(request.headers()),
+    };
+    let mut class = Class::of(request);
+    if is_loadtest(gateway, claims.as_ref()) {
+        if !class.read {
+            tracing::info!(path = %request.uri().path(), "answered 403: the load generator only reads");
+            return Err(Box::new(loadtest_writes()));
+        }
+        class.loadtest = true;
+    }
+    Ok((caller, class))
+}
+
+/// Whether `claims`, a token the realm signed, were issued to the deployment's load generator.
+fn is_loadtest(gateway: &Gateway, claims: Option<&jc_core::auth::token::Claims>) -> bool {
+    match (
+        &gateway.loadtest_client,
+        claims.and_then(|claims| claims.azp.as_ref()),
+    ) {
+        (Some(client), Some(azp)) => client == azp,
+        _ => false,
+    }
+}
+
+/// The 403 of a load generator's request other than a read: its class reads only (T-5921).
+fn loadtest_writes() -> Response<Body> {
+    ProblemDetails::new(403, "forbidden", "Access Denied by Policy")
+        .with_detail(
+            "the load generator's client only reads: send GET or HEAD, or use another client",
+        )
+        .into_response()
 }
 
 /// The 503 of a full gateway: nothing of the request was read or forwarded, so sending it again
@@ -369,15 +442,55 @@ mod tests {
     const SIGNED_READ: Class = Class {
         anonymous: false,
         read: true,
+        loadtest: false,
     };
     const SIGNED_WRITE: Class = Class {
         anonymous: false,
         read: false,
+        loadtest: false,
     };
     const ANONYMOUS_READ: Class = Class {
         anonymous: true,
         read: true,
+        loadtest: false,
     };
+
+    #[test]
+    fn the_loadtest_class_holds_its_own_share_inside_the_readers_one() {
+        let gate = InFlight::new(16, 2, 1).with_loadtest(8);
+        let loadtest = Class {
+            loadtest: true,
+            ..SIGNED_READ
+        };
+        let held: Vec<_> = (0..8)
+            .map(|_| gate.admit("subject:loadtest".into(), loadtest))
+            .collect::<Result<_, _>>()
+            .expect("the loadtest share, past the caller's 2");
+        assert_eq!(
+            gate.admit("subject:loadtest".into(), loadtest).err(),
+            Some(Refused::Busy)
+        );
+        assert_eq!(
+            gate.admit("subject:loadtest".into(), SIGNED_READ).err(),
+            Some(Refused::Busy),
+            "a caller's share is the plain one outside the class"
+        );
+        drop(held);
+
+        let wide = InFlight::new(8, 2, 1).with_loadtest(64);
+        let held: Vec<_> = (0..7)
+            .map(|_| wide.admit("subject:loadtest".into(), loadtest))
+            .collect::<Result<_, _>>()
+            .expect("the readers' share: 8 less the write reserve of 1");
+        assert_eq!(
+            wide.admit("subject:loadtest".into(), loadtest).err(),
+            Some(Refused::Busy)
+        );
+        let _write = wide
+            .admit("subject:pipeline".into(), SIGNED_WRITE)
+            .expect("the write reserve stays");
+        drop(held);
+    }
 
     #[test]
     fn the_shares_follow_the_total() {
@@ -420,6 +533,7 @@ mod tests {
         let anonymous_write = Class {
             anonymous: true,
             read: false,
+            loadtest: false,
         };
         let _anonymous: Vec<_> = (0..4)
             .map(|n| gate.admit(format!("address:{n}"), anonymous_write))

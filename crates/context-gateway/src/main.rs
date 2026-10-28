@@ -119,7 +119,8 @@ async fn main() -> ExitCode {
             config.max_in_flight,
             config.max_in_flight_per_caller,
             config.max_downloads,
-        );
+        )
+        .serve_loadtest(config.loadtest_client.clone(), config.loadtest_in_flight);
     let mut gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.public_max_age = config.public_max_age;
     gateway.replace_federation(federations);
