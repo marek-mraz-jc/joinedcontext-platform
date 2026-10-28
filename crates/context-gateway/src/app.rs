@@ -114,6 +114,9 @@ pub struct Gateway {
     pub ws_token_lifetime: std::time::Duration,
     /// How long a fan-out hub keeps its upstream after its last client left (ADR-N-049 §2.1).
     pub ws_linger: std::time::Duration,
+    /// How many seconds a shared cache may keep an anonymous read of data (T-5900,
+    /// `JC_GATEWAY_PUBLIC_MAX_AGE`); 0, the default, keeps every answer `private, no-store`.
+    pub public_max_age: u32,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// Where a person's own connectors are read, `/api/mcp/me/{name}` (EP-123); `None` serves
@@ -213,6 +216,7 @@ impl Gateway {
             reaches: Default::default(),
             ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             ws_linger: crate::fanout::socket::LINGER,
+            public_max_age: 0,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),

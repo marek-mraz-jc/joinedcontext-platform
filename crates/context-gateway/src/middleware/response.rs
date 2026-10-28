@@ -8,7 +8,7 @@
 
 use crate::app::Gateway;
 use axum::extract::{Request, State};
-use axum::http::{HeaderName, HeaderValue};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
@@ -181,16 +181,19 @@ pub fn asked_about_narrowing(request: &Request) -> bool {
 }
 
 /// Removes the tenant from every answer, the narrowing signal from every answer nobody asked for
-/// it in, says that no answer of this gateway belongs in a shared cache, and points every answer
-/// that carries data at the schema it is described by.
+/// it in, says that no answer of this gateway belongs in a shared cache except an anonymous read
+/// of data when the deployment allows one ([`shareable_read`]), and points every answer that
+/// carries data at the schema it is described by.
 pub async fn scrub(State(gateway): State<Arc<Gateway>>, request: Request, next: Next) -> Response {
     let asked = asked_about_narrowing(&request);
     // Read before the handler runs, because the path is what names the endpoint and the
     // request is moved into it.
     let described = describedby(&gateway, request.uri().path());
     let deprecated = deprecation_headers(&gateway, request.uri().path());
+    let shareable = shareable_read(&gateway, &request);
     let mut response = next.run(request).await;
-    let carries_data = response.status().is_success();
+    let status = response.status();
+    let carries_data = status.is_success();
     let headers = response.headers_mut();
     // EP-50, EP-147: only on an answer that carries data. A refusal that named a schema or a
     // sunset would tell a caller who was refused that the endpoint exists (EP-03, R20).
@@ -209,7 +212,34 @@ pub async fn scrub(State(gateway): State<Arc<Gateway>>, request: Request, next: 
         while headers.remove(&RESULTS_RESTRICTED).is_some() {}
     }
     keep_out_of_shared_caches(headers);
+    if shareable && status == StatusCode::OK {
+        share_for(headers, gateway.public_max_age);
+    }
     response
+}
+
+/// Whether the answer to `request` is the same for every caller who could send it, so a shared
+/// cache may keep it for [`Gateway::public_max_age`] seconds (T-5900): a `GET` or `HEAD` of data
+/// with neither `Authorization` nor `Cookie`. Without a token the gateway decides as the
+/// Endpoint's anonymous subject (`auth::subject::anonymous_on`), the same subject for every such
+/// caller; the headers that still shape the answer stay in `Vary`, so a cache keyed on them
+/// cannot mix two of them. Off while `public_max_age` is 0, the default.
+fn shareable_read(gateway: &Gateway, request: &Request) -> bool {
+    let headers = request.headers();
+    gateway.public_max_age > 0
+        && matches!(*request.method(), Method::GET | Method::HEAD)
+        && !headers.contains_key(axum::http::header::AUTHORIZATION)
+        && !headers.contains_key(axum::http::header::COOKIE)
+        && data_endpoint(gateway, request.uri().path()).is_some()
+}
+
+/// Lets a shared cache keep an anonymous answer `seconds` long: a revoked public grant or a
+/// changed value is served stale at most that long, which is why the deployment bounds it
+/// (`JC_GATEWAY_PUBLIC_MAX_AGE`, at most [`crate::config::PUBLIC_MAX_AGE_LIMIT`]).
+fn share_for(headers: &mut axum::http::HeaderMap, seconds: u32) {
+    if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={seconds}")) {
+        headers.insert(axum::http::header::CACHE_CONTROL, value);
+    }
 }
 
 /// The schema documents an answer is described by, as `Link` headers (EP-50, EP-46, EP-49).
