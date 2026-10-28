@@ -143,6 +143,11 @@ pub struct Config {
     /// How many `file.csv` downloads are built at once (`JC_GATEWAY_MAX_DOWNLOADS`, default `2`,
     /// [`crate::middleware::in_flight::MAX_DOWNLOADS`]).
     pub max_downloads: usize,
+    /// How many seconds a shared cache (the edge) may keep an anonymous read of data
+    /// (`JC_GATEWAY_PUBLIC_MAX_AGE`, default `0`: none, every answer `private, no-store`; at most
+    /// [`PUBLIC_MAX_AGE_LIMIT`]). A public grant revoked or a value changed is served stale at most
+    /// this long (T-5900).
+    pub public_max_age: u32,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -277,6 +282,7 @@ impl Config {
             "downloads",
             in_flight::MAX_DOWNLOADS,
         )?;
+        let public_max_age = public_max_age(std::env::var("JC_GATEWAY_PUBLIC_MAX_AGE"))?;
 
         let public_url = std::env::var("JC_GATEWAY_PUBLIC_URL")
             .ok()
@@ -313,6 +319,7 @@ impl Config {
             max_in_flight,
             max_in_flight_per_caller,
             max_downloads,
+            public_max_age,
             domain_verification,
             domain_verifications_url,
             bind,
@@ -391,6 +398,26 @@ impl Config {
                 .unwrap_or_default(),
             personal_keys: non_empty("JC_GATEWAY_PERSONAL_KEYS").map(PathBuf::from),
         })
+    }
+}
+
+/// The longest an anonymous answer may be kept by a shared cache: a revoked public grant must stop
+/// reaching readers within a minute (T-5900).
+pub const PUBLIC_MAX_AGE_LIMIT: u32 = 60;
+
+/// `JC_GATEWAY_PUBLIC_MAX_AGE` as whole seconds from 0 to [`PUBLIC_MAX_AGE_LIMIT`]; 0 when unset.
+fn public_max_age(read: Result<String, std::env::VarError>) -> Result<u32, ConfigError> {
+    match read {
+        Ok(value) if !value.trim().is_empty() => match value.trim().parse::<u32>() {
+            Ok(seconds) if seconds <= PUBLIC_MAX_AGE_LIMIT => Ok(seconds),
+            _ => Err(ConfigError::Invalid {
+                name: "JC_GATEWAY_PUBLIC_MAX_AGE",
+                reason: format!(
+                    "{value:?} is not a whole number of seconds from 0 to {PUBLIC_MAX_AGE_LIMIT}"
+                ),
+            }),
+        },
+        _ => Ok(0),
     }
 }
 
@@ -555,6 +582,7 @@ mod tests {
             max_in_flight: crate::middleware::in_flight::MAX_IN_FLIGHT,
             max_in_flight_per_caller: crate::middleware::in_flight::MAX_IN_FLIGHT_PER_CALLER,
             max_downloads: crate::middleware::in_flight::MAX_DOWNLOADS,
+            public_max_age: 0,
         }
     }
 
@@ -715,6 +743,28 @@ mod tests {
             "por tal.p",
         ] {
             assert_eq!(mesh_name(bad), None, "{bad}");
+        }
+    }
+
+    /// T-5900: a shared cache keeps an anonymous answer at most a minute, and a value the
+    /// gateway cannot read refuses to start rather than caching for a guessed time.
+    #[test]
+    fn the_public_max_age_is_bounded_and_off_by_default() {
+        use std::env::VarError::NotPresent;
+        assert_eq!(public_max_age(Err(NotPresent)).ok(), Some(0));
+        assert_eq!(public_max_age(Ok(" ".to_owned())).ok(), Some(0));
+        assert_eq!(public_max_age(Ok("5".to_owned())).ok(), Some(5));
+        assert_eq!(public_max_age(Ok("60".to_owned())).ok(), Some(60));
+        for bad in ["61", "-1", "5s", "1.5"] {
+            let refused = public_max_age(Ok(bad.to_owned()))
+                .err()
+                .map(|e| e.to_string());
+            assert!(
+                refused
+                    .as_deref()
+                    .is_some_and(|e| e.contains("JC_GATEWAY_PUBLIC_MAX_AGE")),
+                "{bad}: {refused:?}"
+            );
         }
     }
 }

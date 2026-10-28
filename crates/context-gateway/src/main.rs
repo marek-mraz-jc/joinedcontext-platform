@@ -120,7 +120,8 @@ async fn main() -> ExitCode {
             config.max_in_flight_per_caller,
             config.max_downloads,
         );
-    let gateway = gateway.serve(endpoints).serve_spaces(spaces);
+    let mut gateway = gateway.serve(endpoints).serve_spaces(spaces);
+    gateway.public_max_age = config.public_max_age;
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);
