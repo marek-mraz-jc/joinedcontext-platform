@@ -10,7 +10,7 @@ use crate::diff::diff;
 use crate::loader::{is_empty_doc, parse_yaml_documents, RawManifest};
 use crate::secrets::SecretValue;
 use reqwest::blocking::{Client, RequestBuilder, Response};
-use reqwest::{StatusCode, Url};
+use reqwest::{Method, StatusCode, Url};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -194,18 +194,39 @@ impl Portal {
         })
     }
 
-    /// `/api/v1/projects/{project}/{plural}[/{name}]`, each segment escaped, so a name can
-    /// never climb out of its collection.
-    fn url(&self, project: &str, plural: &str, name: Option<&str>) -> Url {
+    /// The request `verb` sends as `method`, its path filled from the [`ROUTES`] row with a
+    /// `{name}` exactly when `name` is given: the drift test reads the same table, so a path it
+    /// passes is the path sent. Each segment is escaped, so a name can never climb out of its
+    /// collection.
+    fn request(
+        &self,
+        verb: &str,
+        method: Method,
+        project: &str,
+        plural: &str,
+        name: Option<&str>,
+    ) -> Result<RequestBuilder, PortalError> {
+        let route = ROUTES
+            .iter()
+            .find(|r| {
+                r.verb == verb
+                    && r.method == method.as_str()
+                    && r.path.ends_with("{name}") == name.is_some()
+            })
+            .ok_or_else(|| PortalError::Invalid(format!("jcctl has no Portal route for {verb}")))?;
         let mut url = self.base.clone();
         if let Ok(mut path) = url.path_segments_mut() {
-            path.pop_if_empty()
-                .extend(["api", "v1", "projects", project, plural]);
-            if let Some(name) = name {
-                path.push(name);
+            path.pop_if_empty();
+            for segment in route.path.split('/').filter(|s| !s.is_empty()) {
+                path.push(match segment {
+                    "{project}" => project,
+                    "{plural}" => plural,
+                    "{name}" => name.unwrap_or_default(),
+                    literal => literal,
+                });
             }
         }
-        url
+        Ok(self.client.request(method, url))
     }
 
     fn send(
@@ -274,17 +295,15 @@ impl Portal {
         let mut items = Vec::new();
         let mut next: Option<String> = None;
         for _ in 0..MAX_PAGES {
-            let mut url = self.url(project, plural, None);
-            {
-                let mut query = url.query_pairs_mut();
-                if let Some(selector) = label_selector {
-                    query.append_pair("labelSelector", selector);
-                }
-                if let Some(token) = &next {
-                    query.append_pair("continue", token);
-                }
+            let mut query = Vec::new();
+            if let Some(selector) = label_selector {
+                query.push(("labelSelector", selector));
             }
-            let (status, body) = self.send(plural, self.client.get(url))?;
+            if let Some(token) = &next {
+                query.push(("continue", token.as_str()));
+            }
+            let request = self.request("get", Method::GET, project, plural, None)?;
+            let (status, body) = self.send(plural, request.query(&query))?;
             if status != StatusCode::OK {
                 return Err(self.refused(plural, status, &body));
             }
@@ -324,10 +343,8 @@ impl Portal {
         name: &str,
     ) -> Result<Option<Value>, PortalError> {
         let what = format!("{plural}/{name}");
-        let (status, body) = self.send(
-            &what,
-            self.client.get(self.url(project, plural, Some(name))),
-        )?;
+        let request = self.request("get", Method::GET, project, plural, Some(name))?;
+        let (status, body) = self.send(&what, request)?;
         match status {
             StatusCode::OK => self.json(&what, &body).map(Some),
             StatusCode::NOT_FOUND => Ok(None),
@@ -347,9 +364,9 @@ impl Portal {
     ) -> Result<Value, PortalError> {
         let what = format!("{plural}/{name}");
         let request = if replace {
-            self.client.put(self.url(project, plural, Some(name)))
+            self.request("apply", Method::PUT, project, plural, Some(name))?
         } else {
-            self.client.post(self.url(project, plural, None))
+            self.request("apply", Method::POST, project, plural, None)?
         };
         self.change(&what, request.json(manifest))
     }
@@ -367,9 +384,9 @@ impl Portal {
     ) -> Result<Value, PortalError> {
         let what = format!("{plural}/{name}");
         let request = if replace {
-            self.client.put(self.url(project, plural, Some(name)))
+            self.request("plan", Method::PUT, project, plural, Some(name))?
         } else {
-            self.client.post(self.url(project, plural, None))
+            self.request("plan", Method::POST, project, plural, None)?
         };
         let (status, body) =
             self.send(&what, request.query(&[("dryRun", "All")]).json(manifest))?;
@@ -381,7 +398,8 @@ impl Portal {
 
     /// The registry operations this caller may run in `project`, as `GET …/ops` lists them.
     pub fn operations(&self, project: &str) -> Result<Value, PortalError> {
-        let (status, body) = self.send("ops", self.client.get(self.url(project, "ops", None)))?;
+        let request = self.request("ops", Method::GET, project, "ops", None)?;
+        let (status, body) = self.send("ops", request)?;
         if status != StatusCode::OK {
             return Err(self.refused("ops", status, &body));
         }
@@ -398,12 +416,8 @@ impl Portal {
         input: &Value,
     ) -> Result<Value, PortalError> {
         let what = format!("ops/{name}");
-        let (status, body) = self.send(
-            &what,
-            self.client
-                .post(self.url(project, "ops", Some(name)))
-                .json(input),
-        )?;
+        let request = self.request("op", Method::POST, project, "ops", Some(name))?;
+        let (status, body) = self.send(&what, request.json(input))?;
         if !matches!(status, StatusCode::OK | StatusCode::ACCEPTED) {
             return Err(self.refused(&what, status, &body));
         }
@@ -413,10 +427,8 @@ impl Portal {
     /// Proposes the deletion of one resource. The answer is the `Change`.
     pub fn delete(&self, project: &str, plural: &str, name: &str) -> Result<Value, PortalError> {
         let what = format!("{plural}/{name}");
-        self.change(
-            &what,
-            self.client.delete(self.url(project, plural, Some(name))),
-        )
+        let request = self.request("delete", Method::DELETE, project, plural, Some(name))?;
+        self.change(&what, request)
     }
 
     fn change(&self, what: &str, request: RequestBuilder) -> Result<Value, PortalError> {
