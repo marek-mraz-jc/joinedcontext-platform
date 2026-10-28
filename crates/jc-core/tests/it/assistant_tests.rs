@@ -376,6 +376,7 @@ fn a_deployment_without_the_new_fields_takes_the_safe_defaults() {
     );
     let budget = spec.budget.expect("budget");
     assert_eq!(budget.cost_per_day_usd, 3.0);
+    assert_eq!(budget.visitor_share_percent, 10);
     assert_eq!(
         (
             budget.output_tokens_per_answer,
@@ -403,7 +404,7 @@ fn a_deployment_with_every_new_field_validates_and_round_trips() {
     )
     .replace(
         "tokensPerConversation: 40000 }",
-        "tokensPerConversation: 40000, costPerDayUsd: 2.5, outputTokensPerAnswer: 800, messagesPerConversation: 20, questionChars: 1500 }",
+        "tokensPerConversation: 40000, costPerDayUsd: 2.5, outputTokensPerAnswer: 800, messagesPerConversation: 20, questionChars: 1500, visitorSharePercent: 50 }",
     );
     let parsed = deployment(&yaml).expect("every new field");
     assert!(!parsed.spec.enabled);
@@ -416,6 +417,10 @@ fn a_deployment_with_every_new_field_validates_and_round_trips() {
     assert_eq!(
         parsed.spec.budget.as_ref().map(|b| b.cost_per_day_usd),
         Some(2.5)
+    );
+    assert_eq!(
+        parsed.spec.budget.as_ref().map(|b| b.visitor_share_percent),
+        Some(50)
     );
     let again: AssistantDeployment =
         serde_norway::from_str(&serde_norway::to_string(&parsed).expect("yaml")).expect("parse");
@@ -562,6 +567,16 @@ fn a_new_deployment_field_out_of_bounds_is_refused_with_the_field_to_change() {
             "tokensPerConversation: 40000 }",
             "tokensPerConversation: 40000, outputTokensPerAnswer: 99 }",
             "budget.outputTokensPerAnswer",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, visitorSharePercent: 0 }",
+            "budget.visitorSharePercent",
+        ),
+        (
+            "tokensPerConversation: 40000 }",
+            "tokensPerConversation: 40000, visitorSharePercent: 101 }",
+            "budget.visitorSharePercent",
         ),
         (
             "tokensPerConversation: 40000 }",
