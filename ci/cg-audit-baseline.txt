@@ -2,7 +2,7 @@
 antares | links-unmatched | 0
 antares | memory-body-copy | 20
 antares | memory-per-request-build | 0
-antares | memory-unbounded-global | 12
+antares | memory-unbounded-global | 9
 antares | memory-uncapped-read | 1
 antares | modularity-file-cycle | 61
 antares | modularity-server-as-library | 0
@@ -12,7 +12,7 @@ antares | security-mcp-write-unguarded | 0
 platform | links-unmatched | 0
 platform | memory-body-copy | 18
 platform | memory-per-request-build | 0
-platform | memory-unbounded-global | 8
+platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 1
 platform | modularity-file-cycle | 23
 platform | modularity-server-as-library | 1
@@ -22,9 +22,9 @@ platform | security-mcp-write-unguarded | 0
 portal | links-unmatched | 0
 portal | memory-body-copy | 21
 portal | memory-per-request-build | 12
-portal | memory-unbounded-global | 15
+portal | memory-unbounded-global | 11
 portal | memory-uncapped-read | 38
-portal | modularity-file-cycle | 69
+portal | modularity-file-cycle | 68
 portal | modularity-server-as-library | 0
 portal | security-fetch-from-route | 100
 portal | security-log-secret-field | 0
