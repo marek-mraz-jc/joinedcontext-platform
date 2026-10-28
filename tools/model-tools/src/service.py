@@ -25,7 +25,9 @@ import ast
 import base64
 import binascii
 import json
+import multiprocessing
 import os
+import pickle
 import socketserver
 import threading
 import time
@@ -239,12 +241,15 @@ def import_sdm(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return 200, artifacts(source, linkml=source, example=fetched["example"])
 
 
-def infer_schema(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def infer_schema(
+    body: dict[str, Any], attributes: dict[str, list[str]] | None = None
+) -> tuple[int, dict[str, Any]]:
     """`POST /infer-schema`: a draft model from one sample (T-0598, DM-54, DM-55).
 
     The body is `{"name": "<file name>", "content": "<base64>", "format"?: csv|xlsx|json|pdf}`.
     The sample is parsed in memory and nothing leaves the process: the catalogue alignment reads
-    the attribute names this replica already holds and fetches none.
+    the attribute names this replica already holds and fetches none. A job in a child gets
+    them read by the parent: the catalogue lock may be held by another thread at the fork.
     """
     name = body.get("name")
     content = body.get("content")
@@ -258,7 +263,9 @@ def infer_schema(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     except (ValueError, binascii.Error):
         return 400, {"errors": ["'content' is not base64"]}
     try:
-        answer = infer(name, raw, fmt, CATALOGUE.attribute_index())
+        answer = infer(
+            name, raw, fmt, CATALOGUE.attribute_index() if attributes is None else attributes
+        )
     except SampleError as err:
         return 400, {"errors": [str(err)]}
     answer["generatorVersion"] = generator_version()
@@ -473,6 +480,61 @@ def healthz() -> tuple[int, dict[str, Any]]:
     return 200, {"status": "ok", "generatorVersion": generator_version()}
 
 
+#: Jobs run in a forked child (T-5924): Python keeps the heap a generation grew, and a parent
+#: that ran them itself grew 200 -> 400 MiB over four runs of one model and never gave it
+#: back. The child exits with the job, so the parent stays at its idle set. Fork rather than
+#: spawn: the child starts with every generator already imported (no 1-2 s import per job)
+#: and shares the parent's pages until it writes them. It inherits no more than the parent
+#: holds, which is no credential at all (DM-18), and the body caps apply before the fork.
+_FORK = multiprocessing.get_context("fork")
+
+
+def _job_child(writer: Any, job: Callable[..., Any], args: tuple[Any, ...]) -> None:
+    """The child's side: run the job and send back what it answered or raised."""
+    try:
+        outcome: tuple[str, Any] = ("answer", job(*args))
+    except BaseException as err:  # noqa: BLE001 - every failure goes back to the parent
+        outcome = ("raised", err)
+    try:
+        writer.send(outcome)
+    except (pickle.PicklingError, TypeError, AttributeError) as err:
+        writer.send(("raised", RuntimeError(f"{type(err).__name__}: {err}")))
+    finally:
+        writer.close()
+
+
+def in_child(job: Callable[..., tuple[int, Any]], *args: Any) -> tuple[int, Any]:
+    """Run one job in a child process and answer what it answered, or raise what it raised.
+
+    A child that dies without answering (the kernel's OOM killer, a crash in a C extension)
+    costs that one request a 500 instead of costing every request the pod.
+    """
+    reader, writer = _FORK.Pipe(duplex=False)
+    child = _FORK.Process(target=_job_child, args=(writer, job, args), daemon=True)
+    child.start()
+    writer.close()
+    try:
+        # Received before the join: an answer larger than the pipe buffer would otherwise
+        # leave the child blocked on its write and the parent on the join.
+        kind, value = reader.recv()
+    except EOFError:
+        child.join()
+        return 500, {
+            "errors": [
+                (
+                    "the generator stopped before it answered "
+                    f"(exit code {child.exitcode}); try again, and report it if it repeats"
+                )
+            ]
+        }
+    finally:
+        reader.close()
+    child.join()
+    if kind == "raised":
+        raise value
+    return value
+
+
 def _read_body(environ: dict[str, Any], cap: int = MAX_BODY_BYTES) -> dict[str, Any]:
     """The request body as JSON, refusing one past the cap before it is read (DM-18)."""
     declared = environ.get("CONTENT_LENGTH") or "0"
@@ -498,9 +560,13 @@ def application(environ: dict[str, Any], start_response: Callable[..., Any]) -> 
 
     work: dict[tuple[str, str], Callable[[], tuple[int, Any]]] = {
         ("GET", "/catalog"): lambda: catalog(_query(environ)),
-        ("POST", "/generate"): lambda: generate(_read_body(environ)),
-        ("POST", "/import-sdm"): lambda: import_sdm(_read_body(environ)),
-        ("POST", "/infer-schema"): lambda: infer_schema(_read_body(environ, MAX_INFER_BODY_BYTES)),
+        ("POST", "/generate"): lambda: in_child(generate, _read_body(environ)),
+        ("POST", "/import-sdm"): lambda: in_child(import_sdm, _read_body(environ)),
+        ("POST", "/infer-schema"): lambda: in_child(
+            infer_schema,
+            _read_body(environ, MAX_INFER_BODY_BYTES),
+            CATALOGUE.attribute_index(),
+        ),
     }
     try:
         if method == "GET" and path == "/healthz":
