@@ -4,7 +4,7 @@ antares | memory-body-copy | 20
 antares | memory-per-request-build | 0
 antares | memory-unbounded-global | 10
 antares | memory-uncapped-read | 1
-antares | modularity-file-cycle | 61
+antares | modularity-file-cycle | 62
 antares | modularity-server-as-library | 0
 antares | security-fetch-from-route | 4
 antares | security-log-secret-field | 0
