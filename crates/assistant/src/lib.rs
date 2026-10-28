@@ -579,6 +579,43 @@ pub async fn held_page_projects(
     Ok(false)
 }
 
+/// Whether the deployment's sources hold the dataset page at `url` and it serves its rows of
+/// `kind` from the Endpoint `slug` narrowed by `isPartOf` (T-5929): the CKAN page's NGSI-LD
+/// address, `…/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}&q=isPartOf…`. False for a slug
+/// or type that is no plain name.
+pub async fn dataset_reads_projects(
+    pool: &sqlx::PgPool,
+    url: &str,
+    slug: &str,
+    kind: &str,
+    sources: &[(String, Vec<String>)],
+    public_only: bool,
+) -> Result<bool, Error> {
+    if dataset_pattern(&[slug.to_owned()], kind).is_none() {
+        return Ok(false);
+    }
+    let address = format!("/api/endpoint/{slug}/ngsi-ld/v1/entities?type={kind}&q=isPartOf");
+    for (project, names) in sources {
+        let mut tx = project_scope(pool, project).await?;
+        let held: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM chunks c JOIN sites s ON s.id = c.site_id \
+             WHERE c.url = $1 AND s.source = ANY($2) AND (NOT $3 OR c.visibility = 'public') \
+             AND strpos(c.text, $4) > 0)",
+        )
+        .bind(url)
+        .bind(names)
+        .bind(public_only)
+        .bind(&address)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        if held {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// [`dataset_page`] across the projects that hold the sources, in their order.
 pub async fn dataset_page_projects(
     pool: &sqlx::PgPool,

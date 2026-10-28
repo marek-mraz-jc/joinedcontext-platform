@@ -3599,7 +3599,7 @@ async fn opening<'a>(
     };
     let direct = routed.is_ok() && early.as_ref().is_none_or(|r| r.direct);
     let wanted = match &early {
-        Some(r) if !r.direct => wanted(q.ask, r),
+        Some(r) if !r.direct => narrowed(q.ask, wanted(q.ask, r), &r.queries, q.question).await,
         _ => Vec::new(),
     };
     let read = {
@@ -3817,6 +3817,98 @@ fn wanted<'a>(ask: &'a Ask<'_>, routing: &Routing) -> Vec<(Read, &'a Connected)>
             Some((w.clone(), c))
         })
         .collect()
+}
+
+/// How long the reads wait for the dataset their question names (T-5929); past it each read takes
+/// the rows of its whole type, as before.
+const NARROW_DEADLINE: Duration = Duration::from_millis(2_000);
+
+/// The CKAN dataset pages a read is checked against, best first.
+const NARROW_PAGES: usize = 5;
+
+/// The `q` that keeps the rows of the dataset whose page is at `page`, the `isPartOf` its rows
+/// name; `None` for an address that is no https URL or could close the quoted value.
+pub fn dataset_q(page: &str) -> Option<String> {
+    let plain =
+        !page.contains(['"', '\\']) && url::Url::parse(page).is_ok_and(|u| u.scheme() == "https");
+    plain.then(|| format!("isPartOf=={page:?}"))
+}
+
+/// The routed reads, each one the router left without a `q` narrowed to the dataset the
+/// question's search finds first among the CKAN pages that serve its type from its Endpoint by
+/// `isPartOf` (T-5929). BBSK's Endpoint serves 5,068 PointOfInterest of several datasets and
+/// lists no attribute a q may test, so "lekáreň v Brezne" read 50 cycle counters and the answer
+/// said there are no pharmacies; the page "Zoznam lekární v BBK" reads 266. A read whose
+/// question finds no such page in [`NARROW_DEADLINE`] is left as the router named it.
+async fn narrowed<'a>(
+    ask: &Ask<'_>,
+    mut wanted: Vec<(Read, &'a Connected)>,
+    queries: &[String],
+    question: &str,
+) -> Vec<(Read, &'a Connected)> {
+    if wanted.iter().all(|(w, _)| w.q.is_some()) {
+        return wanted;
+    }
+    let asked: Vec<String> = if queries.is_empty() {
+        vec![question.to_owned()]
+    } else {
+        // the question's language and the sources' first: a third search adds time, not pages
+        queries.iter().take(2).cloned().collect()
+    };
+    let began = Instant::now();
+    let found = bounded(NARROW_DEADLINE, async {
+        let pages: Vec<String> = datasets(ask, &asked)
+            .await
+            .into_iter()
+            .map(|hit| hit.url)
+            .filter(|url| is_dataset_page(url) && dataset_q(url).is_some())
+            .take(NARROW_PAGES)
+            .collect();
+        let mut chosen = Vec::new();
+        for (w, connector) in &wanted {
+            if w.q.is_some() {
+                chosen.push(None);
+                continue;
+            }
+            let checks = pages.iter().map(|page| {
+                crate::dataset_reads_projects(
+                    ask.pool,
+                    page,
+                    &connector.surface.slug,
+                    &w.kind,
+                    ask.sources,
+                    ask.public_only,
+                )
+            });
+            let held = futures_util::future::join_all(checks).await;
+            chosen.push(
+                pages
+                    .iter()
+                    .zip(held)
+                    .find(|(_, held)| matches!(held, Ok(true)))
+                    .map(|(page, _)| page.clone()),
+            );
+        }
+        chosen
+    })
+    .await;
+    let output = match &found {
+        Some(chosen) => chosen
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => "deadline".to_owned(),
+    };
+    ask.trace
+        .note("tool", "dataset_narrowing", began, None, Some(&output));
+    for ((w, _), page) in wanted.iter_mut().zip(found.unwrap_or_default()) {
+        if let Some(q) = page.as_deref().and_then(dataset_q) {
+            w.q = Some(q);
+        }
+    }
+    wanted
 }
 
 /// The reads, run at once: two of a slow Endpoint used to take their sum of the answer's time
@@ -6722,6 +6814,26 @@ mod tests {
         assert!(type_names("{}").is_empty());
         let many: Vec<String> = (0..50).map(|n| format!("T{n}")).collect();
         assert_eq!(type_names(&json!(many).to_string()).len(), MAX_TYPES);
+    }
+
+    /// T-5929: a read of a type several datasets share keeps the rows of the dataset page found
+    /// for the question by the `isPartOf` its rows name, quoted so the value cannot close early.
+    #[test]
+    fn a_dataset_page_narrows_a_read_to_its_rows() {
+        let page =
+            "https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-lekarni-v-bbk-c564de";
+        assert_eq!(
+            dataset_q(page).as_deref(),
+            Some("isPartOf==\"https://opendata.smartcity.joinedcontext.com/dataset/bbsk-zoznam-lekarni-v-bbk-c564de\"")
+        );
+        for refused in [
+            "http://opendata.example/dataset/a",
+            "https://x.org/dataset/a\"|name==\"b",
+            "https://x.org/dataset/a\\",
+            "not a url",
+        ] {
+            assert_eq!(dataset_q(refused), None, "{refused}");
+        }
     }
 
     #[test]
