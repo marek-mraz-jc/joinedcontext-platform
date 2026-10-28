@@ -361,6 +361,13 @@
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "visitorSharePercent": {
+          "default": 10,
+          "description": "The percent of `costPerDayUsd` one visitor, or all callers without an `Origin` together, may spend a day; 1 to 100, default 10. Past it their questions are refused until UTC midnight while others still get answers (T-4653, T-5928).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "required": [

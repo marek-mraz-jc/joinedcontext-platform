@@ -265,6 +265,9 @@ fn default_streams() -> u32 {
 fn default_cost_per_day() -> f64 {
     3.0
 }
+fn default_visitor_share() -> u32 {
+    10
+}
 fn default_output_tokens() -> u32 {
     700
 }
@@ -760,6 +763,11 @@ pub struct Budget {
     /// (AG-107, T-4737).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_per_conversation_usd: Option<f64>,
+    /// The percent of `costPerDayUsd` one visitor, or all callers without an `Origin` together,
+    /// may spend a day; 1 to 100, default 10. Past it their questions are refused until UTC
+    /// midnight while others still get answers (T-4653, T-5928).
+    #[serde(default = "default_visitor_share")]
+    pub visitor_share_percent: u32,
 }
 
 /// The models a deployment names for `jc-agent-proxy` (MF-52): the router and answer calls.
@@ -1591,6 +1599,12 @@ impl AssistantDeploymentSpec {
                     budget.question_chars,
                     100..=4_000,
                     "questionChars is 100 to 4000",
+                ),
+                (
+                    "budget.visitorSharePercent",
+                    budget.visitor_share_percent,
+                    1..=100,
+                    "visitorSharePercent is 1 to 100",
                 ),
             ] {
                 if !range.contains(&value) {

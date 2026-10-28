@@ -94,6 +94,7 @@ fn deployment(channel: Channel, per_conversation: u64, per_client: u32) -> Deplo
                 messages_per_conversation: 30,
                 question_chars: 1_000,
                 cost_per_conversation_usd: None,
+                visitor_share_percent: 10,
             }),
             theme: None,
             languages: vec!["sk".into()],

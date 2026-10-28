@@ -70,9 +70,6 @@ pub const ANONYMOUS_TURN_CHARS: usize = 1_000;
 /// The share of a deployment's `requestsPerMinute` that callers without an `Origin` share
 /// (T-4653): a script is not a browser on an allowed site, so it may not take the whole pool.
 const UNPLACED_SHARE: u32 = 6;
-/// The share of a deployment's `costPerDayUsd` one visitor, or all callers without an `Origin`
-/// together, may spend before their questions are refused until UTC midnight (T-4653, T-4671).
-const VISITOR_COST_SHARE: f64 = 0.10;
 /// How long a conversation may be continued; migration 0006's policy deletes it after as long.
 const CONVERSATION_HOURS: i64 = 24;
 /// The most questions answered at once, whatever the deployments' rate limits allow (T-3059):
@@ -247,11 +244,13 @@ impl Limits {
         entry.1 = entry.1.saturating_add(micros);
     }
 
-    /// Whether `visitor`'s answers on `day` cost their share of `cap_usd` (T-4653).
-    pub fn over_share(&self, visitor: &str, day: u64, cap_usd: f64) -> bool {
-        self.spent.get(visitor).is_some_and(|(on, micros)| {
-            *on == day && over_cost_cap(*micros, cap_usd * VISITOR_COST_SHARE)
-        })
+    /// Whether `visitor`'s answers on `day` cost their `percent` of `cap_usd`, the deployment's
+    /// `budget.visitorSharePercent` (T-4653, T-5928).
+    pub fn over_share(&self, visitor: &str, day: u64, cap_usd: f64, percent: u32) -> bool {
+        let share = cap_usd * f64::from(percent) / 100.0;
+        self.spent
+            .get(visitor)
+            .is_some_and(|(on, micros)| *on == day && over_cost_cap(*micros, share))
     }
 
     /// Takes one of `visitor`'s `limit` streams; `false` when all are taken.
@@ -1899,12 +1898,12 @@ async fn ask(
     }
     // Past their share of the day's cost a visitor is refused until UTC midnight, while other
     // visitors still get answers (T-4653, T-4671).
-    if state
-        .limits
-        .lock()
-        .await
-        .over_share(&spender, today(), budget.cost_per_day_usd)
-    {
+    if state.limits.lock().await.over_share(
+        &spender,
+        today(),
+        budget.cost_per_day_usd,
+        budget.visitor_share_percent,
+    ) {
         if streams.is_some() {
             state.limits.lock().await.close_stream(&holder);
         }
@@ -2689,17 +2688,62 @@ mod tests {
     fn a_visitor_stops_at_their_share_of_the_day_s_cost() {
         let mut limits = Limits::default();
         limits.spend("a", 20_000, 60_000);
-        assert!(!limits.over_share("a", 20_000, 1.0));
+        assert!(!limits.over_share("a", 20_000, 1.0, 10));
         limits.spend("a", 20_000, 40_000);
-        assert!(limits.over_share("a", 20_000, 1.0), "0.10 of 1 USD spent");
+        assert!(
+            limits.over_share("a", 20_000, 1.0, 10),
+            "0.10 of 1 USD spent"
+        );
         limits.spend("b", 20_000, 99_999);
         assert!(
-            !limits.over_share("b", 20_000, 1.0),
+            !limits.over_share("b", 20_000, 1.0, 10),
             "another visitor still asks"
         );
-        assert!(!limits.over_share("a", 20_001, 1.0), "a new day");
+        assert!(!limits.over_share("a", 20_001, 1.0, 10), "a new day");
         limits.spend("a", 20_001, 1);
         assert_eq!(limits.spent["a"], (20_001, 1));
+    }
+
+    /// T-5928: a deployment's `visitorSharePercent` sets the share: at 50 a visitor asks up to
+    /// half the day's cap and is refused at it.
+    #[test]
+    fn a_share_of_fifty_admits_a_visitor_up_to_half_the_cap() {
+        let mut limits = Limits::default();
+        limits.spend("a", 20_000, 499_999);
+        assert!(!limits.over_share("a", 20_000, 1.0, 50));
+        limits.spend("a", 20_000, 1);
+        assert!(
+            limits.over_share("a", 20_000, 1.0, 50),
+            "0.50 of 1 USD spent"
+        );
+    }
+
+    /// T-5928: one office address behind a NAT asks 200 questions a day (BBSK trial, about
+    /// 0.011 USD each on prod 2026-10-28) at a share of 100 inside a 3 USD day, paced by its
+    /// minute: an eleventh question in one minute is refused with a wait, never with the day.
+    #[test]
+    fn an_office_address_asks_two_hundred_questions_a_day_paced_by_its_minute() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        for question in 0..200_u32 {
+            let now = start + MINUTE * (question / 10);
+            assert!(
+                !limits.over_share("office", 20_000, 3.0, 100),
+                "question {question}"
+            );
+            assert!(limits.admit(&[("office", 10, MINUTE)], now).is_ok());
+            limits.spend("office", 20_000, 11_000);
+        }
+        let burst = start + MINUTE * 20;
+        for _ in 0..10 {
+            assert!(limits.admit(&[("office", 10, MINUTE)], burst).is_ok());
+        }
+        let retry = limits
+            .admit(&[("office", 10, MINUTE)], burst)
+            .expect_err("the eleventh question of a minute");
+        let refused = too_many(retry, "wait");
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers()[header::RETRY_AFTER], "60");
     }
 
     /// T-4653: the challenge gets harder from four fifths of the deployment's minute on, and
