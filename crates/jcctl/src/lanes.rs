@@ -54,6 +54,8 @@ const ALWAYS_RED: &[&str] = &[
     "RoleBinding",
     // A Group is a grant path of its own: a Policy may name it as assignee.
     "Group",
+    // The ceiling on what people may hand an AI client through a connector (AG-150).
+    "DelegationPolicy",
     "Project",
     // A broker brings its own database, client and share of the node (PF-110, ADR-N-047),
     // and an MQTT broker's roles grant publish and subscribe on topics (ADR-N-048).

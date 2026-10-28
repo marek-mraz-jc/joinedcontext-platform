@@ -15,6 +15,7 @@ pub mod dashboard;
 pub mod data_model;
 pub mod data_source;
 pub mod dataspace;
+pub mod delegation_policy;
 pub mod endpoint;
 pub mod endpoint_deprecation;
 pub mod environment;
@@ -85,6 +86,9 @@ pub use data_source::{
 pub use dataspace::{
     AgreementConstraints, AgreementRole, AgreementState, ConnectorEngine, DataAgreementSpec,
     DataOfferSpec, DataSpaceParticipantSpec, Did,
+};
+pub use delegation_policy::{
+    AboveCeiling, ConnectorVerb, DelegationPolicySpec, DelegationSubject, KindVerbs, Segment,
 };
 pub use endpoint::{
     endpoint_role, Audience, Audit, Caching, Creates, EndpointRef, EndpointRole, EndpointSlug,
@@ -218,6 +222,8 @@ pub type Environment = crate::envelope::ResourceEnvelope<EnvironmentSpec>;
 
 /// `kind: Group` as a whole manifest.
 pub type Group = crate::envelope::ResourceEnvelope<GroupSpec>;
+/// `kind: DelegationPolicy` as a whole manifest.
+pub type DelegationPolicy = crate::envelope::ResourceEnvelope<DelegationPolicySpec>;
 /// `kind: ContextBroker` as a whole manifest.
 pub type ContextBroker = crate::envelope::ResourceEnvelope<ContextBrokerSpec>;
 

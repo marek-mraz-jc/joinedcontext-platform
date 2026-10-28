@@ -383,6 +383,8 @@ fn public_apps_servers_assistants_and_grant_kinds_are_red_as_in_the_portal() {
         manifest("Project", "  title: x\n"),
         manifest("ContextBroker", "  kind: antares\n"),
         manifest("MqttBroker", "  roles: []\n"),
+        // T-5952: the ceiling on what people may hand an AI client (AG-150).
+        manifest("DelegationPolicy", "  projects: [air]\n"),
     ];
     for body in &red {
         let verdict = lane_of(&change(Action::Create, body));
