@@ -13,9 +13,9 @@
 //! missing variable is a failure that says what to set, never a test that passes by skipping.
 
 use assistant::{
-    dataset_page, dataset_page_projects, endpoint_page, fill_terms, held_page_projects,
-    hybrid_search, project_scope, rows_dataset_projects, search_projects, sources_by_project,
-    titles, Search, DIMENSIONS, MIGRATOR,
+    dataset_page, dataset_page_projects, dataset_reads_projects, endpoint_page, fill_terms,
+    held_page_projects, hybrid_search, project_scope, rows_dataset_projects, search_projects,
+    sources_by_project, titles, Search, DIMENSIONS, MIGRATOR,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, PgPool};
@@ -577,6 +577,81 @@ Read it at https://gw.example/api/endpoint/od-air",
         assert_eq!(found, held, "{url}");
     }
     tx.rollback().await.expect("rollback");
+
+    // T-5929: a CKAN page that reads its rows of a type from an Endpoint by isPartOf narrows a
+    // read of that Endpoint and type to them; another Endpoint, another type, a page whose
+    // address names no isPartOf (od-air's above) or a source the deployment does not name never.
+    let lekarne = site(
+        &pool,
+        "helsinki",
+        "hel-ckan3",
+        &[(
+            "# Zoznam lekární v BBK\n\nNGSI-LD API (PointOfInterest) (https://gw.example/api/endpoint/od-all/ngsi-ld/v1/entities?type=PointOfInterest&q=isPartOf%3D%3D%22https%3A%2F%2Fopendata.example%2Fdataset%2Flekarne%22)",
+            "sk",
+            "public",
+            v(),
+        )],
+    )
+    .await;
+    sqlx::query("UPDATE chunks SET url = 'https://opendata.example/dataset/lekarne' WHERE id = $1")
+        .bind(lekarne[0])
+        .execute(&pool)
+        .await
+        .expect("the dataset page's url");
+    let named = [(
+        "helsinki".to_owned(),
+        vec!["hel-ckan3".to_owned(), "hel-ckan2".to_owned()],
+    )];
+    let other = [("helsinki".to_owned(), vec!["hel-blog".to_owned()])];
+    for (url, slug, kind, sources, reads) in [
+        (
+            "https://opendata.example/dataset/lekarne",
+            "od-all",
+            "PointOfInterest",
+            &named,
+            true,
+        ),
+        (
+            "https://opendata.example/dataset/lekarne",
+            "od-air",
+            "PointOfInterest",
+            &named,
+            false,
+        ),
+        (
+            "https://opendata.example/dataset/lekarne",
+            "od-all",
+            "Point",
+            &named,
+            false,
+        ),
+        (
+            "https://opendata.example/dataset/lekarne",
+            "od-all",
+            "Point_",
+            &named,
+            false,
+        ),
+        (
+            "https://opendata.example/dataset/air-quality",
+            "od-air",
+            "A",
+            &named,
+            false,
+        ),
+        (
+            "https://opendata.example/dataset/lekarne",
+            "od-all",
+            "PointOfInterest",
+            &other,
+            false,
+        ),
+    ] {
+        let found = dataset_reads_projects(&pool, url, slug, kind, sources, true)
+            .await
+            .expect("reads");
+        assert_eq!(found, reads, "{url} {slug} {kind}");
+    }
 
     // T-4711: a dataset renamed in the catalogue leaves its old page in the index; the page
     // indexed later for the same Endpoint and type is the one cited, never the stale 404.
