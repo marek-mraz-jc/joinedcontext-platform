@@ -29,6 +29,11 @@ pub struct Config {
     /// capture subscriber only from an address this name resolves to; absent admits none
     /// (ADR-N-048 §2.10).
     pub mqtt_portal_host: Option<String>,
+    /// The MQTT brokers' headless Service (`JC_GATEWAY_MQTT_BROKER_HOST`, e.g.
+    /// `mqtt-broker-pods.dev.svc.cluster.local`): under the mesh a broker sees its internal
+    /// listener's clients at its own address, so the runner's and the capture's tokenless
+    /// CONNECTs are admitted from there too; absent adds none (T-5893).
+    pub mqtt_broker_host: Option<String>,
     /// The Portal's mesh identity as `{serviceaccount}.{namespace}`
     /// (`JC_GATEWAY_MQTT_PORTAL_IDENTITY`, e.g. `portal.portal`): the only caller that reads the
     /// refused MQTT CONNECTs at `/internal/mqtt/refusals/{broker}`; absent, or not two labels,
@@ -320,6 +325,10 @@ impl Config {
                 .ok()
                 .map(|host| host.trim().to_owned())
                 .filter(|host| !host.is_empty()),
+            mqtt_broker_host: std::env::var("JC_GATEWAY_MQTT_BROKER_HOST")
+                .ok()
+                .map(|host| host.trim().to_owned())
+                .filter(|host| !host.is_empty()),
             mqtt_portal_identity: std::env::var("JC_GATEWAY_MQTT_PORTAL_IDENTITY")
                 .ok()
                 .and_then(|identity| mesh_name(&identity)),
@@ -507,6 +516,7 @@ mod tests {
             internal_bind: None,
             mqtt_runner_host: None,
             mqtt_portal_host: None,
+            mqtt_broker_host: None,
             mqtt_portal_identity: None,
             broker_url: "http://broker:1026".to_owned(),
             broker_url_template: None,

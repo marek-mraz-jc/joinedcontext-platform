@@ -335,14 +335,20 @@ pub fn broker_of(identity: &str) -> &str {
     identity.split('.').next().unwrap_or_default()
 }
 
-/// The addresses a tokenless CONNECT is admitted from: the pipeline runner's pods and the
-/// Portal's, each resolved from its headless Service.
+/// The addresses a tokenless CONNECT is admitted from: the pipeline runner's pods, the Portal's
+/// and the brokers' own, each resolved from its headless Service.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pods {
     /// The pipeline runner's pods (PL-76).
     pub runner: Vec<IpAddr>,
     /// The Portal's pods, for its capture subscriber (ADR-N-048 §2.10).
     pub portal: Vec<IpAddr>,
+    /// The brokers' own pods. Under the mesh a broker sees a client of its internal listener
+    /// 1883 at its own address, the Linkerd proxy's forward, never the client's; every other
+    /// listener reads the client's address from Traefik's PROXY header, and no broker dials
+    /// another. So a broker's address means listener 1883, whose Linkerd Server admits only the
+    /// runner's and the Portal's mesh identities (T-5893).
+    pub brokers: Vec<IpAddr>,
 }
 
 /// What a CONNECT was decided on: the log's sentence and, for a refusal of a declared broker,
@@ -685,12 +691,12 @@ fn tokenless(broker: &Broker, pods: &Pods, connect: &Connect) -> (Answer, Why) {
     };
     let runner = runner_username(&broker.project);
     let (topics, who, none) = match connect.username.as_str() {
-        name if name == runner && from(&pods.runner) => (
+        name if name == runner && (from(&pods.runner) || from(&pods.brokers)) => (
             &broker.runner_topics,
             "the pipeline runner",
             "no DataSource reads this broker",
         ),
-        CAPTURE_USERNAME if from(&pods.portal) => (
+        CAPTURE_USERNAME if from(&pods.portal) || from(&pods.brokers) => (
             &broker.capture_topics,
             "the Portal's capture",
             "the broker is not in capture mode",
@@ -722,6 +728,7 @@ struct Internal {
     gateway: Arc<Gateway>,
     runner_host: Option<Arc<str>>,
     portal_host: Option<Arc<str>>,
+    broker_host: Option<Arc<str>>,
     refusals: Arc<Refusals>,
     rates: Arc<Rates>,
 }
@@ -733,6 +740,7 @@ async fn auth(
         gateway,
         runner_host,
         portal_host,
+        broker_host,
         refusals,
         ..
     }): State<Internal>,
@@ -754,6 +762,9 @@ async fn auth(
         };
         if let Some(host) = host {
             *addresses = runner_addresses(host).await;
+        }
+        if let Some(host) = &broker_host {
+            pods.brokers = runner_addresses(host).await;
         }
     }
     let (answer, why) = decide(
@@ -830,12 +841,16 @@ async fn acl(
 /// The internal listener's router: the CONNECT check, the publish check and the record of the
 /// CONNECT refusals. `runner_host` and `portal_host` name the headless Services of the pipeline
 /// runner and of the Portal; without one, nobody connects under that name without a token.
+/// `broker_host` names the brokers' headless Service: a tokenless CONNECT from a broker's own
+/// address came through its mesh-gated internal listener (T-5893); without it, only the
+/// runner's and the Portal's own addresses count.
 /// `portal_identity` is the Portal's `{serviceaccount}.{namespace}`, the only mesh identity that
 /// reads the refusals; without it nobody does (T-5534).
 pub fn internal_router(
     gateway: Arc<Gateway>,
     runner_host: Option<String>,
     portal_host: Option<String>,
+    broker_host: Option<String>,
     portal_identity: Option<String>,
 ) -> axum::Router {
     let refusals = Arc::new(Refusals::default());
@@ -850,6 +865,7 @@ pub fn internal_router(
             gateway,
             runner_host: runner_host.map(Arc::from),
             portal_host: portal_host.map(Arc::from),
+            broker_host: broker_host.map(Arc::from),
             refusals,
             rates: Arc::default(),
         })
