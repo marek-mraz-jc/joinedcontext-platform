@@ -182,7 +182,7 @@ pub fn asked_about_narrowing(request: &Request) -> bool {
 
 /// Removes the tenant from every answer, the narrowing signal from every answer nobody asked for
 /// it in, says that no answer of this gateway belongs in a shared cache except an anonymous read
-/// of data when the deployment allows one ([`shareable_read`]), and points every answer that
+/// of data when the deployment allows one (`shareable_read`), and points every answer that
 /// carries data at the schema it is described by.
 pub async fn scrub(State(gateway): State<Arc<Gateway>>, request: Request, next: Next) -> Response {
     let asked = asked_about_narrowing(&request);
