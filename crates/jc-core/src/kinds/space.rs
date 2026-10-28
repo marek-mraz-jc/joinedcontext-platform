@@ -212,6 +212,11 @@ pub struct Quotas {
     /// organization's `spec.limits.mqtt` as a whole (PF-117, ADR-N-048 §2.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mqtt: Option<crate::kinds::MqttAllowance>,
+    /// The shortest clock a Pipeline of the project may run on, in seconds: its `spec.period`
+    /// and the shortest gap of its `spec.schedule` (PL-116). A floor, not a count, so it is no
+    /// PF-73 dimension; the stricter of the project's and the organization's value holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_pipeline_period_seconds: Option<u32>,
 }
 
 impl Quotas {

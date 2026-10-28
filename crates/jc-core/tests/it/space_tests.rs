@@ -81,8 +81,13 @@ fn project_quota_zero_fails_validation() {
         entities_per_space: Some(1),
         requests_per_minute: Some(1),
         mqtt: None,
+        min_pipeline_period_seconds: Some(900),
     };
     assert!(full.validate().is_ok());
+    let floor: Quotas =
+        serde_norway::from_str("minPipelinePeriodSeconds: 900\n").expect("a floor parses");
+    assert_eq!(floor.min_pipeline_period_seconds, Some(900));
+    assert!(!floor.sets_dimensions(), "a floor is no PF-73 dimension");
     assert_eq!(full.dimensions().len(), 8);
 
     for (field, _) in full.dimensions() {
