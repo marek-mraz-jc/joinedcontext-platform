@@ -175,6 +175,11 @@
             "null"
           ]
         },
+        "personalData": {
+          "default": false,
+          "description": "Whether a connector of theirs may tick `personalData` on a scope item, keeping the attributes a model marks personal in its answers (AG-158); default false.",
+          "type": "boolean"
+        },
         "projects": {
           "description": "The projects a connector may name, at least one; `*` is refused, list them.",
           "items": {

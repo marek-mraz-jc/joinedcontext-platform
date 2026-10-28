@@ -115,6 +115,10 @@ pub struct DelegationPolicySpec {
     /// Whether a connector of theirs may have writes on.
     #[serde(default)]
     pub writes: bool,
+    /// Whether a connector of theirs may tick `personalData` on a scope item, keeping the
+    /// attributes a model marks personal in its answers (AG-158); default false.
+    #[serde(default)]
+    pub personal_data: bool,
     /// The longest expiry, an ISO 8601 duration in days such as `P90D`, at most `P365D`;
     /// absent: `P30D`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -413,6 +417,7 @@ mod tests {
             }]),
             endpoints: None,
             writes: false,
+            personal_data: false,
             max_expiry: Some("P90D".into()),
             allowed_clients: Some(vec!["mcp-local".into()]),
             above_ceiling: AboveCeiling::Refuse,
