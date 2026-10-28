@@ -16,7 +16,7 @@
 //! bound, no hidden attribute named, a minting Endpoint's key left to the broker, the day's
 //! creates counted. The broker's view still decides the operation (ADR-0023).
 
-use crate::app::{Gateway, MAX_BODY};
+use crate::app::{Gateway, MAX_BODY, PAGE};
 use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, principal_of};
 use crate::handlers::ngsi_ld::{
@@ -268,9 +268,33 @@ fn target(request: &Request, prefix: &str, view: &str, surface: &Surface) -> Str
     let root = format!("/x/views/{view}/{}", surface.path);
     let rest = rest_of(request, prefix);
     match request.uri().query() {
+        Some(query)
+            if !query.is_empty() && surface.representation == Representation::OgcFeatures =>
+        {
+            format!("{root}{rest}?{}", page_bounded(query))
+        }
         Some(query) if !query.is_empty() => format!("{root}{rest}?{query}"),
         _ => format!("{root}{rest}"),
     }
+}
+
+/// The query with an OGC `limit` above [`PAGE`] asked as `PAGE` (T-5891): the gateway holds the
+/// broker's page whole to move its links, and a page past `MAX_BODY` would be a 502. A server
+/// may answer fewer features than `limit` (OGC API - Features Part 1, 7.15.4); the broker's
+/// `next` link carries the rest; one past the broker's maximum is no error either (Part 1
+/// recommends using the maximum). Every other parameter, and a `limit` that is no number, goes
+/// byte for byte for the broker to judge.
+fn page_bounded(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some(("limit", n)) if n.parse::<u64>().is_ok_and(|n| n > PAGE as u64) => {
+                format!("limit={PAGE}")
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// The broker's answer as the caller gets it: a failure without its detail, the engine's
@@ -327,7 +351,8 @@ async fn answered(
     let view_to = format!("{}{}/", gateway.base_url(), endpoint.base_path);
     let (mut parts, body) = answer.into_parts();
     // ponytail: the page is held whole to move its links, so one past MAX_BODY (8 MiB) is a
-    // broker failure; stream the rewrite if a `limit` ever reaches that.
+    // broker failure; `page_bounded` keeps a page to PAGE features (T-5891). Stream the rewrite
+    // if PAGE features of one collection ever pass 8 MiB.
     let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
         tracing::error!(slug = %endpoint.slug, surface = surface.name, "the broker's answer is larger than the gateway holds");
         return broker_failure(StatusCode::BAD_GATEWAY, None, Body::empty()).await;
