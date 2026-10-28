@@ -322,6 +322,23 @@ pub struct MqttLimits {
     /// Connections the broker holds at once.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// Connections one source address may hold at once at the edge, in `1..=maxConnections`;
+    /// absent means [`CONNECTIONS_PER_ADDRESS`] or `maxConnections` when lower (T-5888).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections_per_address: Option<u32>,
+}
+
+/// The connections one source address may hold at once when a broker names no
+/// `limits.connectionsPerAddress` (T-5888).
+pub const CONNECTIONS_PER_ADDRESS: u32 = 20;
+
+impl MqttLimits {
+    /// The connections one source address may hold at once: the manifest's own value, else
+    /// [`CONNECTIONS_PER_ADDRESS`] capped at `maxConnections`.
+    pub fn connections_per_address(&self) -> u32 {
+        self.connections_per_address
+            .unwrap_or(CONNECTIONS_PER_ADDRESS.min(self.max_connections))
+    }
 }
 
 fn default_max_message_bytes() -> u32 {
@@ -342,6 +359,7 @@ impl Default for MqttLimits {
             max_message_bytes: default_max_message_bytes(),
             messages_per_second: default_messages_per_second(),
             max_connections: default_max_connections(),
+            connections_per_address: None,
         }
     }
 }
@@ -398,7 +416,12 @@ impl MqttBrokerSpec {
                 MAX_CONNECTIONS,
             ),
         ];
-        for (field, value, ceiling) in limits {
+        let per_address = (
+            "connectionsPerAddress",
+            self.limits.connections_per_address(),
+            self.limits.max_connections,
+        );
+        for (field, value, ceiling) in limits.into_iter().chain([per_address]) {
             if value == 0 || value > ceiling {
                 return Err(invalid(
                     &format!("limits.{field}"),
@@ -905,11 +928,52 @@ mod tests {
                 },
                 "maxConnections",
             ),
+            (
+                MqttLimits {
+                    connections_per_address: Some(0),
+                    ..MqttLimits::default()
+                },
+                "limits.connectionsPerAddress",
+            ),
+            (
+                MqttLimits {
+                    max_connections: 50,
+                    connections_per_address: Some(51),
+                    ..MqttLimits::default()
+                },
+                "limits.connectionsPerAddress",
+            ),
         ] {
             let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
             broker.limits = limits;
             assert!(refusal(&broker).contains(field), "{field}");
         }
+    }
+
+    /// T-5888: one address holds at most 20 connections unless the broker names its own number,
+    /// and never more than the broker holds at all.
+    #[test]
+    fn connections_per_address_defaults_to_twenty_within_max_connections() {
+        let limits = |max_connections, connections_per_address| MqttLimits {
+            max_connections,
+            connections_per_address,
+            ..MqttLimits::default()
+        };
+        assert_eq!(MqttLimits::default().connections_per_address(), 20);
+        assert_eq!(limits(5, None).connections_per_address(), 5);
+        assert_eq!(limits(1000, Some(50)).connections_per_address(), 50);
+        let mut broker = spec(vec![role("camera", &["${clientid}/a"], &[])]);
+        broker.limits = limits(50, Some(50));
+        assert!(broker.validate().is_ok());
+        broker.limits = limits(5, None);
+        assert!(broker.validate().is_ok());
+        let read: MqttLimits =
+            serde_json::from_value(serde_json::json!({ "connectionsPerAddress": 50 })).unwrap();
+        assert_eq!(read.connections_per_address, Some(50));
+        assert!(serde_json::to_value(MqttLimits::default())
+            .unwrap()
+            .get("connectionsPerAddress")
+            .is_none());
     }
 
     #[test]
