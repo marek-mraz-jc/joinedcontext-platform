@@ -77,7 +77,7 @@ impl Antares {
                 "-e",
                 "ANTARES_POLICY=joinedcontext",
                 "-e",
-                "ANTARES_POLICY_SUBJECT_HEADERS=x-jc-subject,x-jc-groups,x-jc-roles,x-jc-client,x-jc-restricted",
+                "ANTARES_POLICY_SUBJECT_HEADERS=x-jc-subject,x-jc-groups,x-jc-roles,x-jc-client,x-jc-restricted,x-jc-read-only",
                 IMAGE,
             ])
             .output()

@@ -99,6 +99,8 @@ pub const ROLES: HeaderName = HeaderName::from_static("x-jc-roles");
 pub const CLIENT: HeaderName = HeaderName::from_static("x-jc-client");
 /// `true` when the caller asked to be told about narrowing (O-3 (b), R22).
 pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
+/// `true` when the caller's token is read-only (T-5955): the broker refuses its every write.
+pub const READ_ONLY: HeaderName = HeaderName::from_static("x-jc-read-only");
 /// The data-space participant a transfer token names (DS-02, map K38, T-3800).
 pub const DID: HeaderName = HeaderName::from_static("x-jc-did");
 
@@ -165,6 +167,9 @@ pub fn pin_caller(
         headers.insert(PROVENANCE_ACTOR_KIND, HeaderValue::from_static(kind));
     }
     request_id(headers);
+    if subject.read_only {
+        headers.insert(READ_ONLY, HeaderValue::from_static("true"));
+    }
     if subject.agreement.is_some() {
         one(headers, DID, subject.did.as_deref());
         return Ok(());
