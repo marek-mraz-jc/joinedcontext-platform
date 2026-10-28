@@ -16,6 +16,7 @@ mod data_model_tests;
 mod data_source_serde_tests;
 mod datacube_tests;
 mod dataspace_tests;
+mod delegation_policy_tests;
 mod display_order_tests;
 mod docs_golden_tests;
 mod endpoint_tests;

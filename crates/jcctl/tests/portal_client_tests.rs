@@ -47,8 +47,11 @@ fn endpoint(name: &str, audience: &str) -> Value {
     })
 }
 
-fn answer(stub: &Mutex<Stub>, method: &str, target: &str) -> (u16, String) {
+fn answer(stub: &Mutex<Stub>, method: &str, target: &str, body: &str) -> (u16, String) {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if let Some(answer) = registry(method, path, query, body) {
+        return answer;
+    }
     let stub = stub.lock().expect("the stub");
     if let Some((refused, status, detail)) = stub.refuse.clone() {
         if refused == path && method != "GET" {
@@ -94,6 +97,62 @@ fn answer(stub: &Mutex<Stub>, method: &str, target: &str) -> (u16, String) {
         "DELETE" => (202, change("red")),
         _ => (405, String::new()),
     }
+}
+
+/// The answers of a dry run and of the operation registry, as the Portal shapes them
+/// (`DryRunResult`, `GET …/ops`, `POST …/ops/{name}`); `None` for every other request.
+fn registry(method: &str, path: &str, query: &str, body: &str) -> Option<(u16, String)> {
+    let sent: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let ops = "/api/v1/projects/helsinki/ops";
+    let answer = match (method, path) {
+        ("POST" | "PUT", _) if query == "dryRun=All" => {
+            match sent["metadata"]["name"].as_str().unwrap_or("") {
+                "bad-air" => json!({
+                    "valid": false, "lane": "red", "plan": { "summary": {}, "fields": [] },
+                    "verdict": { "ok": false, "findings": [
+                        { "level": "error", "path": "spec.contextSpaceRef", "message": "no space 'nowhere' in helsinki" },
+                        { "level": "error", "path": "", "message": format!("the token {TOKEN} is not echoed") }
+                    ] }
+                }),
+                "public-air" => json!({
+                    "valid": true, "lane": "yellow",
+                    "plan": { "summary": { "update": 1 }, "fields": [
+                        { "path": "spec.audience", "from": "organization", "to": "public" }
+                    ] },
+                    "findings": ["spec.auth: write the secret as a secretRef"]
+                }),
+                "fresh-air" => json!({
+                    "valid": true, "lane": "green",
+                    "plan": { "summary": { "create": 1 }, "fields": [
+                        { "path": "spec.audience", "to": "organization" }
+                    ] }
+                }),
+                _ => {
+                    json!({ "valid": true, "lane": "green", "plan": { "summary": {}, "fields": [] } })
+                }
+            }
+        }
+        ("GET", p) if p == ops => json!([
+            { "name": "jc_schema_get", "description": "The JSON Schema of one kind" },
+            { "name": "jc_change_approve", "description": "Approves a Change" }
+        ]),
+        ("POST", p) if p == format!("{ops}/jc_schema_get") => {
+            json!({ "kind": sent["kind"], "schema": { "type": "object" }, "echo": TOKEN })
+        }
+        ("POST", p) if p.starts_with(ops) => {
+            return Some((
+                403,
+                json!({
+                    "type": "about:blank", "title": "Forbidden", "status": 403,
+                    "detail": format!("no approve right with {TOKEN}"),
+                    "errors": ["identity.client: a connector cannot decide", "verb: approve"]
+                })
+                .to_string(),
+            ))
+        }
+        _ => return None,
+    };
+    Some((200, answer.to_string()))
 }
 
 /// Starts the stub Portal; returns its base URL and the shared state.
@@ -148,7 +207,7 @@ fn portal(resources: &[Value]) -> (String, Arc<Mutex<Stub>>) {
                 })
                 .map(|(_, v)| v.trim().to_owned())
                 .unwrap_or_default();
-            let (status, answer) = answer(&shared, &method, &target);
+            let (status, answer) = answer(&shared, &method, &target, &body);
             shared.lock().expect("the stub").seen.push(Seen {
                 method,
                 path: target,
@@ -511,6 +570,9 @@ fn the_usage_lists_the_client_verbs_and_a_verb_with_a_wrong_shape_prints_it() {
         "jcctl apply -f <file>",
         "jcctl diff -f <file>",
         "jcctl delete -f <file>",
+        "jcctl plan -f <file>",
+        "jcctl ops --project <slug>",
+        "jcctl op <operation> --project <slug>",
     ] {
         assert!(usage.contains(verb), "{verb} missing from the usage");
     }
@@ -519,4 +581,174 @@ fn the_usage_lists_the_client_verbs_and_a_verb_with_a_wrong_shape_prints_it() {
         .output()
         .expect("jcctl runs");
     assert!(String::from_utf8_lossy(&output_on_a_write.stderr).starts_with("usage:"));
+}
+
+#[test]
+fn plan_sends_each_manifest_as_a_dry_run_and_prints_lane_fields_and_notes() {
+    let (server, stub) = portal(&[
+        endpoint("public-air", "organization"),
+        endpoint("same-air", "organization"),
+    ]);
+    let file = manifest_file("plan", NEW_AND_CHANGED);
+    let out = jcctl(
+        &server,
+        &token_file("plan"),
+        &["plan", "-f", &file.to_string_lossy()],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert_eq!(
+        stdout(&out),
+        "endpoints/fresh-air: would create (green lane)\n\
+         endpoints/fresh-air: spec.audience: (absent) -> \"organization\"\n\
+         endpoints/public-air: would replace (yellow lane)\n\
+         endpoints/public-air: spec.audience: \"organization\" -> \"public\"\n\
+         endpoints/public-air: note: spec.auth: write the secret as a secretRef\n\
+         endpoints/same-air: unchanged\n"
+    );
+    let writes: Vec<Seen> = seen(&stub)
+        .into_iter()
+        .filter(|s| s.method != "GET")
+        .collect();
+    let sent: Vec<(&str, &str)> = writes
+        .iter()
+        .map(|s| (s.method.as_str(), s.path.as_str()))
+        .collect();
+    let base = format!("{BASE}?dryRun=All");
+    let public = format!("{BASE}/public-air?dryRun=All");
+    let same = format!("{BASE}/same-air?dryRun=All");
+    assert_eq!(
+        sent,
+        [
+            ("POST", base.as_str()),
+            ("PUT", public.as_str()),
+            ("PUT", same.as_str())
+        ],
+        "every write is a dry run, a new manifest to the collection, a known one to itself"
+    );
+    assert!(writes
+        .iter()
+        .all(|s| s.authorization == format!("Bearer {TOKEN}")));
+}
+
+#[test]
+fn plan_of_a_manifest_the_portal_would_refuse_prints_each_finding_and_exits_1() {
+    let (server, _stub) = portal(&[]);
+    let file = manifest_file(
+        "plan-refused",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: Endpoint\nmetadata:\n  name: bad-air\n  \
+         namespace: helsinki\nspec:\n  contextSpaceRef: nowhere\n  audience: public\n",
+    );
+    let out = jcctl(
+        &server,
+        &token_file("plan-refused"),
+        &["plan", "-f", &file.to_string_lossy()],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let printed = stdout(&out);
+    assert!(
+        printed.starts_with("endpoints/bad-air: the Portal would refuse it\n"),
+        "{printed}"
+    );
+    assert!(printed.contains(
+        "endpoints/bad-air: error: spec.contextSpaceRef: no space 'nowhere' in helsinki\n"
+    ));
+}
+
+#[test]
+fn ops_lists_each_operation_the_caller_may_run() {
+    let (server, stub) = portal(&[]);
+    let out = jcctl(
+        &server,
+        &token_file("ops"),
+        &["ops", "--project", "helsinki"],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout(&out),
+        "jc_schema_get\tThe JSON Schema of one kind\njc_change_approve\tApproves a Change\n"
+    );
+    let seen = seen(&stub);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].method.as_str(), seen[0].path.as_str()),
+        ("GET", "/api/v1/projects/helsinki/ops")
+    );
+}
+
+#[test]
+fn op_posts_the_input_file_as_json_and_prints_the_answer() {
+    let (server, stub) = portal(&[]);
+    let dir = common::temp_dir("portal-client-op-input");
+    let input = dir.join("input.yaml");
+    std::fs::write(&input, "kind: Endpoint\n").expect("the input file");
+    let out = jcctl(
+        &server,
+        &token_file("op"),
+        &[
+            "op",
+            "jc_schema_get",
+            "--project",
+            "helsinki",
+            "-f",
+            &input.to_string_lossy(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed: Value = serde_json::from_str(&stdout(&out)).expect("JSON on stdout");
+    assert_eq!(printed["kind"], "Endpoint");
+    assert_eq!(printed["echo"], "[redacted]");
+    let seen = seen(&stub);
+    assert_eq!(seen[0].path, "/api/v1/projects/helsinki/ops/jc_schema_get");
+    assert_eq!(seen[0].authorization, format!("Bearer {TOKEN}"));
+    let sent: Value = serde_json::from_str(&seen[0].body).expect("a JSON body");
+    assert_eq!(sent, json!({ "kind": "Endpoint" }));
+}
+
+#[test]
+fn a_refused_op_names_every_problem_error_with_the_token_redacted() {
+    let (server, _stub) = portal(&[]);
+    let out = jcctl(
+        &server,
+        &token_file("op-refused"),
+        &["op", "jc_change_approve", "--project", "helsinki"],
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("ops/jc_change_approve: the Portal refused (403): no approve right with [redacted]; identity.client: a connector cannot decide; verb: approve"), "{stderr}");
+}
+
+#[test]
+fn an_op_input_that_is_not_one_object_or_a_missing_project_sends_nothing() {
+    let (server, stub) = portal(&[]);
+    let dir = common::temp_dir("portal-client-op-list");
+    let input = dir.join("input.json");
+    std::fs::write(&input, "[1, 2]").expect("the input file");
+    let token = token_file("op-shape");
+    let not_object = jcctl(
+        &server,
+        &token,
+        &[
+            "op",
+            "jc_schema_get",
+            "--project",
+            "helsinki",
+            "-f",
+            &input.to_string_lossy(),
+        ],
+    );
+    assert_eq!(not_object.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&not_object.stderr).contains("the input must be one object"));
+    let no_project = jcctl(&server, &token, &["op", "jc_schema_get"]);
+    assert!(String::from_utf8_lossy(&no_project.stderr).starts_with("usage:"));
+    let two_names = jcctl(&server, &token, &["op", "a", "b", "--project", "helsinki"]);
+    assert!(String::from_utf8_lossy(&two_names.stderr).starts_with("usage:"));
+    assert!(seen(&stub).is_empty());
 }

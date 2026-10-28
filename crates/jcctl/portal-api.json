@@ -1,0 +1,440 @@
+{
+  "kinds": [
+    "AgentProfile",
+    "App",
+    "AssistantDeployment",
+    "Blueprint",
+    "Bundle",
+    "CkanInstance",
+    "ContextBroker",
+    "ContextSourceRegistration",
+    "ContextSpace",
+    "Dashboard",
+    "DataAgreement",
+    "DataModel",
+    "DataOffer",
+    "DataSource",
+    "DataSpaceParticipant",
+    "Endpoint",
+    "Environment",
+    "Group",
+    "KnowledgeSource",
+    "Layer",
+    "Mapping",
+    "McpServer",
+    "ModelProjection",
+    "MqttBroker",
+    "Organization",
+    "Pipeline",
+    "Policy",
+    "Project",
+    "Role",
+    "RoleBinding",
+    "ScopeDefinition",
+    "ServiceAccount",
+    "SharedSpaceReference",
+    "Subscription",
+    "SyncSource",
+    "UiSchema"
+  ],
+  "ops": [
+    {
+      "description": "What happened in the project: the same events, filters and paging the activity page reads",
+      "name": "jc_activity_list",
+      "verb": "read"
+    },
+    {
+      "description": "The SDK's services: calls, app.yaml lines, quotas",
+      "name": "jc_app_services",
+      "verb": "read"
+    },
+    {
+      "description": "Find spaces, endpoints, and data models matching search keywords",
+      "name": "jc_catalog_search",
+      "verb": "read"
+    },
+    {
+      "description": "Approves and merges a change proposal",
+      "name": "jc_change_approve",
+      "verb": "approve"
+    },
+    {
+      "description": "One proposed change: what it does, who wrote it, its lane and where it stands",
+      "name": "jc_change_get",
+      "verb": "read"
+    },
+    {
+      "description": "Lists open change proposals and merge requests for review",
+      "name": "jc_change_list",
+      "verb": "read"
+    },
+    {
+      "description": "Rejects a change proposal with a reason and closes its merge request",
+      "name": "jc_change_reject",
+      "verb": "approve"
+    },
+    {
+      "description": "The catalogues this project publishes to, and what each endpoint's publication is doing",
+      "name": "jc_ckan_status",
+      "verb": "read"
+    },
+    {
+      "description": "Dry-runs a DataSource manifest and probes the external feed",
+      "name": "jc_datasource_check",
+      "verb": "read"
+    },
+    {
+      "description": "Proposes creation or update of a DataSource manifest, from a draft when one is named",
+      "name": "jc_datasource_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "Discards a shared draft (AG-61)",
+      "name": "jc_draft_drop",
+      "verb": "propose"
+    },
+    {
+      "description": "Reads one shared draft with its verdict (AG-61)",
+      "name": "jc_draft_get",
+      "verb": "read"
+    },
+    {
+      "description": "Lists the shared drafts of a project, or of one copy of it (AG-61, CC-76)",
+      "name": "jc_draft_list",
+      "verb": "read"
+    },
+    {
+      "description": "Writes the shared draft of a manifest every window, assistant run and MCP client sees (AG-61)",
+      "name": "jc_draft_put",
+      "verb": "propose"
+    },
+    {
+      "description": "Every Endpoint of every project with its project, for an organization administrator (PF-61, PF-03)",
+      "name": "jc_endpoint_list_all",
+      "verb": "read"
+    },
+    {
+      "description": "Renders an Endpoint and its draft Policy manifests from a request to share data",
+      "name": "jc_endpoint_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "The project's spaces, endpoints, pipelines and apps, and what links them",
+      "name": "jc_federation_graph",
+      "verb": "read"
+    },
+    {
+      "description": "Expands one of the organisation's blueprints with the parameters given, as one change: a green flow merges at once, anything stricter waits for a person's approval",
+      "name": "jc_flow_start",
+      "verb": "propose"
+    },
+    {
+      "description": "Folds an attribute over context entities and renders a KeyPerformanceIndicator entity",
+      "name": "jc_kpi_compute",
+      "verb": "read"
+    },
+    {
+      "description": "Dry-runs candidate manifest changes and returns validation result and plan diff",
+      "name": "jc_manifest_dry_run",
+      "verb": "read"
+    },
+    {
+      "description": "Infers a draft LinkML data model from sample data bytes or text",
+      "name": "jc_model_infer",
+      "verb": "read"
+    },
+    {
+      "description": "Proposes creation or update of a DataModel manifest, from a draft when one is named",
+      "name": "jc_model_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "One DataModel's LinkML, as the repository holds it",
+      "name": "jc_model_source_get",
+      "verb": "read"
+    },
+    {
+      "description": "Writes one DataModel's LinkML and its generated artifacts as a change a person approves",
+      "name": "jc_model_source_put",
+      "verb": "propose"
+    },
+    {
+      "description": "Creates a person and sends the sign-up e-mail",
+      "name": "jc_person_create",
+      "verb": "propose"
+    },
+    {
+      "description": "Disables a person and ends their sessions; never the caller or the last Organization Administrator",
+      "name": "jc_person_disable",
+      "verb": "propose"
+    },
+    {
+      "description": "Edits a person's name, e-mail or language",
+      "name": "jc_person_edit",
+      "verb": "propose"
+    },
+    {
+      "description": "Enables a disabled person",
+      "name": "jc_person_enable",
+      "verb": "propose"
+    },
+    {
+      "description": "One person with their groups and roles",
+      "name": "jc_person_get",
+      "verb": "read"
+    },
+    {
+      "description": "Searches the organization's people, a page at a time",
+      "name": "jc_person_list",
+      "verb": "read"
+    },
+    {
+      "description": "Ends every session of a person",
+      "name": "jc_person_sign_out",
+      "verb": "propose"
+    },
+    {
+      "description": "What the runner has counted for one pipeline: state, messages, errors and latency",
+      "name": "jc_pipeline_metrics",
+      "verb": "read"
+    },
+    {
+      "description": "Proposes creation or update of a Pipeline manifest, from a draft when one is named",
+      "name": "jc_pipeline_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "Reads the first records of a DataSource, or of a sample file or URL, on the project's runner: the records, their fields and the count (the workbench's sample step, ADR-N-034)",
+      "name": "jc_pipeline_sample_source",
+      "verb": "propose"
+    },
+    {
+      "description": "Tests candidate pipeline mapping and validation on runner without writing",
+      "name": "jc_pipeline_test",
+      "verb": "propose"
+    },
+    {
+      "description": "Runs a candidate pipeline's steps over a sample on the project's runner without writing: each record as it would be written and every failure at its step and line (the workbench's mapped output, ADR-N-034)",
+      "name": "jc_pipeline_try_mapping",
+      "verb": "propose"
+    },
+    {
+      "description": "Checks records against the target space's data model, the target Endpoint's Policies and view, and the lifetime: a verdict per record with each finding and its expiresAt (the workbench's validation step, PL-59, ADR-N-034)",
+      "name": "jc_pipeline_validate",
+      "verb": "read"
+    },
+    {
+      "description": "Opens a project, with the opener's steward binding in the same change; the organization's own setting says who may",
+      "name": "jc_project_create",
+      "verb": "propose"
+    },
+    {
+      "description": "Proposes the one red-lane change that removes a project and every space, endpoint, app, service account, role and binding written for it",
+      "name": "jc_project_delete",
+      "verb": "delete"
+    },
+    {
+      "description": "The project's manifests as one bundle, narrowed to the kinds and names asked for; the whole project is for organization administrators",
+      "name": "jc_project_export",
+      "verb": "read"
+    },
+    {
+      "description": "The project and what it holds of each quota: context spaces, resident pipelines, public endpoints and apps",
+      "name": "jc_project_get",
+      "verb": "read"
+    },
+    {
+      "description": "Imports a bundle into the project as one change a person approves, or answers the plan alone",
+      "name": "jc_project_import",
+      "verb": "propose"
+    },
+    {
+      "description": "The project's history: the commits an export can be read from",
+      "name": "jc_project_revisions",
+      "verb": "read"
+    },
+    {
+      "description": "Proposes removing a resource by kind and name, its name typed back; refused while other resources reference it",
+      "name": "jc_resource_delete",
+      "verb": "delete"
+    },
+    {
+      "description": "Reads one resource's manifest and status by kind and name",
+      "name": "jc_resource_get",
+      "verb": "read"
+    },
+    {
+      "description": "Lists the resources of one kind in the project, optionally of one context space",
+      "name": "jc_resource_list",
+      "verb": "read"
+    },
+    {
+      "description": "Proposes creating or changing a resource of any kind from its manifest or a draft; the change waits for a person's approval",
+      "name": "jc_resource_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "Answers one question a run asked, so it carries on; a person answers, never another run",
+      "name": "jc_run_answer",
+      "verb": "propose"
+    },
+    {
+      "description": "Stops one of this caller's runs; what it had not finished is not published",
+      "name": "jc_run_cancel",
+      "verb": "propose"
+    },
+    {
+      "description": "Starts an application, dashboard or analysis run, which waits for a person's approval at the end",
+      "name": "jc_run_create",
+      "verb": "propose"
+    },
+    {
+      "description": "One of this caller's runs: what it is building, what it asks and where it stands",
+      "name": "jc_run_get",
+      "verb": "read"
+    },
+    {
+      "description": "The project's agent runs, newest first, narrowed by app, kind or status",
+      "name": "jc_run_list",
+      "verb": "read"
+    },
+    {
+      "description": "Sends text to one of this caller's running conversations or applications",
+      "name": "jc_run_message",
+      "verb": "propose"
+    },
+    {
+      "description": "Proposes the application a finished run built; a person approves the change",
+      "name": "jc_run_publish",
+      "verb": "propose"
+    },
+    {
+      "description": "Reads the JSON Schema of one manifest kind: its fields, their types and limits, never data",
+      "name": "jc_schema_get",
+      "verb": "read"
+    },
+    {
+      "description": "Opens an endpoint or folder that partly defines a space and completes LinkML, data source, and pipeline drafts (MCP clients pass the files)",
+      "name": "jc_space_complete",
+      "verb": "propose"
+    },
+    {
+      "description": "Proposes creation or update of a ContextSpace manifest, from a draft when one is named",
+      "name": "jc_space_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "Stops the loop and proposes removing the SyncSource; what it imported stays",
+      "name": "jc_syncsource_detach",
+      "verb": "delete"
+    },
+    {
+      "description": "Switches one SyncSource's loop off, or back on; nothing already proposed is touched",
+      "name": "jc_syncsource_pause",
+      "verb": "propose"
+    },
+    {
+      "description": "Where one SyncSource stands: its phase, the revision it saw and why the last run stopped",
+      "name": "jc_syncsource_status",
+      "verb": "read"
+    },
+    {
+      "description": "Runs one SyncSource at once; what it finds becomes changes a person approves",
+      "name": "jc_syncsource_sync",
+      "verb": "propose"
+    },
+    {
+      "description": "Every file the workspace changes with its fields and lane, and every field main changed too",
+      "name": "jc_workspace_compare",
+      "verb": "read"
+    },
+    {
+      "description": "Removes the workspace and its branch; nothing in it reaches main",
+      "name": "jc_workspace_discard",
+      "verb": "propose"
+    },
+    {
+      "description": "One workspace: whose it is, what it covers, when it expires and how many files it changes",
+      "name": "jc_workspace_get",
+      "verb": "read"
+    },
+    {
+      "description": "The open workspaces of the project, oldest first",
+      "name": "jc_workspace_list",
+      "verb": "read"
+    },
+    {
+      "description": "Opens a named branch of the project to change several resources in, brought back later as one Change",
+      "name": "jc_workspace_open",
+      "verb": "propose"
+    },
+    {
+      "description": "Whether the preview runs, the addresses of its Endpoints, its paused pipelines, and why it failed when it did",
+      "name": "jc_workspace_preview_get",
+      "verb": "read"
+    },
+    {
+      "description": "Renders the workspace with its prefix and serves its Endpoints on slugs of their own; every pipeline stays paused (CC-78, PF-83)",
+      "name": "jc_workspace_preview_start",
+      "verb": "propose"
+    },
+    {
+      "description": "Stops the preview; its Endpoints stop answering. Stopping one that does not run changes nothing",
+      "name": "jc_workspace_preview_stop",
+      "verb": "propose"
+    },
+    {
+      "description": "Proposes the workspace as one Change a person approves; never for an agent (AG-82)",
+      "name": "jc_workspace_propose",
+      "verb": "propose"
+    },
+    {
+      "description": "Takes what main changed into the workspace; a field both changed needs a resolution, ours or theirs",
+      "name": "jc_workspace_update_from_main",
+      "verb": "propose"
+    }
+  ],
+  "paths": {
+    "/api/v1/projects/{project}/ops": {
+      "GET": []
+    },
+    "/api/v1/projects/{project}/{plural}": {
+      "GET": [
+        "continue",
+        "fieldSelector",
+        "labelSelector",
+        "limit",
+        "revision",
+        "workspace"
+      ],
+      "POST": [
+        "confirm",
+        "dryRun"
+      ]
+    },
+    "/api/v1/projects/{project}/{plural}/{name}": {
+      "DELETE": [
+        "confirm",
+        "dryRun"
+      ],
+      "GET": [
+        "revision",
+        "workspace"
+      ],
+      "PATCH": [
+        "confirm",
+        "dryRun"
+      ],
+      "PUT": [
+        "confirm",
+        "dryRun"
+      ]
+    }
+  },
+  "source": {
+    "commit": "6422ec60726c1ab3084509278bf98d24b75e76f5",
+    "file": "ui/openapi.json",
+    "repository": "marek-mraz/joinedcontext-portal",
+    "sha256": "8226367be96b83ca47d0b93d97a73c5a62b28c74eb328c8e5533a1b6cdc67bd6"
+  }
+}

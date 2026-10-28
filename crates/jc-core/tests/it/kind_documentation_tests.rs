@@ -25,13 +25,19 @@ use serde_json::Value;
 ///
 /// A visualization's `data.source` is the tag of an internally tagged enum (T-4642): `schemars`
 /// writes it as a bare `enum` member of each `oneOf` branch, and the branch carries the
-/// variant's doc comment, which says what that source reads.
+/// variant's doc comment, which says what that source reads. A DelegationPolicy subject's `kind`
+/// is the same shape, documented on the enum (T-5952).
 const DOCUMENTED_BY_ITS_PARENT: &[(&str, &str, &str)] = &[
     ("Organization", "Group", "The members of one group."),
     (
         "Endpoint",
         "source",
         "The Endpoint's `file.csv` of one entity type.",
+    ),
+    (
+        "DelegationPolicy",
+        "kind",
+        "The `kind` tag, `Group` or `User`, selects which.",
     ),
 ];
 

@@ -727,7 +727,8 @@ fn roles_that_do_not_resolve(repo: &Repository) -> Vec<(Location, String)> {
     vec![(location, err.to_string())]
 }
 
-/// Every `subjects[].group` of a `RoleBinding` that no `Group` manifest declares (PF-64).
+/// Every `subjects[].group` of a `RoleBinding`, and every Group subject of a `DelegationPolicy`,
+/// that no `Group` manifest declares (PF-64, AG-150).
 ///
 /// A binding to a group nobody declared matches nobody, silently: the people it was written for
 /// read nothing and no error says why. The group's membership is configuration (PF-62), so the
@@ -744,6 +745,30 @@ fn bindings_to_undeclared_groups(repo: &Repository) -> Vec<(Location, String)> {
 
     let mut findings = Vec::new();
     for (id, resource) in repo.iter() {
+        // A DelegationPolicy names its Groups as `{kind: Group, name}` (AG-150).
+        if id.kind == "DelegationPolicy" {
+            let groups = resource
+                .manifest
+                .spec
+                .get("subjects")
+                .and_then(|subjects| subjects.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|subject| subject.get("kind").and_then(|k| k.as_str()) == Some("Group"))
+                .filter_map(|subject| subject.get("name").and_then(|n| n.as_str()))
+                .filter(|group| !declared.contains(group));
+            for group in groups {
+                findings.push((
+                    (resource.path.clone(), resource.document, resource.line),
+                    format!(
+                        "{id} spec.subjects names group `{group}`, which no Group manifest of \
+                         this organization declares: add `users/groups/{group}.yaml` (AG-150, \
+                         PF-62)"
+                    ),
+                ));
+            }
+            continue;
+        }
         // A RoleBinding's subjects, and the members of every role an App declares (AP-91).
         let subjects: Vec<&serde_json::Value> = match id.kind.as_str() {
             "RoleBinding" => resource
