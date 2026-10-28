@@ -361,6 +361,71 @@ spec:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// T-5952, AG-150: a DelegationPolicy naming a Group no manifest declares binds nobody, so
+/// `jcctl validate` refuses it with the policy's path; declared, it passes.
+#[test]
+fn a_delegation_policy_naming_an_undeclared_group_is_refused_and_a_declared_one_is_not() {
+    let dir = valid_repo("delegation-undeclared-group");
+    write(
+        &dir,
+        "users/delegation/stewards.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DelegationPolicy
+metadata: { name: stewards, namespace: org }
+spec:
+  subjects:
+    - { kind: Group, name: air-stewards }
+    - { kind: User, id: 3f1c9a52-6b1e-4d0a-9a4e-0c8d1b7e2f10 }
+  projects: [ovzdusie]
+"#,
+    );
+    let report = validate::run(&dir);
+    let found = messages(&report.findings);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(
+        found[0].contains("group `air-stewards`")
+            && found[0].contains("users/groups/air-stewards.yaml"),
+        "{found:?}"
+    );
+    assert!(report.findings[0]
+        .path
+        .ends_with("users/delegation/stewards.yaml"));
+
+    write(
+        &dir,
+        "users/groups/air-stewards.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Group
+metadata: { name: air-stewards, namespace: org }
+spec:
+  members:
+    - { user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }
+"#,
+    );
+    let report = validate::run(&dir);
+    assert_eq!(report.findings, vec![], "the declared group is accepted");
+
+    write(
+        &dir,
+        "users/delegation/stewards.yaml",
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: DelegationPolicy
+metadata: { name: stewards, namespace: org }
+spec:
+  subjects: []
+  projects: [ovzdusie]
+"#,
+    );
+    let report = validate::run(&dir);
+    let found = messages(&report.findings);
+    assert!(
+        found.iter().any(|m| m.contains("spec.subjects")),
+        "an empty subjects is refused by path: {found:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// T-1471, PF-63, PF-64: a group the identity provider owns is bound with `source: provider`
 /// and needs no manifest; marked and declared at once, it would have two owners.
 #[test]

@@ -32,6 +32,8 @@ const ORDER: &[(u8, &str)] = &[
     (WAVE_ROOTS, "Group"),
     (WAVE_ROOTS, "Role"),
     (WAVE_ROOTS, "RoleBinding"),
+    // The ceiling on connectors names Groups, so it follows them (AG-150).
+    (WAVE_ROOTS, "DelegationPolicy"),
     (WAVE_ROOTS, "Project"),
     (WAVE_ROOTS, "DataSpaceParticipant"),
     (WAVE_ROOTS, "AgentProfile"),
