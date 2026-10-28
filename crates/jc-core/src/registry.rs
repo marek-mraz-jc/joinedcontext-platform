@@ -103,6 +103,7 @@ catalogue!(
     crate::kinds::RoleSpec,
     crate::kinds::RoleBindingSpec,
     crate::kinds::GroupSpec,
+    crate::kinds::DelegationPolicySpec,
     crate::kinds::ContextBrokerSpec,
     crate::kinds::EnvironmentSpec,
     crate::kinds::DashboardSpec,

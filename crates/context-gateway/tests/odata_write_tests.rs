@@ -487,3 +487,54 @@ async fn every_refusal_is_the_odata_error_object() {
         assert!(!body.to_string().contains("hunter2"), "{rest}: {body}");
     }
 }
+
+/// S-49 (T-5955): a read-only connector's token forges OData writes on an Endpoint that takes
+/// anonymous ones; each is 403 and none reaches the broker.
+#[tokio::test]
+async fn a_read_only_token_writes_nothing_through_odata() {
+    let realm = common::Realm::new();
+    let (upstream, hops) = broker().await;
+    let app = app(&repo("read-only"), &upstream, &realm);
+    let token = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "preferred_username": "jana",
+        "scope": "openid jc:read-only",
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    for (method, rest, body) in [
+        (
+            Method::POST,
+            "/Feedback",
+            Some(json!({"id": "urn:ngsi-ld:Feedback:forged"})),
+        ),
+        (
+            Method::PATCH,
+            "/Feedback('x')",
+            Some(json!({"text": "forged"})),
+        ),
+        (Method::DELETE, "/Feedback('x')", None),
+    ] {
+        let mut request = Request::builder()
+            .method(method.clone())
+            .uri(format!("/api/endpoint/{OPEN}/odata/v4{rest}"))
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header("jc-reason", "S-49");
+        let body = match body {
+            Some(body) => {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = app
+            .clone()
+            .oneshot(request.body(body).expect("a request"))
+            .await
+            .expect("the gateway answers");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {rest}");
+    }
+    assert!(writes(&hops).is_empty(), "{:?}", writes(&hops));
+}

@@ -199,6 +199,10 @@ pub fn evaluate(
     policies: &[PolicySpec],
     now: DateTime<Utc>,
 ) -> Verdict {
+    // S-49: a read-only token writes nothing, whatever its holder is granted (T-5955).
+    if subject.read_only && operation.is_write() {
+        return Verdict::Deny;
+    }
     let applicable: Vec<&PolicySpec> = policies
         .iter()
         .filter(|policy| applies(policy, subject, operation, now))
@@ -636,6 +640,44 @@ pub const NOTHING: &str = "(jcUnreadablePolicyQ==0;jcUnreadablePolicyQ!=0)";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S-49 (T-5955): a read-only token is refused every write a Policy grants its holder, and
+    /// still reads.
+    #[test]
+    fn a_read_only_subject_is_refused_every_granted_write() {
+        let policy: PolicySpec = serde_norway::from_str(
+            "contextSpaceRef: air\nassigner: did:web:city.example\n\
+             assignee: { kind: user, id: jana }\n\
+             operations: [queryEntity, createEntity, deleteEntity, upsertBatch, createSubscription]\n",
+        )
+        .expect("the policy spec parses");
+        let jana = |read_only| Subject {
+            id: Some("jana".to_owned()),
+            read_only,
+            ..Subject::default()
+        };
+        let request = Request::default();
+        let decided = |subject: &Subject, operation| {
+            evaluate(
+                subject,
+                operation,
+                &request,
+                "air",
+                std::slice::from_ref(&policy),
+                Utc::now(),
+            )
+        };
+        for operation in [
+            Operation::CreateEntity,
+            Operation::DeleteEntity,
+            Operation::UpsertBatch,
+            Operation::CreateSubscription,
+        ] {
+            assert!(!decided(&jana(false), operation).is_deny(), "{operation}");
+            assert!(decided(&jana(true), operation).is_deny(), "{operation}");
+        }
+        assert!(!decided(&jana(true), Operation::QueryEntity).is_deny());
+    }
 
     /// PL-92: `{project}/{name}` names one project's account. A bare name here matches any
     /// project's, which no loaded Policy carries: the store names every bare assignee with the

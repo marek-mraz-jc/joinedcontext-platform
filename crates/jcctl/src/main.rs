@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <from>=<to>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl fmt [--check] <file or dir>...\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl migrate mqtt-roles --repo-dir <path>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>] [--only <project>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]... [--org-dir <organization checkout>]\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--org-dir <organization checkout>] [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl policy export <policy.yaml>\n       jcctl policy import <set.jsonld> [--project <slug>] [--space <name>] [--name <name>] [--out <file.yaml>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--docs-url <url>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]\n       jcctl changelog --repo-dir <project checkout> [--days <1..366>] [--format md|json]\n       jcctl login --idm <issuer url> [--token-file <path>]\n       jcctl token --resource <endpoint url> --idm <issuer url> [--token-file <path>]\n       jcctl get <plural> [<name>] --project <slug> [-o name|yaml|json] [-l <labelSelector>] [--server <url>] [--token-file <path>]\n       jcctl describe <plural> <name> --project <slug> [--server <url>] [--token-file <path>]\n       jcctl apply -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl diff -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl delete -f <file> [--project <slug>] [--server <url>] [--token-file <path>]";
+const USAGE: &str = "usage: jcctl validate --repo-dir <path> [--project-dir <slug>=<path>]...\n       jcctl validate --project <path> [--slug <slug>] [--org-domain <d>] [--param <name>=<value>]...\n       jcctl plan --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json]\n       jcctl apply --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--prune] [--confirm-deletions]\n       jcctl drift --repo-dir <path> [--project-dir <slug>=<path>]... [--gateway-url <url>] [--token-file <path>] [--json] [--adopt-dir <path>]\n       jcctl export --repo-dir <path> --project <slug> --out-dir <path> [--revision <sha>]\n       jcctl import <source> --repo-dir <path> [--namespace <slug>] [--org-domain <from>=<to>] [--conflict fail|skip|replace|rename] [--json]\n       jcctl schema export [--out <dir>]\n       jcctl fmt [--check] <file or dir>...\n       jcctl migrate --repo-dir <layout 1 clone> --out-dir <empty dir>\n       jcctl migrate mqtt-roles --repo-dir <path>\n       jcctl checkouts --org-dir <organization checkout> --projects-dir <dir> --forge <base>/<org> [--token-file <path>] [--secrets-dir <dir>] [--once] [--interval <seconds>] [--only <project>]\n       jcctl export --format git --repo-dir <project checkout> --project <slug> --out-dir <dir> [--app-dir <name>=<checkout>]... [--org-dir <organization checkout>]\n       jcctl import --format git <dir> --out-dir <empty dir>\n       jcctl workspace render --repo-dir <path> --prefix <ws-name-> [--out-dir <dir>]\n       jcctl workspace diff --base-dir <checkout of the base> --repo-dir <checkout of the workspace> [--json]\n       jcctl roles render --repo-dir <path>\n       jcctl roles seed --repo-dir <path>\n       jcctl roles input --repo-dir <path> --base-dir <path> --changes <name-status file> --author <login> [--author-email <e>] [--groups a,b]\n       jcctl model generate|diff|validate --repo-dir <path> [--org-dir <organization checkout>] [--url <url>]\n       jcctl model import <dataModel.Subject/Model> --out <file> [--url <url>]\n       jcctl policy export <policy.yaml>\n       jcctl policy import <set.jsonld> [--project <slug>] [--space <name>] [--name <name>] [--out <file.yaml>]\n       jcctl model merge --repo-dir <path> --project <slug> --space <name> [--name <model>]\n       jcctl model infer --file <sample.csv|xlsx|json|pdf> [--url <url>]\n       jcctl pipeline test --pipeline <manifest.yaml> --sample <file> [--format csv|json|text] [--capture <url>]\n       jcctl artifacts rebuild --repo-dir <path> --out-dir <dir> [--space <name>] [--revision <sha>]\n       jcctl sync --repo-dir <path> --source <project>/<name> --checkout <dir> [--state <file>] [--once] [--json]\n       jcctl publish ckan --repo-dir <path> --project <slug> --host <gateway host> [--organization-title <t>] [--docs-url <url>] [--api-token-env <VAR>] [--age-key-file <path>] [--withdraw]\n       jcctl changelog --repo-dir <project checkout> [--days <1..366>] [--format md|json]\n       jcctl login --idm <issuer url> [--token-file <path>]\n       jcctl token --resource <endpoint url> --idm <issuer url> [--token-file <path>]\n       jcctl get <plural> [<name>] --project <slug> [-o name|yaml|json] [-l <labelSelector>] [--server <url>] [--token-file <path>]\n       jcctl describe <plural> <name> --project <slug> [--server <url>] [--token-file <path>]\n       jcctl apply -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl diff -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl plan -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl delete -f <file> [--project <slug>] [--server <url>] [--token-file <path>]\n       jcctl ops --project <slug> [--server <url>] [--token-file <path>]\n       jcctl op <operation> --project <slug> [-f <input.yaml|json>] [--server <url>] [--token-file <path>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -34,7 +34,10 @@ fn run(words: &[&str]) -> ExitCode {
         ["roles", rest @ ..] => roles_command(rest),
         ["workspace", rest @ ..] => workspace_command(rest),
         ["schema", "export", rest @ ..] => schema_export(rest),
-        ["get" | "describe", ..] | ["apply" | "diff" | "delete", "-f", ..] => client(words),
+        ["get" | "describe", ..] | ["apply" | "diff" | "delete" | "plan", "-f", ..] => {
+            client(words)
+        }
+        ["ops" | "op", ..] => operations_command(words),
         ["login", rest @ ..] => login_command(rest),
         ["token", rest @ ..] => token_command(rest),
         ["fmt", rest @ ..] => fmt_command(rest),
@@ -399,7 +402,54 @@ fn sign_in(options: &ClientOptions, scope: &str, default: Option<PathBuf>) -> Ex
     }
 }
 
-/// `get`, `describe`, `apply -f`, `diff -f` and `delete -f` (MF-14).
+/// `ops --project <p>` and `op <name> --project <p> [-f <input>]`: the operation registry, the
+/// same operations an MCP client and the Portal assistant call (T-5966).
+fn operations_command(args: &[&str]) -> ExitCode {
+    let Some((verb, rest)) = args.split_first() else {
+        return usage();
+    };
+    let Some(options) = client_options(rest) else {
+        return usage();
+    };
+    let shape_fits = match (*verb, options.words.as_slice()) {
+        ("ops", []) => options.file.is_none(),
+        ("op", [_]) => true,
+        _ => false,
+    };
+    let unused = options
+        .output
+        .or(options.selector)
+        .or(options.idm)
+        .or(options.resource);
+    let Some(project) = options.project.filter(|_| shape_fits && unused.is_none()) else {
+        return usage();
+    };
+    let input = match options
+        .file
+        .map(|file| std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}")))
+    {
+        Some(Err(e)) => return fail(&e),
+        Some(Ok(text)) => Some(text),
+        None => None,
+    };
+    let portal = match portal(&options) {
+        Ok(portal) => portal,
+        Err(e) => return fail(&e),
+    };
+    let printed = match options.words.first() {
+        Some(name) => jcctl::portal::operation(&portal, project, name, input.as_deref()),
+        None => jcctl::portal::operations(&portal, project),
+    };
+    match printed {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => fail(&e.to_string()),
+    }
+}
+
+/// `get`, `describe`, `apply -f`, `diff -f`, `plan -f` and `delete -f` (MF-14).
 fn client(args: &[&str]) -> ExitCode {
     let Some((verb, rest)) = args.split_first() else {
         return usage();
@@ -415,7 +465,7 @@ fn client(args: &[&str]) -> ExitCode {
     let reads = matches!(*verb, "get" | "describe");
     let shape_fits = match (*verb, options.words.as_slice(), options.file) {
         ("get", [_] | [_, _], None) | ("describe", [_, _], None) => options.project.is_some(),
-        ("apply" | "diff" | "delete", [], Some(_)) => options.selector.is_none(),
+        ("apply" | "diff" | "delete" | "plan", [], Some(_)) => options.selector.is_none(),
         _ => false,
     };
     if !shape_fits || options.idm.is_some() || (!reads && options.output.is_some()) {
@@ -451,6 +501,7 @@ fn client(args: &[&str]) -> ExitCode {
             let report = match *verb {
                 "apply" => jcctl::portal::apply(&portal, &targets),
                 "diff" => jcctl::portal::diff_file(&portal, &targets),
+                "plan" => jcctl::portal::plan(&portal, &targets),
                 _ => jcctl::portal::delete(&portal, &targets),
             };
             for line in &report.lines {
