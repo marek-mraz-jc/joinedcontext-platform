@@ -373,3 +373,75 @@ async fn a_head_answers_the_length_of_its_get() {
     assert_eq!(headers["content-length"], got["content-length"]);
     assert!(hops_of(&hops).iter().all(|hop| hop.method == Method::GET));
 }
+
+/// T-5891: the gateway holds a page whole to move its links, so an OGC `limit` past `PAGE` is
+/// asked as `PAGE` (a server may answer fewer than `limit`); the broker's `next` link carries the
+/// rest. A broker that answers more than the gateway holds for a large `limit` (prod KPI
+/// limit=2000) no longer turns into a 502.
+#[tokio::test]
+async fn a_limit_past_the_page_is_asked_as_one_page() {
+    let hops: Hops = Arc::default();
+    let recorder = Arc::clone(&hops);
+    let app = Router::new().fallback(move |request: Request<Body>| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let query = request.uri().query().unwrap_or_default().to_owned();
+            let host = request.headers()["host"].to_str().expect("a host").to_owned();
+            recorder.lock().expect("the hop log").push(Hop {
+                method: request.method().clone(),
+                path: request.uri().path().to_owned(),
+                query: Some(query.clone()),
+                headers: request.headers().clone(),
+            });
+            let limit: usize = query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("limit="))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(10);
+            // ~9 KB per feature: 1000 fit 8 MiB, 2000 do not.
+            let features = vec![json!({"type": "Feature", "properties": {"pad": "x".repeat(8_000)}}); limit];
+            let next = format!("http://{host}/x/views/{SLUG}/ogc/features/collections/Car/items?limit={limit}&offset={limit}");
+            axum::Json(json!({"type": "FeatureCollection", "numberReturned": limit, "features": features,
+                              "links": [{"rel": "next", "href": next}]}))
+            .into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let upstream = format!("http://{}", listener.local_addr().expect("an address"));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let items = format!("/api/endpoint/{SLUG}/ogc/features/collections/Car/items");
+    let (status, _, body) = call(
+        &upstream,
+        endpoint(),
+        get(&format!("{items}?f=json&limit=10000")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", &body[..body.len().min(300)]);
+    let page: Value = serde_json::from_str(&body).expect("JSON");
+    assert_eq!(page["numberReturned"], 1000);
+    assert_eq!(
+        page["links"][0]["href"],
+        format!("{items}?limit=1000&offset=1000")
+    );
+    assert_eq!(
+        hops_of(&hops)[0].query.as_deref(),
+        Some("f=json&limit=1000")
+    );
+
+    // A page within PAGE, and a limit that is no number, go as sent.
+    for query in ["limit=7&f=json", "limit=abc"] {
+        let _ = call(&upstream, endpoint(), get(&format!("{items}?{query}"))).await;
+        assert_eq!(
+            hops_of(&hops)
+                .last()
+                .and_then(|hop| hop.query.clone())
+                .as_deref(),
+            Some(query)
+        );
+    }
+}
