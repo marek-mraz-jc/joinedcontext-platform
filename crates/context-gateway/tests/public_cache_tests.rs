@@ -138,6 +138,8 @@ async fn an_anonymous_read_of_data_may_be_kept_as_long_as_the_deployment_says() 
         "Accept",
         "Accept-Language",
         "Accept-Encoding",
+        "Link",
+        "Prefer",
     ] {
         assert!(vary.contains(named), "Vary does not name {named}: {vary}");
     }
@@ -223,4 +225,45 @@ async fn a_write_a_refusal_and_a_document_stay_private() {
         cache, "private, no-store",
         "the Endpoint record is not data"
     );
+}
+
+#[tokio::test]
+async fn a_read_with_a_header_that_shapes_the_answer_stays_private() {
+    // T-5900 review: `Link` names the @context a compacted answer is written in, so a shared
+    // cache keyed on the URL would replay it to a plain read. Any header the gateway does not know
+    // to be harmless keeps the answer private.
+    let realm = common::Realm::new();
+    for (name, value) in [
+        ("link", "<https://example.org/ctx.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\"; type=\"application/ld+json\""),
+        ("prefer", "ngsi-ld=1.9"),
+        ("ngsild-tenant", "other"),
+        ("x-anything", "1"),
+    ] {
+        let (status, cache, _) = sent(
+            app(&realm, 5).await,
+            get(&entities())
+                .header(name, value)
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await;
+        assert_eq!(cache, "private, no-store", "{name} answered {status}");
+    }
+    // The headers in Vary, the edge's forwarding and the mesh's own keep it shareable.
+    let (status, cache, _) = sent(
+        app(&realm, 5).await,
+        get(&entities())
+            .header("accept", "application/geo+json")
+            .header("accept-language", "sk")
+            .header("x-forwarded-for", "203.0.113.7")
+            .header(
+                "l5d-client-id",
+                "apisix.apisix.serviceaccount.identity.linkerd.cluster.local",
+            )
+            .body(Body::empty())
+            .expect("a request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cache, "public, max-age=5");
 }

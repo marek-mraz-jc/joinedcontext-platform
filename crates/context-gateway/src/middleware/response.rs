@@ -224,14 +224,58 @@ pub async fn scrub(State(gateway): State<Arc<Gateway>>, request: Request, next: 
 /// Endpoint's anonymous subject (`auth::subject::anonymous_on`), the same subject for every such
 /// caller; the headers that still shape the answer stay in `Vary`, so a cache keyed on them
 /// cannot mix two of them. Off while `public_max_age` is 0, the default.
+///
+/// Deny by default: a request carrying any header outside [`SHAREABLE_REQUEST_HEADERS`] is kept
+/// private, because the gateway forwards headers that shape the answer (`Link` names the
+/// `@context` a compacted answer uses, `Prefer`, `NGSILD-*`) and a shared cache keyed on the URL
+/// would replay that answer to a plain read of the same URL.
 fn shareable_read(gateway: &Gateway, request: &Request) -> bool {
-    let headers = request.headers();
     gateway.public_max_age > 0
         && matches!(*request.method(), Method::GET | Method::HEAD)
-        && !headers.contains_key(axum::http::header::AUTHORIZATION)
-        && !headers.contains_key(axum::http::header::COOKIE)
+        && request.headers().keys().all(|name| {
+            SHAREABLE_REQUEST_HEADERS.contains(&name.as_str())
+                || name.as_str().starts_with(super::tenancy::MESH_PREFIX)
+        })
         && data_endpoint(gateway, request.uri().path()).is_some()
 }
+
+/// The request headers a shareable anonymous read may carry: the ones in `Vary` (and in the edge's
+/// cache key), and the ones the gateway does not read to build an answer (transport, tracing, the
+/// edge's forwarding; the Linkerd `l5d-*` headers too, which never reach the broker). `Authorization`
+/// and `Cookie` are not among them.
+const SHAREABLE_REQUEST_HEADERS: &[&str] = &[
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "ngsild-results-restricted",
+    "host",
+    "user-agent",
+    "connection",
+    "cache-control",
+    "pragma",
+    "referer",
+    "origin",
+    "dnt",
+    "te",
+    "upgrade-insecure-requests",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-user",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "priority",
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-proto",
+    "x-real-ip",
+    "x-request-id",
+    "traceparent",
+    "tracestate",
+];
 
 /// Lets a shared cache keep an anonymous answer `seconds` long: a revoked public grant or a
 /// changed value is served stale at most that long, which is why the deployment bounds it
@@ -401,11 +445,12 @@ fn keep_out_of_shared_caches(headers: &mut axum::http::HeaderMap) {
     // `Accept-Language` is one of them since EP-37: it picks the text of a LanguageProperty in
     // a GeoJSON feature and the title of the OGC landing page. `Accept-Encoding` since T-5847:
     // the compression layer inside this one packs the answer per that header, and its own
-    // appended `Vary` would be replaced here.
+    // appended `Vary` would be replaced here. `Link` (the `@context` of a compacted answer) and
+    // `Prefer` since T-5900, when an anonymous answer may be shared.
     headers.insert(
         axum::http::header::VARY,
         HeaderValue::from_static(
-            "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted, Accept-Encoding",
+            "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted, Accept-Encoding, Link, Prefer",
         ),
     );
 }
