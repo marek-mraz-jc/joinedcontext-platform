@@ -36,6 +36,10 @@ const REMEMBERED: usize = 4_096;
 /// and then by the handler of the same request; this makes that one signature check, not two.
 const REFUSED: usize = 1_024;
 
+/// The scope Keycloak puts on every token of a read-only connector (T-5954, T-5955): the gateway
+/// refuses its writes and tells the broker, which refuses them too.
+pub const READ_ONLY_SCOPE: &str = "jc:read-only";
+
 /// The claims the gateway acts on. A token carries many more; none of them decide.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Claims {
@@ -128,6 +132,17 @@ impl Claims {
             .split_ascii_whitespace()
             .filter_map(|scope| scope.strip_prefix("endpoint:"))
             .filter(|slug| !slug.is_empty())
+    }
+
+    /// Whether the token carries [`READ_ONLY_SCOPE`]: a connector's token, which reads and never
+    /// writes, whatever its holder's grants say (S-49, T-5955). A `scope` that is not a string
+    /// never gets this far: the claims do not deserialize and the token is refused.
+    pub fn read_only(&self) -> bool {
+        self.scope
+            .as_deref()
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .any(|scope| scope == READ_ONLY_SCOPE)
     }
 
     /// The realm roles the token asserts.
@@ -435,6 +450,23 @@ mod tests {
 
     fn slug() -> Vec<String> {
         vec!["slug".to_owned()]
+    }
+
+    #[test]
+    fn only_the_whole_read_only_scope_marks_a_token_and_a_malformed_scope_is_no_token() {
+        let scoped = |scope: serde_json::Value| {
+            serde_json::from_value::<Claims>(
+                serde_json::json!({"sub": "s", "iss": "i", "exp": NOW, "scope": scope}),
+            )
+        };
+        let marked = |scope: &str| scoped(scope.into()).expect("claims").read_only();
+        assert!(marked("openid jc:read-only"));
+        assert!(marked("jc:read-only\tendpoint:a"));
+        assert!(!marked("openid jc:read-onlyx endpoint:jc:read-only"));
+        assert!(!claims("slug".into(), NOW).read_only());
+        // A scope that is no string never reads as "no marker": the token does not parse at all.
+        assert!(scoped(serde_json::json!(["jc:read-only"])).is_err());
+        assert!(scoped(serde_json::json!(true)).is_err());
     }
 
     #[test]

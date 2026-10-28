@@ -49,6 +49,9 @@ pub struct Subject {
     /// The Organization of the Project the caller was admitted under, for a write's provenance
     /// (ADR-N-054 2.3). Grants nothing.
     pub organization: Option<String>,
+    /// The token carries `jc:read-only` (a connector's, T-5955): every write is refused, here and
+    /// in the broker, whatever the Policies grant the person (S-49).
+    pub read_only: bool,
 }
 
 impl Subject {
@@ -272,6 +275,7 @@ fn preview_reader(
         via: None,
         client: claims.azp.clone(),
         organization: None,
+        read_only: claims.read_only(),
     })
 }
 
@@ -445,6 +449,7 @@ pub(crate) fn subject_of(
                 via: None,
                 client: None,
                 organization: gateway.organization_of(&account.project),
+                read_only: claims.read_only(),
             });
         }
         if via.is_none() && claims.preferred_username.is_none() {
@@ -521,6 +526,7 @@ pub(crate) fn subject_of(
         via,
         client: claims.azp.clone(),
         organization: gateway.organization_of(&project),
+        read_only: claims.read_only(),
     })
 }
 
