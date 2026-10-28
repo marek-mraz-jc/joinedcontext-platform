@@ -610,6 +610,76 @@ def test_the_unit_list_is_read_on_first_use_and_once():
     assert result.returncode == 0, result.stderr
 
 
+# --- a job per child process (T-5924) ----------------------------------------------------
+
+
+def _rss_mib() -> int:
+    with open("/proc/self/status") as status:
+        line = next(line for line in status if line.startswith("VmRSS:"))
+    return int(line.split()[1]) // 1024
+
+
+def test_a_job_runs_in_a_child_and_the_parent_keeps_none_of_its_heap(monkeypatch):
+    """T-5924: a generation's heap goes with the child, so the parent stays at its idle set."""
+    import os
+
+    def heavy(body):
+        ballast = b"x" * (256 * 1024 * 1024)  # written, so every page is resident
+        return 200, {"pid": os.getpid(), "held": len(ballast)}
+
+    monkeypatch.setattr(service, "generate", heavy)
+    before = _rss_mib()
+    status, body = call("POST", "/generate", {"source": "id: x"})
+    assert status == 200
+    assert body["pid"] != os.getpid()
+    assert body["held"] == 256 * 1024 * 1024
+    assert _rss_mib() - before < 64
+
+
+def test_a_job_that_raises_in_the_child_answers_as_it_did_in_the_parent(monkeypatch):
+    def refused(body):
+        raise ValueError("the body must be a JSON object")
+
+    monkeypatch.setattr(service, "import_sdm", refused)
+    assert call("POST", "/import-sdm", {"model": "x"}) == (
+        400,
+        {"errors": ["the body must be a JSON object"]},
+    )
+
+    def broken(body):
+        raise KeyError("subjects")
+
+    with pytest.raises(KeyError, match="subjects"):
+        service.in_child(broken, {})
+
+
+def test_a_child_that_dies_costs_its_request_a_500_and_nothing_else(monkeypatch):
+    import os
+    import signal
+
+    monkeypatch.setattr(service, "generate", lambda body: os.kill(os.getpid(), signal.SIGKILL))
+    status, body = call("POST", "/generate", {"source": "id: x"})
+    assert status == 500
+    assert "exit code -9" in body["errors"][0]
+    assert call("GET", "/healthz")[0] == 200
+
+
+def test_infer_schema_in_the_child_reads_the_attribute_index_the_parent_passed(monkeypatch):
+    seen = {}
+
+    def infer(name, raw, fmt, attributes):
+        seen.update(attributes)
+        return {"linkml": "id: x", "attributes": attributes}
+
+    monkeypatch.setattr(service, "infer", infer)
+    monkeypatch.setattr(
+        service.CATALOGUE, "attribute_index", lambda: {"pm10": ["dataModel.Environment/AirQualityObserved"]}
+    )
+    status, body = call("POST", "/infer-schema", {"name": "a.csv", "content": "YQ=="})
+    assert status == 200
+    assert body["attributes"] == {"pm10": ["dataModel.Environment/AirQualityObserved"]}
+
+
 # --- the image (DM-19) -----------------------------------------------------------------
 
 
