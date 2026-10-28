@@ -146,6 +146,9 @@ pub struct Gateway {
     write_wait: std::time::Duration,
     /// The requests and `file.csv` downloads in flight, in total and per caller (T-4782).
     pub(crate) in_flight: crate::middleware::in_flight::InFlight,
+    /// The Keycloak client of the load generator, whose verified reads get the loadtest share of
+    /// `in_flight` (T-5921); `None` gives no client one.
+    pub(crate) loadtest_client: Option<String>,
     /// The anonymous `file.csv` answers and the space type lists a download reuses (T-5629).
     pub(crate) downloads: crate::handlers::download_cache::Downloads,
     pub(crate) held_types: crate::handlers::download_cache::HeldTypes,
@@ -231,6 +234,7 @@ impl Gateway {
             write_budget_kib: (WRITE_BUDGET_MIB * 1024) as u32,
             write_wait: WRITE_WAIT,
             in_flight: Default::default(),
+            loadtest_client: None,
             downloads: Default::default(),
             held_types: Default::default(),
             catalog_records: Default::default(),
@@ -241,6 +245,15 @@ impl Gateway {
     /// at most `downloads` `file.csv` answers at once (T-4782).
     pub fn limit_in_flight(mut self, total: usize, per_caller: usize, downloads: usize) -> Self {
         self.in_flight = in_flight::InFlight::new(total, per_caller, downloads);
+        self
+    }
+
+    /// Gives the reads of `client`'s verified tokens a share of `per_caller` in flight and refuses
+    /// its other requests (T-5921); `None` gives no client one. After [`Self::limit_in_flight`],
+    /// which makes the slots anew.
+    pub fn serve_loadtest(mut self, client: Option<String>, per_caller: usize) -> Self {
+        self.in_flight = std::mem::take(&mut self.in_flight).with_loadtest(per_caller);
+        self.loadtest_client = client;
         self
     }
 

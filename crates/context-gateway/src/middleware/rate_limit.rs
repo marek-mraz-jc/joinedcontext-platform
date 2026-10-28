@@ -370,15 +370,28 @@ pub(crate) struct CallerKey(pub(crate) String);
 /// own proxy saw. A client that sends the header itself only prepends to its own value,
 /// so a spoofed entry is never the one read.
 pub(crate) fn caller_key(gateway: &Gateway, headers: &axum::http::HeaderMap) -> String {
+    match verified(gateway, headers) {
+        Some(claims) => subject_key(&claims),
+        None => address_key(headers),
+    }
+}
+
+/// The claims of the bearer token `headers` carry when the realm signed it and it has not
+/// expired, else `None`: a made-up or forged token names nobody here.
+pub(crate) fn verified(
+    gateway: &Gateway,
+    headers: &axum::http::HeaderMap,
+) -> Option<jc_core::auth::token::Claims> {
     let presented = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    if let (Ok(raw), Some(verifier)) = (crate::auth::token::bearer(presented), &gateway.verifier) {
-        if let Ok(claims) = verifier.identify(raw) {
-            return format!("subject:{}", claims.sub);
-        }
-    }
-    address_key(headers)
+    let raw = crate::auth::token::bearer(presented).ok()?;
+    gateway.verifier.as_ref()?.identify(raw).ok()
+}
+
+/// The caller key of a verified token's principal (see [`caller_key`]).
+pub(crate) fn subject_key(claims: &jc_core::auth::token::Claims) -> String {
+    format!("subject:{}", claims.sub)
 }
 
 /// The client address alone, whatever credential the request presents (see [`caller_key`]).

@@ -143,6 +143,14 @@ pub struct Config {
     /// How many `file.csv` downloads are built at once (`JC_GATEWAY_MAX_DOWNLOADS`, default `2`,
     /// [`crate::middleware::in_flight::MAX_DOWNLOADS`]).
     pub max_downloads: usize,
+    /// The Keycloak client of the load generator (`JC_GATEWAY_LOADTEST_CLIENT`, e.g. `loadtest`;
+    /// absent or empty: none). A read whose token the realm signed for this client (`azp`) is
+    /// held to [`Self::loadtest_in_flight`] instead of the caller's share, and any other request
+    /// of it is refused 403 (T-5921).
+    pub loadtest_client: Option<String>,
+    /// How many requests the load generator may hold at once (`JC_GATEWAY_LOADTEST_IN_FLIGHT`,
+    /// default `512`, [`crate::middleware::in_flight::LOADTEST_IN_FLIGHT`]); the total still holds.
+    pub loadtest_in_flight: usize,
     /// How many seconds a shared cache (the edge) may keep an anonymous read of data
     /// (`JC_GATEWAY_PUBLIC_MAX_AGE`, default `0`: none, every answer `private, no-store`; at most
     /// [`PUBLIC_MAX_AGE_LIMIT`]). A public grant revoked or a value changed is served stale at most
@@ -282,6 +290,12 @@ impl Config {
             "downloads",
             in_flight::MAX_DOWNLOADS,
         )?;
+        let loadtest_in_flight = positive(
+            "JC_GATEWAY_LOADTEST_IN_FLIGHT",
+            std::env::var("JC_GATEWAY_LOADTEST_IN_FLIGHT"),
+            "requests",
+            in_flight::LOADTEST_IN_FLIGHT,
+        )?;
         let public_max_age = public_max_age(std::env::var("JC_GATEWAY_PUBLIC_MAX_AGE"))?;
 
         let public_url = std::env::var("JC_GATEWAY_PUBLIC_URL")
@@ -319,6 +333,11 @@ impl Config {
             max_in_flight,
             max_in_flight_per_caller,
             max_downloads,
+            loadtest_client: std::env::var("JC_GATEWAY_LOADTEST_CLIENT")
+                .ok()
+                .map(|client| client.trim().to_owned())
+                .filter(|client| !client.is_empty()),
+            loadtest_in_flight,
             public_max_age,
             domain_verification,
             domain_verifications_url,
@@ -582,6 +601,8 @@ mod tests {
             max_in_flight: crate::middleware::in_flight::MAX_IN_FLIGHT,
             max_in_flight_per_caller: crate::middleware::in_flight::MAX_IN_FLIGHT_PER_CALLER,
             max_downloads: crate::middleware::in_flight::MAX_DOWNLOADS,
+            loadtest_client: None,
+            loadtest_in_flight: crate::middleware::in_flight::LOADTEST_IN_FLIGHT,
             public_max_age: 0,
         }
     }
