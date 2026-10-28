@@ -244,6 +244,15 @@
       "additionalProperties": false,
       "description": "The broker's limits (MF-54).",
       "properties": {
+        "connectionsPerAddress": {
+          "description": "Connections one source address may hold at once at the edge, in `1..=maxConnections`; absent means [`CONNECTIONS_PER_ADDRESS`] or `maxConnections` when lower (T-5888).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "maxConnections": {
           "default": 1000,
           "description": "Connections the broker holds at once.",
