@@ -10,8 +10,8 @@ MATCH (a:Package)-[r:DEPENDS_ON]->(b:Package) WHERE a.workspace AND b.workspace 
 MATCH (a:Symbol)-[:CALLS]->(b:Symbol) WHERE a.package = b.package AND a.file < b.file AND NOT a.is_test AND NOT b.is_test AND NOT a.external AND NOT b.external AND EXISTS { MATCH (c:Symbol)-[:CALLS]->(d:Symbol) WHERE c.file = b.file AND d.file = a.file AND NOT c.is_test } RETURN DISTINCT a.file, b.file;
 // memory-body-copy: a body, payload or bytes value copied whole (to_vec, clone, to_owned) in production code
 GREP \b\w*(body|bytes|payload)\w*\.(to_vec|clone|to_owned)\(\) IN **/*.rs;
-// memory-unbounded-global: a process-wide growable container (a static, LazyLock or OnceLock of a map, set or Vec), which only shrinks if its code evicts
-GREP (static|LazyLock|OnceLock)[^\n]*(HashMap|BTreeMap|HashSet|BTreeSet|DashMap|Vec)< IN **/*.rs;
+// memory-unbounded-global: a process-wide growable container (a static, LazyLock or OnceLock of a map, set or Vec), which only shrinks if its code evicts; a 'static lifetime is no static
+GREP (?m)(^|[^'\w])(static\s|LazyLock|OnceLock)[^\n]*(HashMap|BTreeMap|HashSet|BTreeSet|DashMap|Vec)< IN **/*.rs;
 // memory-uncapped-read: a whole outbound response body read with no size cap (reqwest bytes, text or json awaited, to_bytes with usize::MAX)
 GREP (\.(bytes|text|json(::<[^>]*>)?)\(\)\.await|to_bytes\([^)]*usize::MAX) IN **/*.rs;
 // memory-per-request-build: a Regex or a reqwest client built in a function an HTTP route reaches within four calls, so each request builds it again
