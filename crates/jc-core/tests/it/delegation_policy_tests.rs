@@ -22,6 +22,7 @@ spec:
     - { kind: Endpoint, verbs: [read] }
   endpoints: [air-quality-sensors-2026-public]   # optional; absent = the projects' Endpoints the person may read
   writes: true                   # may a connector of theirs have writes on; default false
+  personalData: false            # may a scope item tick personalData (AG-158); default false
   maxExpiry: P90D                # ISO 8601 duration, at most P365D
   allowedClients:                # optional; a connector of theirs must name a subset
     - https://claude.ai/oauth/mcp-oauth-client-metadata
@@ -263,4 +264,16 @@ fn the_schema_round_trips_and_names_the_rules() {
     }
     let validator = jsonschema::validator_for(&schema).expect("a valid schema");
     assert!(validator.is_valid(&json));
+}
+
+#[test]
+fn personal_data_is_off_unless_the_policy_says_true() {
+    assert!(!spec(DOCS).personal_data);
+    let allowing = DOCS.replace("personalData: false", "personalData: true");
+    assert!(spec(&allowing).personal_data);
+    let without = DOCS.replace(
+        "  personalData: false            # may a scope item tick personalData (AG-158); default false\n",
+        "",
+    );
+    assert!(!spec(&without).personal_data);
 }
