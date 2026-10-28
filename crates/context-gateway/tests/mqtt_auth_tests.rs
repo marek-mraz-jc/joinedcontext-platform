@@ -152,6 +152,7 @@ impl Fixture {
                     .map(|ip| ip.parse().expect("an address"))
                     .to_vec(),
                 portal: vec![PORTAL_POD.parse().expect("an address")],
+                brokers: vec![BROKER_POD.parse().expect("an address")],
             },
             connect,
         );
@@ -182,6 +183,10 @@ const RUNNER_PODS: [&str; 2] = ["10.42.0.17", "fd00::17"];
 
 /// The address the Portal's headless Service resolves to in these tests.
 const PORTAL_POD: &str = "10.42.0.30";
+
+/// A broker pod's address, which the brokers' headless Service lists in these tests: under the
+/// mesh the broker reports every client of its internal listener at this address (T-5893).
+const BROKER_POD: &str = "10.42.0.107";
 
 fn capture(ipaddr: &str) -> Connect {
     Connect {
@@ -528,6 +533,39 @@ fn the_runner_subscribes_to_its_data_sources_topics_from_its_own_pods_only() {
     assert_eq!(f.decide(Some(METERS), &runner("10.42.0.17")), deny);
 }
 
+/// T-5893: on dev the broker reports the runner at the broker's own address, Linkerd's forward
+/// on listener 1883, which admits only the runner's and the Portal's mesh identities: the runner
+/// gets its topics from there, and its name without a token from any other address (a client
+/// through Traefik's PROXY header, another pod) or another project's broker is still refused.
+#[test]
+fn the_runner_is_admitted_from_its_brokers_own_address_as_the_mesh_forwards_it() {
+    let f = Fixture::new("runner-mesh");
+    let answer = f.decide(Some(CAMERAS), &runner(BROKER_POD));
+    assert_eq!(answer["result"], "allow", "{answer}");
+    assert!(answer.get("expire_at").is_none(), "{answer}");
+    assert_eq!(
+        answer["acl"],
+        json!([
+            {"permission": "allow", "action": "subscribe", "topic": "cameras/+/frame", "qos": [0, 1]},
+            {"permission": "allow", "action": "subscribe", "topic": "cameras/+/status", "qos": [0, 1]}
+        ])
+    );
+    let deny = json!({"result": "deny", "superuser": false});
+    for elsewhere in ["203.0.113.7", "10.42.0.108", "10.42.0.99"] {
+        assert_eq!(
+            f.decide(Some(CAMERAS), &runner(elsewhere)),
+            deny,
+            "{elsewhere}"
+        );
+    }
+    let someone = Connect {
+        username: "ovzdusie-cam-north".to_owned(),
+        ..runner(BROKER_POD)
+    };
+    assert_eq!(f.decide(Some(CAMERAS), &someone), deny);
+    assert_eq!(f.decide(None, &runner(BROKER_POD)), deny);
+}
+
 /// T-5561: the runner signs in under its project's name, and a broker grants only its own
 /// project's runner: a stream of espoo that dials ovzdusie's broker from a runner pod, under
 /// espoo's name or the bare one, gets no topic.
@@ -594,6 +632,11 @@ fn the_portal_subscribes_to_a_capture_brokers_publish_filters_only() {
         );
     }
     assert_eq!(f.decide(Some(CAMERAS), &runner(PORTAL_POD)), deny);
+    // Under the mesh the capture arrives at the broker's own address, as the runner does (T-5893).
+    assert_eq!(
+        f.decide(Some(PROBE), &capture(BROKER_POD))["result"],
+        "allow"
+    );
 }
 
 /// The route answers on the internal listener's router only, always 200, and never on the
@@ -626,7 +669,7 @@ async fn the_check_answers_on_the_internal_router_and_nowhere_else() {
     };
 
     for (with_identity, result) in [(true, "allow"), (false, "deny")] {
-        let response = internal_router(Arc::clone(&gateway), None, None, None)
+        let response = internal_router(Arc::clone(&gateway), None, None, None, None)
             .oneshot(request(with_identity))
             .await
             .expect("answers");
@@ -662,7 +705,7 @@ async fn the_publish_check_answers_each_publish_and_refuses_a_flood() {
     )
     .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
     gateway.replace_brokers(f.brokers.clone());
-    let app = internal_router(Arc::new(gateway), None, None, None);
+    let app = internal_router(Arc::new(gateway), None, None, None, None);
     let ask = |topic: &str| {
         let body = json!({
             "access": "2", "clientid": "ovzdusie-cam-north",
@@ -712,7 +755,13 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
     gateway.replace_brokers(f.brokers.clone());
     let gateway = Arc::new(gateway);
     let ask = |host: Option<&str>, ipaddr: &str| {
-        let app = internal_router(Arc::clone(&gateway), host.map(str::to_owned), None, None);
+        let app = internal_router(
+            Arc::clone(&gateway),
+            host.map(str::to_owned),
+            None,
+            None,
+            None,
+        );
         let body = json!({
             "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner-ovzdusie",
             "password": "", "ipaddr": ipaddr
@@ -740,6 +789,57 @@ async fn the_router_admits_the_runner_from_its_hosts_addresses_only() {
     );
 }
 
+/// T-5893: the internal router resolves the brokers' headless Service and admits the tokenless
+/// runner from what it lists; without the host, or for a caller that is no declared broker, the
+/// runner's name stays refused there.
+#[tokio::test]
+async fn the_router_admits_the_runner_from_the_brokers_own_pods_only() {
+    let f = Fixture::new("runner-broker-pods");
+    let gateway = Gateway::new(
+        Broker::new("http://broker.invalid:1026"),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .authenticate(Arc::new(f.realm.verifier()), f.accounts.clone(), None);
+    gateway.replace_brokers(f.brokers.clone());
+    let gateway = Arc::new(gateway);
+    let ask = |host: Option<&str>, caller: &'static str, ipaddr: &str| {
+        let app = internal_router(
+            Arc::clone(&gateway),
+            Some("no-such-runner.invalid".to_owned()),
+            None,
+            host.map(str::to_owned),
+            None,
+        );
+        let body = json!({
+            "clientid": "jc-ovzdusie-frames", "username": "pipeline-runner-ovzdusie",
+            "password": "", "ipaddr": ipaddr
+        })
+        .to_string();
+        async move {
+            let request = Request::post("/internal/mqtt/auth")
+                .header("content-type", "application/json")
+                .header("l5d-client-id", caller)
+                .body(Body::from(body))
+                .expect("a request");
+            let response = app.oneshot(request).await.expect("answers");
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("a body");
+            serde_json::from_slice::<Value>(&bytes).expect("json")["result"].clone()
+        }
+    };
+    const STRANGER: &str = "mqtt-elsewhere.jc-mqtt.serviceaccount.identity.linkerd.cluster.local";
+    assert_eq!(ask(Some("localhost"), CAMERAS, "127.0.0.1").await, "allow");
+    assert_eq!(ask(Some("localhost"), CAMERAS, BROKER_POD).await, "deny");
+    assert_eq!(ask(None, CAMERAS, "127.0.0.1").await, "deny");
+    assert_eq!(ask(Some("localhost"), STRANGER, "127.0.0.1").await, "deny");
+    assert_eq!(
+        ask(Some("no-such-broker.invalid"), CAMERAS, "127.0.0.1").await,
+        "deny"
+    );
+}
+
 /// T-5534: a refused CONNECT is kept for its broker with its reason and the broker's own account,
 /// never the token or the client id, and only the Portal's mesh identity reads it.
 #[tokio::test]
@@ -754,6 +854,7 @@ async fn a_refusal_is_kept_without_its_token_and_read_by_the_portal_alone() {
     gateway.replace_brokers(f.brokers.clone());
     let app = internal_router(
         Arc::new(gateway),
+        None,
         None,
         None,
         Some("portal.portal".to_owned()),
