@@ -374,12 +374,12 @@ async fn a_head_answers_the_length_of_its_get() {
     assert!(hops_of(&hops).iter().all(|hop| hop.method == Method::GET));
 }
 
-/// T-5891: the gateway holds a page whole to move its links, so an OGC `limit` past `PAGE` is
-/// asked as `PAGE` (a server may answer fewer than `limit`); the broker's `next` link carries the
-/// rest. A broker that answers more than the gateway holds for a large `limit` (prod KPI
-/// limit=2000) no longer turns into a 502.
+/// T-5891: the gateway holds a page whole to move its links, so an OGC page past `MAX_BODY` is
+/// asked again with half the `limit` until it fits (a server may answer fewer than `limit`); the
+/// broker's `next` link carries the rest. The page stays as large as fits: the ETS follows four
+/// `next` links at limit=10000, so prod Garden (8546 features, 12.4 MB) needs 5000 per page.
 #[tokio::test]
-async fn a_limit_past_the_page_is_asked_as_one_page() {
+async fn a_page_past_the_hold_is_asked_again_at_half_the_limit() {
     let hops: Hops = Arc::default();
     let recorder = Arc::clone(&hops);
     let app = Router::new().fallback(move |request: Request<Body>| {
@@ -398,8 +398,8 @@ async fn a_limit_past_the_page_is_asked_as_one_page() {
                 .find_map(|pair| pair.strip_prefix("limit="))
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(10);
-            // ~9 KB per feature: 1000 fit 8 MiB, 2000 do not.
-            let features = vec![json!({"type": "Feature", "properties": {"pad": "x".repeat(8_000)}}); limit];
+            // ~1.5 KB per feature: 5000 fit 8 MiB, 10000 do not.
+            let features = vec![json!({"type": "Feature", "properties": {"pad": "x".repeat(1_500)}}); limit];
             let next = format!("http://{host}/x/views/{SLUG}/ogc/features/collections/Car/items?limit={limit}&offset={limit}");
             axum::Json(json!({"type": "FeatureCollection", "numberReturned": limit, "features": features,
                               "links": [{"rel": "next", "href": next}]}))
@@ -423,19 +423,25 @@ async fn a_limit_past_the_page_is_asked_as_one_page() {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", &body[..body.len().min(300)]);
     let page: Value = serde_json::from_str(&body).expect("JSON");
-    assert_eq!(page["numberReturned"], 1000);
+    assert_eq!(page["numberReturned"], 5000);
     assert_eq!(
         page["links"][0]["href"],
-        format!("{items}?limit=1000&offset=1000")
+        format!("{items}?limit=5000&offset=5000")
     );
+    let asked: Vec<_> = hops_of(&hops).into_iter().map(|hop| hop.query).collect();
     assert_eq!(
-        hops_of(&hops)[0].query.as_deref(),
-        Some("f=json&limit=1000")
+        asked,
+        [
+            Some("f=json&limit=10000".to_owned()),
+            Some("f=json&limit=5000".to_owned())
+        ]
     );
 
-    // A page within PAGE, and a limit that is no number, go as sent.
+    // A page that fits, and a limit that is no number, go as sent, once.
     for query in ["limit=7&f=json", "limit=abc"] {
+        let before = hops_of(&hops).len();
         let _ = call(&upstream, endpoint(), get(&format!("{items}?{query}"))).await;
+        assert_eq!(hops_of(&hops).len(), before + 1);
         assert_eq!(
             hops_of(&hops)
                 .last()
