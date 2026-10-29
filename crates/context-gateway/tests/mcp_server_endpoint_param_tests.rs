@@ -258,7 +258,8 @@ async fn a_public_server_reads_only_whoever_calls() {
 
 /// EP-141, §9.2: `endpoint` is a name inside the reach. An address, a path, an encoded slash, an
 /// IP, a slug outside the server, an Endpoint the caller may not read and a megabyte of text all
-/// answer the sentence a name nobody has answers, and none reaches the broker.
+/// answer what a name nobody has answers (a slug-shaped one the one tool error, any other name a
+/// -32602 naming it), and none reaches the broker.
 #[tokio::test]
 async fn endpoint_is_a_name_inside_the_reach_and_never_fetched() {
     let realm = common::Realm::new();
@@ -272,7 +273,10 @@ async fn endpoint_is_a_name_inside_the_reach_and_never_fetched() {
     };
     let unknown = "zzzzzzzzzzzzzzzzzzzzzzzzzz";
     let expected = send(&app, post(PUBLIC_SERVER, None, &miss(unknown))).await;
-    assert!(expected["error"].is_object(), "{expected}");
+    // A slug-shaped miss is a tool error the model can act on, never a 401 or a protocol error
+    // that would end the session (T-6031).
+    assert_eq!(expected["result"]["isError"], json!(true), "{expected}");
+    assert!(expected.get("error").is_none(), "{expected}");
 
     let hostile = [
         OUTSIDE.to_owned(),
