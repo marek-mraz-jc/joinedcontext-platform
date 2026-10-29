@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
 use jc_core::ProblemDetails;
-use jc_tabular::{page_entities, Collect, Collector, Limits, Table, Window};
+use jc_tabular::{Collect, Collector, Limits, Table, Window};
 use serde_json::Value;
 
 /// The gateway's own answer to a broker that failed a read behind one of its representations
@@ -72,7 +72,7 @@ pub(crate) fn too_large() -> Response<Body> {
 }
 
 /// How many broker pages one download reads at once (T-4082).
-pub(super) const PARALLEL_PAGES: usize = 4;
+const PARALLEL_PAGES: usize = 4;
 
 /// Every entity the query reaches, read from the broker one page at a time (EP-44).
 ///
@@ -192,7 +192,7 @@ fn collect_failed(failed: Collect) -> Box<Response<Body>> {
 
 /// Pins the tenant and the verified caller for a hop to the view; a caller who asked about
 /// narrowing has the broker asked too (R22).
-pub(super) fn view_hop(
+fn view_hop(
     endpoint: &Endpoint,
     subject: &Subject,
     request: &mut Request,
@@ -219,23 +219,11 @@ async fn selector(
     Ok((!types.is_empty()).then_some(types))
 }
 
-/// One page of entities from `/x/views/{view}/ngsi-ld/v1/{target}`, whether the broker marked
-/// it narrowed, and its size. A space with no tenant at the broker yet is an empty page (EP-22);
-/// the engine's refusal is the platform's `403`; any other failure is [`broker_failed`].
-pub(super) async fn view_page(
-    gateway: &Gateway,
-    slug: &str,
-    view: &str,
-    target: &str,
-    headers: &HeaderMap,
-) -> Result<(Vec<Value>, bool, usize, Option<u64>), Box<Response<Body>>> {
-    let (bytes, restricted, total) = view_bytes(gateway, slug, view, target, headers).await?;
-    let page = page_entities(&bytes).map_err(collect_failed)?;
-    Ok((page, restricted, bytes.len(), total))
-}
-
-/// [`view_page`] unparsed: a download holds the pages it reads ahead as JSON, about a fifteenth of
-/// their parsed form, and parses each as it joins the table (T-5182).
+/// One page from `/x/views/{view}/ngsi-ld/v1/{target}` unparsed, whether the broker marked it
+/// narrowed, and its total: a download holds the pages it reads ahead as JSON, about a fifteenth
+/// of their parsed form, and parses each as it joins the table (T-5182). A space with no tenant at
+/// the broker yet is an empty page (EP-22); the engine's refusal is the platform's `403`; any
+/// other failure is [`broker_failed`].
 async fn view_bytes(
     gateway: &Gateway,
     slug: &str,
