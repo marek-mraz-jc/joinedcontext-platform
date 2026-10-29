@@ -1,0 +1,78 @@
+diff -ru -x Cargo.lock -x Cargo.toml.orig -x .cargo_vcs_info.json -x .cargo-ok kreuzberg/Cargo.toml kreuzberg/Cargo.toml
+--- kreuzberg/Cargo.toml
++++ kreuzberg/Cargo.toml
+@@ -781,7 +781,7 @@
+ features = ["serde"]
+ 
+ [dependencies.calamine]
+-version = "0.36.1"
++version = "0.37.0"
+ features = ["dates"]
+ optional = true
+ 
+@@ -1134,7 +1134,7 @@
+ optional = true
+ 
+ [dependencies.zip]
+-version = ">=7.0.0"
++version = "9.0.5"
+ features = ["deflate-flate2"]
+ optional = true
+ default-features = false
+diff -ru -x Cargo.lock -x Cargo.toml.orig -x .cargo_vcs_info.json -x .cargo-ok kreuzberg/src/extraction/docx/parser.rs kreuzberg/src/extraction/docx/parser.rs
+--- kreuzberg/src/extraction/docx/parser.rs
++++ kreuzberg/src/extraction/docx/parser.rs
+@@ -1088,7 +1088,7 @@
+         if size > MAX_UNCOMPRESSED_FILE_SIZE {
+             return Err(DocxParseError::SecurityLimit(format!(
+                 "File '{}' uncompressed size {} bytes exceeds limit of {} bytes",
+-                file.name(),
++                file.name().unwrap_or_default(),
+                 size,
+                 MAX_UNCOMPRESSED_FILE_SIZE
+             )));
+diff -ru -x Cargo.lock -x Cargo.toml.orig -x .cargo_vcs_info.json -x .cargo-ok kreuzberg/src/extraction/ooxml_embedded.rs kreuzberg/src/extraction/ooxml_embedded.rs
+--- kreuzberg/src/extraction/ooxml_embedded.rs
++++ kreuzberg/src/extraction/ooxml_embedded.rs
+@@ -43,7 +43,7 @@
+     let embedding_names: Vec<String> = (0..archive.len())
+         .filter_map(|i| {
+             let file = archive.by_index(i).ok()?;
+-            let name = file.name().to_string();
++            let name = file.name().ok()?.to_string();
+             if name.starts_with(embeddings_prefix) && name.len() > embeddings_prefix.len() {
+                 Some(name)
+             } else {
+diff -ru -x Cargo.lock -x Cargo.toml.orig -x .cargo_vcs_info.json -x .cargo-ok kreuzberg/src/extraction/pptx/container.rs kreuzberg/src/extraction/pptx/container.rs
+--- kreuzberg/src/extraction/pptx/container.rs
++++ kreuzberg/src/extraction/pptx/container.rs
+@@ -95,7 +95,7 @@
+         let mut slide_paths = Vec::new();
+         for i in 0..archive.len() {
+             if let Ok(file) = archive.by_index(i) {
+-                let name = file.name();
++                let Ok(name) = file.name() else { continue };
+                 if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+                     slide_paths.push(name.to_string());
+                 }
+diff -ru -x Cargo.lock -x Cargo.toml.orig -x .cargo_vcs_info.json -x .cargo-ok kreuzberg/src/extractors/odt.rs kreuzberg/src/extractors/odt.rs
+--- kreuzberg/src/extractors/odt.rs
++++ kreuzberg/src/extractors/odt.rs
+@@ -167,7 +167,7 @@
+ 
+     let mut images = AHashMap::new();
+     let names: Vec<String> = (0..archive.len())
+-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
++        .filter_map(|i| archive.by_index(i).ok().and_then(|f| f.name().ok().map(|n| n.to_string())))
+         .collect();
+ 
+     for name in names {
+@@ -204,7 +204,7 @@
+ 
+     let mut formulas = AHashMap::new();
+     let names: Vec<String> = (0..archive.len())
+-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
++        .filter_map(|i| archive.by_index(i).ok().and_then(|f| f.name().ok().map(|n| n.to_string())))
+         .collect();
+ 
+     for name in &names {

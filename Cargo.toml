@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/jc-core", "crates/jc-dcat", "crates/jc-manifest", "crates/jc-ngsi-input", "crates/jc-relationships", "crates/jc-tabular", "crates/context-gateway", "crates/jcctl", "crates/agent-proxy", "crates/functions", "crates/assistant", "crates/token-sidecar", "crates/wasm-host", "crates/app-sdk", "crates/camera-sim"]
+# vendor/kreuzberg is a patched third-party crate (see [patch.crates-io]), not ours to lint.
+exclude = ["vendor/kreuzberg"]
 
 [workspace.package]
 edition = "2021"
@@ -28,3 +30,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 1
 debug = false
+
+# kreuzberg 4.10.4 (newest on crates.io) caps zip below 9 and takes calamine 0.36 (zip ^8.6), and
+# every zip before 9.0.5 carries CVE-2026-115905 / GHSA-m665-v7pm-7grj (critical, T-6053). The
+# copy in vendor/kreuzberg is that release with zip 9.0.5, calamine 0.37.0 and the five
+# `ZipFile::name()` call sites zip 9 made fallible (vendor/kreuzberg.patch). Drop it, and this
+# block, when a kreuzberg release takes zip >= 9.0.5 and calamine >= 0.37 (ci-full's zip 9 watch).
+[patch.crates-io]
+kreuzberg = { path = "vendor/kreuzberg" }

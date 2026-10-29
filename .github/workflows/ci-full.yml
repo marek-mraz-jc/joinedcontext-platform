@@ -124,8 +124,8 @@ jobs:
         with: { tool: "cargo-audit,cargo-deny" }
       - run: cargo audit
       - run: cargo deny check advisories bans licenses sources
-      # Never fails: says when a kreuzberg or calamine release drops the zip 8 cap behind the
-      # RUSTSEC-2026-0367/0368/0369 ignore in .cargo/audit.toml and deny.toml (T-4524).
+      # Never fails: says when a kreuzberg release takes zip >= 9.0.5 and calamine >= 0.37, so the
+      # patched copy in vendor/kreuzberg and its [patch.crates-io] line can go (T-6053).
       - name: zip 9 watch (kreuzberg, calamine)
         continue-on-error: true
         run: |

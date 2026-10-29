@@ -1,0 +1,377 @@
+//! Apple iWork format extractors (.pages, .numbers, .key)
+//!
+//! Supports the modern iWork format (2013+):
+//! - `.pages`   — Apple Pages word processor
+//! - `.numbers` — Apple Numbers spreadsheet
+//! - `.key`     — Apple Keynote presentation
+//!
+//! ## IWA Container Format
+//!
+//! Modern iWork files are ZIP archives containing `.iwa` (iWork Archive) files.
+//! Each `.iwa` file is:
+//! 1. Snappy-compressed using Apple's non-standard framing
+//!    (no stream identifier chunk, no CRC-32C — raw Snappy blocks).
+//! 2. The decompressed payload is a sequence of protobuf `TSP.ArchiveInfo`-framed
+//!    messages from which text strings are extracted using raw wire parsing.
+
+pub mod keynote;
+pub mod numbers;
+pub mod pages;
+
+use crate::Result;
+use crate::error::KreuzbergError;
+use crate::text::utf8_validation;
+use std::io::Cursor;
+use std::io::Read;
+
+/// Maximum size for an individual IWA file to guard against decompression bombs.
+const MAX_IWA_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
+
+/// Collects all .iwa file paths from a ZIP archive.
+///
+/// Opens the ZIP from `content`, iterates every entry, and returns the names of
+/// all entries whose path ends with `.iwa`. Entries that cannot be read are
+/// silently skipped (consistent with the per-extractor `filter_map` pattern).
+pub fn collect_iwa_paths(content: &[u8]) -> Result<Vec<String>> {
+    let cursor = Cursor::new(content);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| KreuzbergError::parsing(format!("Failed to open iWork ZIP: {e}")))?;
+
+    let iwa_paths: Vec<String> = (0..archive.len())
+        .filter_map(|i| {
+            archive.by_index(i).ok().and_then(|f| {
+                let name = f.name().to_string();
+                if name.ends_with(".iwa") { Some(name) } else { None }
+            })
+        })
+        .collect();
+
+    Ok(iwa_paths)
+}
+
+/// Read and Snappy-decompress a single `.iwa` file from the ZIP archive.
+///
+/// Apple IWA files use a custom framing format:
+/// Each block in the file is: `[type: u8][length: u24 LE][payload: length bytes]`
+/// - type `0x00`: Snappy-compressed block → decompress payload with raw Snappy
+/// - type `0x01`: Uncompressed block → use payload as-is
+///
+/// Multiple blocks are concatenated to form the decompressed IWA stream.
+pub fn read_iwa_file(content: &[u8], path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let cursor = Cursor::new(content);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| KreuzbergError::parsing(format!("Failed to open iWork ZIP: {e}")))?;
+
+    let mut file = archive
+        .by_name(path)
+        .map_err(|_| KreuzbergError::parsing(format!("IWA file not found in archive: {path}")))?;
+
+    let compressed_size = file.size() as usize;
+    let mut raw = Vec::with_capacity(compressed_size.min(MAX_IWA_DECOMPRESSED_SIZE));
+    file.read_to_end(&mut raw)
+        .map_err(|e| KreuzbergError::parsing(format!("Failed to read IWA file {path}: {e}")))?;
+
+    decode_iwa_stream(&raw).map_err(|e| KreuzbergError::parsing(format!("Failed to decode IWA {path}: {e}")))
+}
+
+/// Decode an Apple IWA byte stream into the raw protobuf payload.
+///
+/// IWA framing: each block = 1 byte type + 3 bytes LE length + N bytes payload
+/// - type 0x00 → Snappy-compressed, decompress with `snap::raw::Decoder`
+/// - type 0x01 → Uncompressed, use as-is
+pub fn decode_iwa_stream(data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+    let mut decoder = snap::raw::Decoder::new();
+    let mut output = Vec::new();
+    let mut i = 0usize;
+
+    while i + 4 <= data.len() {
+        let chunk_type = data[i];
+        let chunk_len = (data[i + 1] as usize) | ((data[i + 2] as usize) << 8) | ((data[i + 3] as usize) << 16);
+        i += 4;
+
+        let end = i + chunk_len;
+        if end > data.len() {
+            return Err(format!(
+                "IWA chunk out of bounds: offset={i}, chunk_len={chunk_len}, data_len={}",
+                data.len()
+            ));
+        }
+
+        let payload = &data[i..end];
+        i = end;
+
+        match chunk_type {
+            0x00 => {
+                let decompressed = decoder
+                    .decompress_vec(payload)
+                    .map_err(|e| format!("Snappy decompression failed: {e}"))?;
+
+                if output.len() + decompressed.len() > MAX_IWA_DECOMPRESSED_SIZE {
+                    return Err(format!(
+                        "Decompressed IWA exceeds size limit ({MAX_IWA_DECOMPRESSED_SIZE} bytes)"
+                    ));
+                }
+                output.extend_from_slice(&decompressed);
+            }
+            0x01 => {
+                if output.len() + payload.len() > MAX_IWA_DECOMPRESSED_SIZE {
+                    return Err(format!(
+                        "Uncompressed IWA exceeds size limit ({MAX_IWA_DECOMPRESSED_SIZE} bytes)"
+                    ));
+                }
+                output.extend_from_slice(payload);
+            }
+            _ => {
+                tracing::debug!("Unknown IWA chunk type: 0x{:02x}, len={chunk_len}", chunk_type);
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+/// Extract all UTF-8 text strings from a raw protobuf byte slice.
+///
+/// This uses a simple wire-format scanner without a full schema:
+/// - Field type 2 (length-delimited) with a valid UTF-8 payload of ≥3 bytes is
+///   treated as a text string candidate.
+/// - We skip binary blobs (non-UTF-8) and very short noise strings.
+///
+/// This approach avoids the need for `prost-build` and generated proto code while
+/// still extracting human-readable text reliably from iWork documents.
+pub fn extract_text_from_proto(data: &[u8]) -> Vec<String> {
+    let mut texts: Vec<String> = Vec::new();
+    let mut i = 0usize;
+
+    while i < data.len() {
+        let (tag_varint, tag_len) = match read_varint(data, i) {
+            Some(v) => v,
+            None => break,
+        };
+        i += tag_len;
+
+        let wire_type = tag_varint & 0x7;
+
+        match wire_type {
+            0 => match read_varint(data, i) {
+                Some((_, len)) => i += len,
+                None => break,
+            },
+            1 => {
+                i += 8;
+            }
+            2 => {
+                let (length, len_bytes) = match read_varint(data, i) {
+                    Some(v) => v,
+                    None => break,
+                };
+                i += len_bytes;
+                let end = i + length as usize;
+                if end > data.len() {
+                    break;
+                }
+                let payload = &data[i..end];
+                i = end;
+
+                if let Ok(s) = utf8_validation::from_utf8(payload) {
+                    let trimmed = s.trim();
+                    if trimmed.len() >= 3 && trimmed.chars().any(|c| c.is_alphabetic() || c.is_numeric()) {
+                        texts.push(trimmed.to_string());
+                    }
+                }
+
+                let nested = extract_text_from_proto(payload);
+                texts.extend(nested);
+            }
+            5 => {
+                i += 4;
+            }
+            _ => {
+                break;
+            }
+        }
+    }
+
+    texts
+}
+
+/// Read a protobuf varint from `data` starting at byte `pos`.
+///
+/// Returns `(value, bytes_consumed)` or `None` if there aren't enough bytes.
+fn read_varint(data: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    let mut i = pos;
+
+    loop {
+        if i >= data.len() {
+            return None;
+        }
+        let byte = data[i] as u64;
+        i += 1;
+        result |= (byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            return Some((result, i - pos));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+}
+
+/// Extract all text from an iWork ZIP archive by reading specified IWA entries.
+///
+/// `iwa_paths` should list the IWA file paths to read (e.g. `["Index/Document.iwa"]`).
+/// Returns a flat joined string of all text found across all IWA files.
+pub fn extract_text_from_iwa_files(content: &[u8], iwa_paths: &[&str]) -> Result<String> {
+    let cursor = Cursor::new(content);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| KreuzbergError::parsing(format!("Failed to open iWork ZIP: {e}")))?;
+
+    let mut all_text: Vec<String> = Vec::new();
+
+    for path in iwa_paths {
+        match archive.by_name(path) {
+            Ok(mut file) => {
+                let compressed_size = file.size() as usize;
+                let mut compressed = Vec::with_capacity(compressed_size.min(MAX_IWA_DECOMPRESSED_SIZE));
+
+                if file.read_to_end(&mut compressed).is_err() {
+                    continue;
+                }
+
+                let mut decoder = snap::raw::Decoder::new();
+                let Ok(decompressed) = decoder.decompress_vec(&compressed) else {
+                    continue;
+                };
+
+                if decompressed.len() > MAX_IWA_DECOMPRESSED_SIZE {
+                    continue;
+                }
+
+                let texts = extract_text_from_proto(&decompressed);
+                all_text.extend(texts);
+            }
+            Err(_) => {
+                continue;
+            }
+        }
+    }
+
+    Ok(all_text.join("\n"))
+}
+
+/// Extract metadata from an iWork ZIP archive.
+///
+/// Attempts to read `Metadata/Properties.plist` and
+/// `Metadata/BuildVersionHistory.plist` from the ZIP. These files are XML plists
+/// containing authorship and creation information. If the files cannot be read
+/// or parsed, an empty `Metadata` is returned.
+pub fn extract_metadata_from_zip(content: &[u8]) -> crate::types::metadata::Metadata {
+    let cursor = Cursor::new(content);
+    let Ok(mut archive) = zip::ZipArchive::new(cursor) else {
+        return crate::types::metadata::Metadata::default();
+    };
+
+    let mut metadata = crate::types::metadata::Metadata::default();
+
+    if let Ok(mut file) = archive.by_name("Metadata/Properties.plist") {
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_ok()
+            && let Ok(text) = std::str::from_utf8(&buf)
+        {
+            parse_plist_metadata(text, &mut metadata);
+        }
+    }
+
+    if let Ok(mut file) = archive.by_name("Metadata/DocumentIdentifier") {
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_ok()
+            && let Ok(text) = std::str::from_utf8(&buf)
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() && metadata.title.is_none() {
+                metadata.title = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    metadata
+}
+
+/// Parse metadata fields from an XML plist string.
+///
+/// iWork plist metadata uses `<key>...</key><string>...</string>` pairs.
+/// We extract known keys: title, author, keywords, language.
+fn parse_plist_metadata(plist: &str, metadata: &mut crate::types::metadata::Metadata) {
+    let lines: Vec<&str> = plist.lines().map(|l| l.trim()).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(key) = extract_plist_tag(lines[i], "key") {
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].is_empty() {
+                j += 1;
+            }
+            if j < lines.len()
+                && let Some(value) = extract_plist_tag(lines[j], "string")
+            {
+                match key.as_str() {
+                    "title" | "Title" if metadata.title.is_none() => {
+                        metadata.title = Some(value);
+                    }
+                    "author" | "Author" | "creator" | "Creator" => {
+                        let authors = metadata.authors.get_or_insert_with(Vec::new);
+                        if !authors.contains(&value) {
+                            authors.push(value);
+                        }
+                    }
+                    "keywords" | "Keywords" => {
+                        let kw = metadata.keywords.get_or_insert_with(Vec::new);
+                        for word in value.split(',') {
+                            let trimmed = word.trim().to_string();
+                            if !trimmed.is_empty() && !kw.contains(&trimmed) {
+                                kw.push(trimmed);
+                            }
+                        }
+                    }
+                    "language" | "Language" if metadata.language.is_none() => {
+                        metadata.language = Some(value);
+                    }
+                    _ => {}
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Extract the text content of a simple XML tag, e.g. `<string>value</string>`.
+fn extract_plist_tag(line: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    if let Some(start) = line.find(&open)
+        && let Some(end) = line.find(&close)
+    {
+        let content = &line[start + open.len()..end];
+        return Some(content.to_string());
+    }
+    None
+}
+
+/// Deduplicate a list of text strings while preserving order.
+/// Adjacent duplicates and near-duplicates are removed.
+pub fn dedup_text(texts: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for t in texts {
+        if seen.insert(t.clone()) {
+            result.push(t);
+        }
+    }
+    result
+}

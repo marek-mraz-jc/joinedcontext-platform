@@ -55,12 +55,12 @@ axum = "0.8"
 # bblanchon/pdfium-binaries chromium/7568 release whose SHA-256 the build checks first (CI, the
 # image's Dockerfile). Without it kreuzberg's build script would fetch whatever release is
 # newest, unpinned and unchecked. No OCR, office or embedding features: they bring ONNX Runtime.
-# `office` and `excel` read uploaded DOCX and XLSX (T-4184). Cargo.lock holds `zip` at 8.6 (as
-# calamine): kreuzberg asks `>=7` and does not build on 9, whose `ZipFile::name` is a Result.
+# `office` and `excel` read uploaded DOCX and XLSX (T-4184). kreuzberg is the patched copy in
+# vendor/kreuzberg (workspace Cargo.toml [patch.crates-io]): zip 9.0.5 and calamine 0.37 (T-6053).
 kreuzberg = { version = "=4.10.4", default-features = false, features = ["tokio-runtime", "pdf", "bundled-pdfium", "html", "office", "excel", "chunking", "language-detection"] }
 # The inflation of an uploaded Office file is counted before kreuzberg reads it (T-5699); the
 # version and features kreuzberg already builds, so no new crate.
-zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
 # The version kreuzberg already links: cuts a PDF to `pdf.maxPages` before PDFium reads it.
 lopdf = { version = "=0.45.0", default-features = false }
 # Without resolve-http: a connector's schema never makes this service fetch a `$ref`.
