@@ -7,6 +7,9 @@ failing whenever GitHub is slow.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -370,3 +373,39 @@ def test_a_unit_is_read_from_the_clause_and_never_from_loose_prose():
     assert _unit_of("Property. Units:'CELSIUS DEGREES'.")["ucum_code"] == "Cel"
     assert _unit_of("Property. Units:'parsecs'") is None
     assert _unit_of(None) is None
+
+
+def _recorded(name: str) -> dict:
+    """A catalogue model exactly as `fetch` answered it on 2026-10-29 (T-6101)."""
+    return json.loads((Path(__file__).parent / "fixtures" / f"sdm-{name}.fetched.json").read_text())
+
+
+@pytest.mark.parametrize(
+    ("model", "fixture"),
+    [
+        # `subCategory` lists garden, music, pastry and wine twice; LinkML refuses a duplicate
+        # permissible value, so the whole import failed on one upstream typo.
+        ("dataModel.TourismDestinations/Event", "event"),
+        # The title " - Transportation / TrafficFlowObserved" is no NCName, and schema-automator
+        # names the schema after the title whatever name it is handed.
+        ("dataModel.Transportation/TrafficFlowObserved", "trafficflowobserved"),
+    ],
+)
+def test_a_catalogue_model_with_upstream_quirks_still_imports(model, fixture):
+    fetched = _recorded(fixture)
+    document = convert(
+        model,
+        fetched["schema"],
+        fetched["context"],
+        fetched["example"],
+        fetched["provenance"],
+        fetched.get("commons"),
+    )
+    _, name = split_identifier(model)
+    assert name in document["classes"]
+    for enum in (document.get("enums") or {}).values():
+        values = list(enum.get("permissible_values") or {})
+        assert len(values) == len(set(values))
+    source = yaml.safe_dump(document, sort_keys=False)
+    assert name in load(source).all_classes()
+    assert name in compile_schema(source)["definitions"]
