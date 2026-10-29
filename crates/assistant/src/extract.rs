@@ -555,7 +555,8 @@ mod tests {
     }
 
     use super::{
-        chrome_only, document_type, first_pages, language_of, only_headings, prose, MIN_PROSE,
+        chrome_only, document_type, extract, first_pages, language_of, only_headings, prose,
+        MIN_PROSE,
     };
 
     /// A PDF of `pages` pages, page n showing "Strana n", with a correct cross-reference table.
@@ -651,6 +652,85 @@ mod tests {
             document_type("https://bb.example/download?id=7", None),
             Err("the server named no content type".to_owned())
         );
+    }
+
+    fn office(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in entries {
+            assert!(writer.start_file(*name, options).is_ok());
+            assert!(writer.write_all(body.as_bytes()).is_ok());
+        }
+        writer
+            .finish()
+            .map(std::io::Cursor::into_inner)
+            .unwrap_or_default()
+    }
+
+    /// T-6053: kreuzberg reads DOCX and XLSX through zip 9 and calamine 0.37 (the patched copy
+    /// in vendor/kreuzberg), the versions without CVE-2026-115905.
+    #[tokio::test]
+    async fn a_docx_and_an_xlsx_are_read_through_zip_9() {
+        const RELS: &str = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#;
+        let docx = office(&[
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                &format!(
+                    r#"{RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/document.xml",
+                r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Zber odpadu je v utorok.</w:t></w:r></w:p></w:body></w:document>"#,
+            ),
+        ]);
+        let read = extract(&docx, crate::upload::DOCX, None, 10)
+            .await
+            .expect("docx");
+        assert!(
+            read.passages
+                .iter()
+                .any(|p| p.text.contains("Zber odpadu je v utorok.")),
+            "{read:?}"
+        );
+
+        let xlsx = office(&[
+            (
+                "[Content_Types].xml",
+                r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                &format!(
+                    r#"{RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Zber" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                &format!(
+                    r#"{RELS}<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Podhorie</t></is></c><c r="B1"><v>42</v></c></row></sheetData></worksheet>"#,
+            ),
+        ]);
+        let read = extract(&xlsx, crate::upload::XLSX, None, 10)
+            .await
+            .expect("xlsx");
+        let text: String = read.passages.iter().map(|p| p.text.as_str()).collect();
+        assert!(text.contains("Podhorie") && text.contains("42"), "{read:?}");
     }
 
     #[test]

@@ -20,6 +20,8 @@ RUN sh /tmp/e5-small.sh /opt/e5-small && sh /tmp/onnxruntime.sh /opt/onnxruntime
 # dependency layer first so source edits do not rebuild the world; every target a Cargo.toml names
 # gets a stub, or cargo refuses the manifest (scripts/ci/check-dockerfile-members.py)
 COPY Cargo.toml Cargo.lock ./
+# the patched kreuzberg the workspace [patch.crates-io] names (T-6053)
+COPY vendor/kreuzberg vendor/kreuzberg
 COPY crates/jc-core/Cargo.toml crates/jc-core/Cargo.toml
 COPY crates/jc-dcat/Cargo.toml crates/jc-dcat/Cargo.toml
 COPY crates/jc-manifest/Cargo.toml crates/jc-manifest/Cargo.toml

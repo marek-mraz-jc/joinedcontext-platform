@@ -1,0 +1,179 @@
+//! Layout detection configuration.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+/// Which table structure recognition model to use.
+///
+/// Controls the model used for table cell detection within layout-detected
+/// table regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum TableModel {
+    /// TATR (Table Transformer) -- default, 30MB, DETR-based row/column detection.
+    #[default]
+    Tatr,
+    /// SLANeXT wired variant -- 365MB, optimized for bordered tables.
+    SlanetWired,
+    /// SLANeXT wireless variant -- 365MB, optimized for borderless tables.
+    SlanetWireless,
+    /// SLANet-plus -- 7.78MB, lightweight general-purpose.
+    SlanetPlus,
+    /// Classifier-routed SLANeXT: auto-select wired/wireless per table.
+    /// Uses PP-LCNet classifier (6.78MB) + both SLANeXT variants (730MB total).
+    SlanetAuto,
+    /// Disable table structure model inference entirely; use heuristic path only.
+    Disabled,
+}
+
+impl<'de> Deserialize<'de> for TableModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "tatr" => Ok(TableModel::Tatr),
+            "slanet_wired" => Ok(TableModel::SlanetWired),
+            "slanet_wireless" => Ok(TableModel::SlanetWireless),
+            "slanet_plus" => Ok(TableModel::SlanetPlus),
+            "slanet_auto" => Ok(TableModel::SlanetAuto),
+            "disabled" => Ok(TableModel::Disabled),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown table model: '{other}'. Valid values: tatr, slanet_wired, slanet_wireless, slanet_plus, slanet_auto, disabled"
+            ))),
+        }
+    }
+}
+
+impl std::str::FromStr for TableModel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "tatr" => Ok(Self::Tatr),
+            "slanet_wired" => Ok(Self::SlanetWired),
+            "slanet_wireless" => Ok(Self::SlanetWireless),
+            "slanet_plus" => Ok(Self::SlanetPlus),
+            "slanet_auto" => Ok(Self::SlanetAuto),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(format!(
+                "unknown table model: '{other}'. Valid: tatr, slanet_wired, slanet_wireless, slanet_plus, slanet_auto, disabled"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for TableModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TableModel::Tatr => write!(f, "tatr"),
+            TableModel::SlanetWired => write!(f, "slanet_wired"),
+            TableModel::SlanetWireless => write!(f, "slanet_wireless"),
+            TableModel::SlanetPlus => write!(f, "slanet_plus"),
+            TableModel::SlanetAuto => write!(f, "slanet_auto"),
+            TableModel::Disabled => write!(f, "disabled"),
+        }
+    }
+}
+
+/// Layout detection configuration.
+///
+/// Controls layout detection behavior in the extraction pipeline.
+/// When set on [`ExtractionConfig`](super::ExtractionConfig), layout detection
+/// is enabled for PDF extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayoutDetectionConfig {
+    /// Confidence threshold override (None = use model default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_threshold: Option<f32>,
+
+    /// Whether to apply postprocessing heuristics (default: true).
+    #[serde(default = "default_true")]
+    pub apply_heuristics: bool,
+
+    /// Table structure recognition model.
+    ///
+    /// Controls which model is used for table cell detection within layout-detected
+    /// table regions. Defaults to [`TableModel::Tatr`].
+    #[serde(default)]
+    pub table_model: TableModel,
+
+    /// Hardware acceleration for ONNX models (layout detection + table structure).
+    ///
+    /// When set, controls which execution provider (CPU, CUDA, CoreML, TensorRT)
+    /// is used for inference. Defaults to `None` (auto-select per platform).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acceleration: Option<super::acceleration::AccelerationConfig>,
+}
+
+impl Default for LayoutDetectionConfig {
+    fn default() -> Self {
+        Self {
+            confidence_threshold: None,
+            apply_heuristics: true,
+            table_model: TableModel::default(),
+            acceleration: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = LayoutDetectionConfig::default();
+        assert_eq!(config.table_model, TableModel::Tatr);
+        assert!(config.apply_heuristics);
+        assert!(config.confidence_threshold.is_none());
+    }
+
+    #[test]
+    fn test_table_model_deserialize() {
+        let json = r#""tatr""#;
+        let model: TableModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model, TableModel::Tatr);
+
+        let json = r#""slanet_auto""#;
+        let model: TableModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model, TableModel::SlanetAuto);
+
+        let json = r#""disabled""#;
+        let model: TableModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model, TableModel::Disabled);
+    }
+
+    #[test]
+    fn test_table_model_serialize() {
+        let json = serde_json::to_string(&TableModel::SlanetWired).unwrap();
+        assert_eq!(json, r#""SlanetWired""#);
+    }
+
+    #[test]
+    fn test_backward_compat_unknown_fields_ignored() {
+        let json = r#"{"preset": "accurate", "apply_heuristics": true}"#;
+        let config: LayoutDetectionConfig = serde_json::from_str(json).unwrap();
+        assert!(config.apply_heuristics);
+        assert_eq!(config.table_model, TableModel::Tatr);
+    }
+
+    #[test]
+    fn test_backward_compat_old_table_model_field() {
+        let json = r#"{"table_model": "slanet_wired"}"#;
+        let config: LayoutDetectionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.table_model, TableModel::SlanetWired);
+    }
+
+    #[test]
+    fn test_table_model_display() {
+        assert_eq!(TableModel::Tatr.to_string(), "tatr");
+        assert_eq!(TableModel::SlanetWired.to_string(), "slanet_wired");
+        assert_eq!(TableModel::Disabled.to_string(), "disabled");
+    }
+}

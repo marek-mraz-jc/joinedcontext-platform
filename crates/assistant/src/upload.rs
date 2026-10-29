@@ -378,7 +378,9 @@ mod tests {
     }
 
     /// T-5699, F-PLT1-010: an entry whose central directory declares 1 KiB but that inflates
-    /// past the cap is refused; the declared sizes alone let it through before.
+    /// past the cap is refused; the declared sizes alone let it through before. Since zip 9
+    /// (T-6053) the reader stops at the declared size and calls the entry broken, before the
+    /// count reaches the cap.
     #[test]
     fn an_entry_that_inflates_past_what_it_declares_is_refused() {
         use std::io::Write;
@@ -407,7 +409,7 @@ mod tests {
         assert!(
             refused
                 .as_ref()
-                .is_err_and(|e| e.contains("unpacks past 200 MiB")),
+                .is_err_and(|e| e == "the archive is not a readable DOCX or XLSX"),
             "{refused:?}"
         );
     }

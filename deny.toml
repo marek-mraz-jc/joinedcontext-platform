@@ -11,13 +11,6 @@ ignore = [
   # only (extract::document_type, test a_document_is_read_only_as_a_document_type), never YAML.
   # Decided on T-4070 like RUSTSEC-2024-0436 on T-3209; drop it when kreuzberg drops the crate.
   "RUSTSEC-2024-0449",
-  # zip 8.6.0 under kreuzberg 4.10.4 and calamine 0.36.1: RUSTSEC-2026-0367/0368/0369 sit in
-  # ZipArchive::extract / ZipStreamReader::extract (unpacking to disk), which neither crate nor
-  # ours calls; reason, grep evidence and exit condition in .cargo/audit.toml (T-4524, owner
-  # decision 2026-10-18). Remove when kreuzberg accepts zip >= 9.
-  "RUSTSEC-2026-0367",
-  "RUSTSEC-2026-0368",
-  "RUSTSEC-2026-0369",
   # basic-toml 0.1.10 is unmaintained (not a vulnerability): a build-time read of i18n.toml in
   # age's i18n-embed-fl proc-macro (jcctl -> age 0.12.1 -> i18n-embed-fl 0.10.1 -> i18n-config
   # 0.4.8, the newest of each). age decrypts the pipelines' SOPS files, so it stays; no release
