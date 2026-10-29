@@ -1,10 +1,9 @@
-//! `GET /ngsi-ld/v1/types` through an Endpoint (CIM 009 5.7.1, T-4080).
+//! `GET /ngsi-ld/v1/types` and `/attributes` through an Endpoint (CIM 009 5.7.5, 5.7.8; T-4080,
+//! T-5391).
 //!
-//! On dev every public Endpoint answered it 404 or 403: the grants name `retrieveOps`, which does
-//! not hold the type list, so a client had to read CKAN or the schema files to learn what to ask
-//! for. A read grant now shows the types the Endpoint's reads show: the stub here is the view,
-//! answering entities of the types it lets the caller read and nothing of the others. The view
-//! decides each type; the gateway asks it about every type the space holds (T-3652).
+//! The Endpoint's view answers both from its type and Attribute catalogue, filtered by the
+//! caller's grant (Antares T-4934): the gateway forwards the request and adds no name of its own.
+//! It used to read the space's type list and probe the view once per type, 0.3-3.7 s on dev.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -22,15 +21,14 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 const SLUG: &str = "mluyob4nz52lok3ssk7pgn5vwt";
-const HELD: [&str; 5] = ["Alert", "GtfsStop", "Secret", "TransitRoute", "Vehicle"];
 
-/// Every path the view was asked, with its query.
+/// Every path the broker was asked, with its query.
 type Asked = Arc<Mutex<Vec<String>>>;
 
-/// The space holds the five types; the view answers an entity of each type in `readable` and
-/// nothing of the others, as the engine narrows a caller's read. `None` is an engine refusing
-/// the caller the read itself: every view read is a `403`.
-async fn view_broker(readable: Option<&'static [&'static str]>) -> (String, Asked) {
+/// The broker: the space holds Alert, GtfsStop, Secret and Vehicle with a `secretNote` Attribute;
+/// the view's catalogue shows this caller GtfsStop and Vehicle and hides `secretNote`, as the
+/// engine filters it by the grant. `refused` is an engine refusing the caller the read itself.
+async fn view_broker(refused: bool) -> (String, Asked) {
     let asked: Asked = Arc::default();
     let recorder = Arc::clone(&asked);
     let app = Router::new().fallback(move |request: Request| {
@@ -42,30 +40,30 @@ async fn view_broker(readable: Option<&'static [&'static str]>) -> (String, Aske
                 .lock()
                 .expect("no poisoned lock")
                 .push(format!("{path}?{query}"));
-            if path == "/ngsi-ld/v1/types" {
-                return axum::Json(json!({ "type": "EntityTypeList", "typeList": HELD }))
-                    .into_response();
-            }
-            if path == format!("/x/views/{SLUG}/ngsi-ld/v1/types") || readable.is_none() {
+            let view = format!("/x/views/{SLUG}/ngsi-ld/v1");
+            if refused && path.starts_with(&view) {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(json!({ "title": "AccessDenied", "status": 403 })),
                 )
                     .into_response();
             }
-            let asked_type = query
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .find(|(name, _)| *name == "type")
-                .map(|(_, value)| value.to_owned())
-                .unwrap_or_default();
-            let rows: Vec<Value> = readable
-                .unwrap_or_default()
-                .iter()
-                .filter(|name| **name == asked_type)
-                .map(|name| json!({ "id": format!("urn:ngsi-ld:{name}:1"), "type": name }))
-                .collect();
-            axum::Json(Value::Array(rows)).into_response()
+            let answer = if path == "/ngsi-ld/v1/types" {
+                json!({ "id": "urn:ngsi-ld:EntityTypeList:all", "type": "EntityTypeList",
+                        "typeList": ["Alert", "GtfsStop", "Secret", "Vehicle"] })
+            } else if path == format!("{view}/types") && query.contains("details=true") {
+                json!([{ "id": "GtfsStop", "type": "EntityType", "typeName": "GtfsStop",
+                         "attributeNames": ["name"] }])
+            } else if path == format!("{view}/types") {
+                json!({ "id": "urn:ngsi-ld:EntityTypeList:view", "type": "EntityTypeList",
+                        "typeList": ["GtfsStop", "Vehicle"] })
+            } else if path == format!("{view}/attributes") {
+                json!({ "id": "urn:ngsi-ld:AttributeList:view", "type": "AttributeList",
+                        "attributeList": ["location", "name"] })
+            } else {
+                json!([{ "id": "urn:ngsi-ld:Secret:1", "type": "Secret", "secretNote": "x" }])
+            };
+            axum::Json(answer).into_response()
         }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -125,15 +123,16 @@ fn endpoint(operations: &str, granted: &[&str]) -> Endpoint {
     }
 }
 
-/// An anonymous `GET /types`, as a client with no account sends it.
-async fn types(broker: &str, endpoint: Endpoint) -> (StatusCode, Value) {
+/// An anonymous `GET` of `rest` under the Endpoint's NGSI-LD root, as a client with no account
+/// sends it.
+async fn get(broker: &str, endpoint: Endpoint, rest: &str) -> (StatusCode, Value) {
     let app = router(Arc::new(
         Gateway::new(Broker::new(broker), Box::new(PolicyPdp), "example.org").serve([endpoint]),
     ));
     let response = app
         .oneshot(
             HttpRequest::builder()
-                .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1/types"))
+                .uri(format!("/api/endpoint/{SLUG}/ngsi-ld/v1/{rest}"))
                 .body(Body::empty())
                 .expect("a request"),
         )
@@ -146,151 +145,88 @@ async fn types(broker: &str, endpoint: Endpoint) -> (StatusCode, Value) {
     (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
 }
 
-fn listed(answer: &Value) -> Vec<&str> {
-    answer["typeList"]
-        .as_array()
-        .expect("a typeList")
-        .iter()
-        .filter_map(Value::as_str)
-        .collect()
+fn asked(asked: &Asked) -> Vec<String> {
+    asked.lock().expect("no poisoned lock").clone()
 }
 
-/// F-SEC1-017: the list probes the view once per type the space holds, so it costs the caller's
-/// rate limit one request per type; a bucket short of that is a 429 before any probe is sent.
+/// The type list is the view's: one request to it, no read of the space's own list and no probe
+/// per type, so a type the view refuses the caller (Alert, Secret) never appears.
 #[tokio::test]
-async fn the_type_list_costs_one_request_per_type_it_probes() {
-    let limited = |burst: u32| {
-        let mut endpoint = endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"]);
-        endpoint.rate_limit = Some(RateLimits {
-            requests_per_minute: 1,
-            burst: Some(burst),
-        });
-        endpoint
-    };
-    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
-    let (status, answer) = types(&broker, limited(4)).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{answer}");
-    let probes = |asked: &Asked| {
-        asked
-            .lock()
-            .expect("no poisoned lock")
-            .iter()
-            .filter(|hop| hop.starts_with("/x/views/"))
-            .count()
-    };
-    assert_eq!(
-        probes(&asked),
-        0,
-        "no view read before the bucket is charged"
-    );
-
-    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
-    let (status, answer) = types(&broker, limited(5)).await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert_eq!(probes(&asked), HELD.len());
-}
-
-/// A public Endpoint whose Policy grants 2 of the 5 types lists those 2, to anyone.
-#[tokio::test]
-async fn a_read_grant_of_two_types_lists_those_two_to_anyone() {
-    let (broker, asked) = view_broker(Some(&["GtfsStop", "Vehicle"])).await;
-    let (status, answer) =
-        types(&broker, endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"])).await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert_eq!(answer["type"], json!("EntityTypeList"));
-    assert_eq!(listed(&answer), ["GtfsStop", "Vehicle"]);
-    // The view decided each type; its own type list was never asked.
-    let asked = asked.lock().expect("no poisoned lock").clone();
-    assert!(
-        asked
-            .iter()
-            .all(|hop| !hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/types"))),
-        "{asked:?}"
-    );
-}
-
-/// A type the grant reaches but the view shows the caller nothing of is not listed: its name
-/// would tell what the space holds.
-#[tokio::test]
-async fn a_type_the_view_shows_nothing_of_is_not_listed() {
-    let (broker, _) = view_broker(Some(&["Alert"])).await;
-    let (status, answer) = types(&broker, endpoint("[retrieveOps]", &[])).await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert_eq!(listed(&answer), ["Alert"]);
-}
-
-/// A caller the view refuses every read is answered by the view's own type list, as before:
-/// no list is made up for them.
-#[tokio::test]
-async fn without_a_read_grant_the_view_answers() {
-    let (broker, asked) = view_broker(None).await;
-    let (status, answer) = types(&broker, endpoint("[createEntity]", &[])).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
-    let asked = asked.lock().expect("no poisoned lock").clone();
-    assert!(
-        asked
-            .iter()
-            .any(|hop| hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/types"))),
-        "{asked:?}"
-    );
-}
-
-/// The view is asked about the held types a few at a time, and the list keeps the space's order
-/// (T-4734): on dev the HSL Endpoint's list asked its types one after another and took 10-19 s,
-/// past the assistant's wait, so Helsinki read as a source that could not be checked.
-#[tokio::test]
-async fn the_view_is_asked_about_the_types_a_few_at_a_time() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let inside = Arc::new(AtomicUsize::new(0));
-    let most = Arc::new(AtomicUsize::new(0));
-    let (now, top) = (Arc::clone(&inside), Arc::clone(&most));
-    let app = Router::new().fallback(move |request: Request| {
-        let (now, top) = (Arc::clone(&now), Arc::clone(&top));
-        async move {
-            if request.uri().path() == "/ngsi-ld/v1/types" {
-                return axum::Json(json!({ "type": "EntityTypeList", "typeList": HELD }))
-                    .into_response();
-            }
-            let asked_type = request
-                .uri()
-                .query()
-                .unwrap_or_default()
-                .split('&')
-                .filter_map(|pair| pair.split_once('='))
-                .find(|(name, _)| *name == "type")
-                .map(|(_, value)| value.to_owned())
-                .unwrap_or_default();
-            top.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            now.fetch_sub(1, Ordering::SeqCst);
-            // The view shows nothing of Secret, so it is not listed.
-            let rows = if asked_type == "Secret" {
-                Vec::new()
-            } else {
-                vec![json!({ "id": format!("urn:ngsi-ld:{asked_type}:1"), "type": asked_type })]
-            };
-            axum::Json(Value::Array(rows)).into_response()
-        }
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a free port");
-    let port = listener.local_addr().expect("an address").port();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let (status, answer) = types(
-        &format!("http://127.0.0.1:{port}"),
-        endpoint("[retrieveOps]", &[]),
+async fn the_type_list_is_the_views_answer_in_one_request() {
+    let (broker, hops) = view_broker(false).await;
+    let (status, answer) = get(
+        &broker,
+        endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"]),
+        "types",
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["type"], json!("EntityTypeList"));
+    assert_eq!(answer["typeList"], json!(["GtfsStop", "Vehicle"]));
     assert_eq!(
-        listed(&answer),
-        ["Alert", "GtfsStop", "TransitRoute", "Vehicle"]
+        asked(&hops),
+        [format!("/x/views/{SLUG}/ngsi-ld/v1/types?")],
+        "the gateway asked the view once and nothing else"
     );
+}
+
+/// One request costs the caller one request of the rate limit: the list no longer charges a
+/// probe per type the space holds (F-SEC1-017 charged them before T-5391).
+#[tokio::test]
+async fn the_type_list_costs_one_request() {
+    let mut limited = endpoint("[retrieveOps]", &["GtfsStop", "Vehicle"]);
+    limited.rate_limit = Some(RateLimits {
+        requests_per_minute: 1,
+        burst: Some(1),
+    });
+    let (broker, _) = view_broker(false).await;
+    let (status, answer) = get(&broker, limited, "types").await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+}
+
+/// The Attribute list and the type details are the view's too: an Attribute the view hides
+/// (`secretNote`) never appears, and the gateway adds none.
+#[tokio::test]
+async fn the_attribute_list_and_type_details_are_the_views_answers() {
+    let (broker, hops) = view_broker(false).await;
+    let (status, answer) = get(&broker, endpoint("[retrieveOps]", &[]), "attributes").await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["attributeList"], json!(["location", "name"]));
+    let (status, details) = get(
+        &broker,
+        endpoint("[retrieveOps]", &[]),
+        "types?details=true",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{details}");
+    assert_eq!(details[0]["typeName"], json!("GtfsStop"));
+    for answer in [answer, details] {
+        assert!(!answer.to_string().contains("secretNote"), "{answer}");
+        assert!(!answer.to_string().contains("Secret\""), "{answer}");
+    }
     assert!(
-        most.load(Ordering::SeqCst) > 1,
-        "the types were asked one after another"
+        asked(&hops)
+            .iter()
+            .all(|hop| hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/"))),
+        "{:?}",
+        asked(&hops)
+    );
+}
+
+/// A caller the view refuses is answered by the view's refusal: no list is made up for them.
+#[tokio::test]
+async fn without_a_read_grant_the_view_refuses() {
+    let (broker, hops) = view_broker(true).await;
+    for rest in ["types", "attributes"] {
+        let (status, answer) = get(&broker, endpoint("[createEntity]", &[]), rest).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{rest}: {answer}");
+        assert!(answer.get("typeList").is_none(), "{answer}");
+    }
+    assert!(
+        asked(&hops)
+            .iter()
+            .all(|hop| hop.starts_with(&format!("/x/views/{SLUG}/ngsi-ld/v1/"))),
+        "{:?}",
+        asked(&hops)
     );
 }

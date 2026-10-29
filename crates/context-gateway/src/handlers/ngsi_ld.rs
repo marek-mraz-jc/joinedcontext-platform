@@ -15,7 +15,7 @@
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, admit_space, principal_of};
-use crate::handlers::respond::{json_response, typed_json_response};
+use crate::handlers::respond::json_response;
 use crate::handlers::schema;
 use crate::handlers::writes::{
     accepted_payload, batch_entry_id, batch_result, body_length, empty_space, filled_units,
@@ -458,16 +458,7 @@ pub(crate) async fn serve_ngsi_ld_view(
     };
     let view = view(&endpoint);
     let mut request = request;
-    if let Err(answer) = answered_here(
-        gateway,
-        (&endpoint, &subject),
-        operation,
-        &view,
-        &params,
-        &mut request,
-    )
-    .await
-    {
+    if let Err(answer) = answered_here(&endpoint, operation, &view, &params) {
         return *answer;
     }
     let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
@@ -541,15 +532,14 @@ pub(crate) async fn serve_ngsi_ld_view(
 }
 
 /// What the gateway answers itself before a view request is judged: an Endpoint without a
-/// view (`503 no-view`), a query of a shape no view answers, and the Endpoint's type list as
-/// its reads show the caller (T-4080). `Ok` goes on to the view.
-async fn answered_here(
-    gateway: &Gateway,
-    (endpoint, subject): (&Endpoint, &Subject),
+/// view (`503 no-view`) and a query of a shape no view answers. `Ok` goes on to the view, which
+/// answers the type and Attribute lists too, from its catalogue filtered by the caller's grant
+/// (T-4934, T-5391).
+fn answered_here(
+    endpoint: &Endpoint,
     operation: Operation,
     view: &str,
     params: &[(String, String)],
-    request: &mut Request,
 ) -> Result<(), Box<Response<Body>>> {
     if !has_view(view) {
         return Err(Box::new(no_view(endpoint)));
@@ -559,17 +549,7 @@ async fn answered_here(
             return Err(Box::new(refusal));
         }
     }
-    // A caller without a read grant, and the details form, are the view's to answer.
-    if operation != Operation::RetrieveEntityTypes
-        || request.method() != Method::GET
-        || view != endpoint.slug
-    {
-        return Ok(());
-    }
-    match crate::handlers::types_list::listed_types(gateway, endpoint, subject, request).await? {
-        Some(list) => Err(Box::new(typed_json_response(&list, "application/json"))),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
 /// The view's answer as the caller reads it: the restriction header under the name the
@@ -1464,39 +1444,19 @@ mod tests {
 
     /// T-5508: an Endpoint whose view id no broker view carries is the `503 no-view` before any
     /// hop; a read of entities goes on to the view.
-    #[tokio::test]
-    async fn answered_here_refuses_an_endpoint_without_a_view() {
-        let gateway = Gateway::new(
-            crate::proxy::Broker::new("http://localhost:9"),
-            Box::new(crate::pdp::PolicyPdp),
-            "example.org",
-        );
+    #[test]
+    fn answered_here_refuses_an_endpoint_without_a_view() {
         let endpoint = crate::mcp::catalog::tests::fixture();
-        let subject = Subject::anonymous();
-        let mut request = Request::new(Body::empty());
         let read = Operation::RetrieveEntity;
         let long = "v".repeat(MAX_VIEW_ID + 1);
-        let refused = answered_here(
-            &gateway,
-            (&endpoint, &subject),
-            read,
-            &long,
-            &[],
-            &mut request,
-        )
-        .await;
+        let refused = answered_here(&endpoint, read, &long, &[]);
         let refused = refused.err().map(|answer| answer.status());
         assert_eq!(refused, Some(StatusCode::SERVICE_UNAVAILABLE));
-        let goes_on = answered_here(
-            &gateway,
-            (&endpoint, &subject),
-            read,
-            "view",
-            &[],
-            &mut request,
-        )
-        .await;
-        assert!(goes_on.is_ok());
+        assert!(answered_here(&endpoint, read, "view", &[]).is_ok());
+        // The type and Attribute lists are the view's to answer (T-5391).
+        for list in [Operation::RetrieveEntityTypes, Operation::RetrieveAttrTypes] {
+            assert!(answered_here(&endpoint, list, "view", &[]).is_ok());
+        }
     }
 
     /// T-5508, R22: the broker's restriction header reaches the caller under the name the
