@@ -1249,6 +1249,15 @@
             "null"
           ]
         },
+        "minPipelinePeriodSeconds": {
+          "description": "The shortest clock a Pipeline of the project may run on, in seconds: its `spec.period` and the shortest gap of its `spec.schedule` (PL-116). A floor, not a count, so it is no PF-73 dimension; the stricter of the project's and the organization's value holds.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "mqtt": {
           "anyOf": [
             {

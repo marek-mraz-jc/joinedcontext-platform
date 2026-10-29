@@ -851,6 +851,20 @@ impl PipelineSpec {
         }
     }
 
+    /// The shortest clock the pipeline runs on, in seconds: the smaller of its `spec.period`
+    /// and the shortest gap of its `spec.schedule`; `None` for a push-based pipeline (PL-116).
+    pub fn shortest_clock_seconds(&self) -> Option<u64> {
+        let schedule = self
+            .schedule
+            .as_deref()
+            .and_then(crate::cron::shortest_gap_minutes)
+            .map(|minutes| u64::from(minutes) * 60);
+        match (self.period_seconds(), schedule) {
+            (Some(period), Some(schedule)) => Some(period.min(schedule)),
+            (one, other) => one.or(other),
+        }
+    }
+
     /// Returns whether this pipeline executes as a scheduled CronJob (PL-04, PL-26).
     pub fn is_scheduled(&self) -> bool {
         is_scheduled(self)

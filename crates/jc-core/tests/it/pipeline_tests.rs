@@ -335,6 +335,25 @@ fn period_parses_every_bento_unit_and_refuses_anything_else() {
         .expect("a push-based pipeline needs no period");
 }
 
+/// PL-116: the floor a project sets is held against the faster of the period and the schedule.
+#[test]
+fn the_shortest_clock_is_the_faster_of_period_and_schedule() {
+    let mut spec = Pipeline::from_yaml(GOLDEN_MQTT)
+        .expect("the golden manifest parses")
+        .spec;
+    spec.period = None;
+    spec.schedule = None;
+    assert_eq!(spec.shortest_clock_seconds(), None, "push-based");
+    spec.schedule = Some("*/15 * * * *".to_owned());
+    assert_eq!(spec.shortest_clock_seconds(), Some(900));
+    spec.period = Some("5m".to_owned());
+    assert_eq!(spec.shortest_clock_seconds(), Some(300));
+    spec.schedule = Some("* * * * *".to_owned());
+    assert_eq!(spec.shortest_clock_seconds(), Some(60));
+    spec.schedule = None;
+    assert_eq!(spec.shortest_clock_seconds(), Some(300));
+}
+
 /// T-4050: `pipeline-test` is each project's test-harness principal (PL-43); a Pipeline of that
 /// name would share it, so the name is refused and every other stays as it was.
 #[test]
