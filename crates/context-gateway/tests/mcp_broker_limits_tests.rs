@@ -193,7 +193,7 @@ async fn send(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
 }
 
 /// A fake broker publishes 70/700 Entities and 80/800 values: the hub and the named server
-/// list `limit` and `lastN` with those defaults and maxima, and say them in the descriptions.
+/// list `limit` and `lastN` with those defaults and maxima in their schemas.
 #[tokio::test]
 async fn the_hub_and_a_named_server_advertise_the_broker_s_limits() {
     let realm = common::Realm::new();
@@ -222,11 +222,9 @@ async fn the_hub_and_a_named_server_advertise_the_broker_s_limits() {
             (&json!(70), &json!(700)),
             "{path}"
         );
+        // Said once, by the schema: the description repeats none of it (T-6058).
         let said = query["description"].as_str().unwrap_or_default();
-        assert!(
-            said.contains("Default 70 Entities per call, maximum 700 (limit)"),
-            "{said}"
-        );
+        assert!(!said.contains("700"), "{said}");
         let history = tool("query_temporal");
         let last_n = &history["inputSchema"]["properties"]["lastN"];
         assert_eq!(
@@ -235,9 +233,6 @@ async fn the_hub_and_a_named_server_advertise_the_broker_s_limits() {
             "{path}"
         );
         let said = history["description"].as_str().unwrap_or_default();
-        assert!(
-            said.contains("Default 80 values per Attribute per call, maximum 800 (lastN)"),
-            "{said}"
-        );
+        assert!(!said.contains("800"), "{said}");
     }
 }

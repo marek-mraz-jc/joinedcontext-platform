@@ -152,42 +152,6 @@ pub async fn follow(broker: Broker) {
     }
 }
 
-/// The sentence the read tools add to their description, from these limits.
-pub fn note(tool: &str, limits: Limits) -> Option<String> {
-    let entities = || {
-        format!(
-            "Default {} Entities per call, maximum {} (limit).",
-            thousands(limits.default_limit),
-            thousands(limits.max_limit)
-        )
-    };
-    let history = || {
-        format!(
-            "Default {} values per Attribute per call, maximum {} (lastN).",
-            thousands(limits.temporal_default),
-            thousands(limits.temporal_max)
-        )
-    };
-    match tool {
-        "query_entities" | "batch_query" => Some(entities()),
-        "query_temporal" | "retrieve_temporal" | "batch_query_temporal" => Some(history()),
-        _ => None,
-    }
-}
-
-/// `1000` as `1,000`.
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,20 +174,5 @@ mod tests {
         let older = json!({"limits": {"maxLimit": 1000, "temporalInstanceLimit": 1000}});
         assert_eq!(parse(&older), Some(Limits::default()));
         assert_eq!(parse(&json!({"status": "UP"})), None);
-    }
-
-    #[test]
-    fn the_notes_name_default_and_maximum() {
-        let l = Limits::default();
-        assert_eq!(
-            note("query_entities", l).as_deref(),
-            Some("Default 100 Entities per call, maximum 1,000 (limit).")
-        );
-        assert_eq!(
-            note("retrieve_temporal", l).as_deref(),
-            Some("Default 100 values per Attribute per call, maximum 1,000 (lastN).")
-        );
-        assert_eq!(note("get_entity", l), None);
-        assert_eq!(thousands(12_345_678), "12,345,678");
     }
 }

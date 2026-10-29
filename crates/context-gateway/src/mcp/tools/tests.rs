@@ -561,18 +561,26 @@ fn the_reads_take_format_sys_attrs_and_order_by() {
     assert!(schema("batch_query_temporal")["properties"]
         .get("format")
         .is_none());
-    let query = schema("query_entities");
-    for argument in ["q", "idPattern", "scopeQ", "georel", "orderBy", "format"] {
-        assert!(
-            query["properties"][argument]["description"].is_string(),
-            "{argument} carries no grammar"
+    // The grammar is said once, in the primer, and no argument repeats it (EP-116, T-6058).
+    let primer: &str = &crate::mcp::PRIMER;
+    for (name, argument) in [
+        ("query_entities", "q"),
+        ("query_entities", "idPattern"),
+        ("query_entities", "scopeQ"),
+        ("query_entities", "georel"),
+        ("query_entities", "orderBy"),
+        ("query_entities", "format"),
+        ("query_temporal", "timerel"),
+        ("query_temporal", "lastN"),
+        ("query_temporal", "aggrMethods"),
+    ] {
+        assert!(primer.contains(&format!("`{argument}`")), "{argument}");
+        assert_eq!(
+            schema(name)["properties"][argument].get("description"),
+            None,
+            "{name} {argument}"
         );
     }
-    assert!(
-        schema("query_temporal")["properties"]["timerel"]["description"]
-            .as_str()
-            .is_some_and(|line| line.contains("between"))
-    );
 }
 
 /// EP-116: the hub and every named server say they speak NGSI-LD and teach its language, and

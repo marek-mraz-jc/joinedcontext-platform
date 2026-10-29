@@ -627,7 +627,6 @@ impl Hub {
                         "type": ["string", "integer"],
                         "maxLength": 1024,
                         "minimum": 0,
-                        "description": "The previous page's nextCursor, passed back as given",
                     });
                 }
                 if self.server.is_some() {
