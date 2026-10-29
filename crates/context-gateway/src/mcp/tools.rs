@@ -385,47 +385,13 @@ fn schema_of(kind: Kind) -> Value {
     }
 }
 
-/// One line of NGSI-LD grammar per argument, so a model reads how to fill it where it fills it
-/// (EP-116). A description changes no name and no type, which is all EP-112 compares.
-fn grammar(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "type" => "Entity types, e.g. [\"AirQualityObserved\"]",
-        "id" => "Entity ids, NGSI-LD URNs urn:ngsi-ld:{Type}:{id}",
-        "idPattern" => "A regular expression over entity ids, e.g. ^urn:ngsi-ld:Parking:.*",
-        "attrs" => "Attributes to return; with no q, also those an entity must have",
-        "pick" | "omit" => "Members to keep or drop, id and type included",
-        "q" => "NGSI-LD query: ; is AND, | is OR; == != > >= < <= ~= (regex) !~=; a..b ranges; a.b sub-attribute; a[b] member; !a absent. E.g. no2>40;status==\"ok\"",
-        "scopeQ" => "Scope query, e.g. /city/centre or /city/# ; is AND, , is OR",
-        "georel" => "near;maxDistance==<m>, near;minDistance==<m>, within, contains, intersects, equals, disjoint, overlaps",
-        "coordinates" => "GeoJSON coordinates of `geometry`, longitude first, e.g. [19.15, 48.74]",
-        "geoproperty" => "The GeoProperty the geo query tests; location when absent",
-        "orderBy" => "attr[;asc|desc], comma-separated (CIM 009 4.23); local queries only",
-        "format" => "Representation: normalized (default, values with metadata), concise, keyValues (plain values); on history temporalValues or aggregatedValues",
-        "sysAttrs" => "true adds createdAt and modifiedAt: when the entity or attribute last changed",
-        "timerel" => "before, after or between timeAt (and endTimeAt)",
-        "timeAt" | "endTimeAt" => "An ISO 8601 instant, e.g. 2026-10-12T00:00:00Z",
-        "timeproperty" => "The instant history is ordered by: observedAt (default), modifiedAt, createdAt, or deletedAt for removals",
-        "lastN" => "Keep the newest N instances of each attribute; the broker's default when absent, at most its maximum",
-        "aggrMethods" => "Comma-separated: avg, min, max, sum, totalCount, distinctCount, stddev, sumsq",
-        "aggrPeriodDuration" => "ISO 8601 duration of each aggregation period, e.g. PT1H or P1D",
-        "limit" => "Entities per page",
-        "count" => "true answers the total number of matches",
-        _ => return None,
-    })
-}
-
-/// The input schema of a broker tool with `args`, as the broker publishes it, each argument with
-/// its one line of grammar.
+/// The input schema of a broker tool with `args`, as the broker publishes it. The NGSI-LD grammar
+/// of each argument is said once, in the primer `initialize` answers (EP-116): a line per argument
+/// here cost every turn of every client its bytes again (T-6058).
 fn input_schema(args: &[Arg]) -> Map<String, Value> {
     let properties: Map<String, Value> = args
         .iter()
-        .map(|arg| {
-            let mut schema = schema_of(arg.kind);
-            if let (Value::Object(object), Some(line)) = (&mut schema, grammar(arg.name)) {
-                object.insert("description".to_owned(), json!(line));
-            }
-            (arg.name.to_owned(), schema)
-        })
+        .map(|arg| (arg.name.to_owned(), schema_of(arg.kind)))
         .collect();
     let required: Vec<&str> = args
         .iter()
@@ -703,12 +669,14 @@ const fn broker(
 /// Every tool of the broker's view (Antares `crates/antares-mcp/src/tools.rs`, sorted by name),
 /// then the gateway's two describe tools. The hub and the named servers list these names with
 /// these arguments, so a call that works on an Endpoint's own MCP works on the hub with
-/// `endpoint` beside it, and the hub hands the arguments on as they came (EP-112).
+/// `endpoint` beside it, and the hub hands the arguments on as they came (EP-112). A description
+/// names no TS 104 175 clause: its operations do, and a model reads the text on every turn
+/// (T-6058).
 pub(crate) const TOOLS: &[Tool] = &[
     broker(
         "append_attributes",
         &[Operation::AppendAttrs],
-        "Append Attributes to one Entity (TS 104 175 10.2.4); noOverwrite keeps those it has. The tool asks the person to confirm before it writes.",
+        "Append Attributes to one Entity; noOverwrite keeps those it has. The tool asks the person to confirm before it writes.",
         APPEND,
         "result",
     ),
@@ -722,196 +690,196 @@ pub(crate) const TOOLS: &[Tool] = &[
     broker(
         "batch_create",
         &[Operation::CreateBatch],
-        "Create several Entities (TS 104 175 10.3.2). The tool asks the person to confirm before it writes.",
+        "Create several Entities. The tool asks the person to confirm before it writes.",
         BATCH,
         "result",
     ),
     broker(
         "batch_delete",
         &[Operation::DeleteBatch],
-        "Delete several Entities by id (TS 104 175 10.3.6). The tool asks the person to confirm before it writes.",
+        "Delete several Entities by id. The tool asks the person to confirm before it writes.",
         BATCH_DELETE,
         "result",
     ),
     broker(
         "batch_merge",
         &[Operation::MergeBatch],
-        "Merge into several Entities (TS 104 175 10.3.5). The tool asks the person to confirm before it writes.",
+        "Merge into several Entities. The tool asks the person to confirm before it writes.",
         BATCH,
         "result",
     ),
     broker(
         "batch_query",
         &[Operation::QueryBatch],
-        "Query Entities with a Query document (TS 104 175 10.4.3, POST form): the Entities of the given types that match the conditions, a page at a time.",
+        "Query Entities with a Query document (POST form): the Entities of the given types that match the conditions, a page at a time.",
         BATCH_QUERY,
         "entities",
     ),
     broker(
         "batch_query_temporal",
         &[Operation::QueryTemporal],
-        "Query the history of Entities with a Query document (TS 104 175 11.3.3, POST form), a page of Entities at a time.",
+        "Query the history of Entities with a Query document (POST form), a page of Entities at a time.",
         BATCH_TEMPORAL_QUERY,
         "entities",
     ),
     broker(
         "batch_update",
         &[Operation::UpdateBatch],
-        "Update Attributes of several Entities (TS 104 175 10.3.4). The tool asks the person to confirm before it writes.",
+        "Update Attributes of several Entities. The tool asks the person to confirm before it writes.",
         BATCH_UPDATE,
         "result",
     ),
     broker(
         "batch_upsert",
         &[Operation::UpsertBatch],
-        "Create several Entities or update those that exist (TS 104 175 10.3.3). The tool asks the person to confirm before it writes.",
+        "Create several Entities or update those that exist. The tool asks the person to confirm before it writes.",
         BATCH_UPSERT,
         "result",
     ),
     broker(
         "create_entity",
         &[Operation::CreateEntity],
-        "Create one Entity (TS 104 175 10.2.2). The tool asks the person to confirm before it writes.",
+        "Create one Entity. The tool asks the person to confirm before it writes.",
         ENTITY,
         "created",
     ),
     broker(
         "create_subscription",
         &[Operation::CreateSubscription],
-        "Subscribe an endpoint the deployment allows to changes of Entities (TS 104 175 10.5.2). The tool asks the person to confirm before it writes.",
+        "Subscribe an endpoint the deployment allows to changes of Entities. The tool asks the person to confirm before it writes.",
         CREATE_SUBSCRIPTION,
         "created",
     ),
     broker(
         "delete_attribute",
         &[Operation::DeleteAttrs],
-        "Delete one Attribute of one Entity (TS 104 175 10.2.7). The tool asks the person to confirm before it writes.",
+        "Delete one Attribute of one Entity. The tool asks the person to confirm before it writes.",
         DELETE_ATTRIBUTE,
         "result",
     ),
     broker(
         "delete_entity",
         &[Operation::DeleteEntity],
-        "Delete one Entity (TS 104 175 10.2.8). The tool asks the person to confirm before it writes.",
+        "Delete one Entity. The tool asks the person to confirm before it writes.",
         ENTITY_ID,
         "result",
     ),
     broker(
         "delete_subscription",
         &[Operation::DeleteSubscription],
-        "Delete one Subscription (TS 104 175 10.5.6). The tool asks the person to confirm before it writes.",
+        "Delete one Subscription. The tool asks the person to confirm before it writes.",
         ID_ONLY,
         "result",
     ),
     broker(
         "get_attribute",
         &[Operation::RetrieveAttrTypeInfo],
-        "Describe one Attribute: the types that carry it and how many instances exist (TS 104 175 10.6.8).",
+        "Describe one Attribute: the types that carry it and how many instances exist.",
         ATTR_ONLY,
         "attribute",
     ),
     broker(
         "get_attribute_value",
         &[Operation::RetrieveEntity],
-        "Read one Attribute of one Entity (TS 104 175 10.4.4).",
+        "Read one Attribute of one Entity.",
         ATTR_VALUE,
         "attribute",
     ),
     broker(
         "get_entity",
         &[Operation::RetrieveEntity],
-        "Read one Entity by its id (TS 104 175 10.4.2); attrs, pick and omit narrow what it returns.",
+        "Read one Entity by its id; attrs, pick and omit narrow what it returns.",
         GET_ENTITY,
         "entity",
     ),
     broker(
         "get_subscription",
         &[Operation::RetrieveSubscription],
-        "Read one Subscription made through this endpoint (TS 104 175 10.5.4).",
+        "Read one Subscription made through this endpoint.",
         ID_ONLY,
         "subscription",
     ),
     broker(
         "get_type",
         &[Operation::RetrieveEntityTypeInfo],
-        "Describe one Entity type: its Attributes and how many Entities it has (TS 104 175 10.6.5).",
+        "Describe one Entity type: its Attributes and how many Entities it has.",
         TYPE_ONLY,
         "entityType",
     ),
     broker(
         "list_attribute_details",
         &[Operation::RetrieveAttrTypeDetails],
-        "List the Attributes with the types that carry each (TS 104 175 10.6.7).",
+        "List the Attributes with the types that carry each.",
         NONE,
         "attributes",
     ),
     broker(
         "list_attributes",
         &[Operation::RetrieveAttrTypes],
-        "List the names of the Attributes this endpoint serves (TS 104 175 10.6.6).",
+        "List the names of the Attributes this endpoint serves.",
         NONE,
         "attributes",
     ),
     broker(
         "list_subscriptions",
         &[Operation::QuerySubscription],
-        "List the Subscriptions made through this endpoint (TS 104 175 10.5.5), a page at a time.",
+        "List the Subscriptions made through this endpoint, a page at a time.",
         PAGE_ONLY,
         "subscriptions",
     ),
     broker(
         "list_type_details",
         &[Operation::RetrieveEntityTypeDetails],
-        "List the Entity types with the Attributes of each (TS 104 175 10.6.4).",
+        "List the Entity types with the Attributes of each.",
         NONE,
         "entityTypes",
     ),
     broker(
         "list_types",
         &[Operation::RetrieveEntityTypes],
-        "List the names of the Entity types this endpoint serves (TS 104 175 10.6.3).",
+        "List the names of the Entity types this endpoint serves.",
         NONE,
         "entityTypes",
     ),
     broker(
         "merge_entity",
         &[Operation::MergeEntity],
-        "Merge a fragment into one Entity (TS 104 175 10.2.9). The tool asks the person to confirm before it writes.",
+        "Merge a fragment into one Entity. The tool asks the person to confirm before it writes.",
         MERGE,
         "result",
     ),
     broker(
         "query_entities",
         &[Operation::QueryEntity],
-        "Query Entities (TS 104 175 10.4.3): by type, id, q, scopeQ or area, a page at a time. Give at least one of type, attrs, q, georel or local.",
+        "Query Entities: by type, id, q, scopeQ or area, a page at a time. Give at least one of type, attrs, q, georel or local.",
         QUERY,
         "entities",
     ),
     broker(
         "query_temporal",
         &[Operation::QueryTemporal],
-        "Query the history of Entities (TS 104 175 11.3.3) between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
+        "Query the history of Entities between timeAt and endTimeAt, a page of Entities at a time; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
         TEMPORAL_QUERY,
         "entities",
     ),
     broker(
         "replace_attribute",
         &[Operation::ReplaceAttrs],
-        "Replace one Attribute of one Entity (TS 104 175 10.2.11). The tool asks the person to confirm before it writes.",
+        "Replace one Attribute of one Entity. The tool asks the person to confirm before it writes.",
         ONE_ATTRIBUTE,
         "result",
     ),
     broker(
         "replace_entity",
         &[Operation::ReplaceEntity],
-        "Replace one Entity whole (TS 104 175 10.2.10). The tool asks the person to confirm before it writes.",
+        "Replace one Entity whole. The tool asks the person to confirm before it writes.",
         REPLACE,
         "result",
     ),
     broker(
         "retrieve_temporal",
         &[Operation::RetrieveTemporal],
-        "Read the history of one Entity (TS 104 175 11.3.2) between timeAt and endTimeAt; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
+        "Read the history of one Entity between timeAt and endTimeAt; lastN bounds each Attribute's instances. A window over a day answers hourly averages (daily past 31 days) unless format or lastN asks raw values; an answer the broker cut carries `more.next`, the window to call for the rest.",
         TEMPORAL_ONE,
         "entity",
     ),
@@ -925,21 +893,21 @@ pub(crate) const TOOLS: &[Tool] = &[
     broker(
         "update_attribute",
         &[Operation::UpdateAttrs],
-        "Update part of one Attribute of one Entity (TS 104 175 10.2.5). The tool asks the person to confirm before it writes.",
+        "Update part of one Attribute of one Entity. The tool asks the person to confirm before it writes.",
         ONE_ATTRIBUTE,
         "result",
     ),
     broker(
         "update_attributes",
         &[Operation::UpdateAttrs],
-        "Update Attributes one Entity has (TS 104 175 10.2.3). The tool asks the person to confirm before it writes.",
+        "Update Attributes one Entity has. The tool asks the person to confirm before it writes.",
         ATTRIBUTES,
         "result",
     ),
     broker(
         "update_subscription",
         &[Operation::UpdateSubscription],
-        "Update one Subscription (TS 104 175 10.5.3). The tool asks the person to confirm before it writes.",
+        "Update one Subscription. The tool asks the person to confirm before it writes.",
         UPDATE_SUBSCRIPTION,
         "result",
     ),
@@ -1139,7 +1107,6 @@ pub(crate) fn reads_anything(gateway: &Gateway, endpoint: &Endpoint, subject: &S
 /// the caller's list grants it, with the one required `endpoint` argument: a string, never an
 /// enum of the list, so `tools/list` is the same size for 10 Endpoints and for 10,000 (T-4491).
 pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Vec<Value> {
-    let limits = crate::mcp::limits::current();
     TOOLS
         .iter()
         .filter(|tool| {
@@ -1157,8 +1124,7 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 200,
-                            "description": "catalog (default), or the Endpoint to call: \
-                                            identifier, title or space",
+                            "description": "An Endpoint's slug, title or space",
                         }),
                     );
                 }
@@ -1172,15 +1138,12 @@ pub(crate) fn hub_tools(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -
                     }
                 }
             }
-            // The broker's default and maximum page, as it publishes them (T-4804).
-            let description = match crate::mcp::limits::note(tool.name, limits) {
-                Some(note) => format!("{} {note}", tool.description),
-                None => tool.description.to_owned(),
-            };
             json!({
                 "name": tool.name,
-                // How `endpoint` is named is said once, in the hub's instructions (T-4506).
-                "description": description,
+                // How `endpoint` is named is said once, in the hub's instructions (T-4506); the
+                // broker's default and maximum page are the schema's `default` and `maximum`
+                // (T-4804), never a sentence again (T-6058).
+                "description": tool.description,
                 "inputSchema": schema,
                 "outputSchema": output_schema(tool),
                 "annotations": {
@@ -1244,14 +1207,10 @@ pub(crate) fn hub_tool(
 pub(crate) fn output_schema(tool: &Tool) -> Value {
     json!({
         "type": "object",
-        "properties": {
-            // The tool's own description says what it is; a copy here cost each tool its length.
-            tool.result_key: {},
-            // What `restricted` and `jc:source` mean is said once, in the primer (T-4506,
-            // AG-13, EP-71).
-            "restricted": { "type": "boolean" },
-            "jc:source": { "type": "array", "items": { "type": "string" } },
-        },
+        // The tool's own description says what it is; what `restricted` and `jc:source` mean is
+        // said once, in the primer (T-4506, AG-13, EP-71), and the open schema admits both
+        // (T-6058).
+        "properties": { tool.result_key: {} },
         "required": [tool.result_key],
     })
 }
