@@ -1,4 +1,5 @@
-//! A person's script token from `jcctl token --resource` (T-5614, PF-45, PF-46).
+//! A person's token for one Endpoint by its `endpoint:{slug}` scope: `jcctl token --resource`
+//! (T-5614, PF-45, PF-46) and the Portal's exchanged `jc_data_query` token (T-6063).
 //!
 //! The `jcctl` client's tokens name the Portal (`portal-api`) and the gateway's command-line
 //! audience `jcctl-endpoint`. The second one reaches an Endpoint only together with the
@@ -260,4 +261,64 @@ async fn the_cli_audience_on_another_clients_token_is_401() {
         read(&fixture, GRANTED, &token).await,
         StatusCode::UNAUTHORIZED
     );
+}
+
+/// The token the Portal exchanges a connector's for to run `jc_data_query` (T-6063): audience
+/// `mcp-hub` from `portal-api`, with the `endpoint:{slug}` scope of the one Endpoint it reads.
+fn portal_exchanged(realm: &common::Realm, azp: &str, slug: &str) -> String {
+    person(
+        realm,
+        azp,
+        json!("mcp-hub"),
+        &format!("endpoint:{slug} profile email"),
+    )
+}
+
+/// Done when of T-6063: the Portal's exchanged token reads the Endpoint its scope names, as the
+/// person, where it was 401 before.
+#[tokio::test]
+async fn the_portals_exchanged_token_reads_its_endpoint_as_the_person() {
+    let fixture = fixture().await;
+    let token = portal_exchanged(&fixture.realm, "portal-api", GRANTED);
+    assert_eq!(read(&fixture, GRANTED, &token).await, StatusCode::OK);
+    assert_eq!(fixture.broker.hops().len(), 1, "the broker was asked once");
+    let other = portal_exchanged(&fixture.realm, "portal-api", OTHER);
+    let own = person(&fixture.realm, "edge", json!(OTHER), "openid");
+    let refused = read(&fixture, OTHER, &other).await;
+    assert!(
+        refused.is_client_error() && refused != StatusCode::UNAUTHORIZED,
+        "{refused}"
+    );
+    assert_eq!(refused, read(&fixture, OTHER, &own).await);
+}
+
+/// The hub's audience reaches an Endpoint only from the Portal and only with the scope naming it:
+/// an MCP client's own hub token, the hub's `endpoint:*` consent and another Endpoint's scope stay
+/// 401, and the broker is never asked.
+#[tokio::test]
+async fn a_hub_audience_token_reaches_only_the_portals_named_endpoint() {
+    let fixture = fixture().await;
+    let tokens = [
+        portal_exchanged(
+            &fixture.realm,
+            "https://claude.ai/oauth/claude-code-client-metadata",
+            GRANTED,
+        ),
+        portal_exchanged(&fixture.realm, "mcp-hub", GRANTED),
+        portal_exchanged(&fixture.realm, "portal-api", OTHER),
+        person(
+            &fixture.realm,
+            "portal-api",
+            json!("mcp-hub"),
+            "endpoint:* profile",
+        ),
+        person(&fixture.realm, "portal-api", json!("mcp-hub"), "openid"),
+    ];
+    for token in tokens {
+        assert_eq!(
+            read(&fixture, GRANTED, &token).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(fixture.broker.hops().len(), 0);
 }

@@ -133,6 +133,7 @@ fn admit_on(
     let endpoint_audiences = gateway.audiences_for(endpoint);
     let mut audiences = endpoint_audiences.clone();
     audiences.push(CLI_AUDIENCE.to_owned());
+    audiences.push(HUB_AUDIENCE.to_owned());
     // A token exchanged for the broker reaches only an Endpoint a hub reads with the caller's
     // identity; on any other Endpoint of that broker it is a token of a foreign audience.
     if federated && gateway.is_caller_member(&endpoint.slug) {
@@ -145,7 +146,10 @@ fn admit_on(
         return subject_from(gateway, endpoint, &claims);
     }
     if claims.names_audience(&[CLI_AUDIENCE.to_owned()]) {
-        return cli_subject(gateway, endpoint, &claims);
+        return scoped_subject(gateway, endpoint, &claims, CLI_CLIENT);
+    }
+    if claims.names_audience(&[HUB_AUDIENCE.to_owned()]) {
+        return scoped_subject(gateway, endpoint, &claims, PORTAL_CLIENT);
     }
     exchanged_subject(gateway, endpoint, &claims)
 }
@@ -173,19 +177,23 @@ fn exchanged_subject(
     Ok(subject)
 }
 
-/// A person's `jcctl token --resource` token (T-5614, PF-45, PF-46): the `jcctl` client's
-/// audience reaches an Endpoint only with the `endpoint:{slug}` scope naming that one, so a
-/// script holds nothing broader than one Endpoint, and the Endpoint's Policy decides by the
-/// person. `endpoint:*` is the hub's consent and reaches nothing here.
-fn cli_subject(
+/// A person's token for one Endpoint by its `endpoint:{slug}` scope (PF-45, PF-46): a
+/// `jcctl token --resource` token (audience [`CLI_AUDIENCE`], T-5614), or the token the Portal
+/// exchanges a connector's for to run `jc_data_query` (audience [`HUB_AUDIENCE`] from
+/// [`PORTAL_CLIENT`], T-6063). Each audience holds for its one `client`, and only with the scope
+/// naming this Endpoint, so the token reaches nothing broader than one Endpoint, and the
+/// Endpoint's Policy decides by the person. `endpoint:*` is the hub's consent and reaches
+/// nothing here.
+fn scoped_subject(
     gateway: &Gateway,
     endpoint: &Endpoint,
     claims: &Claims,
+    client: &str,
 ) -> Result<Subject, Box<ProblemDetails>> {
-    let picked = claims.azp.as_deref() == Some(CLI_CLIENT)
+    let picked = claims.azp.as_deref() == Some(client)
         && claims.endpoint_scopes().any(|slug| slug == endpoint.slug);
     if !picked {
-        tracing::info!(slug = %endpoint.slug, "a jcctl-audience token without this Endpoint's scope");
+        tracing::info!(slug = %endpoint.slug, client, "an Endpoint-scoped token without this Endpoint's scope or from another client");
         return Err(Box::new(ProblemDetails::unauthorized()));
     }
     let subject = subject_from(gateway, endpoint, claims)?;
