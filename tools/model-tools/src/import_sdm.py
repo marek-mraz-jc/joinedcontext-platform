@@ -410,13 +410,31 @@ def _flattened(schema_json: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
+def _unique_enums(node: Any) -> Any:
+    """`node` with every `enum` list reduced to its first occurrences, order kept.
+
+    The catalogue repeats values (Event's `subCategory` lists `garden` twice) and LinkML refuses
+    a duplicate permissible value, which failed the whole import over one upstream typo.
+    """
+    if isinstance(node, list):
+        return [_unique_enums(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {key: _unique_enums(value) for key, value in node.items()}
+    if isinstance(node.get("enum"), list):
+        out["enum"] = [v for i, v in enumerate(node["enum"]) if v not in node["enum"][:i]]
+    return out
+
+
 def _automator_schema(schema_json: dict[str, Any], name: str) -> dict[str, Any]:
     """schema-automator's LinkML output for one JSON Schema, as plain data (DM-09)."""
     from linkml_runtime.dumpers import yaml_dumper
     from schema_automator.importers.jsonschema_import_engine import JsonSchemaImportEngine
 
+    # schema-automator names the schema after `title` whatever `name` it is handed, and a
+    # catalogue title (" - Transportation / TrafficFlowObserved") is no NCName.
     with NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as handle:
-        json.dump(schema_json, handle)
+        json.dump({**schema_json, "title": name}, handle)
         path = handle.name
     try:
         schema = JsonSchemaImportEngine().load(path, name=name, format="json")
@@ -509,7 +527,7 @@ def convert(
     context = context_jsonld.get("@context", {}) if isinstance(context_jsonld, dict) else {}
     if not isinstance(context, dict):
         raise ImportError_("the fetched context.jsonld has no object under @context")
-    resolved = resolve(schema_json, commons) if isinstance(schema_json, dict) else {}
+    resolved = _unique_enums(resolve(schema_json, commons)) if isinstance(schema_json, dict) else {}
     flat = _flattened(resolved) if isinstance(resolved, dict) else {}
     automator = _automator_schema(flat, name)
     properties = flat.get("properties") or {}
