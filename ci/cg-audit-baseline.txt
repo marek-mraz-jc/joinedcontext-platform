@@ -24,8 +24,8 @@ portal | memory-body-copy | 21
 portal | memory-per-request-build | 12
 portal | memory-unbounded-global | 11
 portal | memory-uncapped-read | 38
-portal | modularity-file-cycle | 69
+portal | modularity-file-cycle | 70
 portal | modularity-server-as-library | 0
-portal | security-fetch-from-route | 100
+portal | security-fetch-from-route | 101
 portal | security-log-secret-field | 0
 portal | security-mcp-write-unguarded | 4
