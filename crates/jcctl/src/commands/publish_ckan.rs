@@ -486,7 +486,7 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
         url,
         message: format!("the record is not JSON: {e}"),
     })?;
-    let (kind, served) = example_type(&base);
+    let (kind, served) = example_type(&base)?;
     with_types(&mut record, kind, served);
     Ok(record)
 }
@@ -497,26 +497,42 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
 /// AdministrativeArea, so its dataset page sent readers, and the assistant, to a type it does
 /// not serve). `None` when neither answers: the texts then say how to list the types. With it
 /// the types the list names, `None` when it could not be read.
-fn example_type(base: &str) -> (Option<String>, Option<Vec<String>>) {
-    let Ok(client) = reqwest::blocking::Client::builder()
+///
+/// A read the gateway refused for load (429), failed (5xx) or never answered is an error: the
+/// Endpoint's types are unknown only for that moment, and a page written without them sent the
+/// assistant to no dataset until the next refresh (T-6091: every dataset republished at once
+/// after a Portal restart, bbsk-zariadenia lost its typed addresses for an hour).
+fn example_type(base: &str) -> Result<(Option<String>, Option<Vec<String>>), Error> {
+    let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(FETCH_TIMEOUT)
         .user_agent(ckan::GENERATOR)
         .build()
-    else {
-        return (None, None);
-    };
-    let read = |path: &str, expected: reqwest::StatusCode| -> Option<Value> {
+        .map_err(|e| Error::Gateway {
+            url: base.to_owned(),
+            message: format!("HTTP client: {e}"),
+        })?;
+    let read = |path: &str, expected: reqwest::StatusCode| -> Result<Option<Value>, Error> {
+        let url = format!("{base}/{path}");
+        let gateway = |message: String| Error::Gateway {
+            url: url.clone(),
+            message,
+        };
         let response = client
-            .get(format!("{base}/{path}"))
+            .get(&url)
             .header("Accept", "application/json")
             .send()
-            .ok()?;
-        (response.status() == expected).then(|| response.json().ok())?
+            .map_err(|e| gateway(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            let text = response.text().unwrap_or_default();
+            return Err(gateway(refusal(status, &text)));
+        }
+        Ok((status == expected).then(|| response.json().ok()).flatten())
     };
-    let guide = read("ws", reqwest::StatusCode::UPGRADE_REQUIRED).and_then(|g| guide_type(&g));
-    let served = read("ngsi-ld/v1/types", reqwest::StatusCode::OK).map(|list| served_types(&list));
-    (example_of(guide, served.clone()), served)
+    let guide = read("ws", reqwest::StatusCode::UPGRADE_REQUIRED)?.and_then(|g| guide_type(&g));
+    let served = read("ngsi-ld/v1/types", reqwest::StatusCode::OK)?.map(|list| served_types(&list));
+    Ok((example_of(guide, served.clone()), served))
 }
 
 /// `record` with the private members the usage texts read: the example type and the types the
@@ -647,7 +663,7 @@ fn outcome_word(outcome: Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{example_of, guide_type, refusal, served_types, with_types};
+    use super::{example_of, example_type, guide_type, refusal, served_types, with_types};
     use reqwest::StatusCode;
     use serde_json::json;
 
@@ -739,5 +755,80 @@ mod tests {
         ] {
             assert_eq!(guide_type(&other), None, "{other}");
         }
+    }
+    /// A loopback gateway answering `(path, status, body)` and 404 to anything else, one request
+    /// per connection; the thread ends with the test binary.
+    fn gateway(routes: Vec<(&'static str, u16, &'static str)>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let base = format!(
+            "http://{}/api/endpoint/e",
+            listener.local_addr().expect("bound")
+        );
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut head = [0u8; 2048];
+                let read = stream.read(&mut head).unwrap_or(0);
+                let request = String::from_utf8_lossy(head.get(..read).unwrap_or_default());
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (status, body) = routes
+                    .iter()
+                    .find(|(route, _, _)| path.ends_with(route))
+                    .map_or((404, ""), |(_, status, body)| (*status, *body));
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        base
+    }
+
+    /// T-6091: a load refusal or a gateway failure on the type reads fails the record, so the
+    /// catalogue keeps the page it has; an Endpoint that answers keeps its typed example, and one
+    /// that refuses the reader (401, 404) is published without one, as before.
+    #[test]
+    fn a_failed_type_read_fails_the_record_instead_of_dropping_the_type() {
+        let types = r#"{"type":"EntityTypeList","typeList":["PointOfInterest"]}"#;
+        let answered = gateway(vec![("/ws", 426, "{}"), ("/ngsi-ld/v1/types", 200, types)]);
+        let (kind, served) = example_type(&answered).expect("both read");
+        assert_eq!(kind.as_deref(), Some("PointOfInterest"));
+        assert_eq!(served, Some(vec!["PointOfInterest".to_owned()]));
+
+        for (status, body) in [
+            (429, "too many"),
+            (503, r#"{"detail":"the broker restarts"}"#),
+        ] {
+            let failing = gateway(vec![
+                ("/ws", 426, "{}"),
+                ("/ngsi-ld/v1/types", status, body),
+            ]);
+            let error = example_type(&failing)
+                .expect_err("a failed read")
+                .to_string();
+            assert!(error.contains(&status.to_string()), "{error}");
+            assert!(error.contains("/ngsi-ld/v1/types"), "{error}");
+        }
+        let refused = gateway(vec![("/ws", 503, "")]);
+        assert!(
+            example_type(&refused).is_err(),
+            "the guide's failure counts too"
+        );
+
+        let private = gateway(vec![("/ws", 401, ""), ("/ngsi-ld/v1/types", 401, "")]);
+        assert_eq!(
+            example_type(&private).expect("a refusal is an answer"),
+            (None, None)
+        );
+
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let address = silent.local_addr().expect("bound");
+        std::thread::spawn(move || silent.incoming().for_each(drop));
+        let hung_up = format!("http://{address}/api/endpoint/e");
+        assert!(example_type(&hung_up).is_err(), "no answer is no answer");
     }
 }
