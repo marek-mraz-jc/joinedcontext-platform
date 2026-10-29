@@ -16,7 +16,7 @@
 //! bound, no hidden attribute named, a minting Endpoint's key left to the broker, the day's
 //! creates counted. The broker's view still decides the operation (ADR-0023).
 
-use crate::app::{Gateway, MAX_BODY, PAGE};
+use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, principal_of};
 use crate::handlers::ngsi_ld::{
@@ -247,10 +247,7 @@ async fn read_surface(
     // links moved, so the Content-Length is the one the caller's GET gets (T-5204).
     let head = method == Method::HEAD;
     let upstream = if head { Method::GET } else { method };
-    let answer = match gateway
-        .broker
-        .send(upstream, &target, parts.headers, Body::empty())
-        .await
+    let answer = match held_page(gateway, &endpoint, surface, upstream, target, parts.headers).await
     {
         Ok(answer) => answer,
         Err(error) => return ProblemDetails::from(error).into_response(),
@@ -263,38 +260,71 @@ async fn read_surface(
     answer
 }
 
+/// The broker's answer to `target`; an OGC page past `MAX_BODY` is asked again by [`halved`]
+/// until it fits, and comes back held.
+async fn held_page(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    surface: &Surface,
+    method: Method,
+    mut target: String,
+    headers: HeaderMap,
+) -> Result<Response<Body>, proxy::ProxyError> {
+    loop {
+        let answer = gateway
+            .broker
+            .send(method.clone(), &target, headers.clone(), Body::empty())
+            .await?;
+        let smaller = halved(&target)
+            .filter(|_| surface.representation == Representation::OgcFeatures)
+            .filter(|_| answer.status().is_success());
+        let Some(smaller) = smaller else {
+            return Ok(answer);
+        };
+        let (parts, body) = answer.into_parts();
+        let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+            tracing::info!(slug = %endpoint.slug, %smaller, "the broker's page is larger than the gateway holds; asked again with half the limit");
+            target = smaller;
+            continue;
+        };
+        return Ok(Response::from_parts(parts, Body::from(held)));
+    }
+}
+
 /// `/x/views/{view}/{surface}{rest}` with the caller's query as sent.
 fn target(request: &Request, prefix: &str, view: &str, surface: &Surface) -> String {
     let root = format!("/x/views/{view}/{}", surface.path);
     let rest = rest_of(request, prefix);
     match request.uri().query() {
-        Some(query)
-            if !query.is_empty() && surface.representation == Representation::OgcFeatures =>
-        {
-            format!("{root}{rest}?{}", page_bounded(query))
-        }
         Some(query) if !query.is_empty() => format!("{root}{rest}?{query}"),
         _ => format!("{root}{rest}"),
     }
 }
 
-/// The query with an OGC `limit` above [`PAGE`] asked as `PAGE` (T-5891): the gateway holds the
-/// broker's page whole to move its links, and a page past `MAX_BODY` would be a 502. A server
-/// may answer fewer features than `limit` (OGC API - Features Part 1, 7.15.4); the broker's
-/// `next` link carries the rest; one past the broker's maximum is no error either (Part 1
-/// recommends using the maximum). Every other parameter, and a `limit` that is no number, goes
-/// byte for byte for the broker to judge.
-fn page_bounded(query: &str) -> String {
-    query
+/// The forward with its decimal `limit` above 1 halved (T-5891): the gateway holds the broker's
+/// page whole to move its links, so an OGC page past `MAX_BODY` is asked again smaller instead of
+/// answering 502. A server may answer fewer features than `limit` (OGC API - Features Part 1,
+/// 7.15.4) and the broker's `next` link carries the rest. The page stays as large as fits: the
+/// ETS follows only four `next` links at the advertised maximum, so a fixed small page fails its
+/// NumberMatched on a collection of a few thousand features. `None` when there is nothing to halve.
+fn halved(target: &str) -> Option<String> {
+    let (path, query) = target.split_once('?')?;
+    let mut smaller = false;
+    let query = query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some(("limit", n)) if n.parse::<u64>().is_ok_and(|n| n > PAGE as u64) => {
-                format!("limit={PAGE}")
-            }
+            Some(("limit", n)) if !smaller => match n.parse::<u64>() {
+                Ok(n) if n > 1 => {
+                    smaller = true;
+                    format!("limit={}", n / 2)
+                }
+                _ => pair.to_owned(),
+            },
             _ => pair.to_owned(),
         })
         .collect::<Vec<_>>()
-        .join("&")
+        .join("&");
+    smaller.then(|| format!("{path}?{query}"))
 }
 
 /// The broker's answer as the caller gets it: a failure without its detail, the engine's
@@ -351,8 +381,8 @@ async fn answered(
     let view_to = format!("{}{}/", gateway.base_url(), endpoint.base_path);
     let (mut parts, body) = answer.into_parts();
     // ponytail: the page is held whole to move its links, so one past MAX_BODY (8 MiB) is a
-    // broker failure; `page_bounded` keeps a page to PAGE features (T-5891). Stream the rewrite
-    // if PAGE features of one collection ever pass 8 MiB.
+    // broker failure; `halved` asks an OGC page again smaller first (T-5891). Stream the rewrite
+    // if one feature of a collection ever passes 8 MiB.
     let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
         tracing::error!(slug = %endpoint.slug, surface = surface.name, "the broker's answer is larger than the gateway holds");
         return broker_failure(StatusCode::BAD_GATEWAY, None, Body::empty()).await;
