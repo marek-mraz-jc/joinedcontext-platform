@@ -10,7 +10,7 @@
 //! The caller is the rate limiter's (`rate_limit::caller_key`): the principal a genuine token
 //! names, else the client address, so one client cannot take every slot from the others.
 //!
-//! The defaults come from `tests/in_flight_tests.rs` (T-4782): a read of a 1 MiB page costs the
+//! The defaults come from `tests/in_flight_tests/main.rs` (T-4782): a read of a 1 MiB page costs the
 //! gateway well under 1 MiB of peak memory, so 128 reads stay inside the about 300 MiB prod's
 //! gateway has left under its 1 GiB limit at rest, while 128 in flight at a 100 ms answer is still
 //! 1,280 requests a second per replica. A `file.csv` holds up to `MAX_COLLECTED` of

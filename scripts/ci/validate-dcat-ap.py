@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every Endpoint record variant passes the SEMIC DCAT-AP 3.0 shapes (T-2789, EP-78).
 
-`cargo test -p context-gateway --test dcat_ap_catalog_tests` writes each record variant as
+`cargo test -p context-gateway --test it dcat_ap_catalog_tests::` writes each record variant as
 JSON-LD and Turtle into a directory; this reads them back, validates each serialisation against
 the SEMIC shapes pinned beside the test, and checks that the two serialisations of one variant
 are the same graph, because the Turtle is written from the JSON-LD and must say nothing else.
