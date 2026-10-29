@@ -65,13 +65,22 @@ impl Target {
     }
 
     /// `settings` for this Endpoint: its space's language, and its instance's title, which
-    /// the organization is created with or renamed to.
+    /// the instance's own organization is created with or renamed to. An Endpoint publishing
+    /// into another organization (`publish.ckan.organization`) leaves that organization's title
+    /// to the instance that owns it, or two instances would rename it back and forth (T-6098).
     fn settings(&self, settings: &Settings) -> Settings {
         let mut own = settings.clone();
         if let Some(language) = &self.language {
             own = own.in_language(language.clone());
         }
-        if let Some(title) = &self.instance_title {
+        let foreign = self
+            .publication
+            .organization
+            .as_ref()
+            .is_some_and(|organization| {
+                self.instance.organization_default.as_ref() != Some(organization)
+            });
+        if let Some(title) = self.instance_title.as_ref().filter(|_| !foreign) {
             own = own.declared_title(title.clone());
         }
         own
