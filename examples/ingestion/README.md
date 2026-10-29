@@ -79,7 +79,7 @@ the demonstration instance's `hel.fi`.
 ```bash
 bento lint ./examples/ingestion/*/bento.yaml ./examples/ingestion/gtfs-rt/tests/decoder.yaml
 bento test ./examples/ingestion/...
-cargo test -p jcctl --test ingestion_examples_tests
+cargo test -p jcctl --test it ingestion_examples_tests::
 ```
 
 Bento pairs a test file with the config of the same name in the same folder, so the golden tests

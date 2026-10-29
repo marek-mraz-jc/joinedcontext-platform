@@ -7,7 +7,7 @@
 It reads ui/openapi.json at <commit> of the Portal clone (git show, so the clone may sit on any
 branch) and keeps what jcctl's command table depends on: the resource paths and the operation
 registry paths with their methods and query parameters, the kinds jc_schema_get serves and the
-verb each registry operation requires. crates/jcctl/tests/portal_api_drift_tests.rs fails when the
+verb each registry operation requires. crates/jcctl/tests/it/portal_api_drift_tests.rs fails when the
 command table and this extract disagree.
 """
 
