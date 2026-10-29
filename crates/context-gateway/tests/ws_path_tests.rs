@@ -584,6 +584,61 @@ async fn an_oversized_message_closes_with_1009() {
     assert_eq!(code, Some(1009));
 }
 
+/// T-5931: a client flooding `x-subscribe` without reading is closed with `x-closing: rate` and
+/// `1008`, and the gateway then reads to the client's close instead of dropping the socket over
+/// the client's unread frames: a drop resets the connection (RST), and a proxy in between loses
+/// the close frame with it (dev, behind APISIX and linkerd: "close None").
+#[tokio::test]
+async fn a_subscribe_flood_closes_with_1008_and_the_close_handshake_ends_cleanly() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = gateway("flood", &upstream, &realm).await;
+    let (mut socket, _) = open(&at, PUBLIC, "", &[]).await.expect("upgraded");
+    let subscribe = |n: usize| {
+        Message::text(
+            json!({"metadata": {"x-op": "x-subscribe", "x-id": format!("f{n}")},
+                   "body": {"type": "Subscription", "entities": [{"type": "BikeHireDockingStation"}]}})
+            .to_string(),
+        )
+    };
+    // Sent before reading anything, as the conformance suite does: the gateway holds unread
+    // frames when it closes.
+    for n in 0..300 {
+        if socket.send(subscribe(n)).await.is_err() {
+            break;
+        }
+    }
+    let mut closing = None;
+    let mut code = None;
+    while let Some(read) = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("the gateway closes within 5 s")
+    {
+        match read.expect("the close arrives before the connection ends") {
+            Message::Text(text) => {
+                let message: serde_json::Value = serde_json::from_str(text.as_str()).expect("json");
+                if message["metadata"]["x-op"] == "x-closing" {
+                    closing = message["metadata"]["x-reason"].as_str().map(str::to_owned);
+                }
+            }
+            Message::Close(frame) => {
+                code = frame.map(|frame| u16::from(frame.code));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!((closing.as_deref(), code), (Some("rate"), Some(1008)));
+    // tungstenite answers the close; the gateway reads it and ends the TCP connection cleanly.
+    let after = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("the connection ends within 5 s");
+    assert!(
+        matches!(after, None | Some(Err(Error::ConnectionClosed))),
+        "the close handshake ended in {after:?}, not a clean end"
+    );
+}
+
 /// T-4064: a plain GET (a browser tab, curl) is no upgrade. It is told how to use the address,
 /// `426` with the subprotocol, the token rule, one `x-subscribe` message and the guide, never
 /// axum's bare `400`; and the broker is not asked.
