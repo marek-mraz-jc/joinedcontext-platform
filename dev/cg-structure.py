@@ -32,7 +32,7 @@ table, query = _dead.table, _dead.query
 
 CC, LOC, HOPS = 25, 20, 3
 FUNCTION = (
-    "f.lang='rust' AND NOT f.is_test AND NOT f.external "
+    "f.lang='rust' AND NOT f.is_test AND NOT f.external AND NOT f.file STARTS WITH 'vendor/' "
     "AND f.kind IN ['Function','Method','StaticMethod','TraitMethod']"
 )
 COLUMNS = "f.package, f.path, f.file, f.line, f.cc, f.loc"
