@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Hourly gate of image.yml (T-5449): print the commit of the newest green image.yml run on main,
+"""Gate of image.yml (T-5449): print the commit of the newest green image.yml run on main,
 after waiting until GAP seconds have passed since that commit was built.
 
     image-gate.py <owner/repo> <sha> <gap-seconds>
     image-gate.py --selftest
 
-A run that builds after a finished ci on main calls this first, so main gets at most one image an
-hour (T-4696's cost) and the newest merge still gets one within the hour, even when no later merge
-or cron comes: the workflow's gate concurrency group holds one waiting run and replaces the pending
-one. The wait counts from the oldest green run of the newest built commit (later green runs of the
+A run that builds after a finished ci on main calls this first. image.yml passes gap 0 since
+T-6109 (public repo, so T-4696's hourly cost cap saves nothing): the gate then only names the
+newest built commit to diff against. A gap > 0 still waits: the workflow's gate concurrency group
+holds one waiting run and replaces the pending one. The wait counts from the oldest green run of the newest built commit (later green runs of the
 same commit built nothing), at the moment its `changes` job decided, which is after its own wait.
 Prints nothing when main has no green run yet; the caller then builds everything.
 
