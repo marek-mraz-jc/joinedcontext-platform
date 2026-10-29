@@ -157,14 +157,15 @@ jobs:
       - run: |
           tree="$(cargo tree -p context-gateway -e normal --prefix none --locked)"
           if grep -q '^tikv-jemalloc' <<<"$tree"; then echo "context-gateway's default features pull jemalloc" >&2; exit 1; fi
-      # Every variant of an Endpoint's DCAT-AP record against the SEMIC DCAT-AP 3.0 shapes pinned
-      # in the repository, and its JSON-LD and Turtle as one graph (T-2789, EP-78). The test
-      # writes the records, pyshacl reads them: one test binary and a pip install, under a minute.
-      - run: cargo test -p context-gateway --test dcat_ap_catalog_tests --locked
+      # context-gateway's integration tests, one binary (T-6077), whole per push. Among them every
+      # variant of an Endpoint's DCAT-AP record, which dcat_ap_catalog_tests writes for pyshacl
+      # to read against the SEMIC DCAT-AP 3.0 shapes pinned in the repository, its JSON-LD and
+      # Turtle as one graph (T-2789, EP-78); and the MCP tools/list byte ceiling, which only comes
+      # down: a longer tool description went red only in the nightly ci-full, after the merge
+      # (mcp_hub_names_tests, T-5148, T-5576). The seven files that need a process to themselves
+      # (rigs, counting allocators, process-wide tallies) stay in ci-full.
+      - run: cargo test -p context-gateway --test it --locked
         env: { DCAT_RECORDS_DIR: "${{ runner.temp }}/dcat-records" }
-      # The MCP tools/list byte ceiling, which only comes down: a longer tool description went
-      # red only in the nightly ci-full, after the merge (T-5148, T-5576).
-      - run: cargo test -p context-gateway --test mcp_hub_names_tests --locked
       # jcctl's Portal routes against the Portal OpenAPI vendored in crates/jcctl/portal-api.json
       # (T-5966): a route, method, query parameter or kind the two disagree on fails here.
       - run: cargo test -p jcctl --test portal_api_drift_tests --locked

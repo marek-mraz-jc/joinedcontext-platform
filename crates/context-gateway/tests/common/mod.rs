@@ -745,3 +745,49 @@ pub async fn mcp_broker(tools: Value) -> String {
     });
     url
 }
+
+thread_local! {
+    /// The log of the test running on this thread, when it asked for one.
+    static LOG: std::cell::RefCell<Option<Log>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The log lines one test's thread wrote (T-6077). Every integration test shares one process, and
+/// tracing has one global subscriber: it is installed once and writes each line into the log of
+/// the test whose thread emitted it, so a test reads only its own lines. The test must run on a
+/// current-thread runtime (`#[tokio::test]`), where the gateway's tasks run on the test's thread.
+#[derive(Clone, Default)]
+pub struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl Log {
+    /// Starts capturing this thread's lines.
+    pub fn capture() -> Self {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(|| Log(LOG.with(|log| log.borrow().clone()).unwrap_or_default().0))
+                    .with_ansi(false)
+                    .finish(),
+            )
+            .expect("no other subscriber in the test binary");
+        });
+        let log = Log::default();
+        LOG.with(|current| *current.borrow_mut() = Some(log.clone()));
+        log
+    }
+
+    /// What was written so far.
+    pub fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("the log").clone()).expect("utf-8")
+    }
+}
+
+impl std::io::Write for Log {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("the log").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

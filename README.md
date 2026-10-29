@@ -46,10 +46,11 @@ The assistant is tested on its own: its kreuzberg dependency turns on serde_json
 `preserve_order`, which in one cargo invocation would reorder every JSON object the other crates
 write (T-3206).
 
-An integration test is its own binary and is not in `--lib --bins`; run the one you touched:
+Integration tests are not in `--lib --bins`. context-gateway's sit in one binary, `tests/it`; run
+the file you touched with a filter:
 
 ```bash
-cargo test -p context-gateway --test projection_tests
+cargo test -p context-gateway --test it projection_tests::
 ```
 
 The whole suite, the audit and the policy lanes run hourly in `ci-full.yml`.

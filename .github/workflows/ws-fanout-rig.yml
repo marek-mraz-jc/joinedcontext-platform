@@ -16,8 +16,8 @@ on:
       - "crates/context-gateway/src/fanout.rs"
       - "crates/context-gateway/src/fanout/**"
       - "crates/context-gateway/src/handlers/ws.rs"
-      - "crates/context-gateway/tests/ws_fanout_rig.rs"
-      - "crates/context-gateway/tests/ws_abuse_rig.rs"
+      - "crates/context-gateway/tests/ws_fanout_rig/**"
+      - "crates/context-gateway/tests/ws_abuse_rig/**"
       - "crates/context-gateway/tests/rig/**"
       - ".github/workflows/ws-fanout-rig.yml"
 

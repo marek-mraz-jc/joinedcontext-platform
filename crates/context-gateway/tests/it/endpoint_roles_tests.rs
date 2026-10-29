@@ -1,0 +1,364 @@
+//! The roles an Endpoint gives the callers it admits, on requests through it alone (T-2591,
+//! AP-96, AP-97, ADR-N-027).
+//!
+//! **The contract.** A `Policy` names a space, not an endpoint, so the App reconciler assigns an
+//! application's grants to roles only its own Endpoint hands out: `endpoint:{project}/{name}`
+//! to every caller it admits when it sets `callerRole`, and `endpoint:{project}/{name}/{role}`
+//! to a caller whose token of the App's own client `app-{name}` carries that role in
+//! `resource_access.app-{name}.roles` (ADR-N-030). An Endpoint no App generated gives a named
+//! role to the subjects its manifest names. Two endpoints over one space carry the same
+//! Policies here, as they do on a cluster; the roles the gateway pins on each caller's hop to the
+//! broker say which reached them (T-3649).
+
+use crate::common;
+
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use context_gateway::app::{router, Gateway};
+use context_gateway::auth::accounts::ServiceAccounts;
+use context_gateway::pdp::PolicyPdp;
+use context_gateway::proxy::Broker;
+use context_gateway::resolver::{Endpoint, EndpointRoles};
+use jc_core::kinds::{endpoint_role, Audience, EndpointSpec, PolicySpec, Representation};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tower::ServiceExt;
+
+/// The endpoint the reconciler generates for the App `alerts`.
+const APP_SLUG: &str = "k4y7pq2mztsvhx3nbwrs5cjdef";
+/// Another endpoint over the same space, with no roles of its own.
+const PLAIN_SLUG: &str = "q7w6e5r4t3y2uaiopazsxdcfgh";
+/// A hand-written endpoint over the same space whose role names its holders.
+const HAND_SLUG: &str = "h2j3k4l5m6n7p8q9r2s3t4u5v6";
+const PROJECT: &str = "helsinki";
+
+fn policy(role: &str, marker: &str) -> PolicySpec {
+    serde_norway::from_str(&format!(
+        "contextSpaceRef: helsinki\nassigner: did:web:hel.fi\n\
+         assignee: {{ kind: role, id: \"{role}\" }}\noperations: [queryEntity]\n\
+         information:\n  - entities:\n      - type: {marker}\n"
+    ))
+    .expect("the policy spec parses")
+}
+
+/// The Policies of the space: the app's base grant, its editors' grant, and a realm role's.
+fn policies() -> Vec<PolicySpec> {
+    vec![
+        policy(&endpoint_role(PROJECT, "app-alerts", None), "AppRead"),
+        policy(
+            &endpoint_role(PROJECT, "app-alerts", Some("editor")),
+            "EditorWrite",
+        ),
+        policy("data-steward", "StewardView"),
+        policy(
+            &endpoint_role(PROJECT, "hand-alerts", Some("editor")),
+            "HandWrite",
+        ),
+    ]
+}
+
+/// The App's Endpoint as the reconciler renders it: a caller role and one named role, reached
+/// by the App's own client.
+fn app_roles() -> EndpointRoles {
+    EndpointRoles::of_app(
+        PROJECT,
+        "app-alerts",
+        &roles_spec(),
+        "app-alerts".to_owned(),
+    )
+}
+
+/// Jana's Keycloak user id, the `sub` of her token (PF-126).
+const JANA: &str = "3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14";
+
+/// The hand-written endpoint: the same roles, held by the subjects the manifest names.
+fn hand_roles() -> EndpointRoles {
+    EndpointRoles::of(PROJECT, "hand-alerts", &roles_spec())
+}
+
+fn roles_spec() -> EndpointSpec {
+    let spec: EndpointSpec = serde_norway::from_str(&format!(
+        "contextSpaceRef: helsinki\nslug: {APP_SLUG}\naudience: organization\n\
+         enabledRepresentations: [ngsi-ld]\ncallerRole: true\nroles:\n\
+         \x20 - name: editor\n\
+         \x20   subjects: [{{ user: 3f2a9c1e-7b4d-4e8a-9c61-0d5e2b7f8a14 }}, {{ group: alert-editors }}]\n"
+    ))
+    .expect("the endpoint spec parses");
+    spec.validate().expect("the endpoint spec is valid");
+    spec
+}
+
+fn endpoint(slug: &str, audience: Audience, roles: EndpointRoles) -> Endpoint {
+    Endpoint {
+        declared_types: None,
+        roles,
+        slug: slug.to_owned(),
+        title: Default::default(),
+        description: Default::default(),
+        space: "helsinki".to_owned(),
+        project: PROJECT.to_owned(),
+        audience,
+        allowed_projects: Vec::new(),
+        representations: vec![Representation::NgsiLd],
+        rate_limit: None,
+        creates: None,
+        file_limits: None,
+        hidden_attributes: Default::default(),
+        projection: None,
+        base_path: format!("/api/endpoint/{slug}"),
+        models: Vec::new(),
+        view_mapping: None,
+        catalog: None,
+        deprecation: None,
+        feeds: Vec::new(),
+        calendars: Vec::new(),
+        map_defaults: Default::default(),
+        policy_names: Vec::new(),
+        manifest_name: String::new(),
+        policies: policies(),
+    }
+}
+
+struct Fixture {
+    realm: common::Realm,
+    app: axum::Router,
+    broker: common::BrokerStub,
+}
+
+async fn fixture(audience: Audience) -> Fixture {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!({})]).await;
+    let app = router(Arc::new(
+        Gateway::new(
+            Broker::new(broker.url.clone()),
+            Box::new(PolicyPdp),
+            "hel.fi",
+        )
+        .serve([
+            endpoint(APP_SLUG, audience, app_roles()),
+            endpoint(PLAIN_SLUG, audience, EndpointRoles::default()),
+            endpoint(HAND_SLUG, audience, hand_roles()),
+        ])
+        .authenticate(
+            Arc::new(realm.verifier()),
+            // Each App's client reaches the Endpoints its App reads (AP-113).
+            ServiceAccounts::new()
+                .with_app("app-alerts", [APP_SLUG])
+                .with_app("app-other", [APP_SLUG]),
+            None,
+        ),
+    ));
+    Fixture { realm, app, broker }
+}
+
+/// `GET …/access` on `slug`, with a token of `claims` or none: the status and the types of the
+/// Policies that name the caller the gateway pinned for the broker's engine (T-3649).
+async fn granted(
+    fixture: &Fixture,
+    slug: &str,
+    claims: Option<Value>,
+) -> (StatusCode, Vec<String>) {
+    let mut request = Request::builder().uri(format!("/api/endpoint/{slug}/access"));
+    if let Some(extra) = claims {
+        let mut all = json!({
+            "iss": common::ISSUER,
+            "sub": "f:1:someone",
+            "aud": "context-gateway",
+            // A member of the Endpoint's project, which an organization audience asks for
+            // (F-SEC1-009); a test naming its own groups replaces it.
+            "groups": [PROJECT],
+            "exp": common::in_seconds(300),
+            "iat": common::in_seconds(-10),
+        });
+        for (key, value) in extra.as_object().expect("an object") {
+            all[key] = value.clone();
+        }
+        request = request.header(
+            header::AUTHORIZATION,
+            format!("Bearer {}", fixture.realm.mint(&all)),
+        );
+    }
+    let before = fixture.broker.hops().len();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(request.body(Body::empty()).expect("a request"))
+        .await
+        .expect("the gateway answers");
+    let hops = fixture.broker.hops();
+    let markers = match hops.get(before..) {
+        Some([hop]) => common::named_types(&hop.headers, &policies()),
+        _ => Vec::new(),
+    };
+    (response.status(), markers)
+}
+
+/// AP-96, AP-97: every person the app's endpoint admits holds its caller role there, and the
+/// same person on another endpoint of the space holds nothing of the app's.
+#[tokio::test]
+async fn the_caller_role_is_held_on_the_apps_endpoint_and_not_on_another_of_the_space() {
+    let fixture = fixture(Audience::Organization).await;
+    let person = json!({ "preferred_username": "peter.novak@hel.fi" });
+
+    let (status, on_app) = granted(&fixture, APP_SLUG, Some(person.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(on_app, ["AppRead"]);
+
+    let (status, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(person)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+}
+
+/// A person's token of client `azp` carrying `roles` for `client`.
+fn with_client_roles(azp: &str, client: &str, roles: &[&str]) -> Value {
+    json!({
+        "preferred_username": "jana.kovacova@hel.fi",
+        "sub": JANA,
+        "azp": azp,
+        "resource_access": { client: { "roles": roles } },
+    })
+}
+
+/// AP-97, ADR-N-030: on the App's Endpoint a named role comes from the roles a token of the App's
+/// own client carries for it and from nothing else: not a subject the manifest names, not a
+/// realm role or group of the same name, not another client's roles, not a token another client
+/// obtained. The same token is refused on another endpoint of the space, which its App does not
+/// read (AP-113).
+#[tokio::test]
+async fn a_named_role_comes_from_the_apps_own_client_alone() {
+    let fixture = fixture(Audience::Organization).await;
+    let editor = with_client_roles("app-alerts", "app-alerts", &["editor"]);
+    let (_, on_app) = granted(&fixture, APP_SLUG, Some(editor.clone())).await;
+    assert_eq!(on_app, ["AppRead", "EditorWrite"]);
+    let (status, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(editor)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+
+    for viewer in [
+        // The manifest's subject, with no role of the App's client.
+        with_client_roles("app-alerts", "app-alerts", &[]),
+        // The role on another App's client.
+        with_client_roles("app-other", "app-other", &["editor"]),
+        // The App's client roles in a token another client obtained.
+        with_client_roles("edge", "app-alerts", &["editor"]),
+        // A realm role and a group named like the role.
+        json!({
+            "preferred_username": "someone@hel.fi",
+            "azp": "app-alerts",
+            "realm_access": { "roles": ["editor"] },
+            "groups": ["alert-editors", "editor"],
+        }),
+    ] {
+        let (_, on_app) = granted(&fixture, APP_SLUG, Some(viewer.clone())).await;
+        assert_eq!(on_app, ["AppRead"], "{viewer}");
+    }
+}
+
+/// An endpoint no App generated keeps its manifest's subjects: a role's user is a Keycloak id
+/// and matches the token's `sub` exactly, never a username somebody can rename to it (PF-126);
+/// its group matches the `groups` claim with or without the leading slash; nobody else holds it.
+#[tokio::test]
+async fn a_hand_written_endpoints_role_goes_to_its_user_and_its_group_and_to_nobody_else() {
+    let fixture = fixture(Audience::Organization).await;
+    for editor in [
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": JANA }),
+        json!({ "preferred_username": "renamed@hel.fi", "sub": JANA }),
+        json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors"] }),
+        json!({ "preferred_username": "someone@hel.fi", "groups": ["/alert-editors"] }),
+    ] {
+        let (_, on_hand) = granted(&fixture, HAND_SLUG, Some(editor.clone())).await;
+        assert_eq!(on_hand, ["HandWrite"], "{editor}");
+    }
+    for viewer in [
+        json!({ "preferred_username": "someone@hel.fi" }),
+        // A username equal to the id is not the id.
+        json!({ "preferred_username": JANA }),
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": JANA.to_uppercase() }),
+        json!({ "preferred_username": "jana.kovacova@hel.fi", "sub": format!("{JANA}0") }),
+        json!({ "preferred_username": "someone@hel.fi", "groups": ["alert-editors-2", "editor"] }),
+    ] {
+        let (_, on_hand) = granted(&fixture, HAND_SLUG, Some(viewer.clone())).await;
+        assert!(on_hand.is_empty(), "{viewer}: {on_hand:?}");
+    }
+}
+
+/// AP-97: a role of the reserved prefix that a token asserts is dropped on every endpoint, so a
+/// realm role named like an application's grant is worth nothing; the realm's other roles stay.
+#[tokio::test]
+async fn a_token_asserting_an_endpoint_role_gains_nothing_by_it() {
+    let fixture = fixture(Audience::Organization).await;
+    let forged = json!({
+        "preferred_username": "someone@hel.fi",
+        "realm_access": { "roles": [
+            endpoint_role(PROJECT, "app-alerts", Some("editor")),
+            endpoint_role(PROJECT, "app-alerts", None),
+            "data-steward",
+        ] },
+    });
+
+    let (_, elsewhere) = granted(&fixture, PLAIN_SLUG, Some(forged.clone())).await;
+    assert_eq!(elsewhere, ["StewardView"]);
+
+    let (_, on_app) = granted(&fixture, APP_SLUG, Some(forged)).await;
+    assert_eq!(on_app, ["AppRead", "StewardView"]);
+}
+
+/// AP-97: an anonymous caller a public endpoint admits holds its caller role too, and an
+/// endpoint that refuses the caller hands out no role at all.
+#[tokio::test]
+async fn the_caller_role_follows_admission_for_anonymous_and_refused_callers() {
+    // The gateway pins the caller role for the anonymous caller too; the broker's engine keeps
+    // only `public` for one today, which T-3880 fixes, so this reads the hop itself.
+    let public = fixture(Audience::Public).await;
+    let (status, _) = granted(&public, APP_SLUG, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let hops = public.broker.hops();
+    let roles = hops.last().expect("one hop").headers["x-jc-roles"]
+        .to_str()
+        .expect("ASCII");
+    let caller_role = endpoint_role(PROJECT, "app-alerts", None)
+        .replace(':', "%3A")
+        .replace('/', "%2F");
+    assert!(roles.split(',').any(|role| role == caller_role), "{roles}");
+    assert!(roles.split(',').any(|role| role == "public"), "{roles}");
+
+    let organization = fixture(Audience::Organization).await;
+    let (status, on_app) = granted(&organization, APP_SLUG, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(on_app.is_empty(), "{on_app:?}");
+}
+
+/// AP-113 (T-2860): a token of an App's client is admitted on the Endpoints its App reads and is
+/// `401` on every other, whatever its `aud` names, so an audience that reached the client outside
+/// the reconciler opens nothing. An `app-*` client no App names reaches nothing, and a person's
+/// edge token is not narrowed.
+#[tokio::test]
+async fn an_apps_client_reaches_the_endpoints_its_app_reads_and_no_other() {
+    let fixture = fixture(Audience::Organization).await;
+    let token = |azp: &str| {
+        json!({
+            "preferred_username": "jana.kovacova@hel.fi",
+            "sub": JANA,
+            "azp": azp,
+            "aud": [azp, APP_SLUG, PLAIN_SLUG, HAND_SLUG],
+        })
+    };
+
+    let (status, on_app) = granted(&fixture, APP_SLUG, Some(token("app-alerts"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(on_app, ["AppRead"]);
+    for slug in [PLAIN_SLUG, HAND_SLUG] {
+        let (status, granted) = granted(&fixture, slug, Some(token("app-alerts"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{slug}");
+        assert!(granted.is_empty(), "{slug}: {granted:?}");
+    }
+
+    let (status, _) = granted(&fixture, APP_SLUG, Some(token("app-ghost"))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "no App is named ghost");
+
+    let person = json!({ "preferred_username": "peter.novak@hel.fi", "azp": "edge" });
+    for slug in [APP_SLUG, PLAIN_SLUG, HAND_SLUG] {
+        let (status, _) = granted(&fixture, slug, Some(person.clone())).await;
+        assert_eq!(status, StatusCode::OK, "the edge token on {slug}");
+    }
+}
