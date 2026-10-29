@@ -1048,6 +1048,100 @@ async fn one_hundred_eleven_endpoints_list_in_under_25000_characters() {
     );
 }
 
+/// T-6061: a public call naming no `limit` answers at most 20 rows under 10,000 bytes, rows
+/// that would pass it move to the next page, and the cursor walks every Endpoint once. Dev's
+/// 50-row default answered 24,396 bytes; its widest 20 rows 11,169.
+#[tokio::test]
+async fn a_default_list_page_holds_twenty_rows_under_ten_thousand_bytes() {
+    let realm = common::Realm::new();
+    let endpoints: Vec<Endpoint> = (0..45)
+        .map(|n| {
+            // Every fifth title as long as dev's widest rows, so some pages cut early.
+            let title = if n % 5 == 0 {
+                format!(
+                    "Bratislava, open data {n}: {}",
+                    "ovzdušie, doprava, parkovanie ".repeat(8)
+                )
+            } else {
+                format!("Kvalita ovzdušia {n}")
+            };
+            let mut e = endpoint(
+                &format!("{n:0>26}"),
+                &title,
+                &format!("ovzdusie-{n}"),
+                Audience::Public,
+                "public",
+            );
+            e.declared_types = Some(Arc::new(area()));
+            e.models = vec![model(&["AirQualityObserved"])];
+            e
+        })
+        .collect();
+    let app = app(&realm, endpoints);
+    let mut slugs = Vec::new();
+    let mut sizes = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let arguments = cursor
+            .as_ref()
+            .map_or_else(|| json!({}), |next| json!({ "cursor": next }));
+        let page = call(app.clone(), None, "list_endpoints", arguments).await;
+        let bytes = serde_json::to_vec(&page).expect("json").len();
+        let structured = &page["result"]["structuredContent"];
+        let rows = structured["endpoints"].as_array().expect("rows").clone();
+        assert!((1..=20).contains(&rows.len()), "{} rows", rows.len());
+        assert!(bytes < 10_000, "{bytes} bytes for {} rows", rows.len());
+        assert_eq!(structured["total"], json!(45));
+        let text = page["result"]["content"][0]["text"].as_str().expect("text");
+        assert_eq!(text.lines().count(), rows.len() + 2, "{text}");
+        sizes.push(rows.len());
+        slugs.extend(
+            rows.iter()
+                .map(|row| row["slug"].as_str().expect("slug").to_owned()),
+        );
+        cursor = structured["nextCursor"].as_str().map(str::to_owned);
+        if let Some(next) = &cursor {
+            assert!(text.ends_with(&format!("nextCursor {next}")), "{text}");
+        } else {
+            break;
+        }
+    }
+    assert!(
+        sizes.iter().any(|rows| *rows < 20),
+        "no page was cut: {sizes:?}"
+    );
+    assert_eq!(slugs.len(), 45, "{sizes:?}");
+    assert!(
+        slugs.windows(2).all(|w| w[0] < w[1]),
+        "each Endpoint once, in order"
+    );
+
+    // A `limit` the caller names is answered whole: the assistant reads its first page only.
+    let page = call(app.clone(), None, "list_endpoints", json!({ "limit": 40 })).await;
+    assert_eq!(
+        page["result"]["structuredContent"]["endpoints"]
+            .as_array()
+            .map(Vec::len),
+        Some(40)
+    );
+    assert_eq!(
+        page["result"]["structuredContent"]["nextCursor"],
+        json!("40")
+    );
+    // A cursor past the list answers an empty last page, never a refusal or an Endpoint again.
+    let past = call(app, None, "list_endpoints", json!({ "cursor": "999" })).await;
+    assert_eq!(page_rows(&past), 0, "{past}");
+    assert!(past["result"]["structuredContent"]
+        .get("nextCursor")
+        .is_none());
+}
+
+fn page_rows(page: &Value) -> usize {
+    page["result"]["structuredContent"]["endpoints"]
+        .as_array()
+        .map_or(usize::MAX, Vec::len)
+}
+
 fn holding(mut e: Endpoint, class: &str, sk: &str) -> Endpoint {
     let mut declared = area();
     declared.classes = [class.to_owned()].into_iter().collect();

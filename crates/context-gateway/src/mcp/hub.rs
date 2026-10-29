@@ -39,6 +39,13 @@ pub(crate) const SELECTORS: &[&str] = &["space", "tenant", "contextspace", "slug
 /// How many Endpoints one `list_endpoints` page answers unless the caller asks for fewer.
 const PAGE: usize = 50;
 
+/// The rows an MCP `list_endpoints` call without `limit` answers (T-6061): 50 public rows were
+/// 24,396 bytes on dev, the largest answer a public client read after a schema.
+const LIST_PAGE: usize = 20;
+
+/// The most bytes such a default page answers; rows past it move to the next page (T-6061).
+const LIST_BYTES: usize = 9_500;
+
 /// The key the per-subject bucket is kept under. It holds a `/`, so no Endpoint slug is it.
 const HUB_BUCKET: &str = HUB_PATH;
 
@@ -355,14 +362,7 @@ fn page(
             .filter(|limit| (1..=100).contains(limit))
             .ok_or("`limit` is a whole number from 1 to 100")? as usize,
     };
-    // The cursor this hub hands out is an offset written as a string; one an older client
-    // kept as a number still reads.
-    let offset = match arguments.get("cursor") {
-        None => Some(0),
-        Some(Value::String(cursor)) => cursor.parse::<usize>().ok(),
-        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()),
-    }
-    .ok_or("`cursor` is the previous page's nextCursor, passed back as given")?;
+    let offset = offset(arguments)?;
     let mut wanted = Vec::new();
     for name in FILTERS {
         match arguments.get(*name) {
@@ -415,6 +415,17 @@ fn page(
         page["nextCursor"] = json!(next.to_string());
     }
     Ok(page)
+}
+
+/// Where a page starts. The cursor this hub hands out is an offset written as a string; one an
+/// older client kept as a number still reads. One past the list answers an empty page.
+fn offset(arguments: &Map<String, Value>) -> Result<usize, String> {
+    match arguments.get("cursor") {
+        None => Some(0),
+        Some(Value::String(cursor)) => cursor.parse::<usize>().ok(),
+        Some(value) => value.as_u64().and_then(|n| usize::try_from(n).ok()),
+    }
+    .ok_or_else(|| "`cursor` is the previous page's nextCursor, passed back as given".to_owned())
 }
 
 /// The filters `list_endpoints` takes beside its paging (EP-111), each one text.
@@ -910,26 +921,31 @@ impl Hub {
                 )
             }
         };
-        let page = match page(&self.gateway, &self.reach, &arguments) {
+        // A caller naming no `limit` gets a page that fits LIST_BYTES; one naming it gets
+        // that many rows, as the assistant reads its servers' first page whole.
+        let fitted = !arguments.contains_key("limit");
+        if fitted {
+            arguments.insert("limit".to_owned(), json!(LIST_PAGE));
+        }
+        let mut page = match page(&self.gateway, &self.reach, &arguments) {
             Ok(page) => page,
             Err(why) => return result(id, refused(&why, &Value::Null)),
         };
-        let rows: Vec<Value> = page["endpoints"]
+        let mut rows: Vec<Value> = page["endpoints"]
             .as_array()
             .map(|entries| entries.iter().map(|entry| compact(entry, &lang)).collect())
             .unwrap_or_default();
-        let mut answer = answered(&json!(rows), "endpoints");
-        answer["content"][0]["text"] = json!(lines(&rows, &page));
-        if let Some(structured) = answer
-            .get_mut("structuredContent")
-            .and_then(Value::as_object_mut)
-        {
-            structured.insert("total".to_owned(), page["total"].clone());
-            if let Some(next) = page.get("nextCursor") {
-                structured.insert("nextCursor".to_owned(), next.clone());
+        loop {
+            let answer = endpoint_rows(&rows, &page);
+            let size = serde_json::to_vec(&answer).map_or(0, |bytes| bytes.len());
+            if !fitted || size <= LIST_BYTES || rows.len() <= 1 {
+                return result(id, answer);
             }
+            // The cut rows open the next page: the cursor is the offset of the first of them.
+            rows.pop();
+            let first = offset(&arguments).unwrap_or(0);
+            page["nextCursor"] = json!(first.saturating_add(rows.len()).to_string());
         }
-        result(id, answer)
     }
 
     /// One Endpoint (T-4748, T-5642): its query card first, the very text `card://` reads, then
@@ -1065,6 +1081,23 @@ const CARDS_ENDPOINTS: usize = 8;
 
 /// The most tokens the cards of a server's Endpoints add to its instructions (T-4759 item 2).
 const CARDS_TOKENS: usize = 2_000;
+
+/// The `list_endpoints` answer of `rows`: one line each as text, the rows, `total` and the
+/// page's `nextCursor` as structured content.
+fn endpoint_rows(rows: &[Value], page: &Value) -> Value {
+    let mut answer = answered(&json!(rows), "endpoints");
+    answer["content"][0]["text"] = json!(lines(rows, page));
+    if let Some(structured) = answer
+        .get_mut("structuredContent")
+        .and_then(Value::as_object_mut)
+    {
+        structured.insert("total".to_owned(), page["total"].clone());
+        if let Some(next) = page.get("nextCursor") {
+            structured.insert("nextCursor".to_owned(), next.clone());
+        }
+    }
+    answer
+}
 
 /// One `list_endpoints` row (T-4492): the title in `lang`, else English, else any.
 fn compact(entry: &Value, lang: &str) -> Value {
@@ -1363,10 +1396,10 @@ pub(crate) fn list_endpoints_tool() -> Value {
     let themes = format!("An EU data theme code: {themes}");
     json!({
         "name": "list_endpoints",
-        "description": "The Endpoints you may read, open ones without a login. One line each: \
-                        slug, title, space, access, types, domain, EU theme, area, period. Name \
-                        one as `endpoint` in the other tools; get_endpoint gives its URLs, \
-                        attributes and data model.",
+        "description": "The Endpoints you may read, open ones without a login, 20 a page \
+                        (`search` narrows). One line each: slug, title, space, access, types, \
+                        domain, EU theme, area, period. Name one as `endpoint` elsewhere; \
+                        get_endpoint: its URLs, attributes, model.",
         "inputSchema": {
             "type": "object",
             "properties": {
