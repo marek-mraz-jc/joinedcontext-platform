@@ -958,7 +958,7 @@ async fn a_publisher_connector_serves_its_own_public_endpoints_only() {
             ),
         )
         .await;
-        assert!(answer["error"].is_object(), "{answer}");
+        assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
     }
     assert!(broker.hops().is_empty(), "{:?}", broker.hops());
 
