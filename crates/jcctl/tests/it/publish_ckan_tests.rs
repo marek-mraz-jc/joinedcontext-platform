@@ -432,6 +432,48 @@ fn an_existing_organization_is_renamed_to_the_instance_title() {
     );
 }
 
+/// An Endpoint publishing into another instance's organization (`publish.ckan.organization`)
+/// leaves that organization's title alone: the Slovak participation dataset filed under Banská
+/// Bystrica renamed the town's organization to "Slovensko" on every pass (T-6098).
+#[test]
+fn an_endpoint_publishing_into_another_organization_never_renames_it() {
+    let dir = repo("foreign-organization");
+    common::write(
+        &dir,
+        "projects/ovzdusie/ckan/open-data.yaml",
+        &INSTANCE
+            .replacen(
+                "  namespace: ovzdusie\n",
+                "  namespace: ovzdusie\n  title: Slovensko\n",
+                1,
+            )
+            .replacen("mesto-banska-bystrica", "slovensko", 1),
+    );
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/air-public.yaml",
+        &endpoint(
+            "air-public",
+            "zt4qm7ge2xdv6ksb3ncf5arw2y",
+            "[ngsi-ld, csv]",
+            &format!("{PUBLISHED}      organization: mesto-banska-bystrica\n"),
+        ),
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let target = targets(&repo, "ovzdusie").expect("the walk").remove(0);
+    assert_eq!(target.instance_title.as_deref(), Some("Slovensko"));
+    let mut api = titled_organization("Mesto Banská Bystrica");
+
+    publish_one(&mut api, &target, &record("air-public"), None, &settings()).expect("the run");
+    assert_eq!(api.actions(), vec!["organization_create", "package_create"]);
+    assert_eq!(
+        organization_title(&api).as_deref(),
+        Some("Mesto Banská Bystrica")
+    );
+    let (_, created) = api.calls().nth(1).expect("the dataset call");
+    assert_eq!(created["owner_org"], json!("mesto-banska-bystrica"));
+}
+
 /// A CKAN that already holds `mesto-banska-bystrica` under `title`, seeded through the API, so
 /// its first recorded call is that `organization_create`.
 fn titled_organization(title: &str) -> InMemoryCkan {

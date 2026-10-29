@@ -1,13 +1,13 @@
 name: ship
-# builds, smoke-tests and pushes the OCI image(s) once an hour when main moved, once a day on a
+# builds, smoke-tests and pushes the OCI image(s) after each green ci on main, once a day on a
 # quiet main (its Debian fixes, T-5485) and on tags; skipped
 # until a Dockerfile exists. The ship lane of T-4721: the file keeps the name image.yml because the
 # signing identity (`.github/workflows/image.yml@refs/heads/main`) is what pin-images verifies.
-# At most hourly, not per main push (T-4696): one build per merge billed ~960 minutes a day, and
-# dev applies hourly anyway. pin-images (deployment) pins the newest commit this lane built.
 # A green ci on main starts a run (T-5449): GitHub's cron fired none of the 05:37-08:37Z slots on
-# 2026-10-23, so the cron stays only as a fallback. The run waits in `changes` until the newest
-# image is an hour old, so a merge gets its image within the hour without a later merge.
+# 2026-10-23, so the cron stays only as a fallback. pin-images (deployment) pins the newest commit
+# this lane built. No hourly wait any more (T-6109): the repo is public, so the minutes T-4696
+# saved cost nothing, and the gate held a merge's image back up to 40 min (2026-10-29). The gate
+# concurrency group still runs one `changes` at a time with the newest commit pending.
 on:
   schedule: [{ cron: "37 * * * *" }]
   # ci completed: the green main commit. ci-full requested: the daily ci-full's commit gets its
@@ -32,7 +32,7 @@ concurrency:
   group: "image-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}"
   cancel-in-progress: false
 jobs:
-  # The hour, a green ci and ci-full's request build when main moved since the newest green run of
+  # The cron, a green ci and ci-full's request build when main moved since the newest green run of
   # this lane on main, model-tools only when its folder changed; a tag, a dispatch or a last build git cannot
   # diff builds everything (T-4696).
   changes:
@@ -47,9 +47,9 @@ jobs:
        github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_sha == github.sha &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
-    # The hourly gate waits up to an hour (scripts/ci/image-gate.py).
-    timeout-minutes: 70
-    # One run waits at the gate, the newest commit pends behind it and replaces an older pending
+    # gap 0: the gate only names the last built commit (scripts/ci/image-gate.py), no wait.
+    timeout-minutes: 10
+    # One run decides at the gate, the newest commit pends behind it and replaces an older pending
     # one; the replaced run ends cancelled, its commit is in the newer one. ci-full's request, a
     # tag and a dispatch never wait.
     concurrency:
@@ -65,15 +65,12 @@ jobs:
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
-          TRIGGER: ${{ github.event.workflow_run.name }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           build=true models=true
           if [ "$EVENT" = schedule ] || [ "$EVENT" = workflow_run ]; then
-            gap=3600
-            [ "$TRIGGER" = ci-full ] && gap=0
-            gate=$(python3 scripts/ci/image-gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$gap")
+            gate=$(python3 scripts/ci/image-gate.py "$GITHUB_REPOSITORY" "$GITHUB_SHA" 0)
             read -r built refresh <<< "$gate"
             # built on an earlier UTC day: rebuild so APT_REFRESH takes today's Debian fixes
             # (T-5485); model-tools has no such layer, its rebuild would be all cache hits
