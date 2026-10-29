@@ -164,7 +164,10 @@ jobs:
       # down: a longer tool description went red only in the nightly ci-full, after the merge
       # (mcp_hub_names_tests, T-5148, T-5576). The seven files that need a process to themselves
       # (rigs, counting allocators, process-wide tallies) stay in ci-full.
-      - run: cargo test -p context-gateway --test it --locked
+      # DCAT_RECORDS_DIR reaches only dcat_ap_catalog_tests: publisher_catalog_tests writes its
+      # national-profile JSON-LD (no Turtle twin) to the same variable, which the SEMIC check refuses.
+      - run: "cargo test -p context-gateway --test it --locked -- --skip dcat_ap_catalog_tests::"
+      - run: "cargo test -p context-gateway --test it --locked dcat_ap_catalog_tests::"
         env: { DCAT_RECORDS_DIR: "${{ runner.temp }}/dcat-records" }
       # jcctl's Portal routes against the Portal OpenAPI vendored in crates/jcctl/portal-api.json
       # (T-5966): a route, method, query parameter or kind the two disagree on fails here.
