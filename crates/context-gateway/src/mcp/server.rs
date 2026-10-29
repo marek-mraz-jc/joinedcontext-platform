@@ -354,7 +354,6 @@ pub(crate) async fn serve(
         reach,
         caller,
         server: Some(server),
-        anonymous: false,
         reads_only,
     };
     let mut response = match hub.answer(message).await {

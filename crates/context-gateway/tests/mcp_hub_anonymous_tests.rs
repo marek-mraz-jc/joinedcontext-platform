@@ -216,22 +216,24 @@ async fn without_a_token_the_hub_lists_the_public_endpoints_and_nothing_internal
     }
 }
 
+/// T-6031, SP-20: without a token an internal slug is the tool error an unknown one is, byte for
+/// byte; never a `401`, which a client reads as its whole session signed out.
 #[tokio::test]
-async fn without_a_token_an_internal_slug_is_the_login_prompt_like_an_unknown_one() {
+async fn without_a_token_an_internal_slug_is_a_tool_error_like_an_unknown_one() {
     let realm = common::Realm::new();
     let app = app("http://127.0.0.1:1", &realm);
     let mut answers = Vec::new();
     for slug in [INNER, UNKNOWN] {
         let message = call("query_entities", json!({ "endpoint": slug, "type": ["X"] }));
         let (status, headers, body) = raw(app.clone(), rpc(None, message)).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "{slug}: {body}");
-        assert_eq!(
-            headers["www-authenticate"],
-            format!(
-                "Bearer resource_metadata=\"{HOST}/api/mcp/.well-known/oauth-protected-resource\""
-            )
-            .as_str()
+        assert_eq!(status, StatusCode::OK, "{slug}: {body}");
+        assert!(
+            !headers.contains_key("www-authenticate"),
+            "{slug}: {headers:?}"
         );
+        let answer: Value = serde_json::from_str(&body).expect("JSON");
+        assert_eq!(answer["result"]["isError"], json!(true), "{slug}: {body}");
+        assert!(!body.contains(slug), "{slug} echoed: {body}");
         answers.push(body);
     }
     assert_eq!(

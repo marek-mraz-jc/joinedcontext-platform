@@ -230,7 +230,8 @@ async fn an_endpoint_the_caller_may_not_read_is_not_found_by_its_name_either() {
         !body.contains(INNER) && !body.contains("register"),
         "{body}"
     );
-    // Its slug is the login prompt, the bytes an unknown slug gets (SP-20).
+    // Its slug is the tool error an unknown slug gets, byte for byte, never a `401` (SP-20,
+    // T-6031).
     let (inner, inner_body) = rpc(city("http://127.0.0.1:1"), query(INNER)).await;
     let (unknown, unknown_body) = rpc(
         city("http://127.0.0.1:1"),
@@ -238,7 +239,8 @@ async fn an_endpoint_the_caller_may_not_read_is_not_found_by_its_name_either() {
     )
     .await;
     assert_eq!((inner, &inner_body), (unknown, &unknown_body));
-    assert_eq!(inner, StatusCode::UNAUTHORIZED);
+    assert_eq!(inner, StatusCode::OK);
+    assert!(inner_body.contains("\"isError\":true"), "{inner_body}");
 }
 
 #[tokio::test]
