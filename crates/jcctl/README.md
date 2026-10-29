@@ -14,7 +14,7 @@ The reconciler, as a library and a CLI. It loads a Git repository of manifests, 
 ## 2. Tests
 
     cargo test -p jcctl
-    cargo test -p jcctl --test <file>     # one file under tests/
+    cargo test -p jcctl --test it <module>::   # one file under tests/it/
 
 ## 3. Trust boundary
 
