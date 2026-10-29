@@ -181,8 +181,10 @@ async fn tools_list_is_the_same_bytes_for_one_endpoint_and_for_10000() {
     // The broker's `area_overview` (T-5279, the eighth read tool), one call for every type in an
     // area where the model made one per type (18 on Helsinki's whole space), adds 1,487: 16,086
     // so the ceiling is 16,100, and it only comes down. get_endpoint naming its query card
-    // (T-5642) stays inside it.
-    assert!(sizes[0] < 16_100, "{sizes:?}");
+    // (T-5642) stays inside it. The grammar said once in the primer, the page limits once in the
+    // schema and no TS 104 175 clause in a description (T-6058): 12,269, so the ceiling is
+    // 12,300, and it only comes down.
+    assert!(sizes[0] < 12_300, "{sizes:?}");
 }
 
 #[tokio::test]
@@ -266,4 +268,36 @@ async fn a_name_two_endpoints_share_names_both_and_resolves_neither() {
         "{body}"
     );
     assert!(broker.hops.lock().expect("hops").is_empty());
+}
+
+/// T-6058: the tools a model re-reads on every turn of the public door, every read a public
+/// grant can hold (history included, which `retrieveOps` leaves out), measured whole. The
+/// primer in `initialize` says the NGSI-LD grammar once; a tool repeats none of it.
+#[tokio::test]
+async fn the_public_tool_definitions_stay_under_their_byte_ratchet() {
+    let mut public = endpoint(&slug(0), "Dataset 0", "mesto", Audience::Public, "public");
+    public.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: mesto\n\
+         assigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: public }\n\
+         operations: [retrieveOps, retrieveTemporal, queryTemporal]\n",
+    )
+    .expect("the policy spec parses")];
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let (status, body) = rpc(app("http://127.0.0.1:1", vec![public]), list).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+    let tools = answer["result"]["tools"].as_array().expect("a tool list");
+    let size = |value: &serde_json::Value| value.to_string().len();
+    let mut sizes: Vec<(usize, &str)> = tools
+        .iter()
+        .map(|tool| (size(tool), tool["name"].as_str().unwrap_or_default()))
+        .collect();
+    sizes.sort_unstable();
+    let total: usize = sizes.iter().map(|(bytes, _)| bytes).sum();
+    eprintln!("{} tools, {total} bytes: {sizes:?}", sizes.len());
+    // 22,969 bytes on main 6915f902, 15,991 once the per-argument grammar, the page-limit
+    // sentences, the clause numbers and the output schema's `restricted` and `jc:source` went.
+    // The ratchet only comes down.
+    assert!(total < 16_000, "{total} bytes");
 }
