@@ -290,6 +290,25 @@ async fn a_service_accounts_token_groups_reach_no_group_policy() {
     );
 }
 
+/// T-6051: an account's client carries the scope `basic` alone, so its token holds no
+/// `preferred_username`, roles, groups or `client_id`; the claim set measured on Keycloak 26.8.1
+/// for such a client still decides as the account, with its manifest's grants.
+#[tokio::test]
+async fn an_accounts_token_with_only_the_basic_scope_decides_as_the_account() {
+    let fixture = fixture("basic-scope-only", Audience::Organization, PROJECT).await;
+    let (status, document) = access(
+        &fixture,
+        json!({ "azp": workload(), "jti": "trt:1", "typ": "Bearer", "scope": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert_eq!(
+        granted(&document),
+        ["AccountOwn", "SensorWrite"],
+        "{document}"
+    );
+}
+
 /// PF-46: when both are present, a known `azp` decides; the person's name is not the subject.
 #[tokio::test]
 async fn a_token_with_azp_and_preferred_username_prefers_the_service_account_path() {
