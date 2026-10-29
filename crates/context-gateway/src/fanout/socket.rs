@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::extract::ws::{self, WebSocket};
 use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Method};
-use futures_util::stream::SplitSink;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, VecDeque};
@@ -77,6 +77,8 @@ const IDLE: Duration = Duration::from_secs(60);
 /// A client whose socket takes no frame for this long is not reading: it is closed as `overflow`
 /// and gives its slot back, instead of parking its session on a full send buffer (T-4902).
 const STALL: Duration = Duration::from_secs(10);
+/// After its close frame, how long the gateway waits for the client's (T-5931).
+const CLOSING: Duration = Duration::from_secs(5);
 /// The entities a snapshot page asks for.
 const PAGE: usize = 1000;
 /// What the broker writes: a notification of up to 1 MiB (Antares `MAX_NOTIFICATION_BYTES`).
@@ -754,7 +756,26 @@ pub async fn session(
     // A stalled client takes no close frame either.
     let _ = tokio::time::timeout(STALL, finish(&mut to_client, &ended)).await;
     hub.close(conn, &name, &token, sent);
+    linger(&ended, &mut from_client).await;
     ended
+}
+
+/// After the gateway's own close frame, reads and discards what the client still sends until
+/// its close frame, the end of its stream or [`CLOSING`]. Dropping the socket over frames the
+/// gateway never read resets the connection (RST), and the client, or a proxy in between, loses
+/// the close frame with it (T-5931, RFC 6455 7.1.1).
+async fn linger(ended: &Ended, from_client: &mut SplitStream<WebSocket>) {
+    if matches!(ended, Ended::Closed) {
+        return;
+    }
+    let drain = async {
+        while let Some(Ok(message)) = from_client.next().await {
+            if matches!(message, ws::Message::Close(_)) {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(CLOSING, drain).await;
 }
 
 /// What a ping tick decides: a client that left a ping unanswered for longer than [`PING`] ends,
