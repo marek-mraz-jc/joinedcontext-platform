@@ -1079,7 +1079,22 @@ async fn ten_thousand_endpoints_resolve_a_selector() {
     }
 }
 
-// --- T-4538: a person's own connectors at /api/mcp/me/{name} (EP-123, UI-98) ---
+// --- T-4538, T-5970: a person's own connectors at /api/mcp/me/{name} (EP-123, API/14) ---
+
+/// A connector record as the Portal hands it over: `endpoints` by manifest name in project
+/// ovzdusie, live for a long while, any client.
+fn record(name: &str, endpoints: &[&str]) -> Value {
+    json!({
+        "id": "c0nnect0rc0nnect0rc0nnect0",
+        "name": name,
+        "scope": endpoints
+            .iter()
+            .map(|e| json!({ "project": "ovzdusie", "endpoint": e, "access": "read" }))
+            .collect::<Vec<_>>(),
+        "expiresAt": "2999-01-01T00:00:00Z",
+        "allowedClients": [],
+    })
+}
 
 /// The Portal's internal read: each `sub`'s list, `down` answering 503, every call counted.
 struct Portal {
@@ -1136,7 +1151,20 @@ fn personal(
         Box::new(PolicyPdp),
         "banskabystrica.sk",
     )
-    .serve(five())
+    .serve(
+        five()
+            .into_iter()
+            .map(|mut e| {
+                e.manifest_name = e.slug.clone();
+                // The steward may write AIR on its own URL, so only the connector's read-only
+                // rule keeps a write through `/api/mcp/me/...` from the broker (T-5970).
+                if e.slug == AIR {
+                    e.policies = vec![grant("steward", "queryEntity, upsertBatch")];
+                }
+                e
+            })
+            .collect::<Vec<_>>(),
+    )
     .authenticate(
         Arc::new(realm.verifier()),
         ServiceAccounts::new(),
@@ -1171,8 +1199,8 @@ async fn a_personal_connector_answers_its_owner_alone() {
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
     let portal = portal(json!({
-        "ana": [{ "name": "my-air", "select": { "endpoints": [AIR, CLOSED, OPEN] } }],
-        "bob": [{ "name": "other", "select": {} }],
+        "ana": [record("my-air", &[AIR, CLOSED, OPEN])],
+        "bob": [record("other", &[AIR, BIKES])],
     }))
     .await;
     let app = personal(
@@ -1254,8 +1282,7 @@ async fn a_held_list_expires_and_an_unreadable_portal_is_a_503() {
     use std::sync::atomic::Ordering;
     let realm = common::Realm::new();
     let broker = common::BrokerStub::start(vec![json!([])]).await;
-    let portal =
-        portal(json!({ "ana": [{ "name": "my-air", "select": { "endpoints": [AIR] } }] })).await;
+    let portal = portal(json!({ "ana": [record("my-air", &[AIR])] })).await;
     let app = personal(
         &broker.url,
         &realm,
@@ -1291,4 +1318,79 @@ async fn a_held_list_expires_and_an_unreadable_portal_is_a_503() {
         "a catalogued type (API/00 §4)"
     );
     assert_eq!(portal.calls.load(Ordering::SeqCst), 2);
+}
+
+/// T-5970: a connector reads only, whatever its scope item says, until plan_change (T-5956); an
+/// expired one and a token of a client it does not allow are refused before any read.
+#[tokio::test]
+async fn a_personal_connector_reads_only_and_holds_its_expiry_and_clients() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let mut write = record("writer", &[AIR]);
+    write["scope"][0]["access"] = json!("write");
+    let mut expired = record("old", &[AIR]);
+    expired["expiresAt"] = json!("2020-01-01T00:00:00Z");
+    let mut bound = record("bound", &[AIR]);
+    bound["allowedClients"] = json!(["mcp-local"]);
+    let portal = portal(json!({ "ana": [write, expired, bound] })).await;
+    let app = personal(
+        &broker.url,
+        &realm,
+        &portal,
+        std::time::Duration::from_secs(60),
+    );
+    let ana = person(&realm, "ana");
+
+    let (_, answer) = send(
+        app.clone(),
+        post(
+            "/api/mcp/me/writer",
+            Some(&ana),
+            call(
+                "batch_upsert",
+                json!({ "endpoint": AIR, "entities": [{ "id": ENTITY, "type": "AirQualityObserved" }] }),
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        answer["error"].is_object() || answer["result"]["isError"] == json!(true),
+        "a write through a personal connector is refused: {answer}"
+    );
+    assert!(broker.hops().is_empty(), "the write reached the broker");
+
+    let (status, problem) = send(
+        app.clone(),
+        post(
+            "/api/mcp/me/old",
+            Some(&ana),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("expired")),
+        "{problem}"
+    );
+
+    let (status, problem) = send(
+        app.clone(),
+        post(
+            "/api/mcp/me/bound",
+            Some(&ana),
+            call("list_endpoints", json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{problem}");
+    assert!(
+        problem["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("mcp-local")),
+        "{problem}"
+    );
+    assert!(broker.hops().is_empty());
 }

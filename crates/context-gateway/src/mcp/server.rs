@@ -318,7 +318,11 @@ pub(crate) async fn serve(
                 .filter(level)
                 .collect();
             // A public server reads only, whoever calls (EP-141): writes stay on the member's URL.
-            let reads_only = server.project == DEPLOYMENTS || server.audience == Audience::Public;
+            // A person's connector reads only too until plan_change carries its writes (T-5970,
+            // T-5956).
+            let reads_only = server.project == DEPLOYMENTS
+                || server.project == super::personal::PROJECT
+                || server.audience == Audience::Public;
             (format!("subject:{}", claims.sub), reach, reads_only)
         }
     };

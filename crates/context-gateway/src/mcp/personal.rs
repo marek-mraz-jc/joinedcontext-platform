@@ -1,25 +1,27 @@
-//! A person's own connectors, `/api/mcp/me/{name}` (EP-123, UI-98, ADR-N-043 §7.7).
+//! A person's own connectors, `/api/mcp/me/{name}` (EP-123, ADR-N-043 §7.7, API/14, T-5970).
 //!
-//! The Portal keeps each person's connectors in their preferences, never in Git. The gateway
-//! reads them by the token's `sub` from the Portal's internal listener, `GET
-//! /internal/connectors/{sub}`, with its own workload token (audience `portal-internal`, API/01
-//! §8), holds an answer at most a minute, and serves the named one as an organization server
-//! with no members and the connector's selector: the same reach rules as every named server, so
-//! it only narrows. Another person's token at that address finds no connector of that name and
-//! gets the bytes of an unknown server.
+//! The Portal keeps every connector in one store, the connector record of API/14. The gateway
+//! reads a person's data-reading ones by the token's `sub` from the Portal's internal listener,
+//! `GET /internal/connectors/{sub}`, with its own workload token (audience `portal-internal`,
+//! API/01 §8), holds an answer at most a minute, and serves the named one as an organization
+//! server with no members whose Endpoints are the ones the connector's scope names: the same
+//! reach rules as every named server, so it only narrows, and it reads only (writes arrive with
+//! plan_change, T-5956). An expired connector, or a client the connector does not allow, is
+//! refused. Another person's token at that address finds no connector of that name and gets the
+//! bytes of an unknown server.
 
 use crate::app::Gateway;
 use crate::auth::subject::EDGE_AUDIENCE;
 use crate::auth::token;
 use crate::mcp::server::{challenge, serve, McpServer};
 use crate::previews::WorkloadToken;
+use crate::resolver::Endpoint;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::header::AUTHORIZATION;
 use axum::http::Response;
 use axum::response::IntoResponse;
-use jc_core::kinds::catalog::DataTheme;
-use jc_core::kinds::mcp_server::{AccessLevel, Select};
+use jc_core::kinds::mcp_server::Select;
 use jc_core::kinds::Audience;
 use jc_core::ProblemDetails;
 use serde::Deserialize;
@@ -37,33 +39,68 @@ pub const KEEP: Duration = Duration::from_secs(60);
 /// again, so a flood of tokens cannot grow the gateway's memory.
 const MAX_HELD: usize = 10_000;
 
-/// One connector as the Portal stores it (API/01 §8).
+/// One connector record as the Portal hands it to the gateway (API/14 §1).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Connector {
-    /// A DNS label, unique in the person's list, the last segment of its address.
+    /// The record's id, `/c/{id}` on the Portal.
+    pub id: String,
+    /// A DNS label, unique among the person's live connectors, the last segment of its address.
     pub name: String,
-    /// What it selects; nothing given selects every Endpoint the person reads.
+    /// What it reaches: each item a project, narrowed to one space, Endpoint or pipeline.
+    pub scope: Vec<ScopeItem>,
+    /// RFC 3339; past it the connector answers nothing.
+    pub expires_at: String,
+    /// The OAuth clients (`azp`) it answers; none listed answers any.
     #[serde(default)]
-    pub select: PersonalSelect,
+    pub allowed_clients: Vec<String>,
 }
 
-/// An McpServer's selector plus the person's favourite Endpoints (MF-55, UI-98).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PersonalSelect {
-    /// Project names.
-    pub projects: Option<Vec<String>>,
-    /// Context Spaces as `{project}/{space}`.
-    pub spaces: Option<Vec<String>>,
-    /// Smart Data Models domains of the Endpoint's classification.
-    pub domains: Option<Vec<String>>,
-    /// EU data themes.
-    pub themes: Option<Vec<DataTheme>>,
-    /// How the person reaches the Endpoint.
-    pub access_level: Option<Vec<AccessLevel>>,
-    /// The person's favourite Endpoints by slug, up to 50.
-    pub endpoints: Option<Vec<String>>,
+/// One scope item of a connector (API/14 §1); `*` names every one of its kind.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeItem {
+    /// A project slug.
+    pub project: String,
+    /// A Context Space of the project by name, or `*`.
+    #[serde(default)]
+    pub space: Option<String>,
+    /// An Endpoint of the project by manifest name, or `*`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// A pipeline of the project by name, or `*`: it reaches no Endpoint here.
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    /// `read` or `write`; this door reads only whichever it says.
+    pub access: String,
+}
+
+impl ScopeItem {
+    /// Whether this item reaches `endpoint`: same project, and its space or its name when the
+    /// item names one. An item narrowed to a pipeline reaches no Endpoint.
+    fn reaches(&self, endpoint: &Endpoint) -> bool {
+        let named = |wanted: &Option<String>, has: &str| {
+            wanted.as_deref().is_none_or(|w| w == "*" || w == has)
+        };
+        self.project == endpoint.project
+            && self.pipeline.is_none()
+            && named(&self.space, &endpoint.space)
+            && named(&self.endpoint, &endpoint.manifest_name)
+    }
+}
+
+impl Connector {
+    /// Whether `now` (seconds since the epoch) lies past its expiry; an unreadable one is past.
+    fn expired(&self, now: i64) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.expires_at)
+            .map_or(true, |at| at.timestamp() <= now)
+    }
+
+    /// Whether a token obtained by `azp` may use it.
+    fn admits(&self, azp: Option<&str>) -> bool {
+        self.allowed_clients.is_empty()
+            || azp.is_some_and(|azp| self.allowed_clients.iter().any(|c| c == azp))
+    }
 }
 
 #[derive(Deserialize)]
@@ -176,20 +213,23 @@ pub fn addressed(name: &str) -> Option<McpServer> {
     })
 }
 
-/// `connector` as the server it is served as.
-fn server_of(connector: &Connector) -> Option<McpServer> {
+/// `connector` as the server it is served as: every Endpoint of `endpoints` its scope reaches.
+fn server_of(connector: &Connector, endpoints: &[Arc<Endpoint>]) -> Option<McpServer> {
     let mut server = addressed(&connector.name)?;
-    let select = connector.select.clone();
-    server.select = Some(Select {
-        projects: select.projects,
-        spaces: select.spaces,
-        domains: select.domains,
-        themes: select.themes,
-        types: None,
-        access_level: select.access_level,
-    });
-    server.endpoints = select.endpoints;
+    server.endpoints = Some(
+        endpoints
+            .iter()
+            .filter(|e| connector.scope.iter().any(|item| item.reaches(e)))
+            .map(|e| e.slug.clone())
+            .collect(),
+    );
     Some(server)
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// One JSON-RPC message to `/api/mcp/me/{name}` (EP-123).
@@ -224,11 +264,27 @@ pub async fn message(gateway: Arc<Gateway>, name: String, request: Request) -> R
                 .into_response();
         }
     };
-    match connectors
-        .iter()
-        .find(|connector| connector.name == name)
-        .and_then(server_of)
-    {
+    let Some(connector) = connectors.iter().find(|connector| connector.name == name) else {
+        return ProblemDetails::not_found().into_response();
+    };
+    if connector.expired(now()) {
+        return ProblemDetails::forbidden()
+            .with_detail(format!(
+                "connector {name} expired at {}; renew it under My connectors in the Portal",
+                connector.expires_at
+            ))
+            .into_response();
+    }
+    if !connector.admits(claims.azp.as_deref()) {
+        return ProblemDetails::forbidden()
+            .with_detail(format!(
+                "connector {name} answers only {}; this token was issued to {}",
+                connector.allowed_clients.join(", "),
+                claims.azp.as_deref().unwrap_or("no client")
+            ))
+            .into_response();
+    }
+    match server_of(connector, &gateway.resolver.endpoints()) {
         Some(server) => serve(gateway, server, request).await,
         None => ProblemDetails::not_found().into_response(),
     }
@@ -247,22 +303,81 @@ mod tests {
         }
     }
 
+    fn connector(value: serde_json::Value) -> Connector {
+        serde_json::from_value(value).expect("a connector")
+    }
+
+    fn endpoint(slug: &str, project: &str, space: &str, name: &str) -> Arc<Endpoint> {
+        let mut e = crate::mcp::catalog::tests::fixture();
+        e.slug = slug.to_owned();
+        e.project = project.to_owned();
+        e.space = space.to_owned();
+        e.manifest_name = name.to_owned();
+        Arc::new(e)
+    }
+
     #[test]
-    fn a_connector_is_served_as_an_organization_server_of_its_favourites() {
-        let connector: Connector = serde_json::from_value(serde_json::json!({
-            "name": "my-air",
-            "select": { "themes": ["ENVI"], "endpoints": ["aaaa"] }
-        }))
-        .expect("a connector");
-        let server = server_of(&connector).expect("a server");
+    fn a_connector_is_served_as_an_organization_server_of_what_its_scope_reaches() {
+        let endpoints = [
+            endpoint("aaaa", "doprava", "transit", "buses"),
+            endpoint("bbbb", "doprava", "parking", "lots"),
+            endpoint("cccc", "ovzdusie", "air", "air"),
+            endpoint("dddd", "skoly", "schools", "schools"),
+        ];
+        let c = connector(serde_json::json!({
+            "id": "x", "name": "my-air", "expiresAt": "2999-01-01T00:00:00Z",
+            "scope": [
+                { "project": "doprava", "space": "transit", "access": "read" },
+                { "project": "ovzdusie", "access": "read" },
+                { "project": "skoly", "pipeline": "*", "access": "read" },
+            ],
+        }));
+        let server = server_of(&c, &endpoints).expect("a server");
         assert_eq!(server.path(), "/api/mcp/me/my-air");
         assert_eq!(server.audience, Audience::Organization);
         assert!(server.members.is_empty());
-        assert_eq!(server.endpoints.as_deref(), Some(&["aaaa".to_owned()][..]));
-        assert!(addressed("My Air").is_none());
-        let unknown = serde_json::from_value::<Connector>(serde_json::json!({
-            "name": "x", "select": { "everything": true }
+        assert_eq!(server.select, Some(Select::default()));
+        assert_eq!(
+            server.endpoints.as_deref(),
+            Some(&["aaaa".to_owned(), "cccc".to_owned()][..])
+        );
+        let named = connector(serde_json::json!({
+            "id": "x", "name": "one", "expiresAt": "2999-01-01T00:00:00Z",
+            "scope": [{ "project": "doprava", "endpoint": "lots", "access": "read" }],
         }));
-        assert!(unknown.is_err());
+        assert_eq!(
+            server_of(&named, &endpoints).and_then(|s| s.endpoints),
+            Some(vec!["bbbb".to_owned()])
+        );
+        assert!(addressed("My Air").is_none());
+        let old = serde_json::from_value::<Connector>(serde_json::json!({
+            "name": "x", "select": { "endpoints": ["aaaa"] }
+        }));
+        assert!(old.is_err(), "the old selector shape names no connector");
+    }
+
+    #[test]
+    fn an_expired_connector_or_another_client_is_refused() {
+        let c = connector(serde_json::json!({
+            "id": "x", "name": "n", "expiresAt": "2026-10-28T12:00:00Z", "scope": [],
+            "allowedClients": ["mcp-local"],
+        }));
+        let noon = chrono::DateTime::parse_from_rfc3339("2026-10-28T12:00:00Z")
+            .expect("a time")
+            .timestamp();
+        assert!(!c.expired(noon - 1));
+        assert!(c.expired(noon));
+        assert!(connector(serde_json::json!({
+            "id": "x", "name": "n", "expiresAt": "soon", "scope": [],
+        }))
+        .expired(0));
+        assert!(c.admits(Some("mcp-local")));
+        assert!(!c.admits(Some("claude-ai")));
+        assert!(!c.admits(None));
+        let any = Connector {
+            allowed_clients: Vec::new(),
+            ..c
+        };
+        assert!(any.admits(None));
     }
 }
