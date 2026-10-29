@@ -113,7 +113,7 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         ..
     } = match reached(&gateway, request.headers(), Some(Representation::Mcp)) {
         Ok(reached) => reached,
-        Err(refusal) => return *refusal,
+        Err(refusal) => return challenged(&gateway, *refusal),
     };
     if anonymous {
         if let Err(refusal) = rate_limit::spend_anonymous_mcp(&gateway, request.headers()) {
@@ -135,7 +135,6 @@ pub async fn message(State(gateway): State<Arc<Gateway>>, mut request: Request) 
         reach,
         caller,
         server: None,
-        anonymous,
         reads_only: anonymous,
     };
     let mut response = match hub.answer(message).await {
@@ -169,8 +168,8 @@ pub(crate) fn reached(
     serving: Option<Representation>,
 ) -> Result<Reached, Box<Response<Body>>> {
     // Without a token the hub answers over the public Endpoints alone, each as its own URL
-    // answers an anonymous caller (T-4114, EP-87); a slug outside them answers `401` with the
-    // hub's resource metadata (`Hub::call`), which is how a client learns to log in.
+    // answers an anonymous caller (T-4114, EP-87); a slug outside them is the tool error an
+    // unknown slug is (`Hub::resolved`, T-6031).
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
@@ -478,8 +477,6 @@ pub(crate) struct Hub {
     pub(crate) caller: String,
     /// The named server this request came in by, `None` on the hub (ADR-N-043).
     pub(crate) server: Option<McpServer>,
-    /// No token on this request: an Endpoint outside `reach` is `401`, not unknown (T-4114).
-    pub(crate) anonymous: bool,
     /// No token on this request, on the hub or a named server: only
     /// [`tools::ANONYMOUS_TOOLS`] are listed and called (T-4168).
     pub(crate) reads_only: bool,
@@ -803,18 +800,13 @@ impl Hub {
         match resolve(&self.reach, slug) {
             Ok(found) => Ok(found),
             // A slug outside the list is answered the same whatever it is, with no suggestion
-            // that would vary with it (SP-20): without a token the login prompt, an internal one
-            // and one that does not exist alike.
-            Err(_) if EndpointSlug::new(slug).is_ok() => {
-                if self.anonymous {
-                    return Err(Box::new(Answer::Refused(unauthorized(&self.gateway))));
-                }
-                Err(Box::new(Answer::Json(error(
-                    id.clone(),
-                    -32602,
-                    "unknown endpoint",
-                ))))
-            }
+            // that would vary with it (SP-20): an internal one and one that does not exist
+            // alike, with a token or without. A tool error, never `401`: a client reads a
+            // `401` on a call as its session signed out (T-6031).
+            Err(_) if EndpointSlug::new(slug).is_ok() => Err(Box::new(Answer::Json(result(
+                id.clone(),
+                refused(OUTSIDE_REACH, &Value::Null),
+            )))),
             Err(candidates) => {
                 let closest = if candidates.is_empty() {
                     "none".to_owned()
@@ -1425,11 +1417,12 @@ pub(crate) fn get_endpoint_tool() -> Value {
     })
 }
 
-/// The `401` that names the hub's resource metadata (RFC 9728, AG-32).
-fn unauthorized(gateway: &Gateway) -> Response<Body> {
-    let mut response = ProblemDetails::new(401, "unauthorized", "Unauthorized")
-        .with_detail("the hub needs an access token; its authorization server is named by the resource metadata")
-        .into_response();
+/// A `401` of the session itself (a token that fails verification) names the hub's resource
+/// metadata, which is how a client learns where to sign in again (RFC 9728, AG-32, T-6031).
+fn challenged(gateway: &Gateway, mut response: Response<Body>) -> Response<Body> {
+    if response.status() != StatusCode::UNAUTHORIZED {
+        return response;
+    }
     let metadata = format!(
         "{}{HUB_PATH}/.well-known/oauth-protected-resource",
         gateway.base_url()
@@ -1443,6 +1436,10 @@ fn unauthorized(gateway: &Gateway) -> Response<Body> {
     }
     response
 }
+
+/// The one answer to a slug outside the caller's list, unknown or internal alike: it names no
+/// slug, so the bytes never vary with the one asked for (SP-20, T-6031).
+const OUTSIDE_REACH: &str = "no Endpoint you may read has that slug: list_endpoints lists the ones you may read, and an Endpoint that is not public is read after signing in with an account its Policy grants";
 
 /// The hub's protected-resource metadata (RFC 9728, ADR-N-025 section 4).
 pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response<Body> {
@@ -1483,7 +1480,6 @@ mod tests {
             reach: Arc::from(Vec::new()),
             caller: "caller".to_owned(),
             server: None,
-            anonymous,
             reads_only: anonymous,
         }
     }
@@ -1511,17 +1507,24 @@ mod tests {
         assert!(kept.is_ok_and(|arguments| arguments.is_empty()));
     }
 
-    /// T-5508, SP-20: a slug outside the caller's list is the login prompt without a token and
-    /// the same unknown Endpoint with one; a list as `endpoint` is refused; no own tool answers
-    /// a broker tool.
+    /// T-5508, T-6031, SP-20: a slug outside the caller's list is one tool error, with a token
+    /// or without, never a `401`; a list as `endpoint` is refused; no own tool answers a broker
+    /// tool.
     #[tokio::test]
     async fn route_call_refuses_a_list_and_an_endpoint_outside_the_reach() {
         let id = json!(2);
         let slug = "aaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let anonymous = hub(true).resolved(&id, slug).err().map(|answer| *answer);
-        assert!(matches!(anonymous, Some(Answer::Refused(_))));
-        let outside = hub(false).resolved(&id, slug).err().map(|answer| *answer);
-        assert_eq!(code(outside), Some(-32602));
+        for anonymous in [true, false] {
+            let outside = hub(anonymous)
+                .resolved(&id, slug)
+                .err()
+                .map(|answer| *answer);
+            let Some(Answer::Json(answer)) = outside else {
+                panic!("anonymous {anonymous}: no JSON-RPC answer");
+            };
+            assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+            assert_eq!(answer["result"]["content"][0]["text"], json!(OUTSIDE_REACH));
+        }
 
         let mut arguments = Map::new();
         arguments.insert("endpoint".to_owned(), json!(["a", "b"]));

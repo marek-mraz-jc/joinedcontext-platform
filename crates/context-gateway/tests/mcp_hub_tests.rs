@@ -247,6 +247,15 @@ async fn an_endpoint_the_token_may_not_read_is_never_listed_and_answers_like_an_
 
     let unknown = raw(app.clone(), hub(Some(&token), query(UNKNOWN))).await;
     assert_eq!(unknown.0, StatusCode::OK);
+    // A tool error the model can act on, never a JSON-RPC error or a `401` (T-6031).
+    let refusal: Value = serde_json::from_str(&unknown.2).expect("JSON");
+    assert_eq!(refusal["result"]["isError"], json!(true), "{refusal}");
+    assert!(
+        refusal["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("list_endpoints")),
+        "{refusal}"
+    );
     for outside in [CLOSED, FOREIGN, QUIET] {
         let answer = raw(app.clone(), hub(Some(&token), query(outside))).await;
         assert_eq!(answer.2, unknown.2, "{outside}");
@@ -733,15 +742,26 @@ async fn a_tool_another_endpoint_grants_is_refused_by_name_on_this_one() {
     assert!(broker.hops().is_empty());
 }
 
-/// AG-32, RFC 9728: without a token the hub lists the public Endpoints (none here, T-4114) and
-/// a call to any other says where to get a token; its metadata names the hub as the resource.
+/// AG-32, RFC 9728: without a token the hub lists the public Endpoints (none here, T-4114); a
+/// call to any other is the tool error a signed-in caller gets for an unknown slug, so a client
+/// never reads it as a signed-out session (T-6031); a token that fails verification is the
+/// `401`; the metadata names the hub as the resource.
 #[tokio::test]
 async fn a_client_without_a_token_is_told_where_to_get_one() {
     let realm = common::Realm::new();
     let app = app("http://127.0.0.1:1", &realm);
     let (status, _) = send(app.clone(), hub(None, list())).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, headers, _) = raw(app.clone(), hub(None, query(AIR))).await;
+    let (status, headers, anonymous) = raw(app.clone(), hub(None, query(AIR))).await;
+    assert_eq!(status, StatusCode::OK, "{anonymous}");
+    assert!(!headers.contains_key("www-authenticate"), "{headers:?}");
+    let token = edge(&realm);
+    let (_, _, signed_in) = raw(app.clone(), hub(Some(&token), query(UNKNOWN))).await;
+    assert_eq!(
+        anonymous, signed_in,
+        "the same bytes with a token or without"
+    );
+    let (status, headers, _) = raw(app.clone(), hub(Some("not-a-token"), query(AIR))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         headers["www-authenticate"],
