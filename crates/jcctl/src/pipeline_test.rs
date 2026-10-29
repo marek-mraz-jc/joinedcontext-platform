@@ -83,6 +83,10 @@ pub enum HarnessError {
 /// How much of a message the harness keeps after each step: a stage's sample, not its record.
 pub const STAGE_SAMPLE_BYTES: usize = 4096;
 
+/// How many distinct records a stage of the trace keeps (T-6082): enough to compare steps, few
+/// enough that a page of a thousand rows stays a short answer.
+pub const STAGE_RECORDS: usize = 5;
+
 /// The mapping that keeps what step `at` made of the message, at most [`STAGE_SAMPLE_BYTES`] of
 /// it, in metadata; a failed message keeps nothing, so a stage after the failure shows none.
 /// `root` is left alone, so the message travels untouched.
@@ -298,6 +302,13 @@ pub struct StageSample {
     /// The first of them as data, or as text when it is not JSON (cut at the harness's limit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample: Option<Value>,
+    /// The first [`STAGE_RECORDS`] distinct records this step made, in capture order, each as
+    /// [`StageSample::sample`] reads it (T-6082): a page split after the steps counts once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<Value>,
+    /// Captured messages that failed at this step, so none of them left it whole (T-6082).
+    #[serde(default)]
+    pub dropped: usize,
 }
 
 /// The input stage of the trace: what the runner read and the first message as data.
@@ -389,25 +400,40 @@ pub fn trace(captured: &[Captured]) -> TestTrace {
     trace
 }
 
-/// One [`StageSample`] per step: how many captured messages reached it whole, and the first.
+/// One [`StageSample`] per step: how many captured messages reached it whole, the distinct
+/// records it made and how many messages failed at it.
 fn stages(captured: &[Captured]) -> Vec<StageSample> {
     let count = captured
         .iter()
         .filter_map(|message| message.steps.as_ref().map(Vec::len))
         .max()
         .unwrap_or(0);
+    let as_data =
+        |text: &str| serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()));
     (0..count)
         .map(|step| {
             let seen: Vec<&str> = captured
                 .iter()
                 .filter_map(|message| message.steps.as_ref()?.get(step)?.as_deref())
                 .collect();
+            let mut distinct: Vec<&str> = Vec::new();
+            for text in &seen {
+                if distinct.len() < STAGE_RECORDS && !distinct.contains(text) {
+                    distinct.push(text);
+                }
+            }
+            let at = step.to_string();
             StageSample {
                 step,
                 reached: seen.len(),
-                sample: seen.first().map(|text| {
-                    serde_json::from_str(text).unwrap_or_else(|_| Value::String((*text).to_owned()))
-                }),
+                sample: seen.first().map(|text| as_data(text)),
+                records: distinct.into_iter().map(as_data).collect(),
+                dropped: captured
+                    .iter()
+                    .filter(|message| {
+                        message.error.is_some() && message.step.as_deref() == Some(&at)
+                    })
+                    .count(),
             }
         })
         .collect()
@@ -977,10 +1003,13 @@ mod tests {
             StageSample {
                 step: 1,
                 reached: 0,
-                sample: None
+                sample: None,
+                records: vec![],
+                dropped: 1,
             }
         );
         assert_eq!(traced.errors[0].step, Some(1));
+        assert_eq!(traced.stages[0].dropped, 0);
         // A step's text that is not JSON is shown as text.
         let text = [posted(
             r#"{"error":null,"input":"a","output":{},"steps":["plain words"]}"#,
@@ -992,6 +1021,39 @@ mod tests {
                 .stages
                 .is_empty()
         );
+    }
+
+    /// T-6082: a stage keeps up to five distinct records, so a page split into many entities
+    /// after the steps shows its snapshot once, and counts each message that failed at it.
+    #[test]
+    fn a_stage_keeps_five_distinct_records_and_counts_the_messages_it_dropped() {
+        let row = |n: usize| Captured {
+            input: Some(n.to_string()),
+            output: Some(json!({})),
+            steps: Some(vec![Some(format!("{{\"n\":{n}}}")), Some("page".into())]),
+            ..Captured::default()
+        };
+        let mut captured: Vec<Captured> = (0..8).map(row).collect();
+        captured.push(row(0));
+        captured.push(Captured {
+            input: Some("bad".into()),
+            error: Some("failed assignment (line 2): no n".into()),
+            step: Some("1".into()),
+            steps: Some(vec![Some("{\"n\":\"bad\"}".into()), None]),
+            ..Captured::default()
+        });
+        let stages = trace(&captured).stages;
+        assert_eq!(stages[0].reached, 10);
+        assert_eq!(stages[0].records.len(), STAGE_RECORDS);
+        assert_eq!(stages[0].records[4], json!({ "n": 4 }));
+        assert_eq!(stages[0].dropped, 0);
+        assert_eq!(
+            stages[1].records,
+            vec![json!("page")],
+            "one page, shown once"
+        );
+        assert_eq!(stages[1].reached, 9);
+        assert_eq!(stages[1].dropped, 1);
     }
 
     #[test]
