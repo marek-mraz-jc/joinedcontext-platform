@@ -15,6 +15,7 @@
     "DataOffer",
     "DataSource",
     "DataSpaceParticipant",
+    "DelegationPolicy",
     "Endpoint",
     "Environment",
     "Group",
@@ -49,9 +50,14 @@
       "verb": "read"
     },
     {
-      "description": "Find spaces, endpoints, and data models matching search keywords",
+      "description": "Find spaces, endpoints, models and open datasets by keywords",
       "name": "jc_catalog_search",
       "verb": "read"
+    },
+    {
+      "description": "Opens the change requests (or workspace commits) of an unchanged jc_change_plan plan; 409 when an object moved since. Nothing goes live until a person approves each in the Portal, so apply what the person asked for without asking again",
+      "name": "jc_change_apply",
+      "verb": "propose"
     },
     {
       "description": "Approves and merges a change proposal",
@@ -69,9 +75,19 @@
       "verb": "read"
     },
     {
+      "description": "Dry-runs one or more changes of any kind (nothing saved): the diff, the verdict and a planId valid 30 minutes; a failing check answers 422 naming each field",
+      "name": "jc_change_plan",
+      "verb": "propose"
+    },
+    {
       "description": "Rejects a change proposal with a reason and closes its merge request",
       "name": "jc_change_reject",
       "verb": "approve"
+    },
+    {
+      "description": "Plans the undo of a merged Change, every file back to before it, for jc_change_apply; 409 names files changed since",
+      "name": "jc_change_revert_plan",
+      "verb": "propose"
     },
     {
       "description": "The catalogues this project publishes to, and what each endpoint's publication is doing",
@@ -79,14 +95,14 @@
       "verb": "read"
     },
     {
-      "description": "Dry-runs a DataSource manifest and probes the external feed",
-      "name": "jc_datasource_check",
+      "description": "Reads one Endpoint's entities as you, current or history (temporal), with type, id, q, attrs, a geo-query, count and paging",
+      "name": "jc_data_query",
       "verb": "read"
     },
     {
-      "description": "Proposes creation or update of a DataSource manifest, from a draft when one is named",
-      "name": "jc_datasource_propose",
-      "verb": "propose"
+      "description": "Dry-runs a DataSource manifest and probes the external feed",
+      "name": "jc_datasource_check",
+      "verb": "read"
     },
     {
       "description": "Discards a shared draft (AG-61)",
@@ -139,14 +155,14 @@
       "verb": "read"
     },
     {
-      "description": "Infers a draft LinkML data model from sample data bytes or text",
-      "name": "jc_model_infer",
+      "description": "People with a role in this project: user id for a RoleBinding, name, roles",
+      "name": "jc_member_list",
       "verb": "read"
     },
     {
-      "description": "Proposes creation or update of a DataModel manifest, from a draft when one is named",
-      "name": "jc_model_propose",
-      "verb": "propose"
+      "description": "Infers a draft LinkML data model from sample data bytes or text",
+      "name": "jc_model_infer",
+      "verb": "read"
     },
     {
       "description": "One DataModel's LinkML, as the repository holds it",
@@ -194,17 +210,22 @@
       "verb": "propose"
     },
     {
+      "description": "A pipeline's newest runs with what each sent, rejected and failed, and one run's log a page at a time: each record's outcome and why, e.g. the source read that failed or the write the gateway refused",
+      "name": "jc_pipeline_logs",
+      "verb": "read"
+    },
+    {
       "description": "What the runner has counted for one pipeline: state, messages, errors and latency",
       "name": "jc_pipeline_metrics",
       "verb": "read"
     },
     {
-      "description": "Proposes creation or update of a Pipeline manifest, from a draft when one is named",
-      "name": "jc_pipeline_propose",
+      "description": "Queues one run of a queued pipeline now, outside its schedule, and answers its id; it waits its turn in its lane. 409 while its run is in the runner or for a pipeline fed by pushes. Needs propose and approve on Pipeline (a steward); each run is an activity event `pipeline.run`",
+      "name": "jc_pipeline_run",
       "verb": "propose"
     },
     {
-      "description": "Reads the first records of a DataSource, or of a sample file or URL, on the project's runner: the records, their fields and the count (the workbench's sample step, ADR-N-034)",
+      "description": "Reads the first records of a DataSource, sample file or URL on the project's runner: the records, their fields and the count",
       "name": "jc_pipeline_sample_source",
       "verb": "propose"
     },
@@ -214,12 +235,12 @@
       "verb": "propose"
     },
     {
-      "description": "Runs a candidate pipeline's steps over a sample on the project's runner without writing: each record as it would be written and every failure at its step and line (the workbench's mapped output, ADR-N-034)",
+      "description": "Runs a candidate pipeline's steps over a sample on the project's runner without writing: each record as it would be written and every failure at its step and line",
       "name": "jc_pipeline_try_mapping",
       "verb": "propose"
     },
     {
-      "description": "Checks records against the target space's data model, the target Endpoint's Policies and view, and the lifetime: a verdict per record with each finding and its expiresAt (the workbench's validation step, PL-59, ADR-N-034)",
+      "description": "Checks records against the target space's data model, the target Endpoint's Policies and view, and the lifetime: a verdict per record with each finding and its expiresAt",
       "name": "jc_pipeline_validate",
       "verb": "read"
     },
@@ -319,11 +340,6 @@
       "verb": "propose"
     },
     {
-      "description": "Proposes creation or update of a ContextSpace manifest, from a draft when one is named",
-      "name": "jc_space_propose",
-      "verb": "propose"
-    },
-    {
       "description": "Stops the loop and proposes removing the SyncSource; what it imported stays",
       "name": "jc_syncsource_detach",
       "verb": "delete"
@@ -401,9 +417,12 @@
     "/api/v1/projects/{project}/{plural}": {
       "GET": [
         "continue",
+        "cursor",
         "fieldSelector",
+        "filter",
         "labelSelector",
         "limit",
+        "orderBy",
         "revision",
         "workspace"
       ],
@@ -432,9 +451,9 @@
     }
   },
   "source": {
-    "commit": "6422ec60726c1ab3084509278bf98d24b75e76f5",
+    "commit": "23fad55483603809c989fc76882e363311bd874c",
     "file": "ui/openapi.json",
     "repository": "marek-mraz/joinedcontext-portal",
-    "sha256": "8226367be96b83ca47d0b93d97a73c5a62b28c74eb328c8e5533a1b6cdc67bd6"
+    "sha256": "3adb377e9629243ea0c58b577d40ee254d98f9a128e9f5c04013b3e221bb67ee"
   }
 }

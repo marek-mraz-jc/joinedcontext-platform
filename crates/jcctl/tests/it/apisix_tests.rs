@@ -1,0 +1,1114 @@
+use crate::common;
+
+use common::*;
+use jcctl::apisix::{render, Settings, EDGE_CLIENT_SECRET, END_MARKER, OIDC_SESSION_SECRET};
+use serde_json::Value;
+
+fn settings() -> Settings {
+    Settings::new("city.example.com", "prod", "prod")
+}
+
+fn rendered(dir: &std::path::Path) -> String {
+    render(&load(dir), &settings())
+}
+
+fn parsed(yaml: &str) -> Value {
+    serde_norway::from_str(yaml).expect("the rendered configuration is valid YAML")
+}
+
+fn document(dir: &std::path::Path) -> Value {
+    parsed(rendered(dir).trim_end_matches("#END\n"))
+}
+
+fn find<'a>(document: &'a Value, section: &str, id: &str) -> &'a Value {
+    document[section]
+        .as_array()
+        .unwrap_or_else(|| panic!("{section} is an array"))
+        .iter()
+        .find(|item| item["id"] == id)
+        .unwrap_or_else(|| panic!("{section} has no {id}"))
+}
+
+fn has(document: &Value, section: &str, id: &str) -> bool {
+    document[section]
+        .as_array()
+        .unwrap_or_else(|| panic!("{section} is an array"))
+        .iter()
+        .any(|item| item["id"] == id)
+}
+
+/// The plugin table of a route, inline or through its shared plugin config.
+fn plugins_of<'a>(document: &'a Value, route_id: &str) -> &'a Value {
+    let route = find(document, "routes", route_id);
+    match route["plugin_config_id"].as_str() {
+        Some(config) => &find(document, "plugin_configs", config)["plugins"],
+        None => &route["plugins"],
+    }
+}
+
+const FORGEABLE_HEADERS: [&str; 6] = [
+    "NGSILD-Tenant",
+    "X-Userinfo",
+    "X-Access-Token",
+    "X-Allowed-Scope-Ids",
+    "X-Endpoint-Slug",
+    "X-Consumer-Identity",
+];
+
+const SERVICE_APP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: air-quality-today
+  namespace: ovzdusie
+spec:
+  kind: ui-rust
+  source:
+    path: apps/air-quality-today
+  build: {}
+  visibility: internal
+"#;
+
+const STATIC_APP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: air-quality-map
+  namespace: ovzdusie
+spec:
+  kind: static
+  source:
+    path: apps/air-quality-map
+  build: {}
+  visibility: project
+"#;
+
+const PUBLIC_FULLSTACK_APP: &str = r#"apiVersion: joinedcontext.com/v1alpha1
+kind: App
+metadata:
+  name: hsl-transport
+  namespace: doprava
+spec:
+  kind: fullstack
+  source:
+    path: apps/hsl-transport
+  build: {}
+  visibility: public
+"#;
+
+fn repo_with_three_apps(test_name: &str) -> std::path::PathBuf {
+    let dir = demo_repo(test_name);
+    write(
+        &dir,
+        "projects/ovzdusie/apps/air-quality-today/app.yaml",
+        SERVICE_APP,
+    );
+    write(
+        &dir,
+        "projects/ovzdusie/apps/air-quality-map/app.yaml",
+        STATIC_APP,
+    );
+    write(
+        &dir,
+        "projects/doprava/apps/hsl-transport/app.yaml",
+        PUBLIC_FULLSTACK_APP,
+    );
+    dir
+}
+
+/// Without the terminal marker APISIX commits nothing and keeps serving the previous
+/// routing table, silently (stack verdict S7).
+#[test]
+fn the_last_line_is_the_literal_end_marker() {
+    let dir = repo_with_three_apps("apisix-end");
+    let config = rendered(&dir);
+
+    assert!(config.ends_with("\n#END\n"), "{config}");
+    assert_eq!(
+        config.lines().last(),
+        Some(END_MARKER),
+        "the marker must be the final line"
+    );
+    assert_eq!(
+        config.matches("\n#END").count(),
+        1,
+        "exactly one marker, at the end"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// APISIX refuses the whole file if it does not parse, so the renderer's output has to be
+/// YAML even with the Lua header-stripping function inside it.
+#[test]
+fn the_rendered_configuration_is_valid_yaml_with_the_documented_sections() {
+    let dir = repo_with_three_apps("apisix-yaml");
+    let document = document(&dir);
+
+    for section in ["routes", "upstreams", "plugin_configs"] {
+        assert!(
+            document[section].is_array(),
+            "{section} is missing from the rendered configuration"
+        );
+    }
+
+    let gateway = find(&document, "upstreams", "upstream-context-gateway");
+    assert!(gateway["nodes"]["context-gateway.prod.svc.cluster.local:8080"] == 1);
+    assert_eq!(gateway["timeout"]["read"], 300);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Portal lives on `portal.{host}`; the shared surfaces stay on the apex (ADR-N-019).
+#[test]
+fn the_portal_routes_carry_the_portal_host_and_the_surfaces_the_apex() {
+    let dir = demo_repo("apisix-hosts");
+    let document = document(&dir);
+
+    for id in ["portal-ui", "portal-api"] {
+        assert_eq!(
+            find(&document, "routes", id)["host"],
+            "portal.city.example.com",
+            "{id}"
+        );
+    }
+    for id in [
+        "gitea-forge",
+        "well-known",
+        "context-space",
+        "context-endpoint",
+        "apex-redirect",
+    ] {
+        assert_eq!(
+            find(&document, "routes", id)["host"],
+            "city.example.com",
+            "{id}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The apex root sends people to the Portal: a redirect route under every other route on
+/// the apex, so it answers only what no surface claimed (ADR-N-019).
+#[test]
+fn the_apex_redirect_is_the_lowest_priority_route_to_the_portal() {
+    let dir = repo_with_three_apps("apisix-apex");
+    let document = document(&dir);
+
+    let redirect = find(&document, "routes", "apex-redirect");
+    assert_eq!(redirect["uri"], "/*");
+    assert_eq!(
+        redirect["plugins"]["redirect"]["uri"],
+        "https://portal.city.example.com/"
+    );
+    assert_eq!(redirect["plugins"]["redirect"]["ret_code"], 302);
+    assert!(
+        redirect.get("upstream_id").is_none(),
+        "a redirect reaches no upstream"
+    );
+
+    let lowest = redirect["priority"].as_u64().expect("a numeric priority");
+    for route in document["routes"].as_array().expect("routes") {
+        if route["id"] != "apex-redirect" {
+            assert!(
+                route["priority"].as_u64().expect("a numeric priority") > lowest,
+                "{} must sit above the apex redirect",
+                route["id"]
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The endpoint surface must sit above the context space surface, and both above the
+/// catch-all that serves the Portal UI (Deployment/10 section 3).
+#[test]
+fn route_priorities_put_the_specific_surfaces_above_the_catch_all() {
+    let dir = demo_repo("apisix-priority");
+    let document = document(&dir);
+
+    let priority = |id: &str| {
+        find(&document, "routes", id)["priority"]
+            .as_u64()
+            .expect("a numeric priority")
+    };
+
+    assert_eq!(priority("portal-ui"), 1);
+    assert!(priority("context-space") > priority("portal-api"));
+    assert!(priority("context-endpoint") > priority("context-space"));
+
+    let endpoint = find(&document, "routes", "context-endpoint");
+    assert_eq!(endpoint["uri"], "/api/endpoint/*");
+    assert_eq!(endpoint["upstream_id"], "upstream-context-gateway");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every app, whatever its kind, gets its own route behind the edge login, the whole of its
+/// own host (AP-26, AP-133).
+#[test]
+fn every_app_kind_gets_a_route_with_the_edge_login() {
+    let dir = repo_with_three_apps("apisix-apps");
+    let document = document(&dir);
+
+    for name in ["air-quality-today", "air-quality-map", "hsl-transport"] {
+        let route = find(&document, "routes", &format!("app-{name}"));
+        assert_eq!(route["uri"], "/*");
+        assert_eq!(route["host"], format!("{name}.apps.city.example.com"));
+        assert!(
+            route.get("plugin_config_id").is_none(),
+            "an app route carries its plugins inline"
+        );
+
+        let oidc = &route["plugins"]["openid-connect"];
+        assert_eq!(oidc["client_id"], "edge", "{name}");
+        assert_eq!(oidc["bearer_only"], false, "{name}");
+        assert_eq!(oidc["use_jwks"], false, "{name}");
+        assert_eq!(oidc["use_pkce"], true, "{name}");
+        assert_eq!(oidc["ssl_verify"], true, "{name}");
+        assert_eq!(oidc["set_userinfo_header"], true, "{name}");
+        assert_eq!(oidc["set_access_token_header"], true, "{name}");
+        assert_eq!(oidc["set_id_token_header"], false, "{name}");
+        assert_eq!(
+            oidc["discovery"],
+            "https://idm.city.example.com/realms/prod/.well-known/openid-configuration"
+        );
+        assert_eq!(route["plugins"]["request-id"]["include_in_response"], true);
+        assert_eq!(
+            route["plugins"]["response-rewrite"]["headers"]["set"]["X-Content-Type-Options"],
+            "nosniff"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `public` app lets an anonymous request through to the app; every other visibility
+/// sends the browser to Keycloak (AP-28).
+#[test]
+fn a_public_app_passes_anonymous_requests_and_the_others_require_login() {
+    let dir = repo_with_three_apps("apisix-visibility");
+    let document = document(&dir);
+
+    let unauth = |name: &str| {
+        find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"]
+            ["unauth_action"]
+            .clone()
+    };
+    assert_eq!(unauth("hsl-transport"), "pass");
+    assert_eq!(unauth("air-quality-today"), "auth");
+    assert_eq!(unauth("air-quality-map"), "auth");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The session cookie, the callback and the logout of an app route follow the app's own
+/// name and path, so one app's session is not another's; the `session` object takes flat
+/// keys, a nested `cookie` block is ignored by APISIX (AP-29).
+#[test]
+fn the_cookie_name_path_and_the_logout_path_follow_the_app_name() {
+    let dir = repo_with_three_apps("apisix-cookie");
+    let document = document(&dir);
+
+    for name in ["air-quality-today", "air-quality-map", "hsl-transport"] {
+        let oidc = &find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"];
+        let session = &oidc["session"];
+        assert_eq!(session["cookie_name"], format!("__Host-jc_edge_app_{name}"));
+        assert_eq!(
+            session["cookie_path"], "/",
+            "host-only on its own host (AP-29)"
+        );
+        assert_eq!(session["cookie_secure"], true);
+        assert_eq!(session["cookie_http_only"], true);
+        assert_eq!(session["cookie_same_site"], "Lax");
+        assert_eq!(session["idling_timeout"], 3600);
+        assert_eq!(session["rolling_timeout"], 3600);
+        assert_eq!(session["absolute_timeout"], 36000);
+        assert!(session.get("cookie").is_none(), "no nested cookie block");
+        assert_eq!(oidc["logout_path"], "/logout");
+        assert_eq!(
+            oidc["redirect_uri"],
+            format!("https://{name}.apps.city.example.com/callback")
+        );
+        assert_eq!(
+            oidc["post_logout_redirect_uri"],
+            format!("https://{name}.apps.city.example.com/")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `ui-rust` app, or one written with the old `fullstack`, upstreams to its own pod on 8080;
+/// a `ui` (`static`) app is served by the Portal and gets no upstream of its own (AP-26, AP-124).
+#[test]
+fn app_upstreams_point_at_the_pod_or_the_portal_by_kind() {
+    let dir = repo_with_three_apps("apisix-upstreams");
+    let document = document(&dir);
+
+    for name in ["air-quality-today", "hsl-transport"] {
+        let route = find(&document, "routes", &format!("app-{name}"));
+        assert_eq!(route["upstream_id"], format!("upstream-app-{name}"));
+        let pod = find(&document, "upstreams", &format!("upstream-app-{name}"));
+        assert!(pod["nodes"][format!("app-{name}.prod.svc.cluster.local:8080")] == 1);
+    }
+
+    let static_route = find(&document, "routes", "app-air-quality-map");
+    assert_eq!(static_route["upstream_id"], "upstream-portal");
+    assert!(
+        !has(&document, "upstreams", "upstream-app-air-quality-map"),
+        "a static app has no upstream of its own"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The oauth2-proxy sidecar is gone: nothing in the routing table points at its port.
+#[test]
+fn no_route_or_upstream_mentions_the_old_sidecar_port() {
+    let dir = repo_with_three_apps("apisix-no-sidecar");
+    let config = rendered(&dir);
+
+    assert!(!config.contains("4180"), "{config}");
+    assert!(!config.contains("oauth2-proxy"), "{config}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Portal routes run the same login front as the apps, with the cookie scoped to their
+/// own host (ADR-N-019).
+#[test]
+fn the_portal_and_the_shared_surface_log_in_at_the_edge() {
+    let dir = demo_repo("apisix-portal-login");
+    let document = document(&dir);
+
+    let ui = &plugins_of(&document, "portal-ui")["openid-connect"];
+    assert_eq!(ui["client_id"], "edge");
+    assert_eq!(ui["bearer_only"], false);
+    assert_eq!(ui["use_jwks"], false);
+    assert_eq!(ui["use_pkce"], true);
+    assert_eq!(ui["unauth_action"], "auth");
+    assert_eq!(
+        ui["redirect_uri"],
+        "https://portal.city.example.com/callback"
+    );
+    assert_eq!(ui["logout_path"], "/logout");
+    assert_eq!(
+        ui["post_logout_redirect_uri"],
+        "https://portal.city.example.com/"
+    );
+    assert_eq!(ui["session"]["cookie_name"], "__Host-jc_edge");
+    assert_eq!(ui["session"]["cookie_path"], "/");
+
+    // A bearer caller passes through and the Portal verifies the token itself.
+    let api = &plugins_of(&document, "portal-api")["openid-connect"];
+    assert_eq!(api["client_id"], "edge");
+    assert_eq!(api["bearer_only"], false);
+    assert_eq!(
+        api["use_jwks"], false,
+        "a bearer token the plugin cannot verify must reach unauth_action, not a 401"
+    );
+    assert_eq!(api["unauth_action"], "pass");
+    assert_eq!(api["session"]["cookie_name"], "__Host-jc_edge");
+    assert_eq!(api["set_access_token_header"], true);
+
+    // No App is served on a shared surface any more (ADR-N-037).
+    assert!(!has(&document, "routes", "apps-surface"));
+    assert!(!has(&document, "plugin_configs", "pc-apps-surface"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every header a caller could use to forge a tenant, an identity or an authorization
+/// claim is cleared before the edge sets its own, on every route that reaches an upstream
+/// with identity headers (Deployment/10 section 4, AP-28).
+#[test]
+fn every_login_and_context_route_strips_every_forgeable_header() {
+    let dir = repo_with_three_apps("apisix-headers");
+    let document = document(&dir);
+
+    for id in [
+        "portal-ui",
+        "portal-api",
+        "context-space",
+        "context-endpoint",
+        "app-air-quality-today",
+        "app-air-quality-map",
+        "app-hsl-transport",
+    ] {
+        let plugins = plugins_of(&document, id);
+        let lua = plugins["serverless-pre-function"]["functions"][0]
+            .as_str()
+            .unwrap_or_else(|| panic!("{id} has the stripping function"));
+        for header in FORGEABLE_HEADERS {
+            assert!(lua.contains(header), "{id} does not clear {header}");
+        }
+        assert_eq!(plugins["serverless-pre-function"]["phase"], "rewrite");
+    }
+
+    // The context surfaces never run a code flow: the tenant surface takes bearer tokens
+    // only, the public endpoint surface lets an anonymous caller through to the gateway's
+    // own PEP.
+    let firewall = &plugins_of(&document, "context-space")["openid-connect"];
+    assert_eq!(firewall["client_id"], "edge");
+    assert_eq!(firewall["bearer_only"], true);
+    assert_eq!(firewall["use_jwks"], true);
+    assert!(
+        firewall.get("client_secret").is_none(),
+        "bearer_only needs no client secret"
+    );
+    let surface = &plugins_of(&document, "context-endpoint")["openid-connect"];
+    assert_eq!(surface["client_id"], "edge");
+    assert_eq!(surface["bearer_only"], false);
+    assert_eq!(surface["unauth_action"], "pass");
+    assert_eq!(surface["use_jwks"], true);
+    assert_eq!(surface["ssl_verify"], true);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The secrets are placeholders in Git; the deployment's ConfigMap template turns them
+/// into APISIX environment references (AP-27).
+#[test]
+fn the_secret_placeholders_appear_verbatim_and_no_secret_value_does() {
+    let dir = repo_with_three_apps("apisix-placeholders");
+    let config = rendered(&dir);
+    let document = document(&dir);
+
+    assert_eq!(EDGE_CLIENT_SECRET, "${EDGE_CLIENT_SECRET}");
+    assert_eq!(OIDC_SESSION_SECRET, "${OIDC_SESSION_SECRET}");
+    assert!(config.contains("${EDGE_CLIENT_SECRET}"), "{config}");
+    assert!(config.contains("${OIDC_SESSION_SECRET}"), "{config}");
+
+    for id in ["portal-ui", "portal-api", "app-air-quality-today"] {
+        let oidc = &plugins_of(&document, id)["openid-connect"];
+        assert_eq!(oidc["client_secret"], "${EDGE_CLIENT_SECRET}", "{id}");
+        assert_eq!(oidc["session"]["secret"], "${OIDC_SESSION_SECRET}", "{id}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_same_repository_renders_byte_identical_output() {
+    let dir = repo_with_three_apps("apisix-deterministic");
+
+    assert_eq!(rendered(&dir), rendered(&dir));
+    assert!(rendered(&dir).ends_with("\n#END\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- T-2523: the edge cases of `render` and `routed_apps` (AP-26…AP-29) ---
+
+/// An App manifest of `name` in `project` with `spec` lines as given.
+fn app(dir: &std::path::Path, project: &str, name: &str, spec: &str) {
+    write(
+        dir,
+        &format!("projects/{project}/apps/{name}/app.yaml"),
+        &format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: {name}\n  namespace: {project}\nspec:\n{spec}"
+        ),
+    );
+}
+
+fn unauth(document: &Value, name: &str) -> Value {
+    find(document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"]["unauth_action"]
+        .clone()
+}
+
+/// AP-26: one name is one route and one upstream, however many manifests carry it.
+#[test]
+fn two_apps_of_one_name_render_one_route_and_one_upstream() {
+    let dir = demo_repo("apisix-same-name");
+    app(
+        &dir,
+        "ovzdusie",
+        "board",
+        "  kind: ui-rust\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+    );
+    app(
+        &dir,
+        "doprava",
+        "board",
+        "  kind: ui-rust\n  source: { path: apps/board }\n  build: {}\n  visibility: internal\n",
+    );
+    let document = document(&dir);
+    let count = |section: &str, id: &str| {
+        document[section]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .filter(|item| item["id"] == id)
+            .count()
+    };
+    assert_eq!(count("routes", "app-board"), 1);
+    assert_eq!(count("upstreams", "upstream-app-board"), 1);
+}
+
+/// AP-26: only the exact word `public` lets an anonymous request through; every other value,
+/// or none, asks for a login.
+#[test]
+fn an_app_visibility_that_is_not_exactly_public_requires_login() {
+    let dir = demo_repo("apisix-visibility-words");
+    for (name, visibility) in [
+        ("upper", "  visibility: Public\n"),
+        ("spaced", "  visibility: \" public\"\n"),
+        ("unknown", "  visibility: everyone\n"),
+        ("absent", ""),
+        ("listed", "  visibility: [public]\n"),
+    ] {
+        app(
+            &dir,
+            "ovzdusie",
+            name,
+            &format!(
+                "  kind: static\n  source: {{ path: apps/{name} }}\n  build: {{}}\n{visibility}"
+            ),
+        );
+    }
+    let document = document(&dir);
+    for name in ["upper", "spaced", "unknown", "absent", "listed"] {
+        assert_eq!(unauth(&document, name), "auth", "{name}");
+    }
+}
+
+/// AP-14: an app whose kind is unknown or missing is served by the Portal, never given a pod
+/// upstream of its own.
+#[test]
+fn an_app_of_unknown_or_missing_kind_is_served_by_the_portal() {
+    let dir = demo_repo("apisix-kinds");
+    app(
+        &dir,
+        "ovzdusie",
+        "odd",
+        "  kind: lambda\n  source: { path: apps/odd }\n  build: {}\n",
+    );
+    app(
+        &dir,
+        "ovzdusie",
+        "bare",
+        "  source: { path: apps/bare }\n  build: {}\n",
+    );
+    let document = document(&dir);
+    for name in ["odd", "bare"] {
+        assert_eq!(
+            find(&document, "routes", &format!("app-{name}"))["upstream_id"],
+            "upstream-portal",
+            "{name}"
+        );
+        assert!(
+            !has(&document, "upstreams", &format!("upstream-app-{name}")),
+            "{name}"
+        );
+    }
+}
+
+/// AP-26: an installation with no apps renders the Portal and the shared surface, and no route
+/// of an app.
+#[test]
+fn zero_app_manifests_still_renders_the_baseline_routes() {
+    let dir = demo_repo("apisix-no-apps");
+    let document = document(&dir);
+    let routes = document["routes"].as_array().expect("routes");
+    assert!(!routes.is_empty());
+    assert!(
+        routes
+            .iter()
+            .all(|r| !r["id"].as_str().unwrap_or_default().starts_with("app-")),
+        "{routes:?}"
+    );
+    assert!(
+        rendered(&dir).ends_with(END_MARKER)
+            || rendered(&dir).ends_with(&format!("{END_MARKER}\n"))
+    );
+}
+
+/// AP-29: every app's login is its own: cookie, callback and logout never name another app.
+#[test]
+fn two_apps_never_share_a_cookie_callback_or_logout() {
+    let dir = repo_with_three_apps("apisix-own-session");
+    let document = document(&dir);
+    let names = ["air-quality-today", "air-quality-map", "hsl-transport"];
+    let mut cookies = std::collections::BTreeSet::new();
+    for name in names {
+        let oidc = &find(&document, "routes", &format!("app-{name}"))["plugins"]["openid-connect"];
+        let text = oidc.to_string();
+        for other in names.iter().filter(|other| **other != name) {
+            assert!(
+                !text.contains(&format!("{other}.apps.")),
+                "{name} names {other}: {text}"
+            );
+        }
+        cookies.insert(
+            text.split("__Host-jc_edge_app_")
+                .nth(1)
+                .map(|rest| rest.chars().take_while(|c| *c != '"').collect::<String>()),
+        );
+    }
+    assert_eq!(cookies.len(), names.len());
+}
+
+/// AP-26: the browser origins the edge answers are the installation's subdomains and nothing
+/// that only looks like one.
+#[test]
+fn the_cors_origin_pattern_admits_subdomains_only() {
+    let dir = demo_repo("apisix-cors");
+    let text = rendered(&dir);
+    let pattern = text
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("- ")
+                .filter(|l| l.contains("https://.+"))
+        })
+        .map(|l| {
+            l.trim_matches(|c| c == '\'' || c == '"')
+                .replace("\\\\", "\\")
+        })
+        .unwrap_or_else(|| panic!("no origin pattern in the render"));
+    let origin = regex::Regex::new(&pattern).expect("the pattern compiles");
+    assert!(origin.is_match("https://portal.city.example.com"));
+    for foreign in [
+        "https://city.example.com.evil.org",
+        "https://evil-cityXexample.com",
+        "https://portalXcity.example.com.attacker.net",
+        "http://portal.city.example.com",
+        "https://city.example.com",
+    ] {
+        assert!(!origin.is_match(foreign), "{foreign} admitted by {pattern}");
+    }
+}
+
+/// AP-28: the forgeable headers are stripped on an app route of every kind and visibility,
+/// including one the repository could only half describe.
+#[test]
+fn an_app_of_unknown_kind_still_strips_every_forgeable_header() {
+    let dir = demo_repo("apisix-odd-strip");
+    app(
+        &dir,
+        "ovzdusie",
+        "odd",
+        "  kind: lambda\n  source: { path: apps/odd }\n  build: {}\n  visibility: public\n",
+    );
+    let document = document(&dir);
+    let strip = plugins_of(&document, "app-odd")["serverless-pre-function"].to_string();
+    for header in FORGEABLE_HEADERS {
+        assert!(strip.contains(header), "{header} is not stripped: {strip}");
+    }
+}
+
+/// The routes of the three Apps, by name: the App, its endpoint if any, its redirect.
+const APP_NAMES: [&str; 3] = ["air-quality-today", "air-quality-map", "hsl-transport"];
+
+/// AP-133: an App's routes sit on its own host, and the apex matches `/apps/` only to send the
+/// browser there.
+#[test]
+fn every_app_route_is_bound_to_its_own_host() {
+    let dir = repo_with_endpoints("apisix-hosts-per-app");
+    let document = document(&dir);
+    for route in document["routes"].as_array().expect("routes") {
+        let id = route["id"].as_str().unwrap_or_default();
+        let text = route.to_string();
+        if !id.starts_with("app-") {
+            assert!(
+                !text.contains("/apps/"),
+                "{id} matches an App's old path: {text}"
+            );
+            assert!(
+                !text.contains(".apps."),
+                "{id} reaches an App's host: {text}"
+            );
+            continue;
+        }
+        let name = APP_NAMES
+            .iter()
+            .find(|name| {
+                [
+                    format!("app-{name}"),
+                    format!("app-{name}-endpoint"),
+                    format!("app-{name}-moved"),
+                ]
+                .contains(&id.to_owned())
+            })
+            .unwrap_or_else(|| panic!("{id} is no route of a known App"));
+        if id.ends_with("-moved") {
+            assert_eq!(route["host"], "city.example.com", "{id}");
+        } else {
+            assert_eq!(
+                route["host"],
+                format!("{name}.apps.city.example.com"),
+                "{id}"
+            );
+        }
+        for other in APP_NAMES.iter().filter(|other| *other != name) {
+            assert!(
+                !text.contains(&format!("{other}.apps.")),
+                "{id} names {other}"
+            );
+            assert!(
+                !text.contains(&format!("/apps/{other}")),
+                "{id} names {other}"
+            );
+        }
+    }
+}
+
+const MAP_SLUG: &str = "m4pq7ge2xdv6ksb3ncf5arw2yz";
+const HSL_SLUG: &str = "h5lq7ge2xdv6ksb3ncf5arw2yt";
+
+/// The three Apps, each project's App endpoint where the Portal would render it: the map's
+/// and the transport's hold a slug in Git, `air-quality-today`'s none.
+fn repo_with_endpoints(test_name: &str) -> std::path::PathBuf {
+    let dir = repo_with_three_apps(test_name);
+    write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    for (project, name, slug) in [
+        ("ovzdusie", "air-quality-map", MAP_SLUG),
+        ("doprava", "hsl-transport", HSL_SLUG),
+    ] {
+        write(
+            &dir,
+            &format!("projects/{project}/spaces/ovzdusie/endpoints/app-{name}.yaml"),
+            &ENDPOINT
+                .replace("name: public-air", &format!("name: app-{name}"))
+                .replace("namespace: ovzdusie", &format!("namespace: {project}"))
+                .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", slug),
+        );
+    }
+    // An Endpoint of the right name in the wrong project is not the map's.
+    write(
+        &dir,
+        "projects/doprava/spaces/ovzdusie/endpoints/app-air-quality-map.yaml",
+        &ENDPOINT
+            .replace("name: public-air", "name: app-air-quality-map")
+            .replace("namespace: ovzdusie", "namespace: doprava")
+            .replace("zt4qm7ge2xdv6ksb3ncf5arw2y", "w7ongq7ge2xdv6ksb3ncf5arw2"),
+    );
+    dir
+}
+
+/// A `ui` App is the Portal's static host rewritten to its folder; a `ui-rust` App is its own
+/// pod, unrewritten. Both answer the whole of their host (AP-133).
+#[test]
+fn a_static_app_is_rewritten_to_its_folder_and_a_pod_app_is_not() {
+    let dir = repo_with_three_apps("apisix-static-rewrite");
+    let document = document(&dir);
+    let map = find(&document, "routes", "app-air-quality-map");
+    assert_eq!(map["upstream_id"], "upstream-portal");
+    assert_eq!(
+        map["plugins"]["proxy-rewrite"]["regex_uri"],
+        serde_json::json!(["^/(.*)$", "/apps/air-quality-map/$1"])
+    );
+    let hsl = find(&document, "routes", "app-hsl-transport");
+    assert_eq!(hsl["upstream_id"], "upstream-app-hsl-transport");
+    assert!(hsl["plugins"].get("proxy-rewrite").is_none(), "{hsl}");
+}
+
+/// AP-133: an App's host routes its own endpoint's slugs to the gateway and no other; an App
+/// whose endpoint slug is not in Git gets no endpoint route at all.
+#[test]
+fn an_app_host_routes_its_own_endpoint_slugs_only() {
+    let dir = repo_with_endpoints("apisix-app-endpoint");
+    let document = document(&dir);
+
+    let map = find(&document, "routes", "app-air-quality-map-endpoint");
+    assert_eq!(map["host"], "air-quality-map.apps.city.example.com");
+    assert_eq!(
+        map["uris"],
+        serde_json::json!([format!("/api/endpoint/{MAP_SLUG}/*")])
+    );
+    assert_eq!(map["upstream_id"], "upstream-context-gateway");
+    // T-3579: the edge session cookie never travels to the gateway, which takes the bearer.
+    assert_eq!(
+        map["plugins"]["proxy-rewrite"],
+        serde_json::json!({"headers": {"remove": ["Cookie"]}})
+    );
+    assert!(map["plugins"]["openid-connect"]["access_token_in_authorization_header"] == true);
+    assert!(
+        map["priority"].as_u64()
+            > find(&document, "routes", "app-air-quality-map")["priority"].as_u64()
+    );
+    let hsl = find(&document, "routes", "app-hsl-transport-endpoint");
+    assert_eq!(
+        hsl["uris"],
+        serde_json::json!([format!("/api/endpoint/{HSL_SLUG}/*")])
+    );
+    assert!(!has(&document, "routes", "app-air-quality-today-endpoint"));
+
+    // No slug of another App, of the demo's public endpoint or of the same-named Endpoint of
+    // another project is reachable on an App's host.
+    let on_app_hosts: String = document["routes"]
+        .as_array()
+        .expect("routes")
+        .iter()
+        .filter(|route| {
+            route["host"]
+                .as_str()
+                .is_some_and(|host| host.contains(".apps."))
+        })
+        .map(|route| format!("{route}\n"))
+        .collect();
+    for foreign in ["zt4qm7ge2xdv6ksb3ncf5arw2y", "w7ongq7ge2xdv6ksb3ncf5arw2"] {
+        assert!(!on_app_hosts.contains(foreign), "{foreign} on an App host");
+    }
+    assert_eq!(on_app_hosts.matches(MAP_SLUG).count(), 1);
+    assert_eq!(on_app_hosts.matches(HSL_SLUG).count(), 1);
+
+    // A fetch without a session is a 401 for a non-public App, and passes for a public one;
+    // the session's token reaches the gateway as its bearer.
+    let map_login = &map["plugins"]["openid-connect"];
+    assert_eq!(map_login["unauth_action"], "deny");
+    assert_eq!(map_login["access_token_in_authorization_header"], true);
+    assert_eq!(
+        map_login["session"]["cookie_name"],
+        "__Host-jc_edge_app_air-quality-map"
+    );
+    assert_eq!(hsl["plugins"]["openid-connect"]["unauth_action"], "pass");
+    for header in FORGEABLE_HEADERS {
+        assert!(map["plugins"]["serverless-pre-function"]
+            .to_string()
+            .contains(header));
+    }
+}
+
+/// ADR-N-037 §3: the old address answers a 308 to the App's host, reaches no upstream and
+/// runs no login, so the apex never sets an App's cookie.
+#[test]
+fn the_old_app_path_redirects_to_the_host_without_a_session() {
+    let dir = repo_with_three_apps("apisix-app-moved");
+    let document = document(&dir);
+    for name in APP_NAMES {
+        let moved = find(&document, "routes", &format!("app-{name}-moved"));
+        assert_eq!(moved["host"], "city.example.com");
+        assert_eq!(
+            moved["uris"],
+            serde_json::json!([format!("/apps/{name}"), format!("/apps/{name}/*")])
+        );
+        assert!(moved.get("upstream_id").is_none(), "{moved}");
+        assert!(moved.get("plugin_config_id").is_none(), "{moved}");
+        let plugins = moved["plugins"].as_object().expect("plugins");
+        assert_eq!(plugins.keys().collect::<Vec<_>>(), ["redirect"], "{moved}");
+        let redirect = &plugins["redirect"];
+        assert_eq!(redirect["ret_code"], 308);
+        assert_eq!(redirect["append_query_string"], true);
+        let pattern = redirect["regex_uri"][0].as_str().expect("a pattern");
+        let target = redirect["regex_uri"][1].as_str().expect("a target");
+        assert_eq!(target, format!("https://{name}.apps.city.example.com/$1"));
+        let pattern = regex::Regex::new(pattern).expect("the pattern compiles");
+        for (path, rest) in [
+            (format!("/apps/{name}"), ""),
+            (format!("/apps/{name}/"), ""),
+            (format!("/apps/{name}/data/today.json"), "data/today.json"),
+        ] {
+            let captured = pattern.captures(&path).unwrap_or_else(|| panic!("{path}"));
+            assert_eq!(&captured[1], rest, "{path}");
+        }
+    }
+}
+
+/// Findings of `validate` that name the App `name`.
+fn clashes(dir: &std::path::Path, name: &str) -> Vec<String> {
+    jcctl::commands::validate::run(dir)
+        .findings
+        .into_iter()
+        .map(|f| f.message)
+        .filter(|m| m.contains("AP-14a") && m.contains(&format!("App {name} ")))
+        .collect()
+}
+
+/// AP-14a: the host `{name}.apps.{domain}` is one address for the whole organization, so a second project's
+/// App of the same name is refused by `validate`, not silently merged into the first one's
+/// route with the visibility of whichever sorts first.
+#[test]
+fn two_projects_declaring_one_app_name_is_a_validate_finding() {
+    let dir = repo_with_three_apps("apisix-name-clash");
+    write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    assert!(clashes(&dir, "hsl-transport").is_empty());
+
+    // A project-only app in ovzdusie under the name doprava's public app already holds.
+    write(
+        &dir,
+        "projects/ovzdusie/apps/hsl-transport/app.yaml",
+        &STATIC_APP.replace("air-quality-map", "hsl-transport"),
+    );
+    let found = clashes(&dir, "hsl-transport");
+    assert_eq!(found.len(), 2, "each manifest is located: {found:?}");
+    for message in &found {
+        assert!(
+            message.contains("doprava and ovzdusie"),
+            "names both: {message}"
+        );
+    }
+    assert!(clashes(&dir, "air-quality-map").is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// AP-14a: a third claimant is named too, and a name only one project uses stays clean.
+#[test]
+fn three_projects_on_one_app_name_are_all_named_and_other_apps_are_untouched() {
+    let dir = repo_with_three_apps("apisix-name-clash-three");
+    for project in ["doprava", "kultura"] {
+        write(
+            &dir,
+            &format!("projects/{project}/project.yaml"),
+            &PROJECT.replace("ovzdusie", project),
+        );
+    }
+    for project in ["ovzdusie", "kultura"] {
+        write(
+            &dir,
+            &format!("projects/{project}/apps/hsl-transport/app.yaml"),
+            &STATIC_APP
+                .replace("air-quality-map", "hsl-transport")
+                .replace("namespace: ovzdusie", &format!("namespace: {project}")),
+        );
+    }
+    let found = clashes(&dir, "hsl-transport");
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .all(|m| m.contains("doprava and kultura and ovzdusie")),
+        "{found:?}"
+    );
+    for name in ["air-quality-today", "air-quality-map"] {
+        assert!(clashes(&dir, name).is_empty(), "{name}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A wasm App as the repository holds it once published: its shard in `status.shard` (AP-149).
+fn wasm_app(name: &str, shard: Option<u32>, visibility: &str) -> String {
+    let status = shard
+        .map(|s| format!("status:\n  shard: {s}\n"))
+        .unwrap_or_default();
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: App\nmetadata:\n  name: {name}\n  namespace: helsinki\nspec:\n  kind: wasm\n  \
+         source:\n    path: apps/{name}\n  build: {{}}\n  visibility: {visibility}\n{status}"
+    )
+}
+
+/// T-3344, AP-143, AP-149: a published wasm App's `/api/*` goes to its own shard of the WASM
+/// host, rewritten under `/apps/{name}/api/`, behind its login, with the token as the bearer;
+/// one upstream per shard; before its first publish, and for any other kind, no such route.
+#[test]
+fn a_wasm_apps_server_is_routed_to_the_shard_its_status_names() {
+    let dir = demo_repo("apisix-wasm");
+    write(
+        &dir,
+        "projects/helsinki/apps/notes/app.yaml",
+        &wasm_app("notes", Some(1), "project"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/board/app.yaml",
+        &wasm_app("board", Some(1), "public"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/fresh/app.yaml",
+        &wasm_app("fresh", None, "project"),
+    );
+    write(
+        &dir,
+        "projects/helsinki/apps/plain/app.yaml",
+        &STATIC_APP
+            .replace("ovzdusie", "helsinki")
+            .replace("air-quality-map", "plain")
+            .replace(
+                "  visibility: project\n",
+                "  visibility: project\nstatus:\n  shard: 0\n",
+            ),
+    );
+    let doc = document(&dir);
+    let route = find(&doc, "routes", "app-notes-server");
+    assert_eq!(route["uris"], serde_json::json!(["/api/*"]));
+    assert_eq!(route["host"], "notes.apps.city.example.com");
+    assert_eq!(route["upstream_id"], "upstream-wasm-host-1");
+    let plugins = &route["plugins"];
+    assert_eq!(
+        plugins["proxy-rewrite"]["regex_uri"],
+        serde_json::json!(["^/api/(.*)$", "/apps/notes/api/$1"])
+    );
+    assert_eq!(plugins["openid-connect"]["unauth_action"], "deny");
+    assert_eq!(
+        plugins["openid-connect"]["access_token_in_authorization_header"],
+        true
+    );
+    assert_eq!(
+        plugins_of(&doc, "app-board-server")["openid-connect"]["unauth_action"],
+        "pass"
+    );
+    assert!(
+        route["priority"].as_u64() < Some(35),
+        "the App's own endpoint keeps its slugs"
+    );
+    let upstream = find(&doc, "upstreams", "upstream-wasm-host-1");
+    assert!(
+        upstream
+            .to_string()
+            .contains("jc-wasm-host-1.prod.svc.cluster.local:8080"),
+        "{upstream}"
+    );
+    let wasm_upstreams = doc["upstreams"]
+        .as_array()
+        .expect("upstreams")
+        .iter()
+        .filter(|u| {
+            u["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("upstream-wasm-host-"))
+        })
+        .count();
+    assert_eq!(wasm_upstreams, 1, "two Apps on shard 1 share its upstream");
+    assert!(
+        !has(&doc, "routes", "app-fresh-server"),
+        "no shard recorded yet, no server route"
+    );
+    assert!(
+        !has(&doc, "routes", "app-plain-server"),
+        "a ui App's status.shard means nothing"
+    );
+    assert!(
+        has(&doc, "routes", "app-fresh"),
+        "its interface is routed like any App's"
+    );
+}
+
+/// T-4395, AP-29: an App may set a cookie for the parent domain; the browser keeps a `__Host-`
+/// cookie only `Secure`, on `/` and without a `Domain`, so no App plants an edge session of the
+/// same name beside the real one. Every rendered session, the Portal's and each App's.
+#[test]
+fn every_edge_session_cookie_is_host_prefixed() {
+    let dir = repo_with_three_apps("apisix-host-cookies");
+    let document = document(&dir);
+    let sessions: Vec<&Value> = ["routes", "plugin_configs"]
+        .iter()
+        .flat_map(|section| document[*section].as_array().into_iter().flatten())
+        .map(|item| &item["plugins"]["openid-connect"]["session"])
+        .filter(|session| session.is_object())
+        .collect();
+    assert!(
+        sessions.len() > 3,
+        "the Portal's and the three Apps' sessions: {sessions:?}"
+    );
+    for session in sessions {
+        let name = session["cookie_name"].as_str().expect("a cookie name");
+        assert!(name.starts_with("__Host-"), "{session}");
+        assert_eq!(session["cookie_path"], "/", "{session}");
+        assert_eq!(session["cookie_secure"], true, "{session}");
+        assert!(session.get("cookie_domain").is_none(), "{session}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
