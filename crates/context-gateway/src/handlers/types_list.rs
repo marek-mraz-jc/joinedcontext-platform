@@ -1,7 +1,6 @@
 //! The type list a download selects by when the caller named none (T-5507). A caller's own
 //! `/types` is the view's answer (T-5391).
 
-use super::reads::broker_failed;
 use crate::app::{Gateway, MAX_BODY};
 use crate::handlers::writes::names_no_tenant;
 use crate::middleware::tenancy;
@@ -57,7 +56,7 @@ pub(super) async fn dataset_types(
         return Ok(Vec::new());
     }
     if !parts.status.is_success() {
-        return Err(broker_failed(slug, parts.status, Body::from(bytes)).await);
+        return Err(super::broker_failed(slug, parts.status, Body::from(bytes)).await);
     }
     let list: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;

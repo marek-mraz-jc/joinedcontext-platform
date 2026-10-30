@@ -19,49 +19,6 @@ use jc_core::ProblemDetails;
 use jc_tabular::{Collect, Collector, Limits, Table, Window};
 use serde_json::Value;
 
-/// The gateway's own answer to a broker that failed a read behind one of its representations
-/// (T-2340, EP-26, R22).
-///
-/// A download is the gateway's document, and what a
-/// failing broker prints is whatever it was holding: a DSN with its password, a host inside the
-/// cluster, a source path, the tenant. None of it reaches the caller, most of whom need no token
-/// to ask; the operator reads it in the log beside the endpoint's slug. A `400` is the broker
-/// refusing the query this request became and a `404` is a miss; a `5xx` keeps its status, as on
-/// the NGSI-LD surface (T-2260). Any other refusal (the gateway's own credentials, its rate at
-/// the broker) is the gateway failing rather than the caller, so it is a `502`.
-pub(super) async fn broker_failed(
-    slug: &str,
-    status: StatusCode,
-    body: Body,
-) -> Box<Response<Body>> {
-    let held = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .unwrap_or_default();
-    tracing::warn!(
-        slug,
-        status = status.as_u16(),
-        broker = %String::from_utf8_lossy(&held),
-        "the broker failed a read behind a representation; its own explanation is not passed on"
-    );
-    let problem = match status {
-        _ if super::ngsi_ld::timed_out(status, &held) => super::ngsi_ld::query_timeout(),
-        StatusCode::BAD_REQUEST => ProblemDetails::bad_request()
-            .with_detail("the context broker refused the query this request asks for"),
-        StatusCode::NOT_FOUND => ProblemDetails::not_found(),
-        failed => ProblemDetails::new(
-            if failed.is_server_error() {
-                failed.as_u16()
-            } else {
-                StatusCode::BAD_GATEWAY.as_u16()
-            },
-            "broker-failure",
-            "The context broker could not answer",
-        )
-        .with_detail("the context broker behind this endpoint failed to answer this request"),
-    };
-    Box::new(problem.into_response())
-}
-
 /// The answer is bigger than this endpoint allows one download to be (EP-44).
 pub(crate) fn too_large() -> Response<Body> {
     let mut response = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
@@ -223,7 +180,7 @@ async fn selector(
 /// narrowed, and its total: a download holds the pages it reads ahead as JSON, about a fifteenth
 /// of their parsed form, and parses each as it joins the table (T-5182). A space with no tenant at
 /// the broker yet is an empty page (EP-22); the engine's refusal is the platform's `403`; any
-/// other failure is [`broker_failed`].
+/// other failure is [`super::broker_failed`].
 async fn view_bytes(
     gateway: &Gateway,
     slug: &str,
@@ -268,7 +225,7 @@ async fn view_bytes(
         return Err(Box::new(ProblemDetails::forbidden().into_response()));
     }
     if !parts.status.is_success() {
-        return Err(broker_failed(slug, parts.status, Body::from(bytes)).await);
+        return Err(super::broker_failed(slug, parts.status, Body::from(bytes)).await);
     }
     Ok((bytes, restricted, total))
 }
