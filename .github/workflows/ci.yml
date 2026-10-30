@@ -27,7 +27,7 @@ jobs:
     permissions: { contents: read, actions: read }
     outputs:
       rust: ${{ steps.paths.outputs.rust }}
-      model-tools: ${{ steps.paths.outputs.model-tools }}
+      crates: ${{ steps.paths.outputs.crates }}
       pipelines: ${{ steps.paths.outputs.pipelines }}
       widget: ${{ steps.paths.outputs.widget }}
     steps:
@@ -122,25 +122,35 @@ jobs:
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
+      # Clippy, the tests and rustdoc of the crates the change touched and of every crate that
+      # depends on them (T-6153: the whole workspace took 400 s a push); a change outside crates/
+      # (Cargo.lock, tools/, a new folder) checks the whole workspace, and ci-full does every day.
+      - name: the crates this change reaches
+        env: { CHANGED: "${{ needs.changes.outputs.crates }}" }
+        run: python3 scripts/ci/rdeps.py --selftest && python3 scripts/ci/rdeps.py "$CHANGED" | tee -a "$GITHUB_ENV"
       # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
       # otherwise fetch the newest release unchecked (T-3052).
-      - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' assistant ')
+        run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
       # --locked: a dependency added without its lock entry fails here, in the fast lane, and
       # not first in the image build (T-0616).
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: read -ra pkgs <<<"$CARGO_PKGS" && cargo clippy "${pkgs[@]}" --all-targets --locked -- -D warnings
       # The assistant is built and tested on its own: kreuzberg depends on serde_toon_format,
       # which turns on serde_json's `preserve_order`, and in one invocation that feature reaches
       # every crate, changing the order of every JSON object the gateway and jcctl write
       # (schemas, blueprints, CKAN columns; T-3206).
-      - run: cargo test --workspace --exclude assistant --lib --bins --locked
-      - run: cargo test -p assistant --lib --bins --locked
+      - if: env.CARGO_TEST_PKGS != ''
+        run: read -ra pkgs <<<"$CARGO_TEST_PKGS" && cargo test "${pkgs[@]}" --lib --bins --locked
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' assistant ')
+        run: cargo test -p assistant --lib --bins --locked
       # The rustdoc of a jc-core field is the JSON Schema `description` the Portal ships, the
       # OpenAPI document publishes and every MCP tool list hands a model, so a broken
       # intra-doc link is a broken sentence in four places (T-2145, UI-02). The whole workspace,
       # not jc-core alone: a link to a private item fails only here, and clippy does not run
       # rustdoc lints (T-4758, T-4780 and tenancy.rs's AUDIT each held main red until the next
-      # ci-full; T-5312). --no-deps after clippy and the tests: ~20 s warm.
-      - run: cargo doc --workspace --no-deps --locked
+      # ci-full; T-5312). --no-deps after clippy and the tests: ~20 s warm. The crates the change
+      # reaches since T-6153: a link into a crate is checked when that crate is documented.
+      - run: read -ra pkgs <<<"$CARGO_PKGS" && cargo doc "${pkgs[@]}" --no-deps --locked
         env: { RUSTDOCFLAGS: "-D warnings" }
       # jc-core's integration tests, one binary (T-5512): `--lib --bins` above runs none of them,
       # and a stale committed schema went red only in the nightly ci-full (T-5379). Among them the
@@ -150,11 +160,13 @@ jobs:
       # (configuration_documentation_tests, T-2140, OPS-27; the configuration reference in the
       # docs is generated from those sentences); and policy_odrl_tests writes the ODRL records
       # validate-odrl-profile.py reads below.
-      - run: cargo test -p jc-core --test it --locked
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' jc-core ')
+        run: cargo test -p jc-core --test it --locked
         env: { ODRL_RECORDS_DIR: "${{ runner.temp }}/odrl-records" }
       # The gateway library builds no jemalloc for its dependents (the Portal); only the image's
       # `--features context-gateway/jemalloc` links it (T-5017).
-      - run: |
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' context-gateway ')
+        run: |
           tree="$(cargo tree -p context-gateway -e normal --prefix none --locked)"
           if grep -q '^tikv-jemalloc' <<<"$tree"; then echo "context-gateway's default features pull jemalloc" >&2; exit 1; fi
       # context-gateway's integration tests, one binary (T-6077), whole per push. Among them every
@@ -166,74 +178,25 @@ jobs:
       # (rigs, counting allocators, process-wide tallies) stay in ci-full.
       # DCAT_RECORDS_DIR reaches only dcat_ap_catalog_tests: publisher_catalog_tests writes its
       # national-profile JSON-LD (no Turtle twin) to the same variable, which the SEMIC check refuses.
-      - run: "cargo test -p context-gateway --test it --locked -- --skip dcat_ap_catalog_tests::"
-      - run: "cargo test -p context-gateway --test it --locked dcat_ap_catalog_tests::"
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' context-gateway ')
+        run: "cargo test -p context-gateway --test it --locked -- --skip dcat_ap_catalog_tests::"
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' context-gateway ')
+        run: "cargo test -p context-gateway --test it --locked dcat_ap_catalog_tests::"
         env: { DCAT_RECORDS_DIR: "${{ runner.temp }}/dcat-records" }
       # jcctl's Portal routes against the Portal OpenAPI vendored in crates/jcctl/portal-api.json
       # (T-5966): a route, method, query parameter or kind the two disagree on fails here.
-      - run: "cargo test -p jcctl --test it --locked portal_api_drift_tests::"
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' jcctl ')
+        run: "cargo test -p jcctl --test it --locked portal_api_drift_tests::"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: "3.11" }
       - run: pip install --quiet --disable-pip-version-check pyshacl==0.30.1
-      - run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' context-gateway ')
+        run: python3 scripts/ci/validate-dcat-ap.py "${{ runner.temp }}/dcat-records"
       # The ngsi-ld: ODRL profile's SHACL shapes and `jcctl policy import` refuse the same
       # documents (T-5039, ADR-N-057 decision 4): policy_odrl_tests in the jc-core step above
       # writes them, pyshacl reads them.
-      - run: python3 scripts/ci/validate-odrl-profile.py "${{ runner.temp }}/odrl-records"
-  model-tools:
-    needs: changes
-    if: needs.changes.outputs.model-tools == 'true'
-    # The one non-Rust component (Architecture/11 §6.5). It runs beside the Rust job rather
-    # than after it, so the fast lane stays as long as its slowest job and no longer.
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults: { run: { working-directory: tools/model-tools } }
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with: { python-version: "3.11", cache: "pip", cache-dependency-path: tools/model-tools/pyproject.toml }
-      - run: pip install .[test]
-      # SDK-10: `test_gen_typescript` compiles jc-types.ts with the TypeScript the SDK pins.
-      - run: npm install -g typescript@5.9.3
-      # DM-39's golden tests run the compiled Bloblang through the Bento the cluster runs, by
-      # digest. Pulling it here rather than inside the first test that needs it turns a
-      # registry outage into a step that says so.
-      - run: docker pull ghcr.io/warpstreamlabs/bento@sha256:656c55de3f8deddd4ee743f3c76f3b497e67324e940f2bc1769693cd8b906364
-      - run: pytest -q
-      # DM-02: a committed artifact must equal what this generator renders now, or the schema a
-      # partner reads is not the schema the source says. The check lives in this job because
-      # the Model Tools it needs is already installed here, and it runs `jcctl model diff` —
-      # the same code path the Portal preview and an agent use, which is the point of DM-32.
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Every DataModel's artifacts are the ones this generator renders
-        working-directory: ${{ github.workspace }}
-        env:
-          MODEL_TOOLS_MODELS: tools/model-tools/models
-        run: |
-          python3 -m service --host 127.0.0.1 --port 8080 &
-          for _ in $(seq 30); do
-            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
-            sleep 1
-          done
-          curl -sf http://127.0.0.1:8080/healthz
-          # Exit 2 means a committed artifact is stale: regenerate with `jcctl model generate`
-          # and commit the result beside the source (DM-01, DM-02).
-          cargo run -q -p jcctl -- model diff --repo-dir examples/datamodels --url http://127.0.0.1:8080
-      # T-5066: the generated valid and invalid datasets of each fixture and committed model, held
-      # to its SHACL shapes and JSON Schema (gen_datasets exits 1 on a record they disagree on) and
-      # then to the ModelSchema the gateway checks a write with: valid passes, invalid fails at its slot.
-      - name: SHACL, the JSON Schema and the write path agree on every generated record
-        working-directory: ${{ github.workspace }}
-        env:
-          MODEL_TOOLS_MODELS: tools/model-tools/models
-          MODEL_DATASETS_DIR: ${{ runner.temp }}/model-datasets
-        run: |
-          mapfile -t committed < <(find examples/datamodels -name '*.linkml.yaml')
-          python3 tools/model-tools/src/gen_datasets.py -o "$MODEL_DATASETS_DIR" \
-            tools/model-tools/tests/fixtures/senzor.linkml.yaml tools/model-tools/tests/fixtures/constraints.linkml.yaml \
-            "${committed[@]}"
-          cargo test -p jc-manifest --test model_datasets_tests --locked
+      - if: env.CRATES == 'all' || contains(env.CRATES, ' jc-core ')
+        run: python3 scripts/ci/validate-odrl-profile.py "${{ runner.temp }}/odrl-records"
   pipelines:
     needs: changes
     if: needs.changes.outputs.pipelines == 'true'

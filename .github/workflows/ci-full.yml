@@ -1,5 +1,6 @@
 name: ci-full
-# the slow lane: runs once a day on main (02:07Z) and on demand; never a PR gate.
+# the slow lane: runs once a day on main (02:07Z) when main moved, and on demand; never a PR gate.
+# It also holds what left the per-push ci.yml (T-6153): Model Tools and the whole-workspace clippy.
 # The MVP pushes to main many times an hour, and a full run per push queued behind the next
 # one; ci.yml stays the per-push gate. tasks/ci files a task for a red daily run like any other.
 # Every 3 h it billed ~1,100 portal and ~300 platform minutes a day (T-4696). image.yml also
@@ -11,18 +12,43 @@ on:
 permissions: { contents: read }
 concurrency: { group: "ci-full-${{ github.ref }}", cancel-in-progress: false }
 jobs:
+  # Only when main moved since this workflow's last verdict (T-6153: the checks the
+  # per-push lane dropped run here, and a schedule that finds main unchanged repeats nothing);
+  # a dispatch always runs. promote.yml promotes, and a production namespace admits, only a
+  # commit with a green run of this workflow that ran its checks, so every check here holds
+  # before prod.
+  moved:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: { contents: read, actions: read }
+    outputs: { run: "${{ steps.last.outputs.run }}" }
+    steps:
+      - id: last
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -eu
+          # An earlier run of this workflow on this commit that reached a verdict (a cancelled one did not).
+          earlier=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-full.yml/runs?head_sha=$GITHUB_SHA&status=completed&per_page=20" \
+            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID and (.conclusion == \"success\" or .conclusion == \"failure\"))] | length" || echo 0)
+          echo "earlier runs on $GITHUB_SHA: $earlier"
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$earlier" != 0 ]; then run=false; else run=true; fi
+          echo "run=$run" | tee -a "$GITHUB_OUTPUT"
   test-all:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # wasm32-wasip2: jc-wasm-host's tests build their test App as a component (T-3339).
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with: { targets: wasm32-wasip2 }
+        with: { targets: wasm32-wasip2, components: clippy }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # The PDFium the assistant crate links, pinned and checked; kreuzberg's build would
       # otherwise fetch the newest release unchecked (T-3052).
       - run: sh scripts/ci/pdfium.sh "$RUNNER_TEMP/pdfium" && echo "KREUZBERG_PDFIUM_PREBUILT=$RUNNER_TEMP/pdfium" >> "$GITHUB_ENV"
+      # The whole workspace in one clippy: ci.yml lints only the crates a change reaches (T-6153).
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The assistant's embedding model and the ONNX Runtime it runs on, both pinned and checked
       # (T-3053): the embedder and retrieval eval suites load them.
       - run: >-
@@ -65,6 +91,8 @@ jobs:
   # 5 rules, and a p50 at most 20 % above the lowest main run's, which the cache carries over.
   # shell: bash sets pipefail, so the tee keeps the bench's exit status.
   pdp-bench:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -81,6 +109,8 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with: { path: pdp-bench-baseline.txt, key: "pdp-bench-${{ github.run_id }}" }
   wasm-host-fuzz:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     # The sandbox of server WASM Apps under cargo-fuzz (T-4777): arbitrary bytes as a component
     # through the production engine, and arbitrary input to the checks behind every host function.
     # Five minutes each from the corpus kept in crates/wasm-host/fuzz/corpus; a crash fails the lane.
@@ -98,6 +128,8 @@ jobs:
             cargo +nightly fuzz run -O --target x86_64-unknown-linux-gnu "$target" "corpus/$target" -- -max_total_time=300 -timeout=10 -rss_limit_mb=4096
           done
   readme:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     # Every command the README tells a newcomer to type is run here (T-2144, TS-19). A
     # renamed crate, a moved script or a flag that no longer exists then fails a lane rather
     # than somebody's first hour. Only the Build and Test sections run; "Run locally" starts
@@ -114,7 +146,63 @@ jobs:
       - name: the extractor reads what it is meant to read
         run: python3 scripts/ci/check-readme-commands.py --selftest
       - run: python3 scripts/ci/check-readme-commands.py
+  model-tools:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
+    # The one non-Rust component (Architecture/11 §6.5). It left the per-push lane (T-6153: 146 s
+    # a push, no failure in 7 days); jc-core and the gateway still compile its included files there.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults: { run: { working-directory: tools/model-tools } }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with: { python-version: "3.11", cache: "pip", cache-dependency-path: tools/model-tools/pyproject.toml }
+      - run: pip install ".[test]"
+      # SDK-10: `test_gen_typescript` compiles jc-types.ts with the TypeScript the SDK pins.
+      - run: npm install -g typescript@5.9.3
+      # DM-39's golden tests run the compiled Bloblang through the Bento the cluster runs, by
+      # digest. Pulling it here rather than inside the first test that needs it turns a
+      # registry outage into a step that says so.
+      - run: docker pull ghcr.io/warpstreamlabs/bento@sha256:656c55de3f8deddd4ee743f3c76f3b497e67324e940f2bc1769693cd8b906364
+      - run: pytest -q
+      # DM-02: a committed artifact must equal what this generator renders now, or the schema a
+      # partner reads is not the schema the source says. The check lives in this job because
+      # the Model Tools it needs is already installed here, and it runs `jcctl model diff` —
+      # the same code path the Portal preview and an agent use, which is the point of DM-32.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Every DataModel's artifacts are the ones this generator renders
+        working-directory: ${{ github.workspace }}
+        env:
+          MODEL_TOOLS_MODELS: tools/model-tools/models
+        run: |
+          python3 -m service --host 127.0.0.1 --port 8080 &
+          for _ in $(seq 30); do
+            curl -sf http://127.0.0.1:8080/healthz > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz
+          # Exit 2 means a committed artifact is stale: regenerate with `jcctl model generate`
+          # and commit the result beside the source (DM-01, DM-02).
+          cargo run -q -p jcctl -- model diff --repo-dir examples/datamodels --url http://127.0.0.1:8080
+      # T-5066: the generated valid and invalid datasets of each fixture and committed model, held
+      # to its SHACL shapes and JSON Schema (gen_datasets exits 1 on a record they disagree on) and
+      # then to the ModelSchema the gateway checks a write with: valid passes, invalid fails at its slot.
+      - name: SHACL, the JSON Schema and the write path agree on every generated record
+        working-directory: ${{ github.workspace }}
+        env:
+          MODEL_TOOLS_MODELS: tools/model-tools/models
+          MODEL_DATASETS_DIR: ${{ runner.temp }}/model-datasets
+        run: |
+          mapfile -t committed < <(find examples/datamodels -name '*.linkml.yaml')
+          python3 tools/model-tools/src/gen_datasets.py -o "$MODEL_DATASETS_DIR" \
+            tools/model-tools/tests/fixtures/senzor.linkml.yaml tools/model-tools/tests/fixtures/constraints.linkml.yaml \
+            "${committed[@]}"
+          cargo test -p jc-manifest --test model_datasets_tests --locked
   supply-chain:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -134,6 +222,8 @@ jobs:
             echo "$c $v: $(curl -fsS -A joinedcontext-ci "https://crates.io/api/v1/crates/$c/$v/dependencies" | jq -r '[.dependencies[] | select(.crate_id == "zip" or .crate_id == "calamine") | "\(.crate_id) \(.req)"] | join(", ")')"
           done
   trivy-fs:
+    needs: moved
+    if: needs.moved.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
