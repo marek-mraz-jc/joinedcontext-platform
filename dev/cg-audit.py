@@ -109,9 +109,13 @@ def join(found: dict[str, dict[str, list[str]]]) -> tuple[list[str], list[str], 
     return sorted(set(links)), sorted(unmatched), sorted(uncalled)
 
 
+VENDORED = re.compile(r"^vendor/\S*:\d+ \|.*\n?", re.MULTILINE)
+
+
 def counts(output: str) -> tuple[dict[str, int], list[str]]:
-    """Distinct rows per named statement; cg's own warnings as problems."""
-    found = sections(output)
+    """Distinct rows per named statement; cg's own warnings as problems. A GREP hit under
+    vendor/ (a patched third-party crate: platform kreuzberg, Antares rumqttc) is not ours."""
+    found = sections(VENDORED.sub("", output))
     problems = found.pop("!", [])
     return {name: len(dict.fromkeys(rows)) for name, rows in found.items()}, problems
 
@@ -195,7 +199,8 @@ def selftest() -> None:
     graphs = {
         "a": {"queries": "graph: built A\n### Q1: memory-body-copy: x\n2 hits in 1 files\n"
                          "at | in | test | comment | text\nf.rs:1 | a::f | False | False | b\n"
-                         "f.rs:2 | a::f | False | False | b\nt.rs:3 | a::t | True | False | b\n",
+                         "f.rs:2 | a::f | False | False | b\nt.rs:3 | a::t | True | False | b\n"
+                         "vendor/k/src/x.rs:4 | k::x | False | False | b\n",
               "links": "graph: built A\n### Q1: provides: r\n1 rows\nc.key | s.path | r.file | r.line\n"
                        "GET /api/{} | a::serve | f.rs | 9\n"
                        "### Q2: uses: u\n0 rows\nc.key | s.path | r.file | r.line\n"},
