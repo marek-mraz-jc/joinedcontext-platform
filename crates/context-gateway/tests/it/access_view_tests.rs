@@ -1022,6 +1022,38 @@ async fn an_attribute_table_the_gateway_cannot_answer_never_reaches_the_broker()
     assert!(hops.lock().expect("the hop log").is_empty());
 }
 
+/// T-6137: a class of a draft model with no generated schema (the catalogue space's `Dataset`)
+/// is served with no attribute: an empty table, and nobody is asked; a class the model lacks
+/// stays a 400.
+#[tokio::test]
+async fn a_class_of_a_model_without_a_schema_is_an_empty_table() {
+    use context_gateway::resolver::DeclaredTypes;
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({})).await;
+    let mut draft = endpoint();
+    draft.declared_types = Some(Arc::new(DeclaredTypes {
+        model: "catalog".into(),
+        classes: ["Dataset".to_owned()].into(),
+        units: Default::default(),
+        relationships: Default::default(),
+        quality: Vec::new(),
+        schema: None,
+    }));
+    let (status, _, body) = call(
+        app(upstream.clone(), draft.clone()),
+        attributes("?type=Dataset"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).expect("JSON"),
+        json!({"type": "Dataset", "attributes": []})
+    );
+    let (status, _, body) = call(app(upstream, draft), attributes("?type=Nosuch")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("not a class"), "{body}");
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
 /// T-5527: the table pays the rate limit one request per 100 decisions, three per attribute: 101
 /// attributes are 303 decisions, four requests.
 #[tokio::test]

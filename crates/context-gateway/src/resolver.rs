@@ -306,7 +306,8 @@ impl Endpoint {
 
     /// The model's attributes of `class` this Endpoint serves: less the ones its projection
     /// leaves out or `hiddenAttributes` hides. `None` when the Endpoint serves no such class of
-    /// its own model ([`Self::own_schema`]).
+    /// its own model ([`Self::own_schema`]); none when the class is declared by a model with no
+    /// generated schema yet (a draft naming no slot, T-6137).
     pub(crate) fn served_attributes(
         &self,
         class: &str,
@@ -315,7 +316,15 @@ impl Endpoint {
             None => None,
             Some(projection) => Some(&projection.classes.iter().find(|c| c.name == class)?.slots),
         };
-        let mut attributes = self.own_schema()?.attributes(class)?.attributes;
+        let declared = self
+            .declared_types
+            .as_deref()
+            .filter(|_| self.view_mapping.is_none())?;
+        let mut attributes = match declared.schema.as_deref() {
+            Some(schema) => schema.attributes(class)?.attributes,
+            None if declared.classes.contains(class) => Vec::new(),
+            None => return None,
+        };
         attributes.retain(|a| {
             !self.hidden_attributes.contains(&a.name)
                 && kept.is_none_or(|kept| kept.contains(&a.name))
