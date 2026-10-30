@@ -1,0 +1,78 @@
+name: image-scan
+# After each green ship run (image.yml) on main (T-6154): the CycloneDX SBOM of every image that
+# run pushed, attested to its digest (OPS-41), then the vulnerability gate, and on a pass a
+# vuln-scan attestation. Off the dev path: pin-images waits for image.yml only. The production
+# release refuses a digest without both attestations of this workflow on main (deployment
+# scripts/verify-pinned-images.py --scanned, run by the release gate and `just prod-apply`).
+# vulnerabilities.yml rescans `:main` every day for what was disclosed since.
+on:
+  workflow_run: { workflows: [ship], types: [completed], branches: [main] }
+  workflow_dispatch:
+    inputs:
+      sha: { description: "main commit whose images to scan (40 hex)", required: true, type: string }
+permissions: { contents: read }
+concurrency: { group: "image-scan-${{ github.event.workflow_run.head_sha || github.event.inputs.sha }}", cancel-in-progress: false }
+jobs:
+  scan:
+    # A green ship run of a push or a ci on main of this repository, never a fork's.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write, id-token: write }
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        path: ["", "/checkouts", "/model-tools"]
+    env:
+      SHA: ${{ github.event.workflow_run.head_sha || github.event.inputs.sha }}
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      # model-tools is built only when its folder changed: no image under this commit, nothing to scan.
+      - id: image
+        env: { IMAGE: "ghcr.io/${{ github.repository }}${{ matrix.path }}" }
+        run: |
+          set -eu
+          printf '%s' "$SHA" | grep -qxE '[0-9a-f]{40}' || { echo "::error::'$SHA' is no commit"; exit 1; }
+          digest=$(docker buildx imagetools inspect "$IMAGE:$SHA" --format '{{json .Manifest}}' 2>/dev/null | jq -r '.digest // empty' || true)
+          if [ -z "$digest" ]; then
+            [ "${{ matrix.path }}" = /model-tools ] && { echo "no $IMAGE:$SHA"; exit 0; }
+            echo "::error::$IMAGE:$SHA is not published"; exit 1
+          fi
+          echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+      - if: steps.image.outputs.ref != ''
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - if: steps.image.outputs.ref != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.ref }}
+          format: cyclonedx
+          output: ${{ runner.temp }}/sbom.cdx.json
+          cache-dir: ${{ runner.temp }}/trivy
+      - if: steps.image.outputs.ref != ''
+        run: cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" "${{ steps.image.outputs.ref }}"
+      # Read back what was just attested, by digest and under this workflow's identity: a lane that
+      # stops attesting goes red here instead of leaving an image nothing describes.
+      - if: steps.image.outputs.ref != ''
+        run: |
+          cosign verify-attestation --type cyclonedx \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/image-scan.yml@refs/heads/main" \
+            "${{ steps.image.outputs.ref }}" > /dev/null
+      - if: steps.image.outputs.ref != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with: { image-ref: "${{ steps.image.outputs.ref }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true, cache-dir: "${{ runner.temp }}/trivy" }
+      # Reached only when the gate above passed: the record the release gate asks for.
+      - if: steps.image.outputs.ref != ''
+        run: |
+          set -eu
+          jq -n --arg sha "$SHA" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg at "$(date -u +%FT%TZ)" \
+            '{scanner: "trivy", severity: ["HIGH", "CRITICAL"], ignoreUnfixed: true, result: "pass", commit: $sha, run: $run, scannedAt: $at}' \
+            > "$RUNNER_TEMP/scan.json"
+          cosign attest --yes --type https://joinedcontext.com/attestations/vuln-scan/v1 --predicate "$RUNNER_TEMP/scan.json" "${{ steps.image.outputs.ref }}"
