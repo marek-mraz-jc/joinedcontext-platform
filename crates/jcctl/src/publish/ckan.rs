@@ -581,6 +581,10 @@ pub fn publish(
             Ok(Outcome::Created)
         }
         Some(live) => {
+            let desired = match carried(endpoint, record, &live) {
+                Some(record) => package(endpoint, instance, &record, settings)?.unwrap_or(desired),
+                None => desired,
+            };
             let desired = with_issued(desired, &live);
             if !deleted(&live) && same(&live, &desired) {
                 return Ok(Outcome::Unchanged);
@@ -600,6 +604,59 @@ pub fn publish(
             Ok(Outcome::Updated)
         }
     }
+}
+
+/// `record` with the types the live dataset's usage texts name, for each type member the record
+/// lacks, when the Endpoint is public (T-6131). The gateway's type list can read as nothing for
+/// a moment without failing the record: helsinki-transport was republished at 04:00:06 with a
+/// bare NGSI-LD address and no entity sets, and three Endpoints over its space lost their
+/// Vehicle source link for the hour. `None` when nothing is carried.
+///
+/// ponytail: an Endpoint that really loses every type keeps its last named types until it serves
+/// one again; a page that never named one stays bare.
+fn carried(endpoint: &RawManifest, record: &Value, live: &Value) -> Option<Value> {
+    let lacks_example = record.get(EXAMPLE_TYPE).is_none();
+    let lacks_served = record.get(SERVED_TYPES).is_none();
+    let spec: EndpointSpec = serde_json::from_value(endpoint.spec.clone()).ok()?;
+    if !(lacks_example || lacks_served) || spec.audience != Audience::Public {
+        return None;
+    }
+    let texts = live["resources"]
+        .as_array()?
+        .iter()
+        .filter_map(|resource| resource["description"].as_str());
+    let (mut example, mut served) = (None, Vec::new());
+    for text in texts {
+        let named = text
+            .split("entities?type=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .filter(|kind| is_type_name(kind));
+        example = example.or(named.map(str::to_owned));
+        if let Some(sets) = text
+            .split("Its entity sets: ")
+            .nth(1)
+            .and_then(|rest| rest.split(".\n").next())
+        {
+            served = sets
+                .split(", ")
+                .filter_map(|set| set.rsplit('/').next())
+                .filter(|kind| is_type_name(kind))
+                .map(str::to_owned)
+                .collect();
+        }
+    }
+    let mut record = record.clone();
+    let mut changed = false;
+    if let Some(kind) = example.filter(|_| lacks_example) {
+        record[EXAMPLE_TYPE] = json!(kind);
+        changed = true;
+    }
+    if lacks_served && !served.is_empty() {
+        record[SERVED_TYPES] = json!(served);
+        changed = true;
+    }
+    changed.then_some(record)
 }
 
 /// The CKAN view type a visualization is published as (ADR-N-053 §2.7, EP-132).
