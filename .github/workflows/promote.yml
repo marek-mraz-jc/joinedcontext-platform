@@ -35,9 +35,18 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "not a full commit sha: $SHA"; exit 1; }
           runs() { gh api "repos/$REPO/actions/runs?head_sha=$SHA&branch=main&status=success&per_page=50" \
                      --jq "[.workflow_runs[] | select(.name == \"$1\")] | .[0] // empty"; }
+          # A scheduled ci-full that found main unchanged skips every check and still ends "success"
+          # (T-6153): it tested nothing, so it promotes nothing and is never the run attested.
+          ran() { [ "$(gh api "repos/$REPO/actions/runs/$1/jobs?per_page=100" \
+                       --jq '[.jobs[] | select(.conclusion == "skipped")] | length')" = 0 ]; }
           if [ -z "$FULL_RUN" ]; then
-            FULL_RUN=$(runs ci-full | jq -r .id)
-            [ -n "$FULL_RUN" ] || { echo "no green ci-full on $SHA: nothing is promoted"; exit 1; }
+            for id in $(gh api "repos/$REPO/actions/runs?head_sha=$SHA&branch=main&status=success&per_page=50" \
+                          --jq '.workflow_runs[] | select(.name == "ci-full") | .id'); do
+              if ran "$id"; then FULL_RUN=$id; break; fi
+            done
+            [ -n "$FULL_RUN" ] || { echo "no green ci-full on $SHA that ran its checks: nothing is promoted"; exit 1; }
+          elif ! ran "$FULL_RUN"; then
+            echo "::notice::ci-full run $FULL_RUN skipped its checks (main unchanged): nothing is promoted"; exit 0
           fi
           N=$(runs ship | jq -r .run_number)
           if [ -z "$N" ]; then
