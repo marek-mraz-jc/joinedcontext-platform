@@ -431,14 +431,18 @@ pub(crate) async fn access_attributes(
             "type {entity_type:?} is not a class of the model this endpoint serves"
         ));
     };
-    if attributes.is_empty() || attributes.len() > MAX_ATTRIBUTES {
+    if attributes.len() > MAX_ATTRIBUTES {
         return refused(format!(
-            "type {entity_type:?} has {} served attributes; 1 to {MAX_ATTRIBUTES} are answered",
+            "type {entity_type:?} has {} served attributes; at most {MAX_ATTRIBUTES} are answered",
             attributes.len()
         ));
     }
     if !has_view(&view_of(&endpoint)) {
         return no_view(&endpoint);
+    }
+    // A class of no served attribute (a draft model naming no slot, T-6137) has no decision to ask.
+    if attributes.is_empty() {
+        return json_response(&json!({"type": entity_type, "attributes": []}));
     }
     // The rate limit layer spent one request; it pays for 100 decisions, each further 100 one more.
     let charges = attributes
