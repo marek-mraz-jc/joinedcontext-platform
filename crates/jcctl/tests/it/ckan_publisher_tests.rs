@@ -1674,3 +1674,46 @@ fn links_and_usage_name_the_address_the_record_gives_the_endpoint() {
         assert_eq!(public(id)["url"], json!(fallback), "{id}");
     }
 }
+
+/// T-6131: a pass whose type reads gave nothing keeps the types the public dataset's page
+/// already names, so a sibling Endpoint over the same space still finds its source; a private
+/// Endpoint's page carries nothing over.
+#[test]
+fn a_record_without_types_keeps_the_types_the_page_names() {
+    let mut typed = record();
+    typed[EXAMPLE_TYPE] = json!("Vehicle");
+    typed[SERVED_TYPES] = json!(["Alert", "Vehicle"]);
+    let base = "https://data.example.org/api/endpoint/zt4qm7ge2xdv6ksb3ncf5arw2y";
+    for (audience, kept) in [("public", true), ("organization", false)] {
+        let mut api = ckan();
+        let endpoint = default_endpoint(audience, "");
+        let name = package(&endpoint, &instance(), &typed, &documented())
+            .expect("the endpoint publishes")
+            .expect("a dataset")["name"]
+            .as_str()
+            .expect("a name")
+            .to_owned();
+        publish(&mut api, &endpoint, &instance(), &typed, &documented()).expect("typed");
+        let mut untyped = record();
+        untyped["dct:description"] = json!([{ "@value": "Changed.", "@language": "en" }]);
+        let outcome =
+            publish(&mut api, &endpoint, &instance(), &untyped, &documented()).expect("untyped");
+        assert_eq!(outcome, Outcome::Updated, "{audience}: the new text lands");
+        let dataset = api.package(&name).expect("the dataset");
+        let ngsi = description(dataset, "/ngsi-ld/v1/");
+        let odata = description(dataset, "/odata/v4/");
+        assert_eq!(
+            ngsi.contains("entities?type=Vehicle&limit=10"),
+            kept,
+            "{audience}: {ngsi}"
+        );
+        assert_eq!(
+            odata.contains(&format!(
+                "Its entity sets: {base}/odata/v4/Alert, {base}/odata/v4/Vehicle."
+            )),
+            kept,
+            "{audience}: {odata}"
+        );
+        assert!(!dataset.to_string().contains(SERVED_TYPES));
+    }
+}

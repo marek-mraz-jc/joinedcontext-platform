@@ -8,6 +8,9 @@ name: ship
 # this lane built. No hourly wait any more (T-6109): the repo is public, so the minutes T-4696
 # saved cost nothing, and the gate held a merge's image back up to 40 min (2026-10-29). The gate
 # concurrency group still runs one `changes` at a time with the newest commit pending.
+# T-6154: the binaries compile once outside Docker with a warm cache (`compile`), the image only
+# copies them; the SBOM, its attestation and the vulnerability gate moved to image-scan.yml, which
+# runs on this lane's green run, so the pin no longer waits for them; production does (release gate).
 on:
   schedule: [{ cron: "37 * * * *" }]
   # ci completed: the green main commit. ci-full requested: the daily ci-full's commit gets its
@@ -84,40 +87,72 @@ jobs:
           fi
           echo "built: ${built:-none} ${refresh:-}; build=$build model-tools=$models"
           printf 'build=%s\nmodel-tools=%s\n' "$build" "$models" >> "$GITHUB_OUTPUT"
-  build:
+  # The binaries compile once, here, in the build stage's own base image (same glibc as the runtime,
+  # T-4126) with the dependency cache of the last release build, not cold inside Docker: the docker
+  # build step took 555-789 s per run that way (T-6154). The Dockerfile's `build` stage is what a
+  # local `docker build` runs; this lane hands the image builds these binaries in its place.
+  compile:
     needs: changes
     if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
-    permissions: { contents: read, packages: write, id-token: write }
+    container: rust:1.97-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c
+    permissions: { contents: read }
     timeout-minutes: 30
+    env: { KREUZBERG_PDFIUM_PREBUILT: /opt/pdfium }
+    steps:
+      # the build stage's packages (Dockerfile), plus zstd and git for the cache and checkout actions
+      - run: apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev curl ca-certificates g++ libclang-dev make git zstd && rm -rf /var/lib/apt/lists/*
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: sh scripts/ci/pdfium.sh /opt/pdfium
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with: { shared-key: image-release, save-if: "${{ github.ref == 'refs/heads/main' }}" }
+      # Two invocations, so kreuzberg's serde_json `preserve_order` stays in the assistant and never
+      # reorders what the gateway and jcctl write (T-3206); the Dockerfile builds the same way.
+      - run: |
+          cargo build --release --locked --workspace --exclude assistant --features context-gateway/jemalloc
+          cargo build --release --locked -p assistant
+          mkdir -p dist/src/target/release
+          for bin in context-gateway jcctl jc-agent-proxy jc-functions jc-assistant jc-token-sidecar jc-camera-sim jc-wasm-host; do
+            strip -o "dist/src/target/release/$bin" "target/release/$bin"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with: { name: binaries, path: dist, retention-days: 1, if-no-files-found: error }
+  # Push and sign only: the SBOM, its attestation and the vulnerability gate run after this lane in
+  # image-scan.yml, so pin-images (which waits for this run) is not held by them. Dev takes a signed
+  # digest; production takes only one image-scan.yml attested (deployment verify-pinned-images.py
+  # --scanned in the release gate, T-6154).
+  build:
+    needs: compile
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write, id-token: write }
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - id: has
-        run: echo "df=$(ls Dockerfile* 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
-      - if: steps.has.outputs.df == ''
-        run: echo "no Dockerfile yet"
-      - if: steps.has.outputs.df != ''
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - if: steps.has.outputs.df != ''
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with: { name: binaries, path: "${{ runner.temp }}/build" }
+      # The named context `build` stands in for the Dockerfile's build stage: every `COPY --from=build`
+      # reads this directory, laid out as that stage's filesystem.
+      - name: the build stage's files
+        run: |
+          set -eu
+          chmod +x "$RUNNER_TEMP"/build/src/target/release/*
+          sh scripts/ci/e5-small.sh "$RUNNER_TEMP/build/opt/e5-small"
+          sh scripts/ci/onnxruntime.sh "$RUNNER_TEMP/build/opt/onnxruntime"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
-      - if: steps.has.outputs.df != ''
-        id: day
+      - id: day
         run: echo "d=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       # Built into the runner's docker first and started there, so only bytes that answer get
       # pushed; the push below is the same build again, every layer a cache hit (T-4721).
-      - if: steps.has.outputs.df != ''
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          file: ${{ steps.has.outputs.df }}
+          build-contexts: build=${{ runner.temp }}/build
           build-args: APT_REFRESH=${{ steps.day.outputs.d }}
           load: true
           tags: platform-local:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - if: steps.has.outputs.df != ''
-        name: the gateway starts, answers /healthz and refuses an unknown Endpoint
+      - name: the gateway starts, answers /healthz and refuses an unknown Endpoint
         run: |
           docker run -d --name gw -p 8080:8080 -e JC_GATEWAY_BROKER_URL=http://127.0.0.1:9 \
             -e JC_GATEWAY_ORG_DOMAIN=smoke.example platform-local:latest
@@ -127,101 +162,41 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/endpoint/nope/ngsi-ld/v1/types)
           [ "$code" = 404 ] || fail "an unknown Endpoint answered $code"
           docker rm -f gw >/dev/null
-      - if: steps.has.outputs.df != ''
-        id: push
+      - id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          file: ${{ steps.has.outputs.df }}
+          build-contexts: build=${{ runner.temp }}/build
           build-args: APT_REFRESH=${{ steps.day.outputs.d }}
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ github.sha }},ghcr.io/${{ github.repository }}:main,ghcr.io/${{ github.repository }}:dev-${{ github.run_number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: true
           sbom: true
-      - if: steps.has.outputs.df != ''
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-      - if: steps.has.outputs.df != ''
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
-      - if: steps.has.outputs.df != ''
-        run: echo "digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
-      # OPS-41 asks for the bill of materials in CycloneDX; `sbom: true` above attaches
-      # BuildKit's SPDX one. The CycloneDX document is read off the pushed digest and attested
-      # to it, because an uploaded artifact expires and an attestation travels with the image
-      # (T-2412).
-      - if: steps.has.outputs.df != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
-          format: cyclonedx
-          output: ${{ runner.temp }}/sbom.cdx.json
-          cache-dir: ${{ runner.temp }}/trivy
-      - if: steps.has.outputs.df != ''
-        run: cosign attest --yes --type cyclonedx --predicate "$RUNNER_TEMP/sbom.cdx.json" ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
-      # Read back what was just attested, by the same digest and under the identity of this
-      # workflow: a lane that stops attesting, or attests under another identity, goes red here
-      # instead of publishing an image nothing describes. Before the vulnerability gate below,
-      # because an image that fails that gate is the one whose contents somebody needs.
-      - if: steps.has.outputs.df != ''
-        run: |
-          cosign verify-attestation --type cyclonedx \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/image.yml@${{ github.ref }}" \
-            "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" > /dev/null
-      - if: steps.has.outputs.df != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { image-ref: "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true, cache-dir: "${{ runner.temp }}/trivy" }
-      # The checkouts build below reuses the gateway's `build` stage only while `COPY . .` sees the
-      # same tree. Trivy's SBOM and its DB cache (default `.cache/trivy` in the workspace) once
-      # landed in that context and recompiled the workspace, which after a lock bump ran the job
-      # past its 30 min (T-5041): every step above writes to $RUNNER_TEMP, and this checks it.
-      - if: steps.has.outputs.df != ''
-        name: the build context is still the checked-out tree
-        run: |
-          stray=$(git status --porcelain --untracked-files=all --ignored)
-          [ -z "$stray" ] || { echo "files written into the build context since checkout:"; echo "$stray"; exit 1; }
-      # The checkouts sidecar (T-2646): the same build stage, so the layers above are reused and
-      # jcctl is the binary of this commit; signed, attested and gated like the platform image.
-      - if: steps.has.outputs.df != ''
-        id: checkouts
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      - run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+      - run: echo "digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      # The checkouts sidecar (T-2646): jcctl of this commit on Debian with git; its apt layer is
+      # cached per day (APT_REFRESH).
+      - id: checkouts
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          file: ${{ steps.has.outputs.df }}
+          build-contexts: build=${{ runner.temp }}/build
           target: checkouts
-          # the same build-args as the gateway build, so the shared `build` stage is a cache hit
-          # rather than a second release compile (3.5 min, T-4721)
           build-args: APT_REFRESH=${{ steps.day.outputs.d }}
           push: true
           tags: ghcr.io/${{ github.repository }}/checkouts:${{ github.sha }},ghcr.io/${{ github.repository }}/checkouts:main,ghcr.io/${{ github.repository }}/checkouts:dev-${{ github.run_number }}
-          cache-from: |
-            type=gha
-            type=gha,scope=checkouts
+          cache-from: type=gha,scope=checkouts
           cache-to: type=gha,mode=max,scope=checkouts
           provenance: true
           sbom: true
-      - if: steps.has.outputs.df != ''
-        run: cosign sign --yes ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
-      - if: steps.has.outputs.df != ''
-        run: echo "checkouts digest ${{ steps.checkouts.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+      - run: cosign sign --yes ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
+      - run: echo "checkouts digest ${{ steps.checkouts.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
       # tini is PID 1 and reaps the orphans git leaves behind (T-5638: 18,673 zombies per pod).
-      - if: steps.has.outputs.df != ''
-        name: the checkouts image reaps orphaned processes
+      - name: the checkouts image reaps orphaned processes
         run: |
           docker pull -q "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
           scripts/ci/checkouts-reaps-orphans.sh "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
-      - if: steps.has.outputs.df != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}"
-          format: cyclonedx
-          output: checkouts.cdx.json
-      - if: steps.has.outputs.df != ''
-        run: cosign attest --yes --type cyclonedx --predicate checkouts.cdx.json ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}
-      - if: steps.has.outputs.df != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { image-ref: "ghcr.io/${{ github.repository }}/checkouts@${{ steps.checkouts.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
   model-tools:
     needs: changes
     if: needs.changes.outputs.model-tools == 'true'
@@ -264,24 +239,22 @@ jobs:
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
       - run: cosign sign --yes ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}
       - run: echo "model-tools digest ${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
-      # OPS-41 asks for the bill of materials in CycloneDX; `sbom: true` above attaches
-      # BuildKit's SPDX one. The CycloneDX document is read off the pushed digest and attested
-      # to it, because an uploaded artifact expires and an attestation travels with the image
-      # (T-2412).
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}"
-          format: cyclonedx
-          output: sbom.cdx.json
-      - run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}
-      # Read back what was just attested, by the same digest and under the identity of this
-      # workflow: a lane that stops attesting, or attests under another identity, goes red here
-      # instead of publishing an image nothing describes. Before the vulnerability gate below,
-      # because an image that fails that gate is the one whose contents somebody needs.
+  # Starts pin-images in the deployment as soon as the images are signed (T-6154). workflow_run
+  # does not cross repositories, so this sends a repository_dispatch with a token that may only
+  # do that (secret DEPLOYMENT_DISPATCH_TOKEN, fine-grained, contents: write on the deployment
+  # repository); without it pin-images still runs on its cron.
+  notify:
+    needs: [build, model-tools]
+    if: always() && needs.build.result == 'success' && needs.model-tools.result != 'failure' && needs.model-tools.result != 'cancelled' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    env:
+      TOKEN: ${{ secrets.DEPLOYMENT_DISPATCH_TOKEN }}
+    steps:
       - run: |
-          cosign verify-attestation --type cyclonedx \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/image.yml@${{ github.ref }}" \
-            "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}" > /dev/null
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with: { image-ref: "ghcr.io/${{ github.repository }}/model-tools@${{ steps.push.outputs.digest }}", severity: "HIGH,CRITICAL", exit-code: "1", ignore-unfixed: true }
+          set -eu
+          [ -n "$TOKEN" ] || { echo "no DEPLOYMENT_DISPATCH_TOKEN: pin-images picks this commit up on its cron"; exit 0; }
+          curl -fsS --max-time 20 -X POST -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY_OWNER}/joinedcontext-deployment/dispatches" \
+            -d "{\"event_type\":\"image-pushed\",\"client_payload\":{\"repository\":\"${GITHUB_REPOSITORY}\",\"sha\":\"${GITHUB_SHA}\"}}"
