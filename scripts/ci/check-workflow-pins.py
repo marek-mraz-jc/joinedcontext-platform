@@ -47,9 +47,25 @@ def unattested(lines):
     return [(number, image) for image, number in signed.items() if image not in attested]
 
 
-def problems(path: Path):
+WORKFLOW_NAME = re.compile(r"^name:\s*(\S+)")
+FOLLOWS = re.compile(r"workflow_run:.*workflows:\s*\[([^\]]*)\]")
+
+
+def attested_after(name: str, others) -> bool:
+    """A workflow that runs on `name`'s finished runs attests a CycloneDX SBOM (image-scan.yml
+    attests what image.yml signed, T-6154): the signer then need not attest itself."""
+    for lines in others:
+        follows = any(name in [w.strip().strip("\"'") for w in m.group(1).split(",")]
+                      for m in map(FOLLOWS.search, lines) if m)
+        if follows and any("cosign attest " in l.split("#", 1)[0] and "--type cyclonedx" in l for l in lines):
+            return True
+    return False
+
+
+def problems(path: Path, others=()):
     lines = path.read_text().splitlines()
-    for number, image in unattested(lines):
+    name = next((m.group(1) for m in map(WORKFLOW_NAME.match, lines) if m), "")
+    for number, image in [] if attested_after(name, others) else unattested(lines):
         yield (
             f"{path.name}:{number}: {image} is signed and no CycloneDX SBOM is attested to it "
             "(`cosign attest --type cyclonedx`, OPS-41)"
@@ -81,7 +97,10 @@ def problems(path: Path):
 
 
 def main() -> int:
-    found = [problem for path in sorted(WORKFLOWS.glob("*.yml")) for problem in problems(path)]
+    paths = sorted(WORKFLOWS.glob("*.yml"))
+    texts = {path: path.read_text().splitlines() for path in paths}
+    found = [problem for path in paths
+             for problem in problems(path, [lines for other, lines in texts.items() if other != path])]
     for problem in found:
         print(problem, file=sys.stderr)
     return 1 if found else 0
