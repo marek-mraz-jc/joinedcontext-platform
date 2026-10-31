@@ -4,8 +4,16 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { bundle, BUDGET } from "./build.mjs";
 
-const { deployment, framedBy } = createRequire(import.meta.url)("./app.js");
+const { deployment, framedBy, mayShow } = createRequire(import.meta.url)("./app.js");
 const API = "https://assistant.dev.joinedcontext.com";
+
+test("a framed page shows only inside the deployment's origins, with or without embed=1", () => {
+  const origins = ["https://www.banskabystrica.sk"];
+  assert.equal(mayShow(false, [], "", origins), true, "a page of its own");
+  assert.equal(mayShow(true, ["https://evil.example"], "", origins), false, "a frame on another origin");
+  assert.equal(mayShow(true, [], "", origins), false, "a frame naming no parent");
+  assert.equal(mayShow(true, ["https://www.banskabystrica.sk"], "", origins), true);
+});
 
 test("the page's address names the deployment, and nothing else is one", () => {
   assert.equal(deployment("/bb-doprava", ""), "bb-doprava");

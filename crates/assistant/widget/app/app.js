@@ -30,13 +30,23 @@ var JCApp = (function () {
     return Boolean(parent) && (frameOrigins || []).some(function (o) { return origin(o) === parent; });
   }
 
+  /**
+   * Whether the page may show at all: on its own, or framed by one of the deployment's origins.
+   * Any frame counts, `?embed=1` or not: the query only picks the layout, so a page framed without
+   * it is checked the same (T-6218).
+   */
+  function mayShow(framed, ancestors, referrer, frameOrigins) {
+    return !framed || framedBy(ancestors, referrer, frameOrigins);
+  }
+
   function start() {
     var root = document.getElementById("jc-chat");
     var meta = document.querySelector('meta[name="jc-api"]');
     var api = origin(meta && meta.content);
     var id = deployment(location.pathname, location.search);
     var params = new URLSearchParams(location.search);
-    var embedded = params.get("embed") === "1" && window.parent !== window;
+    var framed = window.parent !== window;
+    var embedded = params.get("embed") === "1" && framed;
     function missing() {
       root.textContent = "";
       var text = document.createElement("p");
@@ -49,7 +59,7 @@ var JCApp = (function () {
     fetch(api + "/api/v1/d/" + id + "/config", { credentials: "omit" })
       .then(function (answer) { return answer.ok ? answer.json() : Promise.reject(answer.status); })
       .then(function (config) {
-        if (embedded && !framedBy(location.ancestorOrigins, document.referrer, config.frameOrigins)) return missing();
+        if (!mayShow(framed, location.ancestorOrigins, document.referrer, config.frameOrigins)) return missing();
         config.api = api;
         config.assets = "/";
         document.documentElement.lang = (config.languages && config.languages[0]) || "sk";
@@ -63,6 +73,6 @@ var JCApp = (function () {
   }
 
   if (typeof document !== "undefined") start();
-  return { deployment: deployment, framedBy: framedBy, origin: origin };
+  return { deployment: deployment, framedBy: framedBy, mayShow: mayShow, origin: origin };
 })();
 if (typeof module !== "undefined") module.exports = JCApp;
