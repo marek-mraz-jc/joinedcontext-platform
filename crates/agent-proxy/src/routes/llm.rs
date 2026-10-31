@@ -631,6 +631,17 @@ async fn run_limits(
     Ok(Caller::Run(run))
 }
 
+/// A run's call capped at what is left of its token budget; an assistant or App call as sent.
+async fn within_runs_budget(state: &ProxyState, caller: &Caller, body: Bytes) -> Bytes {
+    match caller {
+        Caller::Run(run) => within_budget(
+            body,
+            state.limits.tokens_left(&run.id, run.max_tokens).await,
+        ),
+        Caller::Assistant { .. } | Caller::App { .. } => body,
+    }
+}
+
 /// Who calls: the assistant or an App (each at the completion endpoints alone, refused before the
 /// realm is asked about its token, AG-111), else a run, authenticated first so a refused path
 /// tells nobody without a ticket anything.
@@ -695,13 +706,7 @@ pub async fn handler(
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),
         None => body_bytes,
     };
-    let body_bytes = match &caller {
-        Caller::Run(run) => within_budget(
-            body_bytes,
-            state.limits.tokens_left(&run.id, run.max_tokens).await,
-        ),
-        Caller::Assistant { .. } | Caller::App { .. } => body_bytes,
-    };
+    let body_bytes = within_runs_budget(&state, &caller, body_bytes).await;
     let streamed = wants_stream(&body_bytes);
     let body_bytes = if streamed {
         with_stream_usage(&body_bytes, &rest)
