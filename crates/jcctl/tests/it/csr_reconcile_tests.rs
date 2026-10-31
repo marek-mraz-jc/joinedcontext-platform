@@ -110,6 +110,19 @@ fn a_local_endpoint_becomes_a_registration_at_that_endpoints_address() {
     );
 }
 
+/// F-R2PLT4-014: a title of one string (UI-50) names the registration as the legacy map did.
+#[test]
+fn a_plain_string_title_names_the_registration() {
+    let plain = LOCAL.replace(
+        r#"{ sk: "Ovzdušie mesta", en: "City air quality" }"#,
+        r#""City air quality""#,
+    );
+    let body = registration(&manifest(&plain), &endpoints()).expect("builds");
+    assert_eq!(body["registrationName"], json!("City air quality"));
+    let legacy = registration(&manifest(LOCAL), &endpoints()).expect("builds");
+    assert!(legacy["registrationName"].is_string(), "{legacy}");
+}
+
 #[test]
 fn an_external_source_keeps_its_own_url_and_its_expiry() {
     let body = registration(&manifest(EXTERNAL), &no_endpoints()).expect("builds");
