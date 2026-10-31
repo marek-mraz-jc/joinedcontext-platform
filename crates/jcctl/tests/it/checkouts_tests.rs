@@ -136,6 +136,11 @@ fn a_mounted_secret_is_read_by_name_only() {
     assert!(unmounted.contains("--secrets-dir"), "{unmounted}");
     let outside = mounted_secret(Some(&dir), &secret("../etc")).expect_err("out of the mount");
     assert!(outside.contains("not a Secret name"), "{outside}");
+    // F-R2PLT4-016: an empty name is no Secret, and never the mount's own root.
+    write(&dir, "username", "root-reader\n");
+    write(&dir, "password", "root-value\n");
+    let root = mounted_secret(Some(&dir), &secret("")).expect_err("no name");
+    assert!(root.contains("not a Secret name"), "{root}");
     let empty = mounted_secret(Some(&dir), &secret("absent")).expect_err("no such Secret");
     assert!(!empty.contains("s3cr3t"), "{empty}");
 }

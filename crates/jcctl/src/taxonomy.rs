@@ -187,7 +187,7 @@ pub fn taxonomy() -> Vec<Seeded> {
                       letting an endpoint or an app out to the public (PF-71).",
             rules: vec![
                 rule(
-                    without(without(project(), "Endpoint"), "App"),
+                    without(without(without(project(), "Endpoint"), "App"), "McpServer"),
                     vec![Verb::Propose, Verb::Approve],
                 ),
                 // Proposing a public App is the author's; approving it is the publisher's (AP-120).
@@ -202,6 +202,12 @@ pub fn taxonomy() -> Vec<Seeded> {
                     vec![Verb::Propose, Verb::Approve],
                     audience_is_not_public(),
                 ),
+                // A public MCP server is its members' public exposure, the publisher's (MF-53).
+                constrained(
+                    vec!["McpServer".into()],
+                    vec![Verb::Propose, Verb::Approve],
+                    audience_is_not_public(),
+                ),
             ],
         },
         Seeded {
@@ -211,6 +217,11 @@ pub fn taxonomy() -> Vec<Seeded> {
                 rule(project(), vec![Verb::Read]),
                 constrained(
                     vec!["Endpoint".into()],
+                    vec![Verb::Approve],
+                    audience_is_public(),
+                ),
+                constrained(
+                    vec!["McpServer".into()],
                     vec![Verb::Approve],
                     audience_is_public(),
                 ),

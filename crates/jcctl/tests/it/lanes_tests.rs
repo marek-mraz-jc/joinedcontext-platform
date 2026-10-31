@@ -117,6 +117,35 @@ fn a_deletion_is_red_whatever_it_deletes() {
     assert_eq!(verdict.lane, Lane::Red, "{}", verdict.reason);
 }
 
+/// F-R2PLT4-009: a Dashboard or a KnowledgeSource anyone sees is public exposure (CC-63), so
+/// publishing or withdrawing one is red; one the project alone sees keeps its lane.
+#[test]
+fn a_public_dashboard_or_knowledge_source_is_red() {
+    for kind in ["Dashboard", "KnowledgeSource"] {
+        let public = format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: {kind}\nmetadata:\n  name: x\n  \
+             namespace: ovzdusie\nspec:\n  visibility: public\n"
+        );
+        let verdict = lane_of(&change(Action::Create, &public));
+        assert_eq!(verdict.lane, Lane::Red, "{kind}: {}", verdict.reason);
+        let mut withdrawn = change(
+            Action::Update,
+            &public.replace("visibility: public", "visibility: project"),
+        );
+        withdrawn.live = Some(serde_norway::from_str(&public).expect("fixture parses"));
+        let verdict = lane_of(&withdrawn);
+        assert_eq!(
+            verdict.lane,
+            Lane::Red,
+            "{kind} withdrawn: {}",
+            verdict.reason
+        );
+    }
+    let project = "apiVersion: joinedcontext.com/v1alpha1\nkind: Dashboard\nmetadata:\n  \
+                   name: x\n  namespace: ovzdusie\nspec:\n  visibility: project\n";
+    assert_eq!(lane_of(&change(Action::Update, project)).lane, Lane::Green);
+}
+
 #[test]
 fn publishing_an_endpoint_to_the_public_is_red() {
     let verdict = lane_of(&change(Action::Create, ENDPOINT));

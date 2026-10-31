@@ -73,6 +73,20 @@ fn render_of_a_repository_that_does_not_load_is_an_error() {
     assert!(render(&dir, "ws-x-").is_err());
 }
 
+/// F-R2PLT4-007: a manifest name that is no DNS-1123 name never becomes a file outside the
+/// output directory.
+#[test]
+fn render_refuses_a_name_that_would_leave_the_output_directory() {
+    let dir = repo("escape", &[]);
+    write(
+        &dir,
+        "projects/helsinki/spaces/x/space.yaml",
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: ../../../escaped\n  namespace: helsinki\nspec:\n  isSandbox: false\n",
+    );
+    let err = render(&dir, "").expect_err("refused");
+    assert!(err.to_string().contains("escaped"), "{err}");
+}
+
 #[test]
 fn diff_names_what_the_workspace_creates_changes_and_removes() {
     let base = repo(

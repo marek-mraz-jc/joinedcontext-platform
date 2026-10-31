@@ -10,7 +10,7 @@ use crate::loader::{RawManifest, Repository};
 use jc_core::envelope::ORG_NAMESPACE;
 use jc_core::kinds::{RoleBindingSpec, RoleSpec, Subject, Verb};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -76,6 +76,16 @@ pub enum RolesError {
         /// Where the binding applies, in words.
         scope: String,
     },
+    /// A context-space binding whose space name several projects declare: it would reach the
+    /// space of each of them (F-R2PLT4-002).
+    AmbiguousSpace {
+        /// The binding's name.
+        binding: String,
+        /// The space it names.
+        space: String,
+        /// Every project declaring a space of that name.
+        projects: Vec<String>,
+    },
     /// A line of the change list names no path inside the checkout: absolute, climbing out
     /// with `..`, or quoted the way git quotes and broken (PF-52).
     ChangePath {
@@ -118,6 +128,16 @@ impl fmt::Display for RolesError {
                      at {scope}; a project role is bound inside its own project alone (PF-69)"
                 )
             }
+            Self::AmbiguousSpace {
+                binding,
+                space,
+                projects,
+            } => write!(
+                f,
+                "RoleBinding `{binding}` is scoped to context space `{space}`, which projects \
+                 {} each declare; scope it to one project, or give the spaces names of their own",
+                projects.join(", ")
+            ),
             Self::ChangePath { path } => write!(
                 f,
                 "the change list names {path:?}, which is not a path inside the repository; \
@@ -195,7 +215,7 @@ fn resolve<'a>(
     binding: &NamedBinding,
     roles: &'a BTreeMap<String, RoleSpec>,
     project_roles: &'a BTreeMap<String, BTreeMap<String, RoleSpec>>,
-    project_of_space: &BTreeMap<String, String>,
+    project_of_space: &BTreeMap<String, BTreeSet<String>>,
 ) -> Result<&'a RoleSpec, RolesError> {
     if let Some(spec) = roles.get(&binding.spec.role) {
         return Ok(spec);
@@ -205,7 +225,7 @@ fn resolve<'a>(
         scope
             .context_space
             .as_ref()
-            .and_then(|space| project_of_space.get(space).cloned())
+            .and_then(|space| project_of_space.get(space)?.first().cloned())
     });
     if let Some(project) = &reachable {
         if let Some(spec) = project_roles
@@ -244,10 +264,12 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
     let mut roles = BTreeMap::new();
     let mut project_roles: BTreeMap<String, BTreeMap<String, RoleSpec>> = BTreeMap::new();
     let mut bindings = Vec::new();
-    let mut org: Option<String> = None;
+    let org = repo
+        .installation_organization()
+        .map(|(id, _)| id.name.clone());
     // A context-space binding names no project, so the space's own namespace says which
-    // project's roles it may reach (PF-69).
-    let mut project_of_space: BTreeMap<String, String> = BTreeMap::new();
+    // project's roles it may reach (PF-69), and which project's space it owns.
+    let mut project_of_space: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (id, loaded) in repo.iter() {
         match id.kind.as_str() {
             "Role" => {
@@ -268,10 +290,12 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
                 name: id.name.clone(),
                 spec: parse::<RoleBindingSpec>(&loaded.manifest)?,
             }),
-            "Organization" => org = Some(id.name.clone()),
             "ContextSpace" => {
                 if let Some(project) = id.namespace.clone() {
-                    project_of_space.insert(id.name.clone(), project);
+                    project_of_space
+                        .entry(id.name.clone())
+                        .or_default()
+                        .insert(project);
                 }
             }
             _ => {}
@@ -289,6 +313,15 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
     }
     bindings.sort_by(|a, b| a.name.cmp(&b.name));
     for binding in &bindings {
+        if let Some(space) = &binding.spec.scope.context_space {
+            if let Some(projects) = project_of_space.get(space).filter(|p| p.len() > 1) {
+                return Err(RolesError::AmbiguousSpace {
+                    binding: binding.name.clone(),
+                    space: space.clone(),
+                    projects: projects.iter().cloned().collect(),
+                });
+            }
+        }
         resolve(binding, &roles, &project_roles, &project_of_space)?;
     }
 
@@ -341,11 +374,20 @@ pub fn compile(repo: &Repository) -> Result<Compiled, RolesError> {
                 names.join(" ")
             ));
         } else if let Some(space) = &binding.spec.scope.context_space {
-            out.push_str(&format!(
-                "\n# RoleBinding {} (context space {space})\n/projects/*/spaces/{space}/ {}\n",
-                binding.name,
-                names.join(" ")
-            ));
+            // The space's own project, never `*`: another project's space of the same name
+            // is not this binding's (F-R2PLT4-002).
+            match project_of_space.get(space).and_then(|p| p.first()) {
+                Some(project) => out.push_str(&format!(
+                    "\n# RoleBinding {} (context space {space})\n/projects/{project}/spaces/{space}/ {}\n",
+                    binding.name,
+                    names.join(" ")
+                )),
+                None => out.push_str(&format!(
+                    "\n# RoleBinding {} (context space {space}): no project declares the space, \
+                     so it owns no path yet\n",
+                    binding.name
+                )),
+            }
         }
     }
 

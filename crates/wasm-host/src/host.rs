@@ -669,7 +669,7 @@ impl Host {
         token: String,
         wall: std::time::Duration,
     ) -> Result<(), String> {
-        let _admission = self.admit(app).map_err(|_| {
+        let admission = self.admit(app).map_err(|_| {
             "the App was at its limit of concurrent requests; the run waits for its next time"
                 .to_owned()
         })?;
@@ -686,7 +686,10 @@ impl Host {
             .map_err(|f| f.detail().to_owned())?;
         let export = export.to_owned();
         let id = app.id.clone();
-        let task = tokio::spawn(async move {
+        // As a request's: the admission lives as long as the instance, and past the wall time the
+        // instance is stopped, not left waiting on the host outside the App's cap (F-R2PLT4-010).
+        let mut task = tokio::spawn(async move {
+            let _admission = admission;
             let instance = pre.instance_pre().instantiate_async(&mut store).await?;
             let Ok(func) =
                 instance.get_typed_func::<(), (Result<(), String>,)>(&mut store, export.as_str())
@@ -698,8 +701,11 @@ impl Host {
             let (outcome,) = func.call_async(&mut store, ()).await?;
             wasmtime::Result::Ok(outcome)
         });
-        match tokio::time::timeout(wall + std::time::Duration::from_secs(1), task).await {
-            Err(_) => Err("the job ran past its wall time and was stopped".to_owned()),
+        match tokio::time::timeout(wall + std::time::Duration::from_secs(1), &mut task).await {
+            Err(_) => {
+                task.abort();
+                Err("the job ran past its wall time and was stopped".to_owned())
+            }
             Ok(Err(err)) => Err(format!("the run ended abnormally: {err}")),
             Ok(Ok(Ok(Ok(())))) => Ok(()),
             Ok(Ok(Ok(Err(why)))) => Err(sentence(&why)),

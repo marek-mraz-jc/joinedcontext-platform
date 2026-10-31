@@ -692,7 +692,10 @@ fn plugin_configs(settings: &Settings) -> Value {
                     "allow_origins_by_regex": [settings.origin_regex()],
                     "allow_methods": "GET,HEAD,POST,OPTIONS",
                     "allow_headers": "Authorization,Content-Type,Accept,Link",
-                    "allow_credential": true,
+                    // A bearer token is the surface's one credential: no browser cookie of the
+                    // origins the pattern admits, an App's among them, rides along (ADR-N-037,
+                    // F-R2PLT4-013).
+                    "allow_credential": false,
                 },
                 "response-rewrite": security_headers(&[]),
             },

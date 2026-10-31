@@ -184,8 +184,12 @@ pub fn registration(manifest: &RawManifest, endpoints: &impl Endpoints) -> Resul
         .metadata
         .rest
         .get("title")
-        .and_then(Value::as_object)
-        .and_then(|languages| languages.values().find_map(Value::as_str))
+        // One string (UI-50), else the legacy map's first language (F-R2PLT4-014).
+        .and_then(|title| {
+            title
+                .as_str()
+                .or_else(|| title.as_object()?.values().find_map(Value::as_str))
+        })
     {
         body.insert("registrationName".into(), json!(title));
     }

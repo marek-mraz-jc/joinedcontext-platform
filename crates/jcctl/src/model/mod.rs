@@ -10,6 +10,7 @@
 pub mod http;
 pub mod merge;
 
+use crate::gateway::snippet;
 use crate::loader::{LoadedResource, Repository};
 use jc_core::envelope::ORG_NAMESPACE;
 use jc_core::kinds::data_model::{
@@ -179,7 +180,7 @@ impl Answer {
             _ => {
                 return Err(http::HttpError::Protocol(format!(
                     "a body that is not a JSON object: {}",
-                    truncate(body)
+                    snippet(body)
                 ))
                 .into())
             }
@@ -240,7 +241,7 @@ impl ModelTools {
             },
             _ => Err(http::HttpError::Protocol(format!(
                 "a /healthz answer that is not a JSON object: {}",
-                truncate(&body)
+                snippet(&body)
             ))
             .into()),
         }
@@ -289,7 +290,7 @@ impl ModelTools {
             .ok_or_else(|| {
                 http::HttpError::Protocol(format!(
                     "an infer-schema answer that is not a JSON object: {}",
-                    truncate(&raw)
+                    snippet(&raw)
                 ))
                 .into()
             })
@@ -311,9 +312,9 @@ impl ModelTools {
                         .map(render_message)
                         .collect::<Vec<_>>()
                         .join("; "),
-                    _ => truncate(&response.body),
+                    _ => snippet(&response.body),
                 },
-                _ => truncate(&response.body),
+                _ => snippet(&response.body),
             },
         })
     }
@@ -773,15 +774,6 @@ fn render_message(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         other => other.to_string(),
-    }
-}
-
-/// Enough of an unexpected body to recognise it, without pasting a model into a log.
-fn truncate(body: &str) -> String {
-    let body = body.trim();
-    match body.char_indices().nth(200) {
-        Some((cut, _)) => format!("{}…", &body[..cut]),
-        None => body.to_owned(),
     }
 }
 

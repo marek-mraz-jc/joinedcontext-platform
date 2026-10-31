@@ -54,10 +54,12 @@ pub fn mounted_secret(dir: Option<&Path>, secret: &SecretRef) -> Result<Basic, S
             secret.name
         )
     })?;
-    let base = dir.join(&secret.name);
-    if secret.name.contains(['/', '\\']) || secret.name.starts_with('.') {
+    // A DNS-1123 label, as a Secret is named: never empty (the mount's root, F-R2PLT4-016),
+    // never a path out of the mount.
+    if jc_core::names::validate_dns1123_label(&secret.name).is_err() {
         return Err(format!("`{}` is not a Secret name", secret.name));
     }
+    let base = dir.join(&secret.name);
     let user = read_trimmed(&base.join("username"))
         .map_err(|_| format!("the Secret `{}` has no username", secret.name))?;
     let password = read_trimmed(&base.join("password"))
