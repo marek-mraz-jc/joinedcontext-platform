@@ -519,10 +519,12 @@ pub fn pool_options(size: u32) -> PgPoolOptions {
         .acquire_timeout(Duration::from_secs(3))
         .after_release(|conn, _| {
             Box::pin(async move {
-                Ok(sqlx::raw_sql("select pg_advisory_unlock_all(); unlisten *; reset all")
-                    .execute(conn)
-                    .await
-                    .is_ok())
+                Ok(
+                    sqlx::raw_sql("select pg_advisory_unlock_all(); unlisten *; reset all")
+                        .execute(conn)
+                        .await
+                        .is_ok(),
+                )
             })
         })
 }

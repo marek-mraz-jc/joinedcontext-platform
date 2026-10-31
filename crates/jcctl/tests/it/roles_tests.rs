@@ -171,7 +171,10 @@ fn codeowners_handles_name_the_installation_organization() {
         &ORG.replace("banskabystrica", "zvolen"),
     );
     let owners = roles::compile(&load(&dir)).expect("compiles").codeowners;
-    assert!(owners.contains("/ @banskabystrica/platform-admins\n"), "{owners}");
+    assert!(
+        owners.contains("/ @banskabystrica/platform-admins\n"),
+        "{owners}"
+    );
     assert!(!owners.contains("@zvolen/"), "{owners}");
     let _ = std::fs::remove_dir_all(&dir);
 }

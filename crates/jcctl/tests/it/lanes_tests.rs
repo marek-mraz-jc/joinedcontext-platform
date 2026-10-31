@@ -134,7 +134,12 @@ fn a_public_dashboard_or_knowledge_source_is_red() {
         );
         withdrawn.live = Some(serde_norway::from_str(&public).expect("fixture parses"));
         let verdict = lane_of(&withdrawn);
-        assert_eq!(verdict.lane, Lane::Red, "{kind} withdrawn: {}", verdict.reason);
+        assert_eq!(
+            verdict.lane,
+            Lane::Red,
+            "{kind} withdrawn: {}",
+            verdict.reason
+        );
     }
     let project = "apiVersion: joinedcontext.com/v1alpha1\nkind: Dashboard\nmetadata:\n  \
                    name: x\n  namespace: ovzdusie\nspec:\n  visibility: project\n";
