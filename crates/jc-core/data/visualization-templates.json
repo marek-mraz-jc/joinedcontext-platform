@@ -18,7 +18,7 @@
     "spec": {
       "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
       "data": {"name": "source"},
-      "mark": {"type": "line", "point": true},
+      "mark": {"type": "line", "point": {"opacity": 0}},
       "encoding": {
         "x": {"field": "{x}", "type": "temporal", "title": null},
         "y": {"field": "{y}", "type": "quantitative", "scale": {"zero": false}},

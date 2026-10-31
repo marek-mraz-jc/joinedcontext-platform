@@ -433,6 +433,22 @@ fn every_template_fills_from_columns_and_validates() {
     }
 }
 
+/// T-6171: a week of readings drew 13-18k point markers per chart. The line keeps its points, so
+/// each reading has its tooltip, but draws them transparent: the lines alone show.
+#[test]
+fn the_line_template_draws_no_marker_and_keeps_a_tooltip_per_reading() {
+    let columns: BTreeMap<String, String> = [("x", "observedAt"), ("y", "temperature")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    let spec = template("line", &columns).expect("fills");
+    assert_eq!(
+        spec["mark"],
+        serde_json::json!({ "type": "line", "point": { "opacity": 0 } })
+    );
+    assert_eq!(spec["encoding"]["tooltip"][0]["field"], "observedAt");
+}
+
 #[test]
 fn an_optional_role_left_out_drops_its_encoding_and_a_required_one_fails() {
     let columns: BTreeMap<String, String> = [
