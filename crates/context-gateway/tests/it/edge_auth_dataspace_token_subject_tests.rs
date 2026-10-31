@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use context_gateway::auth::dataspace_token::{
-    agreements_of, presented, subject, Agreements, Refused, MAX_LIFETIME,
+    agreements_of, presented, subject, Agreements, Refused, IAT_LEEWAY, MAX_LIFETIME,
 };
 use context_gateway::auth::token::Claims;
 use context_gateway::resolver::Endpoint;
@@ -179,6 +179,24 @@ fn a_token_minted_for_exactly_the_longest_life_is_accepted_and_one_second_more_i
 /// DS-11 is a property of the token, so it is measured before anything is looked up: a token
 /// minted to live a day is refused whether or not it names an agreement that exists, and the
 /// refusal says nothing about which.
+/// F-R2PLT1-015: a token issued in the future keeps its short span far ahead of now; past the
+/// clock skew the gateway allows it is a long-lived token and refused as one.
+#[test]
+fn a_token_issued_in_the_future_is_refused_past_the_clock_skew() {
+    let at = |ahead: i64| {
+        let mut claims = transfer(600, CONSUMER, AGREEMENT);
+        claims["iat"] = json!(now().timestamp() + ahead);
+        claims["exp"] = json!(now().timestamp() + ahead + 600);
+        establish(&claims)
+    };
+    assert_eq!(at(365 * 86_400), Err(Refused::TooLong));
+    assert_eq!(at(IAT_LEEWAY + 1), Err(Refused::TooLong));
+    assert!(
+        at(IAT_LEEWAY).is_ok(),
+        "a skew inside the leeway is accepted"
+    );
+}
+
 #[test]
 fn the_lifetime_is_measured_before_the_agreement_is_looked_up() {
     assert_eq!(
@@ -207,9 +225,11 @@ fn a_lifetime_that_runs_backwards_neither_panics_nor_passes_for_a_long_one() {
     let mut extreme = transfer(0, CONSUMER, AGREEMENT);
     extreme["iat"] = json!(i64::MAX);
     extreme["exp"] = json!(i64::MIN);
-    assert!(
-        establish(&extreme).is_ok(),
-        "the ends of the range saturate rather than overflowing into a short lifetime",
+    assert_eq!(
+        establish(&extreme),
+        Err(Refused::TooLong),
+        "the ends of the range saturate rather than overflowing, and an iat that far ahead is \
+         refused (F-R2PLT1-015)",
     );
 
     let mut long = transfer(0, CONSUMER, AGREEMENT);
