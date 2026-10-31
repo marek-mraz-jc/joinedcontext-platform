@@ -135,10 +135,13 @@ pub struct Search<'a> {
     /// Passages in this language and those of no known language only; `None` reads every one
     /// (T-4659).
     pub lang: Option<&'a str>,
+    /// Passages whose [path](Hit::path) starts with one of these only; empty reads every one
+    /// (T-6183). Compared as text, never as a pattern.
+    pub paths: &'a [String],
 }
 
 /// One passage, with where it came from and its fused score.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Hit {
     /// The chunk's id.
     pub chunk: i64,
@@ -152,6 +155,13 @@ pub struct Hit {
     pub site: String,
     /// When its page or document was published, last changed and last read.
     pub dates: Dates,
+    /// Its place in its page or document, from 0 (T-6183).
+    pub ordinal: i32,
+    /// Where it sits in its source: a website page's URL path, an uploaded file's folders and
+    /// name (`/reports/2026/budget.pdf`) (T-6183).
+    pub path: String,
+    /// The PDF page it starts on, from 1; `None` outside a PDF.
+    pub page: Option<i32>,
 }
 
 /// When a passage's page or document was published, last changed and last read by the crawl,
@@ -244,6 +254,7 @@ lexical AS (
               AND c.site_id = ANY (ARRAY(SELECT s.id FROM sites s WHERE s.source = ANY($3)))
               AND (NOT $4 OR c.visibility = 'public')
               AND ($7::text IS NULL OR c.lang IS NULL OR c.lang = $7)
+              AND (cardinality($8::text[]) = 0 OR jc_chunk_path(c.url) ^@ ANY ($8::text[]))
             OFFSET 0
         ) scoped
         ORDER BY found.hits DESC, found.id
@@ -258,6 +269,7 @@ semantic AS (
         WHERE c.site_id = ANY (ARRAY(SELECT s.id FROM sites s WHERE s.source = ANY($3)))
           AND (NOT $4 OR c.visibility = 'public')
           AND ($7::text IS NULL OR c.lang IS NULL OR c.lang = $7)
+          AND (cardinality($8::text[]) = 0 OR jc_chunk_path(c.url) ^@ ANY ($8::text[]))
         ORDER BY c.embedding <=> $2::vector
         LIMIT 50
     ) near
@@ -266,7 +278,8 @@ fused AS MATERIALIZED (
     SELECT COALESCE(lexical.id, semantic.id) AS id, lexical.rank AS by_words, semantic.rank AS by_meaning
     FROM lexical FULL OUTER JOIN semantic USING (id)
 )
-SELECT c.id, c.url, c.text, site.project || '/' || site.source AS site,
+SELECT c.id, c.url, c.text, c.ordinal, jc_chunk_path(c.url) AS path, jc_chunk_page(c.url) AS page,
+       site.project || '/' || site.source AS site,
        to_char(COALESCE(p.published, d.published) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS published,
        to_char(COALESCE(p.modified, d.modified) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS modified,
        to_char(COALESCE(p.fetched_at, d.fetched_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS crawled,
@@ -333,6 +346,7 @@ pub async fn hybrid_search(
         .bind(RRF_K)
         .bind(search.limit)
         .bind(search.lang)
+        .bind(search.paths)
         .fetch_all(conn)
         .await?;
     // Which arm found each passage kept (T-5779): one statement runs both, so the arms share
@@ -363,6 +377,9 @@ pub async fn hybrid_search(
                     modified: row.try_get("modified")?,
                     crawled: row.try_get("crawled")?,
                 },
+                ordinal: row.try_get("ordinal")?,
+                path: row.try_get("path")?,
+                page: row.try_get("page")?,
             })
         })
         .collect::<Result<_, sqlx::Error>>()

@@ -5915,7 +5915,7 @@ async fn the_mcp_search_answers_public_passages_with_their_pages_metadata_and_ne
     assert_eq!(english, json!({"hits": []}));
     for bad in [
         json!({"query": "", "sources": both}),
-        json!({"query": "knižnica", "sources": both, "limit": 11}),
+        json!({"query": "knižnica", "sources": both, "limit": 51}),
         json!({"query": "knižnica", "sources": []}),
         json!({"query": "knižnica", "sources": both, "token": "x"}),
     ] {
@@ -6249,6 +6249,207 @@ async fn a_filtered_count_is_read_exactly_not_from_the_profile_sample() {
             .iter()
             .any(|(n, d)| n == "answer" && d.to_string().contains("37")),
         "{events:?}"
+    );
+    db::drop_database(w.admin, w.pool, &w.name).await;
+}
+
+/// EP-133, EP-167, T-6183: a search keeps to its path prefixes in SQL, `%` and `_` being plain characters; each
+/// hit says where it sits (path, breadcrumb, chunkId, ordinal); the passages around a hit come
+/// in order, stop at the page's first and last passage, skip an internal one beside public ones,
+/// and a chunkId outside the named sources or internal answers 404.
+#[tokio::test]
+async fn the_mcp_search_keeps_to_a_path_and_reads_the_passages_around_a_hit() {
+    let w = world("chatcontext", deployment(Channel::Public, 50_000, 10)).await;
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let site: i64 = sqlx::query_scalar("SELECT id FROM sites WHERE source = 'web'")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("the web site");
+    let parent: i64 = sqlx::query_scalar(
+        "INSERT INTO pages (site_id, project, url, depth, title) \
+         VALUES ($1, 'hronov', 'https://hronov.example/sluzby', 0, 'Služby mesta') RETURNING id",
+    )
+    .bind(site)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("parent");
+    let page: i64 = sqlx::query_scalar(
+        "INSERT INTO pages (site_id, project, url, parent_id, depth, title) \
+         VALUES ($1, 'hronov', 'https://hronov.example/sluzby/kupalisko', $2, 1, 'Kúpalisko') RETURNING id",
+    )
+    .bind(site)
+    .bind(parent)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("page");
+    let texts = [
+        ("public", "Letné kúpalisko Hronov má tri bazény a tobogan."),
+        (
+            "public",
+            "Vstupné na kúpalisko je 4 eurá, deti do 6 rokov platia 1 euro.",
+        ),
+        (
+            "internal",
+            "Interná poznámka: servis filtrov kúpaliska objednaný na jún.",
+        ),
+        (
+            "public",
+            "Kúpalisko je otvorené od júna do augusta denne od 9:00 do 19:00.",
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (ordinal, (visibility, text)) in texts.iter().enumerate() {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO chunks (site_id, project, page_id, ordinal, url, text, lang, visibility) \
+             VALUES ($1, 'hronov', $2, $3, 'https://hronov.example/sluzby/kupalisko', $4, 'sk', $5) RETURNING id",
+        )
+        .bind(site)
+        .bind(page)
+        .bind(i32::try_from(ordinal).expect("small"))
+        .bind(*text)
+        .bind(*visibility)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("chunk");
+        ids.push(id);
+    }
+    sqlx::query("UPDATE chunks SET visibility = 'internal' WHERE url LIKE 'https://intranet.%'")
+        .execute(&mut *tx)
+        .await
+        .expect("internal");
+    tx.commit().await.expect("commit");
+    embed_missing(
+        &w.pool,
+        &Embedder::load(&model::model_dir(), 1).expect("the pinned model loads"),
+        "hronov",
+        100,
+    )
+    .await
+    .expect("embedded");
+    let web = json!([{"project": "hronov", "source": "web"}]);
+    let search = |prefix: Value| json!({"query": "kúpalisko vstupné knižnica", "sources": web, "limit": 10, "pathPrefix": prefix});
+
+    let (status, kept) = internal_post(
+        &w.app,
+        "/internal/v1/search",
+        search(json!(["/sluzby/"])),
+        false,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    let hits = kept["hits"].as_array().expect("hits");
+    assert!(!hits.is_empty(), "{kept}");
+    for hit in hits {
+        assert!(
+            hit["path"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("/sluzby/"),
+            "{hit}"
+        );
+    }
+    let pool = &hits[0];
+    assert_eq!(pool["path"], "/sluzby/kupalisko");
+    assert_eq!(pool["breadcrumb"], json!(["Služby mesta"]));
+    assert_eq!(pool["page"], Value::Null);
+    assert!(
+        ids.contains(&pool["chunkId"].as_i64().expect("chunkId")),
+        "{pool}"
+    );
+    assert!(pool["ordinal"].is_i64(), "{pool}");
+    let (_, every) = internal_post(&w.app, "/internal/v1/search", search(json!([])), false).await;
+    assert!(
+        every["hits"]
+            .as_array()
+            .expect("hits")
+            .iter()
+            .any(|h| h["path"] == "/kniznica"),
+        "no prefix keeps every path: {every}"
+    );
+    for nothing in [json!(["/nic"]), json!(["/%"]), json!(["/_luzby"])] {
+        let (status, none) = internal_post(
+            &w.app,
+            "/internal/v1/search",
+            search(nothing.clone()),
+            false,
+        )
+        .await;
+        assert_eq!(
+            (status, none),
+            (StatusCode::OK, json!({"hits": []})),
+            "{nothing}"
+        );
+    }
+    for bad in [
+        json!(["sluzby"]),
+        json!(vec!["/a"; 6]),
+        json!([format!("/{}", "a".repeat(200))]),
+        json!(["/a\u{7}"]),
+    ] {
+        let (status, _) =
+            internal_post(&w.app, "/internal/v1/search", search(bad.clone()), false).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+
+    let around = |chunk: i64, before: u8, after: u8| json!({"sources": web, "chunkId": chunk, "before": before, "after": after});
+    let ordinals = |answer: &Value| -> Vec<i64> {
+        answer["passages"]
+            .as_array()
+            .expect("passages")
+            .iter()
+            .map(|p| p["ordinal"].as_i64().expect("ordinal"))
+            .collect()
+    };
+    // The page's first passage: nothing before it.
+    let (status, first) =
+        internal_post(&w.app, "/internal/v1/context", around(ids[0], 10, 1), false).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(ordinals(&first), [0, 1]);
+    assert_eq!(first["passages"][0]["hit"], true);
+    assert_eq!(first["passages"][1]["hit"], false);
+    assert_eq!(first["publisher"], "hronov");
+    // The last: nothing after it, and the internal passage before it is never read.
+    let (_, last) =
+        internal_post(&w.app, "/internal/v1/context", around(ids[3], 2, 10), false).await;
+    assert_eq!(ordinals(&last), [1, 3]);
+    assert!(!last.to_string().contains("Interná"), "{last}");
+    // An internal passage, or one of a source not named, is no passage to read around.
+    let (status, _) =
+        internal_post(&w.app, "/internal/v1/context", around(ids[2], 1, 1), false).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let mut tx = assistant::project_scope(&w.pool, "hronov")
+        .await
+        .expect("scope");
+    let intranet: i64 =
+        sqlx::query_scalar("SELECT id FROM chunks WHERE url LIKE 'https://intranet.%'")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("intranet chunk");
+    tx.rollback().await.expect("rollback");
+    for sources in [
+        web.clone(),
+        json!([{"project": "hronov", "source": "intranet"}]),
+    ] {
+        let (status, _) = internal_post(
+            &w.app,
+            "/internal/v1/context",
+            json!({"sources": sources, "chunkId": intranet, "before": 1, "after": 1}),
+            false,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{sources}");
+    }
+    let (status, _) =
+        internal_post(&w.app, "/internal/v1/context", around(ids[1], 11, 0), false).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) =
+        internal_post(&w.app, "/internal/v1/context", around(ids[1], 1, 1), true).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "through the edge the path does not exist"
     );
     db::drop_database(w.admin, w.pool, &w.name).await;
 }

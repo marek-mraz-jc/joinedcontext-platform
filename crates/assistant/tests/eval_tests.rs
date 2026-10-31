@@ -153,6 +153,7 @@ async fn hybrid_retrieval_finds_the_answering_page_at_least_as_often_as_either_r
                 public_only: true,
                 limit: 10,
                 lang: None,
+                paths: &[],
             },
         )
         .await
