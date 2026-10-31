@@ -84,6 +84,11 @@ impl Gateway {
         if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
             return Err(unusable("it is not an http(s) URL naming a host"));
         }
+        if !crate::login::token_may_travel(&base) {
+            return Err(unusable(
+                "the token travels over https alone, or over http to a host inside the cluster",
+            ));
+        }
         if token.is_empty() {
             return Err(unusable("the reconciler's token is empty"));
         }
@@ -260,6 +265,35 @@ mod tests {
 
     /// CC-06 (T-2549): the token leaves an echoed answer before the answer is cut, so not even
     /// the part of it that would fall inside the snippet survives.
+    /// F-R2PLT4-012: the reconciler's, the Portal's and OpenBao's clients send a token over https,
+    /// or over plain http only to a host inside the cluster, as the issuer's rule does for a login.
+    #[test]
+    fn a_token_goes_over_http_only_to_a_host_inside_the_cluster() {
+        use crate::secrets::bao_http::HttpBao;
+        let token = || SecretValue::new("a-token".to_owned());
+        for good in [
+            "https://portal.example.org",
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://gateway:8080",
+            "http://context-gateway.joinedcontext.svc.cluster.local:8080",
+            "http://openbao.openbao.svc:8200",
+        ] {
+            assert!(Gateway::new(good, token()).is_ok(), "{good}");
+            assert!(crate::portal::Portal::new(good, token()).is_ok(), "{good}");
+            assert!(HttpBao::new(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "http://portal.example.org",
+            "http://10.0.0.1:8080",
+            "http://cluster.local.example.org",
+        ] {
+            assert!(Gateway::new(bad, token()).is_err(), "{bad}");
+            assert!(crate::portal::Portal::new(bad, token()).is_err(), "{bad}");
+            assert!(HttpBao::new(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn an_echoed_token_is_redacted_before_the_snippet_is_cut() {
         let token = "eyJhbGciOiJSUzI1NiJ9.t2549-token";

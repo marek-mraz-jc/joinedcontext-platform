@@ -178,6 +178,11 @@ impl Portal {
         if !matches!(base.scheme(), "http" | "https") || base.host_str().is_none() {
             return Err(unusable("it is not an http(s) URL naming a host"));
         }
+        if !crate::login::token_may_travel(&base) {
+            return Err(unusable(
+                "the token travels over https alone, or over http to a host inside the cluster",
+            ));
+        }
         if token.is_empty() {
             return Err(unusable("the token file is empty"));
         }

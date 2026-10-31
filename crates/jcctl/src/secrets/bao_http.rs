@@ -93,6 +93,15 @@ impl HttpBao {
                 message: format!("'{address}' is not an http(s) URL naming a host"),
             });
         }
+        if !crate::login::token_may_travel(&base) {
+            return Err(BaoError::Transport {
+                path: address.to_owned(),
+                message: format!(
+                    "'{address}': the token travels over https alone, or over http to a host \
+                     inside the cluster"
+                ),
+            });
+        }
         let client = builder
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)

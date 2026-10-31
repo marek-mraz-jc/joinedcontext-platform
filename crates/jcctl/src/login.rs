@@ -132,6 +132,30 @@ fn proof_key() -> Result<(SecretValue, String), String> {
     Ok((SecretValue::new(verifier), challenge))
 }
 
+/// Whether a token may travel to `url`: over https, or over plain http to a host that cannot be
+/// on the internet — loopback, a single-label service name or a `.svc` name inside the cluster,
+/// where the mesh carries it (F-R2PLT4-012). An http URL to a public name sends the token in
+/// the clear to whoever answers on the way.
+pub fn token_may_travel(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let inside = host == "localhost"
+        || !host.contains(['.', ':', '['])
+        || host.ends_with(".svc")
+        || host.ends_with(".svc.cluster.local")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    match url.scheme() {
+        "https" => true,
+        "http" => inside,
+        _ => false,
+    }
+}
+
 /// The realm's issuer, e.g. `https://idm.example.org/realms/city`. A token travels over it, so it
 /// must be `https`, except on the loopback interface; a URL carrying a user name or password is
 /// refused.
