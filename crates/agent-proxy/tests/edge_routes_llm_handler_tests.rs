@@ -806,3 +806,42 @@ async fn the_provider_is_asked_for_the_profiles_model_alone() {
             .expect("a JSON body");
     assert_eq!(sent["model"], "google/gemini-3.8-flash");
 }
+
+/// F-R2PLT1-006: the budget was only checked before the call, so one call asking a large
+/// `max_tokens` could answer far past it. The forwarded output is capped at what is left, and a
+/// body naming no output cap gets one when what is left is small.
+#[tokio::test]
+async fn one_call_cannot_answer_past_the_runs_token_budget() {
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"choices":[]}"#))
+        .mount(&provider)
+        .await;
+    let app = proxy(&provider.uri(), 10, 10);
+    for (sent, field) in [
+        (r#"{"model":"m","max_tokens":100000}"#, "max_tokens"),
+        (
+            r#"{"model":"m","max_completion_tokens":100000}"#,
+            "max_completion_tokens",
+        ),
+        (r#"{"model":"m"}"#, "max_tokens"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                authed("POST", "/v1/llm/v1/chat/completions")
+                    .body(body(sent))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::OK, "{sent}");
+        let seen = provider
+            .received_requests()
+            .await
+            .expect("the mock recorded");
+        let last: serde_json::Value =
+            serde_json::from_slice(&seen.last().expect("a request").body).expect("JSON reached");
+        assert_eq!(last[field], 10, "{sent}");
+    }
+}
