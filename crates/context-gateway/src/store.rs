@@ -1388,7 +1388,12 @@ fn beside_text(
     let (root, relative) = (root?, relative.as_deref()?);
     let directory = manifest_path.parent().unwrap_or(Path::new(""));
     let path = normalize(&root.join(directory).join(relative))?;
-    if !path.starts_with(root) {
+    // A committed symlink resolves only when the file opens, so the path is judged again with
+    // every link resolved: a link out of the repository reads nothing (F-R2PLT2-006).
+    let resolved = std::fs::canonicalize(&path)
+        .ok()
+        .zip(std::fs::canonicalize(root).ok());
+    if !path.starts_with(root) || !resolved.is_some_and(|(path, root)| path.starts_with(root)) {
         tracing::warn!(owner, "artifact path leaves the repository");
         return None;
     }
@@ -1436,7 +1441,8 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        language_map, normalize, of_own_project, portal_personal_data_read, PORTAL_RECONCILER_USER,
+        beside_text, language_map, normalize, of_own_project, portal_personal_data_read,
+        PORTAL_RECONCILER_USER,
     };
     use crate::auth::subject::Subject;
     use crate::pdp::evaluator::{evaluate, Request};
@@ -1651,6 +1657,26 @@ mod tests {
         assert!(language_map(&metadata(json!("")), "title").is_empty());
         assert!(language_map(&metadata(json!(7)), "title").is_empty());
         assert!(language_map(&metadata(json!({})), "description").is_empty());
+    }
+
+    /// A committed symlink out of the repository is no artifact: the path reads inside the
+    /// repository, the file it opens does not (F-R2PLT2-006).
+    #[test]
+    fn an_artifact_linked_out_of_the_repository_reads_nothing() {
+        let base = std::env::temp_dir().join(format!("gw-beside-link-{}", std::process::id()));
+        let (repo, outside) = (base.join("repo"), base.join("outside"));
+        std::fs::create_dir_all(repo.join("projects")).expect("the repository");
+        std::fs::create_dir_all(&outside).expect("a directory beside it");
+        std::fs::write(outside.join("token"), "secret").expect("the outside file");
+        std::fs::write(repo.join("projects/inside.blobl"), "root = this").expect("an artifact");
+        std::os::unix::fs::symlink(outside.join("token"), repo.join("projects/x.blobl"))
+            .expect("a link");
+        let manifest = Path::new("projects/mapping.yaml");
+        let read = |name: &str| beside_text(Some(&repo), manifest, &Some(name.to_owned()), "m");
+
+        assert_eq!(read("inside.blobl").as_deref(), Some("root = this"));
+        assert_eq!(read("x.blobl"), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// An artifact path is checked before anything is opened, so a manifest that names

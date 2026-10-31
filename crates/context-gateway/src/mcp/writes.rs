@@ -9,6 +9,7 @@ use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::principal_of;
 use crate::auth::subject::Subject;
 use crate::handlers::ngsi_ld::{reserve_create, view_payload};
+use crate::mcp::tools::{Shape, TOOLS};
 use crate::resolver::Endpoint;
 use crate::{mcp, operations, query};
 use axum::http::header::CONTENT_TYPE;
@@ -65,28 +66,6 @@ pub(crate) async fn guarded(
         Some(value) => serde_json::to_vec(value).unwrap_or_default(),
         None => Vec::new(),
     };
-    // The OData surface refuses a write to an attribute the Endpoint hides; a tool is held to the
-    // same, by every name its body or its path gives.
-    let hidden = body
-        .and_then(|name| arguments.get(name))
-        .into_iter()
-        .chain(
-            arguments
-                .get("entities")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten(),
-        )
-        .filter_map(Value::as_object)
-        .flat_map(|members| members.keys().map(String::as_str))
-        .chain(word(arguments, "attrId"))
-        .find(|name| endpoint.hidden_attributes.contains(*name));
-    if let Some(name) = hidden {
-        tracing::info!(slug = %endpoint.slug, %tool, "MCP write refused: a hidden attribute");
-        return Err(refuse(&format!(
-            "`{name}` is not an attribute this Endpoint lets you write"
-        )));
-    }
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     // The relationship guards read and unlink in the Endpoint's space, as the NGSI-LD surface's
@@ -272,38 +251,41 @@ pub(crate) fn problem_text(body: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Whether the broker tool only reads (see [`MCP_READ_TOOLS`]).
+/// Whether the broker tool only reads: a broker tool of [`TOOLS`] none of whose operations writes
+/// (Antares `docs/src/mcp.md` section 2); any other name is a write.
 pub(crate) fn is_read_tool(tool: &str) -> bool {
-    MCP_READ_TOOLS.contains(&tool)
+    TOOLS.iter().any(|known| {
+        known.name == tool && matches!(known.shape, Shape::Broker(_)) && known.read_only()
+    })
 }
-
-/// The broker's read tools (Antares `docs/src/mcp.md` section 2); any other tool is a write.
-const MCP_READ_TOOLS: &[&str] = &[
-    "area_overview",
-    "batch_query",
-    "batch_query_temporal",
-    "get_attribute",
-    "get_attribute_value",
-    "get_entity",
-    "get_subscription",
-    "get_type",
-    "list_attribute_details",
-    "list_attributes",
-    "list_subscriptions",
-    "list_type_details",
-    "list_types",
-    "query_entities",
-    "query_temporal",
-    "retrieve_temporal",
-    // a profile of what query_entities reads (Antares T-4680)
-    "summarize",
-];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::handlers::ngsi_ld::create_key;
     use serde_json::json;
+
+    /// The read tools are the broker tools that write nothing, read off [`TOOLS`] (F-R2PLT2-012):
+    /// a gateway tool and an unknown name are no broker read.
+    #[test]
+    fn a_read_tool_is_a_broker_tool_that_writes_nothing() {
+        for read in [
+            "batch_query",
+            "query_entities",
+            "summarize",
+            "list_subscriptions",
+        ] {
+            assert!(is_read_tool(read), "{read}");
+        }
+        for other in [
+            "delete_entity",
+            "batch_upsert",
+            "describe_schema",
+            "no_such_tool",
+        ] {
+            assert!(!is_read_tool(other), "{other}");
+        }
+    }
 
     /// An attribute name stays one path segment: `../subscriptions` cannot turn an attribute
     /// write into a request on another resource the guards would classify instead.

@@ -283,6 +283,10 @@ const SHAREABLE_REQUEST_HEADERS: &[&str] = &[
 fn share_for(headers: &mut axum::http::HeaderMap, seconds: u32) {
     if let Ok(value) = HeaderValue::from_str(&format!("public, max-age={seconds}")) {
         headers.insert(axum::http::header::CACHE_CONTROL, value);
+        // The quota left is one caller's: a shared cache would replay it to the next (F-R2PLT2-018).
+        for name in ["ratelimit-limit", "ratelimit-remaining", "ratelimit-reset"] {
+            headers.remove(name);
+        }
     }
 }
 
@@ -453,4 +457,21 @@ fn keep_out_of_shared_caches(headers: &mut axum::http::HeaderMap) {
             "Authorization, Accept, Accept-Language, NGSILD-Results-Restricted, Accept-Encoding, Link, Prefer",
         ),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shared answer carries no caller's quota (F-R2PLT2-018).
+    #[test]
+    fn a_shared_answer_names_no_callers_quota() {
+        let mut headers = axum::http::HeaderMap::new();
+        for name in ["ratelimit-limit", "ratelimit-remaining", "ratelimit-reset"] {
+            headers.insert(name, HeaderValue::from_static("7"));
+        }
+        share_for(&mut headers, 60);
+        assert_eq!(headers.len(), 1, "{headers:?}");
+        assert_eq!(headers["cache-control"], "public, max-age=60");
+    }
 }

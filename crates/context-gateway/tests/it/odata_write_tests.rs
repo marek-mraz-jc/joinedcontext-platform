@@ -538,3 +538,91 @@ async fn a_read_only_token_writes_nothing_through_odata() {
     }
     assert!(writes(&hops).is_empty(), "{:?}", writes(&hops));
 }
+
+/// EP-61 and DM-90 as the NGSI-LD surface judges them (F-R2PLT2-015, F-R2PLT2-024): a hidden
+/// attribute spelled as its expanded IRI is the same attribute, and the quarantine mark is the
+/// space's rules' alone, in the body or in the path.
+#[tokio::test]
+async fn an_expanded_hidden_name_and_the_quarantine_mark_are_refused() {
+    let realm = common::Realm::new();
+    let (upstream, hops) = broker().await;
+    let app = app(&repo("spelled"), &upstream, &realm);
+    let iri = "https_x003A__x002F__x002F_ex.org_x002F_contact";
+    for (method, rest, body, refused) in [
+        (
+            Method::PATCH,
+            "/Feedback('x')".to_owned(),
+            Some(json!({ iri: "me@x" })),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Method::DELETE,
+            format!("/Feedback('x')/{iri}"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Method::PATCH,
+            "/Feedback('x')".to_owned(),
+            Some(json!({"quarantinedAt": "2026-01-01T00:00:00Z"})),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Method::DELETE,
+            "/Feedback('x')/quarantinedAt".to_owned(),
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (status, _, answer) = send(&app, method.clone(), FORM, &rest, body).await;
+        assert_eq!(status, refused, "{method} {rest}: {answer}");
+    }
+    assert!(writes(&hops).is_empty(), "{:?}", writes(&hops));
+}
+
+/// The guards of a space's model read an NGSI-LD body (DM-61, DM-86, DM-121), so an OData write
+/// to a modelled space would pass them all: it is refused with the NGSI-LD address to use, and
+/// reads go on (F-R2PLT2-001).
+#[tokio::test]
+async fn an_odata_write_to_a_modelled_space_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let (upstream, hops) = broker().await;
+    let (mut endpoints, ..) = store::load(&repo("modelled")).expect("the repository loads");
+    for endpoint in &mut endpoints {
+        endpoint.declared_types = Some(Arc::new(context_gateway::resolver::DeclaredTypes {
+            model: "feedback".into(),
+            classes: ["Feedback".to_owned()].into(),
+            units: Default::default(),
+            relationships: Default::default(),
+            quality: Vec::new(),
+            schema: None,
+        }));
+    }
+    let app = router(Arc::new(
+        Gateway::new(Broker::new(&upstream), Box::new(PolicyPdp), "hel.fi")
+            .serve(endpoints)
+            .authenticate(
+                Arc::new(realm.verifier()),
+                ServiceAccounts::new(),
+                Some(HOST.to_owned()),
+            ),
+    ));
+    for (method, rest, body) in [
+        (Method::POST, "/Feedback", Some(json!({"text": "t"}))),
+        (Method::PATCH, "/Feedback('x')", Some(json!({"text": "t"}))),
+        (Method::DELETE, "/Feedback('x')", None),
+    ] {
+        let (status, _, answer) = send(&app, method.clone(), OPEN, rest, body).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_IMPLEMENTED,
+            "{method} {rest}: {answer}"
+        );
+        let said = answer.to_string();
+        assert!(
+            said.contains(&format!("/api/endpoint/{OPEN}/ngsi-ld/v1")),
+            "{said}"
+        );
+    }
+    assert!(writes(&hops).is_empty(), "{:?}", writes(&hops));
+}

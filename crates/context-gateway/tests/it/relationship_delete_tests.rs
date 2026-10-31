@@ -765,6 +765,24 @@ async fn a_cascade_into_entities_the_caller_may_not_delete_is_refused_without_id
     assert!(answer.writes().is_empty(), "{:?}", answer.writes());
 }
 
+/// The rules change entities as the gateway before the broker's view decides the delete, so a
+/// caller who may change every dependent but not delete the root changes nothing (F-R2PLT2-002).
+#[tokio::test]
+async fn a_root_the_caller_may_not_delete_leaves_its_dependents_untouched() {
+    // The caller deletes Teachers and Lessons, not Schools.
+    let answer = delete(&["Teacher", "Lesson"], &urn("School", "s1")).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN, "{}", answer.body);
+    assert!(answer.writes().is_empty(), "{:?}", answer.writes());
+    for kept in [
+        urn("School", "s1"),
+        urn("Teacher", "t1"),
+        urn("Lesson", "l1"),
+    ] {
+        assert!(answer.held(&kept).is_some(), "{kept} went");
+    }
+}
+
 #[tokio::test]
 async fn a_batch_delete_refuses_the_kept_id_and_deletes_the_rest() {
     let answer = send(

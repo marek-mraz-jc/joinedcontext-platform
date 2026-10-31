@@ -21,12 +21,12 @@ use crate::auth::subject::Subject;
 use crate::auth::subject::{admit, principal_of};
 use crate::handlers::ngsi_ld::{
     broker_failure, caller_links, has_view, read_body, reserve_create, view_request,
-    with_platform_slug,
+    with_platform_slug, ANTARES_RESTRICTED,
 };
 use crate::handlers::respond::read_only;
+use crate::handlers::writes::hidden_refusal;
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::middleware::tenancy;
-use crate::pdp::write_guard;
 use crate::resolver::Endpoint;
 use crate::{proxy, query};
 use axum::body::Body;
@@ -41,9 +41,6 @@ use jc_core::ProblemDetails;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-/// The broker's narrowing marker (Antares `configuration.md`, `ANTARES_POLICY`).
-const ANTARES_RESTRICTED: &str = "antares-results-restricted";
 
 /// A read-only surface of the broker's view, forwarded as sent.
 struct Surface {
@@ -346,7 +343,8 @@ async fn answered(
         let held = axum::body::to_bytes(body, MAX_BODY)
             .await
             .unwrap_or_default();
-        tracing::info!(slug = %endpoint.slug, broker = %String::from_utf8_lossy(&held), "odata feature not served");
+        let (kind, detail) = crate::handlers::ngsi_ld::explanation(&held);
+        tracing::info!(slug = %endpoint.slug, broker_type = %kind, broker_detail = %detail, "odata feature not served");
         return ProblemDetails::new(501, "odata-not-implemented", "Not Implemented")
             .with_detail(
                 "this OData request needs a feature the endpoint does not serve; ask the entity \
@@ -433,6 +431,20 @@ async fn odata_write(
     if endpoint.view_mapping.is_some() || !has_view(&view) {
         return no_view(&ODATA);
     }
+    // A space with a data model judges every write against it: its classes, slot constraints,
+    // quality rules, units, relationships and personal-data minimisation (DM-61, DM-86, DM-87,
+    // DM-06, DM-70, DM-121). Those guards read an NGSI-LD body, so an OData write there would
+    // pass them all; it goes through the NGSI-LD surface instead (F-R2PLT2-001).
+    if endpoint.declared_types.is_some() {
+        tracing::info!(slug = %endpoint.slug, "odata write refused: the space's model judges writes");
+        return ProblemDetails::new(501, "odata-not-implemented", "Not Implemented")
+            .with_detail(format!(
+                "this endpoint checks every write against its data model, which OData writes do \
+                 not pass; write through {}/ngsi-ld/v1 instead",
+                endpoint.base_path
+            ))
+            .into_response();
+    }
     let prefix = format!("{}/{}", endpoint.base_path, ODATA.path);
     let write = match Write::of(request.method(), rest_of(&request, &prefix)) {
         Ok(write) => write,
@@ -463,20 +475,19 @@ async fn odata_write(
         Ok(members) => members,
         Err(problem) => return problem.into_response(),
     };
-    // What an Endpoint does not show cannot be changed through it (EP-61): the property the path
-    // names, or a member of the body, by its NGSI-LD name.
+    // What an Endpoint does not show cannot be changed through it (EP-61), and the quarantine
+    // mark is the space's rules' alone (DM-90): the property the path names, or a member of the
+    // body, by its NGSI-LD name, as the NGSI-LD surface judges it.
     let named = write
         .property
         .iter()
         .cloned()
         .chain(members.iter().filter_map(|member| attribute_of(member)));
-    if let Some(hidden) = named
-        .map(|name| unmangle(&name))
-        .find(|name| endpoint.hidden_attributes.contains(name))
-    {
-        let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden);
-        tracing::info!(slug = %endpoint.slug, %refusal, "odata write refused");
-        return ProblemDetails::from(refusal).into_response();
+    if let Some(problem) = named.map(|name| unmangle(&name)).find_map(|name| {
+        hidden_refusal(&endpoint, &name).or_else(|| crate::quality::owned_path(Some(&name)))
+    }) {
+        tracing::info!(slug = %endpoint.slug, "odata write refused");
+        return problem.into_response();
     }
     // A form's ids are minted, never chosen (EP-97): the broker mints the key a create leaves
     // out, so a create that names it is refused.

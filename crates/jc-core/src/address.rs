@@ -42,10 +42,18 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         let o = ip.octets();
         return is_public_v4(Ipv4Addr::new(o[12], o[13], o[14], o[15]));
     }
+    // 2002::/16, 6to4: the IPv4 address in its next 32 bits is the one reached (F-R2PLT2-022).
+    if segments[0] == 0x2002 {
+        let o = ip.octets();
+        return is_public_v4(Ipv4Addr::new(o[2], o[3], o[4], o[5]));
+    }
     !(ip.is_unspecified()
         || ip.is_loopback()
         || ip.is_multicast()
         || ip.is_unique_local()
+        // 2001::/32, Teredo, tunnels to an IPv4 address it hides; fec0::/10, deprecated site-local.
+        || (segments[0] == 0x2001 && segments[1] == 0)
+        || (segments[0] & 0xffc0) == 0xfec0
         || ip.is_unicast_link_local()
         // ::/96, the deprecated IPv4-compatible form, and 2001:db8::/32, documentation.
         || segments[..6] == [0, 0, 0, 0, 0, 0]
@@ -81,6 +89,10 @@ mod tests {
             "64:ff9b::a00:1",
             "::127.0.0.1",
             "2001:db8::1",
+            "2002:7f00:1::",
+            "2002:a00:1::1",
+            "2001:0:4136:e378::1",
+            "fec0::1",
         ] {
             assert!(!is_public(ip.parse().expect("an address")), "{ip}");
         }
@@ -94,6 +106,7 @@ mod tests {
             "2606:4700::1111",
             "::ffff:1.1.1.1",
             "64:ff9b::101:101",
+            "2002:101:101::1",
         ] {
             assert!(is_public(ip.parse().expect("an address")), "{ip}");
         }

@@ -23,6 +23,11 @@ pub const MAX_QUEUED: usize = 256;
 pub const RESUME_WINDOW: Duration = Duration::from_secs(30);
 /// Notifications kept per connection for a resume.
 pub const KEPT: usize = 256;
+/// Closed connections one hub holds for a resume: past it the oldest goes, and its resume
+/// answers a gap (F-R2PLT2-010).
+pub const MAX_CLOSED: usize = 256;
+/// The notification bytes the closed connections of one hub keep, cut the same way.
+pub const MAX_CLOSED_BYTES: usize = 4 * 1024 * 1024;
 /// The bound of the entity table when `JC_GATEWAY_WS_ENTITIES` names none (ADR-N-049 §2.2).
 pub const DEFAULT_ENTITIES: usize = 50_000;
 
@@ -324,6 +329,25 @@ impl Hub {
                 at: now,
             },
         );
+        let kept = |closed: &Closed| {
+            closed
+                .sent
+                .iter()
+                .map(|(_, text)| text.len())
+                .sum::<usize>()
+        };
+        let mut bytes: usize = state.closed.values().map(kept).sum();
+        while state.closed.len() > MAX_CLOSED || bytes > MAX_CLOSED_BYTES {
+            let oldest = state
+                .closed
+                .iter()
+                .min_by_key(|(_, closed)| closed.at)
+                .map(|(name, _)| name.clone());
+            let Some(gone) = oldest.and_then(|name| state.closed.remove(&name)) else {
+                break;
+            };
+            bytes = bytes.saturating_sub(kept(&gone));
+        }
         if state.conns.is_empty() {
             state.idle_since = Some(now);
         }
@@ -1059,6 +1083,25 @@ mod tests {
             hub.take_closed("name", "token", "anonymous").is_none(),
             "once"
         );
+    }
+
+    /// Reconnect churn holds no more than the caps: the oldest closed connections go first.
+    #[test]
+    fn closed_connections_held_for_a_resume_stay_under_the_caps() {
+        let hub = Hub::new("s", 100);
+        let large = "x".repeat(64 * 1024);
+        for n in 0..(MAX_CLOSED + 40) {
+            let (conn, _) = open(&hub);
+            let sent = VecDeque::from([(1, large.clone())]);
+            hub.close(conn, &format!("c{n}"), "token", sent);
+        }
+        let state = hub.state();
+        let bytes: usize = state.closed.values().map(|c| c.sent[0].1.len()).sum();
+        assert!(state.closed.len() <= MAX_CLOSED, "{}", state.closed.len());
+        assert!(bytes <= MAX_CLOSED_BYTES, "{bytes}");
+        let newest = format!("c{}", MAX_CLOSED + 39);
+        assert!(state.closed.contains_key(&newest), "the newest is kept");
+        assert!(!state.closed.contains_key("c0"), "the oldest went");
     }
 
     #[test]

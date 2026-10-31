@@ -29,6 +29,7 @@ mod attack_organization_audience_tests;
 mod attack_percent_attribute_tests;
 mod attack_policy_widening_tests;
 mod attack_resource_bomb_tests;
+mod broker_failure_log_tests;
 mod broker_timeout_tests;
 mod catalog_feed_tests;
 mod compression_tests;
