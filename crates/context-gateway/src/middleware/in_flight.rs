@@ -367,6 +367,7 @@ pub async fn enforce(
 /// read (T-5921).
 fn caller_of(gateway: &Gateway, request: &Request) -> Result<(String, Class), Box<Response<Body>>> {
     let claims = rate_limit::verified(gateway, request.headers());
+    crate::telemetry::caller_kind(crate::usage::caller(claims.as_ref()));
     let caller = match &claims {
         Some(claims) => rate_limit::subject_key(claims),
         None => rate_limit::address_key(request.headers()),

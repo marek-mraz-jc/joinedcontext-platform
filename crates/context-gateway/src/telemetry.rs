@@ -131,6 +131,12 @@ pub fn decision_time(seconds: f64) {
     let _ = SPLIT.try_with(|split| split.pdp.set(split.pdp.get() + seconds));
 }
 
+/// The kind of caller the request's verified token names (T-6186), told by the layer that
+/// verifies it once per request (`in_flight`); a request it never reached counts as anonymous.
+pub fn caller_kind(kind: &'static str) {
+    let _ = SPLIT.try_with(|split| split.caller.set(Some(kind)));
+}
+
 /// Where one answer's time went: the decision point and the broker, each summed over the request
 /// (ADR-N-057 section 4). Read back into `Server-Timing`, so a client or a load test sees the
 /// gateway's share without a scrape.
@@ -138,6 +144,8 @@ pub fn decision_time(seconds: f64) {
 struct Split {
     pdp: std::cell::Cell<f64>,
     broker: std::cell::Cell<f64>,
+    /// What [`caller_kind`] was told.
+    caller: std::cell::Cell<Option<&'static str>>,
 }
 
 tokio::task_local! {
@@ -169,11 +177,12 @@ pub async fn record(
         .unwrap_or("-")
         .to_owned();
     let started = Instant::now();
-    let (mut response, pdp, broker) = SPLIT
+    let (mut response, pdp, broker, caller) = SPLIT
         .scope(Split::default(), async {
             let response = next.run(request).await;
-            let (pdp, broker) = SPLIT.with(|split| (split.pdp.get(), split.broker.get()));
-            (response, pdp, broker)
+            let (pdp, broker, caller) =
+                SPLIT.with(|split| (split.pdp.get(), split.broker.get(), split.caller.get()));
+            (response, pdp, broker, caller)
         })
         .await;
     let seconds = started.elapsed().as_secs_f64();
@@ -187,7 +196,12 @@ pub async fn record(
         response.headers_mut().append(SERVER_TIMING, value);
     }
 
-    crate::usage::count(&endpoint, &route, response.status().as_u16());
+    crate::usage::count(
+        &endpoint,
+        &route,
+        response.status().as_u16(),
+        caller.unwrap_or("anonymous"),
+    );
     metrics::counter!(
         REQUESTS,
         "route" => route.clone(),
