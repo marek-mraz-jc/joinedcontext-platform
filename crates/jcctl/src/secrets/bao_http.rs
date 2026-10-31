@@ -11,6 +11,7 @@
 //! which is a message about a policy and never a value (PL-17).
 
 use super::openbao::{BaoApi, BaoError};
+use crate::gateway::snippet;
 use reqwest::blocking::Client;
 use reqwest::{StatusCode, Url};
 use serde_json::Value;
@@ -23,10 +24,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long one call may take end to end. Both calls are small reads; an apply that waits
 /// longer than this on a secret store is a store that is down.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How much of a non-JSON answer an error repeats: enough to recognise a proxy's error page,
-/// not enough to flood a log.
-const SNIPPET: usize = 200;
 
 /// One OpenBao instance reached over HTTP(S).
 #[derive(Debug)]
@@ -224,13 +221,5 @@ fn transport(path: &str, error: &reqwest::Error) -> BaoError {
     BaoError::Transport {
         path: path.to_owned(),
         message: error.to_string(),
-    }
-}
-
-fn snippet(text: &str) -> String {
-    let trimmed = text.trim();
-    match trimmed.char_indices().nth(SNIPPET) {
-        Some((cut, _)) => format!("{}…", &trimmed[..cut]),
-        None => trimmed.to_owned(),
     }
 }

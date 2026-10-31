@@ -7,6 +7,7 @@
 //! `Authorization` header and replaced by `[redacted]` in anything an answer echoes back.
 
 use crate::diff::diff;
+use crate::gateway::snippet;
 use crate::loader::{is_empty_doc, parse_yaml_documents, RawManifest};
 use crate::secrets::SecretValue;
 use reqwest::blocking::{Client, RequestBuilder, Response};
@@ -17,8 +18,6 @@ use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-/// How much of an answer that is not problem JSON an error repeats.
-const SNIPPET: usize = 200;
 /// Pages a list follows before it stops: a `continue` that never ends is the server's bug, not
 /// a reason to loop for ever.
 const MAX_PAGES: usize = 1000;
@@ -442,15 +441,6 @@ impl Portal {
             return Err(self.refused(what, status, &body));
         }
         self.json(what, &body)
-    }
-}
-
-/// The first `SNIPPET` characters of an answer.
-fn snippet(body: &str) -> String {
-    let trimmed = body.trim();
-    match trimmed.char_indices().nth(SNIPPET) {
-        Some((at, _)) => format!("{}…", &trimmed[..at]),
-        None => trimmed.to_owned(),
     }
 }
 

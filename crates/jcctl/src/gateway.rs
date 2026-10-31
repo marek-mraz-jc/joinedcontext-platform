@@ -180,8 +180,9 @@ fn multi_status(
     }
 }
 
-/// The first `SNIPPET` characters of an answer that is not what was expected.
-fn snippet(body: &str) -> String {
+/// The first `SNIPPET` characters of an answer that is not what was expected: the one cut every
+/// client of this crate repeats in its errors (F-R2PLT4-018).
+pub(crate) fn snippet(body: &str) -> String {
     let trimmed = body.trim();
     match trimmed.char_indices().nth(SNIPPET) {
         Some((at, _)) => format!("{}…", &trimmed[..at]),
