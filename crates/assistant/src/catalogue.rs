@@ -8,6 +8,7 @@
 //! entity count, read anonymously through the gateway as any visitor could read it. A `public`
 //! source holds public Endpoints alone, so nothing of a private space reaches a public channel.
 
+use crate::html_escape as escape;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -352,13 +353,6 @@ pub fn digest(pages: &[EndpointPage]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{pages:?}").as_bytes());
     hex::encode(hasher.finalize())
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 /// The page an Endpoint is indexed as, HTML so it goes through the crawl's extraction; every

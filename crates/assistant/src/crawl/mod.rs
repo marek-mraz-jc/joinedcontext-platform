@@ -1408,24 +1408,25 @@ async fn record_links(
     if extracted_links.is_empty() {
         return Ok(0);
     }
+    // One statement for the page's links, however many it has (F-R2PLT1-022).
+    let (urls, kinds): (Vec<&str>, Vec<&str>) = extracted_links
+        .iter()
+        .map(|link| (link.url.as_str(), link.kind.as_str()))
+        .unzip();
     let mut tx = crate::project_scope(pool, project).await?;
-    let mut inserted = 0;
-    for link in extracted_links {
-        let res = sqlx::query(
-            "INSERT INTO links (from_page, project, to_url, kind) \
-             VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (from_page, to_url) DO NOTHING",
-        )
-        .bind(page_id)
-        .bind(project)
-        .bind(link.url.as_str())
-        .bind(link.kind.as_str())
-        .execute(&mut *tx)
-        .await?;
-        inserted += res.rows_affected() as u32;
-    }
+    let res = sqlx::query(
+        "INSERT INTO links (from_page, project, to_url, kind) \
+         SELECT $1, $2, to_url, kind FROM unnest($3::text[], $4::text[]) AS l(to_url, kind) \
+         ON CONFLICT (from_page, to_url) DO NOTHING",
+    )
+    .bind(page_id)
+    .bind(project)
+    .bind(&urls)
+    .bind(&kinds)
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
-    Ok(inserted)
+    Ok(u32::try_from(res.rows_affected()).unwrap_or(u32::MAX))
 }
 
 async fn get_stored_links(
