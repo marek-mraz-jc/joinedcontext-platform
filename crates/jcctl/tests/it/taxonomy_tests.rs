@@ -201,6 +201,24 @@ fn seeding_twice_writes_nothing_the_second_time_and_leaves_an_edited_role_alone(
 /// AP-120, PF-71 (T-2690): a public App is the publisher's to approve, as a public Endpoint is. The
 /// steward approves every other App, one without `spec.visibility` included (it is `project`), and
 /// still proposes a public one: writing it is the author's, letting it out is the publisher's.
+/// F-R2PLT4-008: a public McpServer is the publisher's to approve (MF-53, ADR-N-043); any
+/// other audience stays the steward's.
+#[test]
+fn a_public_mcp_server_is_the_publishers_to_approve() {
+    let approves = |name: &str, audience: Option<&str>| {
+        role(name).rules.iter().any(|rule| {
+            rule.kinds.contains(&"McpServer".to_owned())
+                && rule.verbs.contains(&Verb::Approve)
+                && rule.constraints.iter().all(|c| c.holds(audience))
+        })
+    };
+    assert!(!approves("steward", Some("public")));
+    assert!(approves("steward", Some("organization")));
+    assert!(approves("steward", Some("project-list")));
+    assert!(approves("publisher", Some("public")));
+    assert!(!approves("publisher", Some("organization")));
+}
+
 #[test]
 fn a_public_app_is_the_publishers_to_approve_and_every_other_app_the_stewards() {
     let approves = |name: &str, visibility: Option<&str>| {
