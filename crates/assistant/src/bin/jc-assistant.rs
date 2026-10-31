@@ -93,10 +93,7 @@ async fn run() -> Result<(), Startup> {
     let threads = embed_threads(&env).map_err(fail("the embedding model is not configured"))?;
     let embedder = Embedder::load(std::path::Path::new(&model_dir), threads)
         .map_err(fail("the embedding model is not usable"))?;
-    // 10, not 4 (2026-10-26): a question searches 3 projects at once beside the embedding
-    // backfill and the catalogue counts, and with 4 each waited ~9.7 s to acquire on prod.
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(10)
+    let pool = pool_options()
         .connect(&url)
         .await
         .map_err(fail("the assistant's database is not reachable"))?;
@@ -333,6 +330,17 @@ const TERMS_BATCH: i64 = 1000;
 /// The share of each worker minute that embeds passages (T-4749): a count of 256 used a few
 /// seconds and left a first full index waiting for days.
 const EMBED_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// 10, not 4 (2026-10-26): a question searches 3 projects at once beside the embedding
+/// backfill and the catalogue counts, and with 4 each waited ~9.7 s to acquire on prod.
+/// Idle connections close after 60 s (T-6201): the background loops touch the pool more often
+/// than sqlx's 10 min default, so the idle set never shrank and each held a ~19 MiB backend.
+fn pool_options() -> sqlx::postgres::PgPoolOptions {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(10)
+        .min_connections(0)
+        .idle_timeout(Duration::from_secs(60))
+}
 
 /// The chat route beside `/healthz` and `/readyz`, which answers 503 until `ready` is set.
 fn probe(chat_state: Arc<ChatState>, ready: Arc<AtomicBool>) -> axum::Router {
@@ -572,6 +580,14 @@ mod startup_tests {
                 .is_err_and(|e| e.contains("could not be read"))
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pool_releases_idle_connections_after_a_minute() {
+        let options = pool_options();
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(60)));
+        assert_eq!(options.get_min_connections(), 0);
+        assert_eq!(options.get_max_connections(), 10);
     }
 
     #[test]
