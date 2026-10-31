@@ -465,24 +465,10 @@ async fn odata_write(
         tracing::info!(slug = %endpoint.slug, "odata write refused");
         return problem.into_response();
     }
-    // A form's ids are minted, never chosen (EP-97): the broker mints the key a create leaves
-    // out, so a create that names it is refused.
-    let mints = endpoint
-        .creates
-        .as_ref()
-        .is_some_and(|creates| creates.mint_ids);
-    if write.operation == Operation::CreateEntity && mints {
-        let key = match key_of(gateway, &view, &write.set, &parts.headers).await {
-            Ok(key) => key,
-            Err(answer) => return *answer,
-        };
-        if members.contains(&key) {
-            return ProblemDetails::bad_request()
-                .with_detail(format!(
-                    "this endpoint mints the id of what it creates; leave `{key}` out"
-                ))
-                .into_response();
-        }
+    if let Err(answer) =
+        chosen_id_refused(gateway, &endpoint, &view, &write, &parts.headers, &members).await
+    {
+        return *answer;
     }
     let caller = crate::handlers::ngsi_ld::create_key(&subject, &parts.headers);
     let reserved = match reserve_create(gateway, &endpoint, &caller, write.operation) {
@@ -549,6 +535,36 @@ fn named_refusal(endpoint: &Endpoint, write: &Write, members: &[String]) -> Opti
         .find_map(|name| {
             hidden_refusal(endpoint, &name).or_else(|| crate::quality::owned_path(Some(&name)))
         })
+}
+
+/// A form's ids are minted, never chosen (EP-97): the broker mints the key a create leaves out,
+/// so a create that names it is refused.
+async fn chosen_id_refused(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    view: &str,
+    write: &Write,
+    headers: &HeaderMap,
+    members: &[String],
+) -> Result<(), Box<Response<Body>>> {
+    let mints = endpoint
+        .creates
+        .as_ref()
+        .is_some_and(|creates| creates.mint_ids);
+    if write.operation != Operation::CreateEntity || !mints {
+        return Ok(());
+    }
+    let key = key_of(gateway, view, &write.set, headers).await?;
+    if members.contains(&key) {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail(format!(
+                    "this endpoint mints the id of what it creates; leave `{key}` out"
+                ))
+                .into_response(),
+        ));
+    }
+    Ok(())
 }
 
 /// An OData write as the Endpoint's guards read it: the operation it stands for (the domain
