@@ -594,3 +594,55 @@ async fn a_pooled_connection_comes_back_without_the_last_users_locks() {
     .expect("the locks");
     assert_eq!(held, 0);
 }
+
+#[tokio::test]
+async fn a_null_parameter_takes_the_type_of_its_column() {
+    let db = Db::new().await;
+    let id = db.id("a");
+    let mut owner = PgConnection::connect(&db.url).await.expect("the database");
+    for statement in [
+        format!("set role {}", wasm_host::provision::owner_of(&id)),
+        format!(
+            "create table app_{id}.drives (km double precision, stops integer, done boolean, \
+             route jsonb, note text)"
+        ),
+    ] {
+        sqlx::query(AssertSqlSafe(statement))
+            .execute(&mut owner)
+            .await
+            .expect("the App's migration");
+    }
+    let store = PgStore::with_pool(db.pool("s1", 4).await, limits());
+    let a = app(&id);
+
+    let (_, added) = store
+        .run(
+            &a,
+            "insert into drives (km, stops, done, route, note) values ($1, $2, $3, $4, $5)".into(),
+            vec![Value::Null; 5],
+            Kind::Write,
+        )
+        .await
+        .expect("every column takes a NULL");
+    assert_eq!(added, 1);
+    // A NULL beside typed values, and a NULL compared in a filter, still bind.
+    store
+        .run(
+            &a,
+            "insert into drives (km, note) values ($1, $2)".into(),
+            vec![Value::Float(12.5), Value::Null],
+            Kind::Write,
+        )
+        .await
+        .expect("a typed value beside a NULL");
+    let (rows, _) = store
+        .run(
+            &a,
+            "select km, note from drives where km is not distinct from $1".into(),
+            vec![Value::Null],
+            Kind::Read,
+        )
+        .await
+        .expect("a NULL in a filter");
+    assert_eq!(rows.expect("rows").values, [vec![Value::Null, Value::Null]]);
+}
