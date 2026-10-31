@@ -6,8 +6,10 @@
 //! surface and day. Each replica sends only its own counts since its last post, so any number of
 //! replicas add up to the right total.
 //!
-//! Counts only: no address, token, person, query or entity id is read here, so nothing
-//! personal leaves the gateway. A refused call (status 400 and above) is no use of the data and
+//! Each count also carries the kind of caller (T-6186): a person, a workload, an agent or MCP
+//! client, or nobody signed in, read from the token the realm signed and never from one it did
+//! not. Counts only: no address, token, subject, client id, query or entity id is kept here, so
+//! nothing personal leaves the gateway. A refused call (status 400 and above) is no use of the data and
 //! is not counted, which also keeps a scanner's invented slugs (404) out of the tally.
 
 use std::collections::HashMap;
@@ -20,7 +22,7 @@ use crate::previews::WorkloadToken;
 
 /// How often the counts are posted.
 pub const INTERVAL: Duration = Duration::from_secs(300);
-/// Distinct (endpoint, surface) pairs one replica keeps between two posts. Endpoints are few;
+/// Distinct (endpoint, surface, caller) triples one replica keeps between two posts. Endpoints are few;
 /// the cap bounds memory if the Portal stays away for days.
 const MAX_KEYS: usize = 10_000;
 
@@ -31,6 +33,8 @@ pub struct Count {
     pub endpoint: String,
     /// One of the names [`surface`] gives.
     pub surface: &'static str,
+    /// One of [`CALLERS`].
+    pub caller: &'static str,
     /// Answered calls since the last post.
     pub count: u64,
 }
@@ -40,7 +44,29 @@ struct Post<'a> {
     counts: &'a [Count],
 }
 
-type Tally = HashMap<(String, &'static str), u64>;
+type Tally = HashMap<(String, &'static str, &'static str), u64>;
+
+/// The kinds of caller a count names, as [`caller`] gives them.
+pub const CALLERS: &[&str] = &["person", "workload", "agent", "anonymous"];
+
+/// The kind of caller a verified token names; `None`, a token the realm did not sign or none at
+/// all, is `anonymous`. An MCP connector's public client (`mcp-*`, PLATFORM_CLIENTS), a client
+/// metadata document's URL (CIMD) and the Portal's assistant are agents, whoever signed in through
+/// them; a Keycloak service account (`service-account-<client>`) or a token without a username is
+/// a workload; any other username is a person.
+pub fn caller(claims: Option<&jc_core::auth::token::Claims>) -> &'static str {
+    let Some(claims) = claims else {
+        return "anonymous";
+    };
+    let azp = claims.azp.as_deref().unwrap_or_default();
+    if azp.starts_with("mcp-") || azp.contains("://") || azp == "jc-assistant" {
+        return "agent";
+    }
+    match claims.preferred_username.as_deref() {
+        Some(name) if !name.starts_with("service-account-") => "person",
+        _ => "workload",
+    }
+}
 
 fn tally() -> &'static Mutex<Tally> {
     static TALLY: OnceLock<Mutex<Tally>> = OnceLock::new();
@@ -67,8 +93,8 @@ pub fn surface(route: &str) -> Option<&'static str> {
     })
 }
 
-/// Counts one answered call.
-pub fn count(endpoint: &str, route: &str, status: u16) {
+/// Counts one answered call by a `caller` of [`CALLERS`].
+pub fn count(endpoint: &str, route: &str, status: u16, caller: &'static str) {
     let Some(surface) = surface(route) else {
         return;
     };
@@ -79,15 +105,17 @@ pub fn count(endpoint: &str, route: &str, status: u16) {
         &mut tally().lock().unwrap_or_else(|e| e.into_inner()),
         endpoint,
         surface,
+        caller,
         1,
     );
 }
 
-fn add(tally: &mut Tally, endpoint: &str, surface: &'static str, n: u64) {
-    if let Some(held) = tally.get_mut(&(endpoint.to_owned(), surface)) {
+fn add(tally: &mut Tally, endpoint: &str, surface: &'static str, caller: &'static str, n: u64) {
+    let key = (endpoint.to_owned(), surface, caller);
+    if let Some(held) = tally.get_mut(&key) {
         *held = held.saturating_add(n);
     } else if tally.len() < MAX_KEYS {
-        tally.insert((endpoint.to_owned(), surface), n);
+        tally.insert(key, n);
     }
 }
 
@@ -96,13 +124,16 @@ pub fn take() -> Vec<Count> {
     let taken = std::mem::take(&mut *tally().lock().unwrap_or_else(|e| e.into_inner()));
     let mut counts: Vec<Count> = taken
         .into_iter()
-        .map(|((endpoint, surface), count)| Count {
+        .map(|((endpoint, surface, caller), count)| Count {
             endpoint,
             surface,
+            caller,
             count,
         })
         .collect();
-    counts.sort_by(|a, b| (&a.endpoint, a.surface).cmp(&(&b.endpoint, b.surface)));
+    counts.sort_by(|a, b| {
+        (&a.endpoint, a.surface, a.caller).cmp(&(&b.endpoint, b.surface, b.caller))
+    });
     counts
 }
 
@@ -110,7 +141,13 @@ pub fn take() -> Vec<Count> {
 pub fn restore(counts: Vec<Count>) {
     let mut tally = tally().lock().unwrap_or_else(|e| e.into_inner());
     for count in counts {
-        add(&mut tally, &count.endpoint, count.surface, count.count);
+        add(
+            &mut tally,
+            &count.endpoint,
+            count.surface,
+            count.caller,
+            count.count,
+        );
     }
 }
 
@@ -215,18 +252,29 @@ mod tests {
                 .collect()
         };
         let data = "/api/endpoint/{slug}/ngsi-ld/v1/{*rest}";
-        count("usage-test", data, 200);
-        count("usage-test", data, 200);
-        count("usage-test", "/api/endpoint/{slug}/file.csv", 200);
-        count("usage-test", "/api/endpoint/{slug}/ws", 101);
-        count("usage-test", data, 403);
-        count("nope", data, 404);
-        count("-", data, 200);
-        count("usage-test", "/api/endpoint/{slug}/openapi.json", 200);
+        count("usage-test", data, 200, "anonymous");
+        count("usage-test", data, 200, "anonymous");
+        count(
+            "usage-test",
+            "/api/endpoint/{slug}/file.csv",
+            200,
+            "anonymous",
+        );
+        count("usage-test", "/api/endpoint/{slug}/ws", 101, "anonymous");
+        count("usage-test", data, 403, "anonymous");
+        count("nope", data, 404, "anonymous");
+        count("-", data, 200, "anonymous");
+        count(
+            "usage-test",
+            "/api/endpoint/{slug}/openapi.json",
+            200,
+            "anonymous",
+        );
         let counts = mine(take());
         let line = |surface: &'static str, count: u64| Count {
             endpoint: "usage-test".to_owned(),
             surface,
+            caller: "anonymous",
             count,
         };
         assert_eq!(
@@ -238,7 +286,7 @@ mod tests {
             ]
         );
         assert_eq!(mine(take()), Vec::new());
-        count("usage-test", data, 200);
+        count("usage-test", data, 200, "anonymous");
         restore(counts);
         assert_eq!(
             mine(take()),
@@ -265,38 +313,78 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move { axum::serve(listener, app).await });
         let client = reqwest::Client::new();
-        count("usage-test", data, 200);
+        count("usage-test", data, 200, "anonymous");
         flush(&client, &format!("http://{addr}/down"), None).await;
         flush(&client, "http://127.0.0.1:1/none", None).await;
-        count("usage-test", data, 200);
+        count("usage-test", data, 200, "anonymous");
         assert_eq!(mine(take()), vec![line("ngsi-ld", 2)]);
-        count("usage-test", data, 200);
+        count("usage-test", data, 200, "anonymous");
         flush(&client, &format!("http://{addr}/ok"), None).await;
         assert_eq!(mine(take()), Vec::new());
+    }
+
+    /// Each kind from the claims of a token the realm signed; no token, or one it did not sign,
+    /// is anonymous (T-6186).
+    #[test]
+    fn a_verified_token_names_its_callers_kind() {
+        let kind = |claims: serde_json::Value| {
+            let mut base = serde_json::json!({"sub": "s", "iss": "i", "exp": 1});
+            if let (Some(base), Some(extra)) = (base.as_object_mut(), claims.as_object()) {
+                base.extend(extra.clone());
+            }
+            let claims: jc_core::auth::token::Claims =
+                serde_json::from_value(base).expect("claims");
+            caller(Some(&claims))
+        };
+        assert_eq!(caller(None), "anonymous");
+        assert_eq!(
+            kind(serde_json::json!({"azp": "portal-ui", "preferred_username": "ana"})),
+            "person"
+        );
+        assert_eq!(
+            kind(
+                serde_json::json!({"azp": "city-pipelines", "preferred_username": "service-account-city-pipelines"})
+            ),
+            "workload"
+        );
+        assert_eq!(kind(serde_json::json!({"azp": "edge"})), "workload");
+        assert_eq!(
+            kind(serde_json::json!({"azp": "mcp-local", "preferred_username": "ana"})),
+            "agent"
+        );
+        assert_eq!(
+            kind(
+                serde_json::json!({"azp": "https://claude.ai/oauth/mcp-oauth-client-metadata", "preferred_username": "ana"})
+            ),
+            "agent"
+        );
+        assert_eq!(kind(serde_json::json!({"azp": "jc-assistant"})), "agent");
+        assert!(CALLERS.contains(&kind(serde_json::json!({}))));
     }
 
     #[test]
     fn the_tally_holds_at_most_its_cap_of_pairs() {
         let mut tally = Tally::new();
         for i in 0..MAX_KEYS + 5 {
-            add(&mut tally, &format!("e{i}"), "ngsi-ld", 1);
+            add(&mut tally, &format!("e{i}"), "ngsi-ld", "person", 1);
         }
         assert_eq!(tally.len(), MAX_KEYS);
-        add(&mut tally, "e0", "ngsi-ld", 2);
-        assert_eq!(tally.get(&("e0".to_owned(), "ngsi-ld")), Some(&3));
+        add(&mut tally, "e0", "ngsi-ld", "person", 2);
+        assert_eq!(tally.get(&("e0".to_owned(), "ngsi-ld", "person")), Some(&3));
     }
 
-    /// What the Portal reads: names and numbers, nothing else.
+    /// What the Portal reads: names, a caller kind and numbers, nothing else.
     #[test]
     fn a_post_carries_endpoint_surface_and_count_only() {
         let counts = [Count {
             endpoint: "air".to_owned(),
             surface: "ogc",
+            caller: "agent",
             count: 7,
         }];
         assert_eq!(
             serde_json::to_value(Post { counts: &counts }).unwrap_or_default(),
-            serde_json::json!({"counts": [{"endpoint": "air", "surface": "ogc", "count": 7}]})
+            serde_json::json!({"counts": [{"endpoint": "air", "surface": "ogc", "caller": "agent", "count": 7}]})
         );
     }
 
@@ -328,6 +416,7 @@ mod tests {
         let counts = [Count {
             endpoint: "air".to_owned(),
             surface: "ogc",
+            caller: "agent",
             count: 7,
         }];
         assert!(post(&client, &format!("http://{addr}/ok"), None, &counts).await);
