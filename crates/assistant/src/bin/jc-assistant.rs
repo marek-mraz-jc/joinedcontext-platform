@@ -331,7 +331,6 @@ const TERMS_BATCH: i64 = 1000;
 /// seconds and left a first full index waiting for days.
 const EMBED_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// The chat route beside `/healthz` and `/readyz`, which answers 503 until `ready` is set.
 /// 10, not 4 (2026-10-26): a question searches 3 projects at once beside the embedding
 /// backfill and the catalogue counts, and with 4 each waited ~9.7 s to acquire on prod.
 /// Idle connections close after 60 s (T-6201): the background loops touch the pool more often
@@ -343,6 +342,7 @@ fn pool_options() -> sqlx::postgres::PgPoolOptions {
         .idle_timeout(Duration::from_secs(60))
 }
 
+/// The chat route beside `/healthz` and `/readyz`, which answers 503 until `ready` is set.
 fn probe(chat_state: Arc<ChatState>, ready: Arc<AtomicBool>) -> axum::Router {
     chat::router(chat_state)
         .route("/healthz", axum::routing::get(|| async { "ok" }))
