@@ -314,27 +314,9 @@ fn asked(arguments: &Map<String, Value>) -> Result<(Map<String, Value>, Vec<Stri
             ("query", Value::String(query)) if is_query(query) => {
                 queries.insert(0, query.clone());
             }
-            ("translations", Value::Object(translations))
-                if translations.len() <= MAX_TRANSLATIONS =>
-            {
-                for (lang, text) in translations {
-                    match text {
-                        Value::String(text) if is_lang(lang) && is_query(text) => {
-                            if !queries.contains(text) {
-                                queries.push(text.clone());
-                            }
-                        }
-                        _ => return Err(format!(
-                            "`translations` maps a two-letter language code to the question in it, 1 to {MAX_QUERY} characters, e.g. {{\"fi\": \"uimahallit\"}}"
-                        )),
-                    }
-                }
+            ("translations", translations) => {
+                add_translations(translations, &mut queries)?;
                 continue;
-            }
-            ("translations", _) => {
-                return Err(format!(
-                    "`translations` holds at most {MAX_TRANSLATIONS} languages, e.g. {{\"fi\": \"uimahallit\"}}"
-                ))
             }
             ("limit", Value::Number(n))
                 if n.as_u64().is_some_and(|n| (1..=MAX_LIMIT).contains(&n)) => {}
@@ -354,6 +336,33 @@ fn asked(arguments: &Map<String, Value>) -> Result<(Map<String, Value>, Vec<Stri
         return Err(format!("`query` is 1 to {MAX_QUERY} characters"));
     }
     Ok((asked, queries))
+}
+
+/// Adds each translation of the question to `queries`, once per distinct text.
+fn add_translations(translations: &Value, queries: &mut Vec<String>) -> Result<(), String> {
+    let Value::Object(translations) = translations else {
+        return Err(too_many_translations());
+    };
+    if translations.len() > MAX_TRANSLATIONS {
+        return Err(too_many_translations());
+    }
+    for (lang, text) in translations {
+        match text {
+            Value::String(text) if is_lang(lang) && is_query(text) => {
+                if !queries.contains(text) {
+                    queries.push(text.clone());
+                }
+            }
+            _ => return Err(format!(
+                "`translations` maps a two-letter language code to the question in it, 1 to {MAX_QUERY} characters, e.g. {{\"fi\": \"uimahallit\"}}"
+            )),
+        }
+    }
+    Ok(())
+}
+
+fn too_many_translations() -> String {
+    format!("`translations` holds at most {MAX_TRANSLATIONS} languages, e.g. {{\"fi\": \"uimahallit\"}}")
 }
 
 /// One ranked list of hits from several, by reciprocal rank fusion: a hit scores
