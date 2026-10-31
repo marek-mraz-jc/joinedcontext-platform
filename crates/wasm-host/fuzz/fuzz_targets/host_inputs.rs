@@ -5,7 +5,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wasm_host::blob::checked;
+use wasm_host::files::checked;
 use wasm_host::host::endpoint_target;
 use wasm_host::sql::check;
 

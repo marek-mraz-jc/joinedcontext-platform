@@ -9,38 +9,13 @@ use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 
-use crate::files::{FileUrls, MAX_FILE_BYTES};
+use crate::files::{checked, FileUrls, MAX_FILE_BYTES};
 use crate::placement::Placed;
 use crate::s3::Bucket;
 use crate::storage::{BlobError, Method};
 
 /// The longest a presigned URL lives (AP-145).
 pub const MAX_PRESIGN_SECONDS: u32 = 300;
-
-/// The longest key an App may name, below its prefix.
-pub const MAX_KEY_BYTES: usize = 512;
-
-/// An App's key, checked: relative, no `.` or `..` segment, no empty segment, no backslash or
-/// control character, at most 512 bytes. Nothing is rewritten: a key either stays inside the
-/// prefix as written or is refused.
-pub fn checked(key: &str) -> Result<&str, String> {
-    if key.is_empty() || key.len() > MAX_KEY_BYTES {
-        return Err(format!("a key is 1 to {MAX_KEY_BYTES} bytes"));
-    }
-    if key.starts_with('/') {
-        return Err("a key is relative to the application's own prefix".into());
-    }
-    if key.chars().any(|c| c.is_control() || c == '\\') {
-        return Err("a key holds no control character or backslash".into());
-    }
-    if key
-        .split('/')
-        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
-    {
-        return Err("a key has no empty, `.` or `..` segment".into());
-    }
-    Ok(key)
-}
 
 /// A listing prefix: empty (everything), or a checked key, or one ending in `/`.
 fn checked_prefix(prefix: &str) -> Result<&str, String> {
@@ -330,6 +305,7 @@ impl S3Blob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::files::MAX_KEY_BYTES;
 
     #[test]
     fn a_key_stays_under_the_prefix_or_is_refused() {

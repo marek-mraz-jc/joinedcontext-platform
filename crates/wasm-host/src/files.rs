@@ -41,6 +41,31 @@ impl std::fmt::Debug for FileUrls {
     }
 }
 
+/// The longest key an App may name, below its prefix.
+pub const MAX_KEY_BYTES: usize = 512;
+
+/// An App's key, checked: relative, no `.` or `..` segment, no empty segment, no backslash or
+/// control character, at most 512 bytes. Nothing is rewritten: a key either stays inside the
+/// prefix as written or is refused.
+pub fn checked(key: &str) -> Result<&str, String> {
+    if key.is_empty() || key.len() > MAX_KEY_BYTES {
+        return Err(format!("a key is 1 to {MAX_KEY_BYTES} bytes"));
+    }
+    if key.starts_with('/') {
+        return Err("a key is relative to the application's own prefix".into());
+    }
+    if key.chars().any(|c| c.is_control() || c == '\\') {
+        return Err("a key holds no control character or backslash".into());
+    }
+    if key
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err("a key has no empty, `.` or `..` segment".into());
+    }
+    Ok(key)
+}
+
 fn mac(key: &[u8]) -> Hmac<Sha256> {
     <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes a key of any length")
 }
@@ -136,7 +161,7 @@ impl FileUrls {
         let key = percent_encoding::percent_decode_str(path)
             .decode_utf8()
             .map_err(|_| INVALID)?;
-        let key = crate::blob::checked(&key).map_err(|_| INVALID)?.to_owned();
+        let key = checked(&key).map_err(|_| INVALID)?.to_owned();
         let (mut expires, mut length, mut signature) = (None, None, None);
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (name, value) = pair.split_once('=').ok_or(INVALID)?;

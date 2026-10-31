@@ -1,4 +1,4 @@
-# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 2b3bee0, portal 593a0859 + T-4965, antares 53ab566e + T-4965; platform memory-uncapped-read 1 since T-5510: camera-sim, a simulator, left uncapped on purpose; raised by T-4984 with the reason per row in its commit (graphs: platform 96d684a5, portal f362e656, antares 1be46bb4); vendor/ skipped since T-6141 (antares file-cycle 62 -> 39: the 23 vendor/rumqttc rows of the antares 53ab566e graph)
+# repo | query | count, from dev/cg-audit.py (T-4594), each line only goes down; graphs: platform 2b3bee0, portal 593a0859 + T-4965, antares 53ab566e + T-4965; platform memory-uncapped-read 1 since T-5510: camera-sim, a simulator, left uncapped on purpose; raised by T-4984 with the reason per row in its commit (graphs: platform 96d684a5, portal f362e656, antares 1be46bb4); vendor/ skipped since T-6141 (antares file-cycle 62 -> 39: the 23 vendor/rumqttc rows of the antares 53ab566e graph); platform security-fetch-from-route 23 since T-6143: wasm_host::s3::Bucket::send, the file-link route (T-6195) streams from the shard's configured store, key HMAC-verified, no URL from the request; platform memory-body-copy 19 since T-6143: context-gateway mcp/documents.rs search_each clones the few-key search arguments once per wording (T-6167), no request body
 antares | links-unmatched | 0
 antares | memory-body-copy | 19
 antares | memory-per-request-build | 0
@@ -10,13 +10,13 @@ antares | security-fetch-from-route | 4
 antares | security-log-secret-field | 0
 antares | security-mcp-write-unguarded | 0
 platform | links-unmatched | 0
-platform | memory-body-copy | 18
+platform | memory-body-copy | 19
 platform | memory-per-request-build | 0
 platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 1
 platform | modularity-file-cycle | 22
 platform | modularity-server-as-library | 1
-platform | security-fetch-from-route | 22
+platform | security-fetch-from-route | 23
 platform | security-log-secret-field | 0
 platform | security-mcp-write-unguarded | 0
 portal | links-unmatched | 0
