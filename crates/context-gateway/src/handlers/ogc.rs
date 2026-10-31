@@ -428,22 +428,8 @@ async fn odata_write(
         return offered;
     }
     let view = endpoint.slug.clone();
-    if endpoint.view_mapping.is_some() || !has_view(&view) {
-        return no_view(&ODATA);
-    }
-    // A space with a data model judges every write against it: its classes, slot constraints,
-    // quality rules, units, relationships and personal-data minimisation (DM-61, DM-86, DM-87,
-    // DM-06, DM-70, DM-121). Those guards read an NGSI-LD body, so an OData write there would
-    // pass them all; it goes through the NGSI-LD surface instead (F-R2PLT2-001).
-    if endpoint.declared_types.is_some() {
-        tracing::info!(slug = %endpoint.slug, "odata write refused: the space's model judges writes");
-        return ProblemDetails::new(501, "odata-not-implemented", "Not Implemented")
-            .with_detail(format!(
-                "this endpoint checks every write against its data model, which OData writes do \
-                 not pass; write through {}/ngsi-ld/v1 instead",
-                endpoint.base_path
-            ))
-            .into_response();
+    if let Some(refused) = unwritable(&endpoint, &view) {
+        return refused;
     }
     let prefix = format!("{}/{}", endpoint.base_path, ODATA.path);
     let write = match Write::of(request.method(), rest_of(&request, &prefix)) {
@@ -475,38 +461,14 @@ async fn odata_write(
         Ok(members) => members,
         Err(problem) => return problem.into_response(),
     };
-    // What an Endpoint does not show cannot be changed through it (EP-61), and the quarantine
-    // mark is the space's rules' alone (DM-90): the property the path names, or a member of the
-    // body, by its NGSI-LD name, as the NGSI-LD surface judges it.
-    let named = write
-        .property
-        .iter()
-        .cloned()
-        .chain(members.iter().filter_map(|member| attribute_of(member)));
-    if let Some(problem) = named.map(|name| unmangle(&name)).find_map(|name| {
-        hidden_refusal(&endpoint, &name).or_else(|| crate::quality::owned_path(Some(&name)))
-    }) {
+    if let Some(problem) = named_refusal(&endpoint, &write, &members) {
         tracing::info!(slug = %endpoint.slug, "odata write refused");
         return problem.into_response();
     }
-    // A form's ids are minted, never chosen (EP-97): the broker mints the key a create leaves
-    // out, so a create that names it is refused.
-    let mints = endpoint
-        .creates
-        .as_ref()
-        .is_some_and(|creates| creates.mint_ids);
-    if write.operation == Operation::CreateEntity && mints {
-        let key = match key_of(gateway, &view, &write.set, &parts.headers).await {
-            Ok(key) => key,
-            Err(answer) => return *answer,
-        };
-        if members.contains(&key) {
-            return ProblemDetails::bad_request()
-                .with_detail(format!(
-                    "this endpoint mints the id of what it creates; leave `{key}` out"
-                ))
-                .into_response();
-        }
+    if let Err(answer) =
+        chosen_id_refused(gateway, &endpoint, &view, &write, &parts.headers, &members).await
+    {
+        return *answer;
     }
     let caller = crate::handlers::ngsi_ld::create_key(&subject, &parts.headers);
     let reserved = match reserve_create(gateway, &endpoint, &caller, write.operation) {
@@ -535,6 +497,74 @@ async fn odata_write(
         Ok(answer) => answered(gateway, &endpoint, &ODATA, answer).await,
         Err(error) => ProblemDetails::from(error).into_response(),
     }
+}
+
+/// The answer for an Endpoint whose OData surface takes no write at all: no broker view of its
+/// own, or a space model that judges every write.
+fn unwritable(endpoint: &Endpoint, view: &str) -> Option<Response<Body>> {
+    if endpoint.view_mapping.is_some() || !has_view(view) {
+        return Some(no_view(&ODATA));
+    }
+    // A space with a data model judges every write against it: its classes, slot constraints,
+    // quality rules, units, relationships and personal-data minimisation (DM-61, DM-86, DM-87,
+    // DM-06, DM-70, DM-121). Those guards read an NGSI-LD body, so an OData write there would
+    // pass them all; it goes through the NGSI-LD surface instead (F-R2PLT2-001).
+    endpoint.declared_types.as_ref()?;
+    tracing::info!(slug = %endpoint.slug, "odata write refused: the space's model judges writes");
+    Some(
+        ProblemDetails::new(501, "odata-not-implemented", "Not Implemented")
+            .with_detail(format!(
+                "this endpoint checks every write against its data model, which OData writes do \
+                 not pass; write through {}/ngsi-ld/v1 instead",
+                endpoint.base_path
+            ))
+            .into_response(),
+    )
+}
+
+/// What an Endpoint does not show cannot be changed through it (EP-61), and the quarantine mark
+/// is the space's rules' alone (DM-90): the property the path names, or a member of the body, by
+/// its NGSI-LD name, as the NGSI-LD surface judges it.
+fn named_refusal(endpoint: &Endpoint, write: &Write, members: &[String]) -> Option<ProblemDetails> {
+    write
+        .property
+        .iter()
+        .cloned()
+        .chain(members.iter().filter_map(|member| attribute_of(member)))
+        .map(|name| unmangle(&name))
+        .find_map(|name| {
+            hidden_refusal(endpoint, &name).or_else(|| crate::quality::owned_path(Some(&name)))
+        })
+}
+
+/// A form's ids are minted, never chosen (EP-97): the broker mints the key a create leaves out,
+/// so a create that names it is refused.
+async fn chosen_id_refused(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    view: &str,
+    write: &Write,
+    headers: &HeaderMap,
+    members: &[String],
+) -> Result<(), Box<Response<Body>>> {
+    let mints = endpoint
+        .creates
+        .as_ref()
+        .is_some_and(|creates| creates.mint_ids);
+    if write.operation != Operation::CreateEntity || !mints {
+        return Ok(());
+    }
+    let key = key_of(gateway, view, &write.set, headers).await?;
+    if members.contains(&key) {
+        return Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail(format!(
+                    "this endpoint mints the id of what it creates; leave `{key}` out"
+                ))
+                .into_response(),
+        ));
+    }
+    Ok(())
 }
 
 /// An OData write as the Endpoint's guards read it: the operation it stands for (the domain

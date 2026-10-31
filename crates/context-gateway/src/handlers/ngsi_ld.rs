@@ -1062,21 +1062,8 @@ pub(crate) async fn view_payload(
     }
     let before = sent.len();
     one_entity_per_create(endpoint, operation, sent)?;
-    // What the Endpoint asks of a write whatever the grants are: an id that is an NGSI-LD URN
-    // of its type (PF-43), the entity of the path (PF-44), a type of the space's model (DM-61),
-    // no access control inside the data (GW29). With no constraint the grant checks pass; the
-    // broker's view and its engine decide the grants. A batch keeps what passes (GW18).
-    if operation.is_write() && !sent.is_empty() {
-        judged_write(endpoint, path, operation, sent, divided)?;
-    }
     if operation.is_write() {
-        // The attribute the path names, for a `DELETE` with no body too (EP-61).
-        if let Some(problem) =
-            operations::targeted_attribute(path).and_then(|name| hidden_refusal(endpoint, &name))
-        {
-            return Err(answer(problem));
-        }
-        owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
+        endpoint_held(endpoint, path, operation, sent, divided)?;
     }
     let declared = endpoint.declared_types.as_ref();
     let mut filled = Vec::new();
@@ -1118,6 +1105,32 @@ pub(crate) async fn view_payload(
         headers.insert(CONTENT_LENGTH, HeaderValue::from(sent.len() as u64));
     }
     Ok(filled)
+}
+
+/// What the Endpoint asks of a write whatever the grants are: an id that is an NGSI-LD URN of
+/// its type (PF-43), the entity of the path (PF-44), a type of the space's model (DM-61), no
+/// access control inside the data (GW29), no attribute it hides (EP-61) and no quarantine mark
+/// (DM-90). With no constraint the grant checks pass; the broker's view and its engine decide
+/// the grants. A batch keeps what passes (GW18).
+fn endpoint_held(
+    endpoint: &Endpoint,
+    path: &str,
+    operation: Operation,
+    sent: &mut Vec<u8>,
+    divided: &mut Option<(Vec<String>, Refused)>,
+) -> Result<(), Box<Response<Body>>> {
+    let answer = |problem: ProblemDetails| Box::new(problem.into_response());
+    if !sent.is_empty() {
+        judged_write(endpoint, path, operation, sent, divided)?;
+    }
+    // The attribute the path names, for a `DELETE` with no body too (EP-61).
+    if let Some(problem) =
+        operations::targeted_attribute(path).and_then(|name| hidden_refusal(endpoint, &name))
+    {
+        return Err(answer(problem));
+    }
+    owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
+    Ok(())
 }
 
 /// A form's minted id on a create, and one entity per create on an Endpoint that counts its
