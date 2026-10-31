@@ -364,4 +364,69 @@ mod tests {
         assert_eq!(checked_prefix("notes/"), Ok("notes/"));
         assert!(checked_prefix("../").is_err());
     }
+
+    #[tokio::test]
+    async fn a_sized_upload_skips_the_quota_and_an_unsized_one_is_held_to_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let store = MockServer::start().await;
+        // The prefix already holds 8 of its 10 bytes.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                 <Contents><Key>apps/s1/a1/old</Key><Size>8</Size></Contents></ListBucketResult>",
+            ))
+            .expect(1)
+            .mount(&store)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/b/apps/s1/a1/sized"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&store)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/b/apps/s1/a1/denied"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&store)
+            .await;
+        let blob = S3Blob::new(
+            Bucket {
+                endpoint: store.uri(),
+                bucket: "b".into(),
+                region: "us-east-1".into(),
+                key_id: "k".into(),
+                secret: "s".into(),
+                public_endpoint: None,
+                http: reqwest::Client::new(),
+            },
+            "s1",
+            10,
+        );
+        let app = Placed {
+            name: "notes".into(),
+            id: "a1".into(),
+            tenant: "t".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            endpoint: None,
+            jobs: Vec::new(),
+        };
+        // A sized link took its room when signed: no listing, the store takes the bytes.
+        blob.upload(&app, "sized", vec![0; 5], Some("text/plain".into()), true)
+            .await
+            .expect("a sized upload is stored");
+        // An unsized one is counted here: 8 + 5 passes the quota of 10.
+        assert!(matches!(
+            blob.upload(&app, "unsized", vec![0; 5], None, false).await,
+            Err(BlobError::Quota(_))
+        ));
+        assert!(matches!(
+            blob.upload(&app, "denied", vec![0; 1], None, true).await,
+            Err(BlobError::Refused(_))
+        ));
+        assert!(matches!(
+            blob.upload(&app, "../x", vec![0; 1], None, true).await,
+            Err(BlobError::Refused(_))
+        ));
+    }
 }
