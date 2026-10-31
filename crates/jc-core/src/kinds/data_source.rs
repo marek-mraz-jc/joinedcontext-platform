@@ -1430,7 +1430,7 @@ mod address_tests {
         }
         for allowed in [
             json!({ "kafka": { "addresses": ["broker.example.org:9092"] } }),
-            json!({ "socket": { "address": "203.0.113.7:9000" } }),
+            json!({ "socket": { "address": "1.1.1.1:9000" } }),
         ] {
             assert!(validate_input_strings(&allowed).is_ok(), "{allowed}");
         }
