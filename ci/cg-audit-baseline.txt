@@ -21,7 +21,7 @@ platform | security-log-secret-field | 0
 platform | security-mcp-write-unguarded | 0
 portal | links-unmatched | 0
 portal | memory-body-copy | 21
-portal | memory-per-request-build | 12
+portal | memory-per-request-build | 11
 portal | memory-unbounded-global | 11
 portal | memory-uncapped-read | 36
 portal | modularity-file-cycle | 71
