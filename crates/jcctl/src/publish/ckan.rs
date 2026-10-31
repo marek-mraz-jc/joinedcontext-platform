@@ -15,7 +15,9 @@ use jc_core::display_order::{display_order, Field};
 use jc_core::kinds::catalog::Texts;
 use jc_core::kinds::ckan::{CkanInstanceSpec, CkanPublication};
 use jc_core::kinds::space::{duration_seconds, RetentionRule, HISTORY_FOREVER, HISTORY_OFF};
-use jc_core::kinds::visualization::{Visualization, VisualizationData, MAX_VISUALIZATIONS};
+use jc_core::kinds::visualization::{
+    AggrMethod, Visualization, VisualizationData, MAX_VISUALIZATIONS,
+};
 use jc_core::kinds::{Audience, EndpointSpec, Licence, Representation};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -798,6 +800,10 @@ const VIEW_PAYLOAD: [&str; 9] = [
 pub const SERIES_WINDOW: &str = "P7D";
 /// [`SERIES_WINDOW`] in seconds.
 const SERIES_SECONDS: u64 = 7 * 86_400;
+/// The bucket of an automatic chart whose window is longer than a day: the hourly average
+/// (T-6171). A week of five-minute readings of 20 entities was 18,000 points, 1.4-6 s to read and
+/// as many marks to draw; hourly it is 3,400 points, read in about 2.4 s.
+pub const SERIES_PERIOD: &str = "PT1H";
 
 /// What the public may read of an Endpoint's history, which decides its automatic charts
 /// (T-5421): a chart the Policy or the space's retention does not allow answers 404 on the page.
@@ -916,8 +922,10 @@ pub fn series_charts(
     out
 }
 
-/// The line chart of `kind`'s `attr` over `last`, when its name is a view name.
+/// The line chart of `kind`'s `attr` over `last`, when its name is a view name: hourly averages
+/// ([`SERIES_PERIOD`]) over a window longer than a day, the readings themselves over a shorter one.
 fn series_chart(kind: &str, attr: &str, last: String, title: Texts) -> Option<Visualization> {
+    let hourly = duration_seconds(&last).is_some_and(|seconds| seconds > 86_400);
     let name = format!("auto-{kind}-{attr}").to_ascii_lowercase();
     let columns = BTreeMap::from([
         ("x".to_owned(), "observedAt".to_owned()),
@@ -933,8 +941,8 @@ fn series_chart(kind: &str, attr: &str, last: String, title: Texts) -> Option<Vi
             entity_type: kind.to_owned(),
             attrs: vec![attr.to_owned()],
             last,
-            aggr_method: None,
-            aggr_period: None,
+            aggr_method: hourly.then_some(AggrMethod::Avg),
+            aggr_period: hourly.then(|| SERIES_PERIOD.to_owned()),
         },
         spec,
     })

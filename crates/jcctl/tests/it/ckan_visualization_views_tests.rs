@@ -5,11 +5,11 @@
 
 use jc_core::kinds::ckan::CkanInstanceSpec;
 use jc_core::kinds::space::RetentionRule;
-use jc_core::kinds::visualization::{Visualization, VisualizationData};
+use jc_core::kinds::visualization::{AggrMethod, Visualization, VisualizationData};
 use jcctl::loader::RawManifest;
 use jcctl::publish::ckan::{
     publish, publish_views, series_charts, CkanApi, History, InMemoryCkan, Settings, TemporalGrant,
-    Views, SERIES_WINDOW, VISUALIZATION_VIEW,
+    Views, SERIES_PERIOD, SERIES_WINDOW, VISUALIZATION_VIEW,
 };
 use serde_json::{json, Value};
 
@@ -301,7 +301,8 @@ fn a_value_observed_over_time_gets_a_chart_of_its_history_and_a_register_none() 
     let source: Value = serde_json::from_str(view["source"].as_str().expect("text")).expect("JSON");
     assert_eq!(
         source,
-        json!({ "source": "temporal", "type": "WaterQualityObserved", "attrs": ["temperature"], "last": SERIES_WINDOW })
+        json!({ "source": "temporal", "type": "WaterQualityObserved", "attrs": ["temperature"], "last": SERIES_WINDOW,
+            "aggrMethod": "avg", "aggrPeriod": SERIES_PERIOD })
     );
     let spec: Value = serde_json::from_str(view["spec"].as_str().expect("text")).expect("JSON");
     assert_eq!(spec["encoding"]["x"]["field"], "observedAt");
@@ -468,6 +469,50 @@ fn the_window_is_the_shortest_of_a_week_the_history_and_the_grant() {
         window(&series_charts(&schema(), None, &star)),
         [SERIES_WINDOW]
     );
+}
+
+/// The aggregation of each chart: its method and period, `None` for the readings themselves.
+fn buckets(charts: &[Visualization]) -> Vec<Option<(AggrMethod, String)>> {
+    charts
+        .iter()
+        .map(|chart| match &chart.data {
+            VisualizationData::Temporal {
+                aggr_method,
+                aggr_period,
+                ..
+            } => aggr_method.zip(aggr_period.clone()),
+            other => panic!("a temporal source, got {other:?}"),
+        })
+        .collect()
+}
+
+/// T-6171: a week of helsinki-weather temperature was 18,165 readings of 21 entities per chart,
+/// 1.4-6.2 s to read and as many SVG marks; hourly averages are 168 per entity.
+#[test]
+fn a_window_over_a_day_reads_hourly_averages_and_a_shorter_one_the_readings() {
+    assert_eq!(
+        buckets(&automatic()),
+        [Some((AggrMethod::Avg, SERIES_PERIOD.to_owned()))]
+    );
+    let two_days = History {
+        retention: kept("P2D"),
+        ..open()
+    };
+    assert_eq!(
+        buckets(&series_charts(&schema(), None, &two_days)),
+        [Some((AggrMethod::Avg, "PT1H".to_owned()))]
+    );
+    for short in ["P1D", "PT6H"] {
+        let history = History {
+            retention: kept(short),
+            ..open()
+        };
+        assert_eq!(
+            buckets(&series_charts(&schema(), None, &history)),
+            [None],
+            "{short}: the readings"
+        );
+    }
 }
 
 #[test]
