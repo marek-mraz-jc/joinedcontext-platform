@@ -60,6 +60,77 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (segments[0] == 0x2001 && segments[1] == 0x0db8))
 }
 
+/// The host of an authority past its userinfo: without the port, the scp form's `:path`
+/// (`git@host:org/repo`) or an IPv6 literal's brackets' tail.
+pub(crate) fn remote_host(host_port: &str) -> &str {
+    match host_port.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host_port.split(':').next().unwrap_or_default(),
+    }
+}
+
+/// Names that answer inside the installation, never on the internet: `localhost` (RFC 6761),
+/// mDNS (RFC 6762), the home network (RFC 8375), Kubernetes Services and the usual private zones.
+const INTERNAL_SUFFIXES: [&str; 7] = [
+    "localhost",
+    "local",
+    "localdomain",
+    "internal",
+    "lan",
+    "home.arpa",
+    "svc",
+];
+
+/// Refuses a host no remote origin can have (F-PLT2-019): an address written into the URL that
+/// is not on the public internet, in any form a URL parser reads as one (`2130706433`,
+/// `0x7f.1`, `[::ffff:127.0.0.1]`), a name of one label (an in-cluster Service) or under an
+/// internal suffix, and anything a parser would decode into another host (`%`, non-ASCII).
+/// What a public name resolves to is judged when it is fetched, by the outbound guard.
+pub(crate) fn check_remote_host(host: &str) -> std::result::Result<(), &'static str> {
+    const PRIVATE: &str = "the host is a loopback, private, link-local or internal address; a \
+                           remote names a public host such as git.example.org";
+    if host.is_empty() {
+        return Err("url names no host, e.g. https://git.example.org/org/repo.git");
+    }
+    if host.contains(':') {
+        return match host.parse::<std::net::Ipv6Addr>() {
+            Ok(ip) if is_public(ip.into()) => Ok(()),
+            Ok(_) => Err(PRIVATE),
+            Err(_) => Err("the host is not a valid IPv6 address"),
+        };
+    }
+    let host = host.to_ascii_lowercase();
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    if !host
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+    {
+        return Err(
+            "the host holds only letters, digits, dots and hyphens; an internationalised \
+                    name is written in its xn-- form",
+        );
+    }
+    let last = host.rsplit('.').next().unwrap_or_default();
+    // A URL parser reads a host whose last label is a number as an IPv4 address.
+    if last.starts_with("0x") || last.bytes().all(|b| b.is_ascii_digit()) {
+        return match host.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if is_public(ip.into()) => Ok(()),
+            Ok(_) => Err(PRIVATE),
+            Err(_) => Err("an IPv4 address is written in dotted decimal, e.g. 203.0.113.7"),
+        };
+    }
+    let internal = INTERNAL_SUFFIXES.iter().any(|suffix| {
+        host == *suffix
+            || host
+                .strip_suffix(suffix)
+                .is_some_and(|rest| rest.ends_with('.'))
+    });
+    if internal || !host.contains('.') {
+        return Err(PRIVATE);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
