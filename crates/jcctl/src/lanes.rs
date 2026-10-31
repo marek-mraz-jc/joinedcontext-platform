@@ -167,10 +167,19 @@ fn touches_public_audience(change: &ResourceChange) -> bool {
 
 /// The other kinds whose change opens something to anyone, red as the Portal's lane makes them
 /// (AP-120, AP-134, MF-52, MF-53): a public or egressing App, a public McpServer, an
-/// AssistantDeployment on any channel but `internal`. Moving the member is red both ways.
+/// AssistantDeployment on any channel but `internal`, a public Dashboard or KnowledgeSource
+/// (CC-63, F-R2PLT4-009). Moving the member is red both ways.
 fn public_exposure(change: &ResourceChange) -> Option<&'static str> {
     let spec = change.declared.as_ref().map(|manifest| &manifest.spec);
     let member = |key: &str| spec.and_then(|spec| spec.get(key));
+    let was_public = |key: &str| {
+        change
+            .live
+            .as_ref()
+            .and_then(|manifest| manifest.spec.get(key))
+            .and_then(Value::as_str)
+            == Some("public")
+    };
     let moved = |path: &str| change.diff.iter().any(|d| d.path.starts_with(path));
     match change.id.kind.as_str() {
         "App"
@@ -196,6 +205,12 @@ fn public_exposure(change: &ResourceChange) -> Option<&'static str> {
                 || moved("spec.channel") =>
         {
             Some("an assistant that answers outside the project is red (MF-52)")
+        }
+        "Dashboard" | "KnowledgeSource"
+            if member("visibility").and_then(Value::as_str) == Some("public")
+                || was_public("visibility") =>
+        {
+            Some("making a dashboard or a knowledge source public, or withdrawing it, is red (CC-63)")
         }
         _ => None,
     }
