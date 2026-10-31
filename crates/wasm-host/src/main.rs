@@ -10,7 +10,8 @@
 //! | `JC_WASM_PORTAL_URL` | the Portal inside the cluster, which the host asks for a request's caller and an App's `email` and `ai` (T-3622); unset, `identity` answers nobody and both services `unavailable` |
 //! | `JC_WASM_S3_ENDPOINT`, `JC_WASM_S3_BUCKET` | the bucket of `components/sha256-<64 hex>.wasm` and `apps/<shard>/<id>/` |
 //! | `JC_WASM_S3_KEY_FILE`, `JC_WASM_S3_SECRET_FILE` | the shard's key, as mounted files, never variables |
-//! | `JC_WASM_S3_PUBLIC_ENDPOINT` | the store's address for a browser, which presigned URLs name |
+//! | `JC_WASM_APPS_HOST` | the domain the Apps' hosts sit under (`apps.example.org`): presigned URLs name `https://{name}.{this}/api/_jc/files/…`, which the shard serves itself, so the store needs no address in the open (T-6195) |
+//! | `JC_WASM_S3_PUBLIC_ENDPOINT` | without `JC_WASM_APPS_HOST`: the store's address for a browser, which presigned URLs name |
 //! | `JC_WASM_COMPONENTS_DIR` | components from a directory instead of the bucket |
 //! | `JC_WASM_DB_URL_FILE` | the apps database URL as the shard's login role, a mounted file |
 //! | `JC_WASM_DB_URL`, `JC_WASM_DB_PASSWORD_FILE` | instead: the URL without a password, and the password as a mounted file |
@@ -27,6 +28,7 @@ use std::sync::{Arc, RwLock};
 
 use tokio::net::TcpListener;
 use wasm_host::blob::S3Blob;
+use wasm_host::files::FileUrls;
 use wasm_host::host::Host;
 use wasm_host::jobs::{HostRunner, JobTokens, Scheduler, WALL_TIME};
 use wasm_host::limits::Limits;
@@ -129,15 +131,25 @@ async fn run() -> Result<(), String> {
     };
     let blob = match bucket {
         None => None,
-        Some(bucket) => Some(
-            S3Blob::new(bucket, &id, bytes("JC_WASM_BLOB_QUOTA_BYTES", 1 << 30)?)
-                .with_read_limit(limits.response_bytes),
-        ),
+        Some(bucket) => {
+            let urls = var("JC_WASM_APPS_HOST")
+                .map(|host| FileUrls::new(&host, &bucket.secret))
+                .transpose()?;
+            let mut blob = S3Blob::new(bucket, &id, bytes("JC_WASM_BLOB_QUOTA_BYTES", 1 << 30)?)
+                .with_read_limit(limits.response_bytes);
+            if let Some(urls) = urls {
+                blob = blob.with_file_urls(urls);
+            }
+            Some(Arc::new(blob))
+        }
     };
     let storage: Arc<dyn Storage> = if sql.is_none() && blob.is_none() {
         Arc::new(Unconfigured)
     } else {
-        Arc::new(Stores { sql, blob })
+        Arc::new(Stores {
+            sql,
+            blob: blob.clone(),
+        })
     };
     let host = Host::new(
         limits,
@@ -166,6 +178,7 @@ async fn run() -> Result<(), String> {
         apps: RwLock::new(HashMap::new()),
         metrics: Metrics::new(20),
         jobs: jobs.clone(),
+        files: blob,
     });
     shard.watch(placements);
     let placed = Arc::downgrade(&shard);

@@ -178,7 +178,7 @@ pub fn add_to_linker(linker: &mut Linker<State>) -> wasmtime::Result<()> {
 /// `unavailable`.
 pub struct Stores {
     pub sql: Option<crate::sql::PgStore>,
-    pub blob: Option<crate::blob::S3Blob>,
+    pub blob: Option<std::sync::Arc<crate::blob::S3Blob>>,
 }
 
 impl Storage for Stores {

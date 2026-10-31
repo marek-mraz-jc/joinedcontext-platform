@@ -279,7 +279,7 @@ impl Bucket {
         Ok(Some((status, body)))
     }
 
-    async fn send(
+    pub(crate) async fn send(
         &self,
         method: reqwest::Method,
         key: &str,

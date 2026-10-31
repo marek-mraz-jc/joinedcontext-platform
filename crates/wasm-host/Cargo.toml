@@ -33,6 +33,7 @@ url = "2"
 hmac = "0.12"
 time = { version = "0.3", features = ["formatting", "macros"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "json", "uuid", "time"] }
+percent-encoding = "2"
 futures-util = { version = "0.3", default-features = false }
 http = "1"
 # The one cron reader of the platform, the one the manifest check uses (AP-154).

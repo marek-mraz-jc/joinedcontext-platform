@@ -8130,6 +8130,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jc-core",
+ "percent-encoding",
  "pg_query",
  "reqwest",
  "serde",
