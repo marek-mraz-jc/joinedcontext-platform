@@ -338,13 +338,33 @@ pub fn role_of(id: &str) -> String {
     format!("app_{id}")
 }
 
+/// A NULL parameter without a type of its own: Postgres infers it from where it stands (a
+/// `double precision` column, a comparison), where a `text` NULL fails every other column (T-6198).
+struct Untyped;
+
+impl sqlx::Type<Postgres> for Untyped {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        // Oid 0 in Parse is "unspecified", the server's own inference.
+        sqlx::postgres::PgTypeInfo::with_oid(sqlx::postgres::types::Oid(0))
+    }
+}
+
+impl sqlx::Encode<'_, Postgres> for Untyped {
+    fn encode_by_ref(
+        &self,
+        _: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+        Ok(sqlx::encode::IsNull::Yes)
+    }
+}
+
 fn bind<'q>(
     mut query: sqlx::query::Query<'q, Postgres, PgArguments>,
     params: Vec<Value>,
 ) -> sqlx::query::Query<'q, Postgres, PgArguments> {
     for value in params {
         query = match value {
-            Value::Null => query.bind(None::<String>),
+            Value::Null => query.bind(Untyped),
             Value::Boolean(v) => query.bind(v),
             Value::Int(v) => query.bind(v),
             Value::Float(v) => query.bind(v),
