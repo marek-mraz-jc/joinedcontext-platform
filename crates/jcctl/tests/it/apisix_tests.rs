@@ -649,6 +649,16 @@ fn two_apps_never_share_a_cookie_callback_or_logout() {
     assert_eq!(cookies.len(), names.len());
 }
 
+/// F-R2PLT4-013: the endpoint surface answers a browser origin without credentials: the pattern
+/// admits every App's origin, and the surface takes a bearer token alone.
+#[test]
+fn the_endpoint_surface_cors_carries_no_credentials() {
+    let dir = demo_repo("apisix-cors-credentials");
+    let document = document(&dir);
+    let cors = &find(&document, "plugin_configs", "pc-endpoint-surface")["plugins"]["cors"];
+    assert_eq!(cors["allow_credential"], Value::Bool(false), "{cors}");
+}
+
 /// AP-26: the browser origins the edge answers are the installation's subdomains and nothing
 /// that only looks like one.
 #[test]
