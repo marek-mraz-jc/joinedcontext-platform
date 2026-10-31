@@ -562,6 +562,8 @@ async fn a_model_call_carries_the_profiles_reasoning_effort_upstream() {
     let mut run = sample_run(false, "building");
     run.reasoning_effort = Some("medium".to_string());
     run.model_name = "google/gemini-3.8-flash".to_string();
+    // A budget large enough that the body keeps its own output cap (F-R2PLT1-006).
+    run.max_tokens = 100_000;
     let app = router(test_state_with_upstreams(
         run,
         "http://context-gateway:8080",

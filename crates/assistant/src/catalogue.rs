@@ -160,6 +160,18 @@ fn language_text(map: Option<&Value>, languages: &[String]) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The text of `path` when the file it names, symlinks followed, is inside `root` (F-R2PLT1-008):
+/// `beside` judges the path as written, and a committed symlink would otherwise publish a file
+/// from anywhere the checkout's reader may open.
+fn read_inside(root: &Path, path: &Path) -> Option<String> {
+    let real = path.canonicalize().ok()?;
+    if !real.starts_with(root.canonicalize().ok()?) {
+        tracing::warn!(path = %path.display(), "the model's schema is a link out of the repository");
+        return None;
+    }
+    std::fs::read_to_string(real).ok()
+}
+
 /// The pages of `project`'s Endpoints over `spaces` (every space when empty), public ones alone
 /// when `public_only`. `ckan` is each `CkanInstance` URL of the project, by name.
 pub fn pages_of(
@@ -192,8 +204,7 @@ pub fn pages_of(
             tracing::warn!(project, model = %id.name, "the model's schema path leaves the repository");
             continue;
         };
-        match std::fs::read_to_string(&path)
-            .ok()
+        match read_inside(repository.root(), &path)
             .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         {
             // The classes the model declares: its schema also defines the root they specialise.
@@ -897,6 +908,24 @@ mod tests {
             None
         );
         assert_eq!(beside(root, Path::new("a/model.yaml"), "/etc/passwd"), None);
+    }
+
+    /// F-R2PLT1-008: a schema path that is a symlink out of the repository reads as nothing.
+    #[test]
+    fn a_schema_linked_out_of_the_repository_is_not_read() {
+        let base = std::env::temp_dir().join(format!("t6221-catalogue-{}", std::process::id()));
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join("a")).expect("a scratch repository");
+        std::fs::write(base.join("other.json"), "{}").expect("a file outside");
+        std::fs::write(root.join("a/own.json"), "{}").expect("a file inside");
+        std::os::unix::fs::symlink(base.join("other.json"), root.join("a/link.json"))
+            .expect("a symlink");
+        assert_eq!(
+            read_inside(&root, &root.join("a/own.json")).as_deref(),
+            Some("{}")
+        );
+        assert_eq!(read_inside(&root, &root.join("a/link.json")), None);
+        std::fs::remove_dir_all(&base).expect("the scratch dir is removed");
     }
 
     #[test]
