@@ -695,3 +695,102 @@ async fn a_run_never_writes_a_github_workflow() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(paths_asked(&forge).await.is_empty());
 }
+
+/// F-R2PLT1-001: Gitea's file options also take `from_path` (move a file from elsewhere) and
+/// `new_branch` (commit to another branch). A write carrying either is refused before the forge
+/// is asked, so neither escapes the run's directory or branch.
+#[tokio::test]
+async fn a_write_naming_another_path_or_branch_in_its_body_is_refused() {
+    let forge = forge_answering(201, "{}").await;
+    for (verb, field, value) in [
+        ("PUT", "from_path", ".gitea/workflows/build.yml"),
+        ("PUT", "from_path", "projects/other/project.yaml"),
+        ("POST", "new_branch", "main-2"),
+        ("DELETE", "new_branch", "elsewhere"),
+        ("PUT", "force_push", "true"),
+    ] {
+        let response = proxy(&forge.uri())
+            .oneshot(
+                authed(verb, &format!("/v1/forge/contents/{INSIDE}/src/main.rs"))
+                    .body(Body::from(
+                        serde_json::json!({ "content": "eA==", "message": "x", field: value })
+                            .to_string(),
+                    ))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{verb} {field}");
+        assert!(
+            body_of(response).await.contains(field),
+            "the refusal names {field}"
+        );
+    }
+    assert!(paths_asked(&forge).await.is_empty());
+}
+
+/// F-R2PLT1-002: a run with no directory reads no file either; the empty prefix would admit every
+/// project's manifests in the configuration repository.
+#[tokio::test]
+async fn a_run_without_an_application_directory_reads_no_file() {
+    let forge = forge_answering(200, "{}").await;
+    for (kind, prefix) in [
+        ("conversation", ""),
+        ("application", ""),
+        ("conversation", "/"),
+    ] {
+        let response = proxy_without_directory(&forge.uri(), kind, prefix)
+            .oneshot(
+                authed("GET", "/v1/forge/contents/projects/other/project.yaml")
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{kind} {prefix:?}"
+        );
+    }
+    assert!(paths_asked(&forge).await.is_empty());
+}
+
+/// F-R2PLT1-003: a file read reaches the run's own branch when it asks for it, and no other ref:
+/// the query used to be dropped, so every read answered the default branch.
+#[tokio::test]
+async fn a_file_read_reaches_the_runs_own_branch_and_no_other_ref() {
+    let forge = forge_answering(200, "{}").await;
+    let branch = format!("agent/app-bikes/{RUN_ID}");
+    let own = format!(
+        "/v1/forge/contents/{INSIDE}/src/main.rs?ref={}",
+        branch.replace('/', "%2F")
+    );
+    let response = proxy(&forge.uri())
+        .oneshot(authed("GET", &own).body(Body::empty()).expect("a request"))
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::OK);
+    let seen = forge.received_requests().await.expect("the mock recorded");
+    let asked = seen.last().expect("the read reached the forge");
+    assert_eq!(
+        asked.url.query_pairs().collect::<Vec<_>>(),
+        vec![("ref".into(), branch.clone().into())]
+    );
+
+    for query in ["ref=main", "ref=agent%2Fapp-bikes%2Fother", "token=x"] {
+        let response = proxy(&forge.uri())
+            .oneshot(
+                authed(
+                    "GET",
+                    &format!("/v1/forge/contents/{INSIDE}/src/main.rs?{query}"),
+                )
+                .body(Body::empty())
+                .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{query}");
+    }
+    assert_eq!(paths_asked(&forge).await.len(), 1);
+}
