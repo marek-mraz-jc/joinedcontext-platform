@@ -24,6 +24,8 @@ type Refusal = Box<Response>;
 
 /// The most ids one inclusion call may name.
 pub const MAX_IDS: usize = 500;
+/// The most hits an administrator's search preview answers.
+const MAX_PREVIEW_HITS: u8 = 10;
 
 /// The platform's own problem type for `status` (T-3243), never a slug made of a title.
 fn problem(status: u16, detail: impl Into<String>) -> Response {
@@ -705,7 +707,7 @@ async fn search(
     if q.is_empty() || q.chars().count() > super::documents::MAX_QUERY {
         return problem(400, "q must be 1 to 300 characters");
     }
-    if limit == 0 || limit > super::documents::MAX_HITS {
+    if limit == 0 || limit > MAX_PREVIEW_HITS {
         return problem(400, "limit must be 1 to 10");
     }
     if let Err(refused) = site(&state, &project, &source).await {
@@ -714,7 +716,7 @@ async fn search(
     let scope = [(project, vec![source])];
     let found = match state.embedder.query(q).await {
         Ok(vector) => {
-            super::documents::ranked(&state, &scope, q, &vector, None, limit, false).await
+            super::documents::ranked(&state, &scope, q, &vector, (None, &[]), limit, false).await
         }
         Err(err) => Err(err),
     };
@@ -1103,7 +1105,7 @@ async fn upload(
     else {
         return problem(
             400,
-            "`name` is the file's name: 1 to 200 characters, no `/`, `\\` or control character",
+            "`name` is the file's name, in up to 8 folders: 1 to 200 characters, no `\\`, control character or empty, `.` or `..` part, e.g. reports/2026/budget.pdf",
         );
     };
     let spec = match upload_source(&state, &project, &source) {

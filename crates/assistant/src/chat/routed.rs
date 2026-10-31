@@ -1187,6 +1187,7 @@ pub fn holdings(connectors: &[Connected], live: &[Shown], base: &url::Url) -> Ve
                     score: 0.0,
                     site: String::new(),
                     dates: Default::default(),
+                    ..Default::default()
                 },
             ))
         })
@@ -1592,6 +1593,7 @@ async fn search_index(
             public_only: ask.public_only,
             limit,
             lang: None,
+            paths: &[],
         },
     )
     .await?;
@@ -4604,6 +4606,7 @@ mod tests {
             score,
             site: "bbsk/portal".into(),
             dates: Default::default(),
+            ..Default::default()
         };
         let found = vec![
             hit(1, "https://opendata.dev.example/dataset/cyklotrasy", 0.2),
@@ -5622,6 +5625,7 @@ mod tests {
             score,
             site: "bb/catalogue".into(),
             dates: Default::default(),
+            ..Default::default()
         }
     }
 
@@ -6574,6 +6578,7 @@ mod tests {
             score: BOTH,
             site: "bb/web".into(),
             dates: Default::default(),
+            ..Default::default()
         };
         let follow = follow_messages(
             &[],
@@ -7544,6 +7549,7 @@ classes:
             score: 1.0,
             site: String::new(),
             dates: Default::default(),
+            ..Default::default()
         };
         let mut linked = held.clone();
         linked[1].1.url = "https://data.example/dataset/mosty".into();

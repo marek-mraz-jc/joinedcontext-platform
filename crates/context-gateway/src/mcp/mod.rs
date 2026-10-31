@@ -112,6 +112,10 @@ mod tests {
         names(&hub::get_endpoint_tool()["inputSchema"], &mut arguments);
         names(&super::search::tool()["inputSchema"], &mut arguments);
         names(&super::documents::tool("")["inputSchema"], &mut arguments);
+        names(
+            &super::documents::context_tool()["inputSchema"],
+            &mut arguments,
+        );
         arguments.sort();
         arguments.dedup();
         let unexplained: Vec<&String> = arguments
@@ -142,6 +146,7 @@ mod tests {
             hub::list_endpoints_tool(),
             hub::get_endpoint_tool(),
             super::documents::tool(""),
+            super::documents::context_tool(),
         ]);
         let names: Vec<Value> = listed.iter().map(|tool| tool["name"].clone()).collect();
         super::annotations::annotate(&mut listed);

@@ -100,6 +100,7 @@ pub(crate) const ANONYMOUS_TOOLS: &[&str] = &[
     "area_overview",
     "search",
     "search_documents",
+    "read_knowledge_context",
     "list_types",
     "get_type",
     "list_type_details",

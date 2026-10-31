@@ -169,6 +169,7 @@ async fn measure(
                     public_only: true,
                     limit: CANDIDATES,
                     lang: None,
+                    paths: &[],
                 },
             )
             .await?;
