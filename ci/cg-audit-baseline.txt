@@ -10,7 +10,7 @@ antares | security-fetch-from-route | 4
 antares | security-log-secret-field | 0
 antares | security-mcp-write-unguarded | 0
 platform | links-unmatched | 0
-platform | memory-body-copy | 19
+platform | memory-body-copy | 18
 platform | memory-per-request-build | 0
 platform | memory-unbounded-global | 6
 platform | memory-uncapped-read | 1
