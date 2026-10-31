@@ -6195,7 +6195,10 @@ async fn a_filtered_count_is_read_exactly_not_from_the_profile_sample() {
         completion(json!({"role": "assistant", "content": json!({"route": "data", "queries": ["mosty"], "data": [
             {"endpoint": "ovzdusie", "type": "Bridge"},
             {"endpoint": "ovzdusie", "type": "Bridge", "q": "yearBuilt<1900"}]}).to_string()}), 400),
-    ], vec![], vec![
+    ], vec![
+        // the first round is judged beside the reads (T-4293) once the narrowing lets it on (T-6178)
+        completion(json!({"role": "assistant", "content": "{\"answers\": false}"}), 50),
+    ], vec![
         completion(json!({"role": "assistant", "content": "V registri je 1 651 mostov [1], z nich 37 postavených pred rokom 1900 [2]."}), 900),
     ]).await;
 

@@ -3600,12 +3600,19 @@ async fn opening<'a>(
         _ => None,
     };
     let direct = routed.is_ok() && early.as_ref().is_none_or(|r| r.direct);
-    let wanted = match &early {
-        Some(r) if !r.direct => narrowed(q.ask, wanted(q.ask, r), &r.queries, q.question).await,
-        _ => Vec::new(),
-    };
-    let read = {
-        let reading = read_all(q.ask, &wanted);
+    // The narrowing searches the embedder too, whose one turn the first round may hold until it
+    // is polled again: both go on beside it, or the narrowing waits out its deadline (T-6178).
+    let (wanted, read) = {
+        let reading = async {
+            let wanted = match &early {
+                Some(r) if !r.direct => {
+                    narrowed(q.ask, wanted(q.ask, r), &r.queries, q.question).await
+                }
+                _ => Vec::new(),
+            };
+            let read = read_all(q.ask, &wanted).await;
+            (wanted, read)
+        };
         tokio::pin!(reading);
         tokio::select! {
             out = &mut reading => out,
