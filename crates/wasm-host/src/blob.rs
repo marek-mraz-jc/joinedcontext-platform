@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 
+use crate::files::{FileUrls, MAX_FILE_BYTES};
 use crate::placement::Placed;
 use crate::s3::Bucket;
 use crate::storage::{BlobError, Method};
@@ -55,6 +56,8 @@ pub struct S3Blob {
     quota_bytes: u64,
     read_limit: usize,
     sizes: Mutex<HashMap<String, (Instant, u64)>>,
+    /// File links on the App's own host instead of the store's address (T-6195).
+    urls: Option<FileUrls>,
 }
 
 fn refused(app: &Placed, why: String) -> BlobError {
@@ -70,7 +73,19 @@ impl S3Blob {
             quota_bytes,
             read_limit: crate::limits::Limits::default().response_bytes,
             sizes: Mutex::new(HashMap::new()),
+            urls: None,
         }
+    }
+
+    /// Presigned URLs name the App's own host, where the shard serves them (T-6195).
+    pub fn with_file_urls(mut self, urls: FileUrls) -> Self {
+        self.urls = Some(urls);
+        self
+    }
+
+    /// The signer of file links, when they are on the Apps' hosts.
+    pub fn file_urls(&self) -> Option<&FileUrls> {
+        self.urls.as_ref()
     }
 
     /// The most one `get` reads from the store; the default is the largest answer a guest gives.
@@ -220,7 +235,7 @@ impl S3Blob {
                 "PUT"
             }
         };
-        Ok(self.signed(method, &key, expires, None))
+        Ok(self.signed(app, method, &key, expires, None))
     }
 
     /// A PUT URL for one key whose body is exactly `size` bytes: `content-length` is signed, so
@@ -234,11 +249,49 @@ impl S3Blob {
         expires: u32,
     ) -> Result<String, BlobError> {
         let key = self.key(app, key)?;
+        if self.urls.is_some() && size > MAX_FILE_BYTES {
+            return Err(refused(
+                app,
+                format!("a file link moves at most {MAX_FILE_BYTES} bytes"),
+            ));
+        }
         self.room_for(app, size).await?;
         // Counted when signed, so several URLs inside one cached listing cannot add up past the
         // quota; an unused one holds its room until the listing refreshes.
         self.count(app, size);
-        Ok(self.signed("PUT", &key, expires, Some(size)))
+        Ok(self.signed(app, "PUT", &key, expires, Some(size)))
+    }
+
+    /// The store's answer to a GET of `key` (below the App's prefix), its body unread, for the
+    /// shard to stream to a file link's holder (T-6195).
+    pub async fn download(&self, app: &Placed, key: &str) -> Result<reqwest::Response, BlobError> {
+        let key = self.key(app, key)?;
+        self.bucket
+            .send(reqwest::Method::GET, &key, None)
+            .await
+            .map_err(BlobError::Unavailable)
+    }
+
+    /// A file link's PUT: a sized link's room was taken when it was signed, so only an unsized
+    /// one is held to the quota here (T-6195).
+    pub async fn upload(
+        &self,
+        app: &Placed,
+        key: &str,
+        data: Vec<u8>,
+        content_type: Option<String>,
+        sized: bool,
+    ) -> Result<(), BlobError> {
+        if !sized {
+            return self.put(app, key, data, content_type).await;
+        }
+        let key = self.key(app, key)?;
+        let (status, _) = self
+            .bucket
+            .object(reqwest::Method::PUT, &key, Some((data, content_type)))
+            .await
+            .map_err(BlobError::Unavailable)?;
+        Self::answer(status)
     }
 
     /// `Quota` unless `size` more bytes fit beside the application's files.
@@ -253,14 +306,24 @@ impl S3Blob {
         Ok(())
     }
 
-    fn signed(&self, method: &str, key: &str, expires: u32, length: Option<u64>) -> String {
-        self.bucket.presign(
-            method,
-            key,
-            expires.clamp(1, MAX_PRESIGN_SECONDS),
-            length,
-            OffsetDateTime::now_utc(),
-        )
+    fn signed(
+        &self,
+        app: &Placed,
+        method: &str,
+        key: &str,
+        expires: u32,
+        length: Option<u64>,
+    ) -> String {
+        let expires = expires.clamp(1, MAX_PRESIGN_SECONDS);
+        let now = OffsetDateTime::now_utc();
+        match &self.urls {
+            Some(urls) => {
+                let own = key.strip_prefix(&self.prefix(app)).unwrap_or(key);
+                let until = now.unix_timestamp().saturating_add(i64::from(expires));
+                urls.url(app, method, own, until, length)
+            }
+            None => self.bucket.presign(method, key, expires, length, now),
+        }
     }
 }
 

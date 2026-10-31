@@ -197,7 +197,11 @@ async fn placed(
             SqlLimits::default(),
         )),
         // The bucket's shard prefix is the database's shard, as one shard's pods hold both.
-        blob: Some(S3Blob::new(store.bucket("s1"), &store.shard("s1"), 1 << 20)),
+        blob: Some(Arc::new(S3Blob::new(
+            store.bucket("s1"),
+            &store.shard("s1"),
+            1 << 20,
+        ))),
     };
     let host = Host::new(
         Limits::default(),

@@ -956,6 +956,7 @@ async fn job_records_and_counters_answer_on_the_admin_port_alone() {
             },
             WALL_TIME,
         )),
+        files: None,
     });
     let bind = || tokio::net::TcpListener::bind("127.0.0.1:0");
     let (apps, admin) = (bind().await.expect("apps"), bind().await.expect("admin"));
@@ -1101,4 +1102,154 @@ async fn an_outgoing_body_past_the_request_cap_is_refused_and_never_sent() {
         "only the body within the cap reached the gateway"
     );
     assert_eq!(seen[0].body.len(), 1 << 20);
+}
+
+/// T-6195: a presigned URL names the App's own host, and the shard serves it there: a GET link
+/// streams the object as an attachment, a sized PUT link stores exactly its length, and a link
+/// altered, for another method or with another body length is refused before the store is asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_link_opens_on_the_apps_own_host_for_its_method_and_length_alone() {
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+    use wasm_host::blob::S3Blob;
+    use wasm_host::files::FileUrls;
+    use wasm_host::jobs::{HostRunner, Scheduler, WALL_TIME};
+    use wasm_host::metrics::Metrics;
+    use wasm_host::s3::Bucket;
+    use wasm_host::server::{Port, Shard};
+    use wasm_host::storage::Method as BlobMethod;
+    use wiremock::matchers::query_param;
+
+    let store = MockServer::start().await;
+    let world = World::new("file-links", Limits::default(), None);
+    let app = world.place("one", guest());
+    let object = format!("/apps/apps/0/{}/tiles/a%20b.geojson", app.id);
+    Mock::given(method("GET"))
+        .and(path(object.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw("{\"type\":\"FeatureCollection\"}", "application/geo+json"),
+        )
+        .mount(&store)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/apps"))
+        .and(query_param("list-type", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>",
+        ))
+        .mount(&store)
+        .await;
+    let upload = format!("/apps/apps/0/{}/up.png", app.id);
+    Mock::given(method("PUT"))
+        .and(path(upload.as_str()))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&store)
+        .await;
+    let bucket = Bucket {
+        endpoint: store.uri(),
+        bucket: "apps".into(),
+        region: "us-east-1".into(),
+        key_id: "key0".into(),
+        secret: "secret-0".into(),
+        public_endpoint: None,
+        http: reqwest::Client::new(),
+    };
+    let files = Arc::new(
+        S3Blob::new(bucket, "0", 1 << 20)
+            .with_file_urls(FileUrls::new("apps.dev.example", "secret-0").expect("urls")),
+    );
+    let shard = Arc::new(Shard {
+        id: "0".into(),
+        host: world.host.clone(),
+        apps: RwLock::new(HashMap::from([("one".to_owned(), app.clone())])),
+        metrics: Metrics::new(20),
+        jobs: Arc::new(Scheduler::new(
+            HostRunner {
+                host: world.host.clone(),
+                tokens: None,
+            },
+            WALL_TIME,
+        )),
+        files: Some(files.clone()),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let apps_url = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(shard.clone().serve(listener, Port::Apps));
+    // What the edge does: the App's host, `/api/*` rewritten to `/apps/{name}/api/*`.
+    let routed = |url: &str| {
+        assert!(
+            url.starts_with("https://one.apps.dev.example/api/_jc/files/"),
+            "{url}"
+        );
+        url.replace(
+            "https://one.apps.dev.example/api/",
+            &format!("{apps_url}/apps/one/api/"),
+        )
+    };
+    let http = reqwest::Client::new();
+
+    let get = routed(
+        &files
+            .presign(&app, "tiles/a b.geojson", BlobMethod::Get, 60)
+            .await
+            .expect("presign"),
+    );
+    let answer = http.get(&get).send().await.expect("get");
+    assert_eq!(answer.status(), 200);
+    let headers = answer.headers().clone();
+    assert_eq!(headers["content-type"], "application/geo+json");
+    assert_eq!(headers["content-disposition"], "attachment");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(
+        answer.text().await.expect("body"),
+        "{\"type\":\"FeatureCollection\"}"
+    );
+
+    let status = |answer: reqwest::Response| answer.status().as_u16();
+    let tampered = get.replace("signature=", "signature=00");
+    assert_eq!(
+        status(http.get(&tampered).send().await.expect("tampered")),
+        403
+    );
+    let elsewhere = get.replace("tiles/a%20b.geojson", "tiles/other.geojson");
+    assert_eq!(status(http.get(&elsewhere).send().await.expect("key")), 403);
+    assert_eq!(
+        status(http.put(&get).body("x").send().await.expect("put")),
+        403
+    );
+    assert_eq!(status(http.post(&get).send().await.expect("post")), 405);
+
+    let put = routed(
+        &files
+            .presign_put(&app, "up.png", 3, 60)
+            .await
+            .expect("presign put"),
+    );
+    assert_eq!(
+        status(http.put(&put).body("abcd").send().await.expect("long")),
+        403
+    );
+    assert_eq!(
+        status(http.get(&put).send().await.expect("get on put")),
+        403
+    );
+    assert_eq!(
+        status(
+            http.put(&put)
+                .header("content-type", "image/png")
+                .body("abc")
+                .send()
+                .await
+                .expect("put")
+        ),
+        200
+    );
+    assert!(
+        files.presign_put(&app, "big", 26 << 20, 60).await.is_err(),
+        "a link moves at most 25 MiB"
+    );
 }

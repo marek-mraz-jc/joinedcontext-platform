@@ -19,10 +19,13 @@ use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
+use crate::blob::S3Blob;
+use crate::files::{MAX_FILE_BYTES, PREFIX};
 use crate::host::{capped, Failure, Host};
 use crate::jobs::{records_json, HostRunner, Scheduler};
 use crate::metrics::{Metrics, Outcome};
 use crate::placement::{Placed, Placement};
+use crate::storage::BlobError;
 
 pub type Body = UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -34,6 +37,8 @@ pub struct Shard {
     pub metrics: Metrics,
     /// The scheduler of the placed Apps' jobs, whose records `/jobs` answers (AP-154).
     pub jobs: Arc<Scheduler<HostRunner>>,
+    /// The Apps' files, which file links on the Apps' hosts reach (T-6195).
+    pub files: Option<Arc<S3Blob>>,
 }
 
 fn text(status: u16, content_type: &str, body: String) -> http::Response<Body> {
@@ -152,6 +157,12 @@ impl Shard {
                 "No application is served at this address.",
             );
         };
+        if let Some(encoded) = path
+            .strip_prefix(&format!("/apps/{}/api/{PREFIX}", app.name))
+            .map(str::to_owned)
+        {
+            return self.file(&app, &encoded, request).await;
+        }
         let started = Instant::now();
         // Admitted before the body is read (T-3342).
         let admission = match self.host.admit(&app) {
@@ -204,6 +215,61 @@ impl Shard {
         }
     }
 
+    /// A file link on the App's own host (T-6195): the link's signature, never the App, decides,
+    /// and the bytes move between the caller and the App's prefix alone. A GET streams the
+    /// object as an attachment; a PUT stores a body of the signed length, at most
+    /// [`MAX_FILE_BYTES`].
+    async fn file(
+        &self,
+        app: &Placed,
+        encoded: &str,
+        request: http::Request<Incoming>,
+    ) -> http::Response<Body> {
+        let Some((files, urls)) = self
+            .files
+            .as_ref()
+            .and_then(|files| files.file_urls().map(|urls| (files, urls)))
+        else {
+            return problem(404, "Not Found", "This shard serves no file links.");
+        };
+        let method = request.method().clone();
+        if method != http::Method::GET && method != http::Method::PUT {
+            let mut refused = problem(
+                405,
+                "Method Not Allowed",
+                "A file link is opened with GET, or with PUT for an upload.",
+            );
+            refused.headers_mut().insert(
+                http::header::ALLOW,
+                http::HeaderValue::from_static("GET, PUT"),
+            );
+            return refused;
+        }
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let query = request.uri().query().unwrap_or_default();
+        let signed = match urls.verify(app, method.as_str(), encoded, query, now) {
+            Ok(signed) => signed,
+            Err(why) => {
+                tracing::warn!(app = %app.id, kind = "file-link", "refused");
+                return problem(403, "Forbidden", why);
+            }
+        };
+        let admission = match self.host.admit(app) {
+            Ok(admission) => admission,
+            Err(failure) => {
+                return problem(failure.status(), "Application Error", failure.detail())
+            }
+        };
+        let answer = if method == http::Method::GET {
+            download(files, app, &signed.key, admission).await
+        } else {
+            let answer = upload(files, app, signed, request).await;
+            drop(admission);
+            answer
+        };
+        answer.unwrap_or_else(|failed| *failed)
+    }
+
     /// Reads the placement file again whenever it changes; a file that does not parse keeps the
     /// placement in force and says why.
     pub fn watch(self: &Arc<Self>, path: PathBuf) {
@@ -233,6 +299,145 @@ impl Shard {
             }
         });
     }
+}
+
+/// A file link's refusal, boxed: an answer is large beside the streamed one.
+type Refusal = Box<http::Response<Body>>;
+
+fn blob_problem(err: BlobError) -> Refusal {
+    Box::new(match err {
+        BlobError::NotFound => problem(404, "Not Found", "The application holds no such file."),
+        BlobError::Refused(why) | BlobError::Quota(why) => problem(403, "Forbidden", &why),
+        BlobError::Unavailable(why) => {
+            tracing::warn!(%why, kind = "file-link", "the store failed");
+            problem(
+                503,
+                "Service Unavailable",
+                "The file store did not answer; try again in a minute.",
+            )
+        }
+    })
+}
+
+/// The object streamed from the store, the admission held until its last byte.
+async fn download(
+    files: &S3Blob,
+    app: &Placed,
+    key: &str,
+    admission: crate::host::Admission,
+) -> Result<http::Response<Body>, Refusal> {
+    let stored = files.download(app, key).await.map_err(blob_problem)?;
+    match stored.status().as_u16() {
+        200 => {}
+        404 => return Err(blob_problem(BlobError::NotFound)),
+        other => {
+            return Err(blob_problem(BlobError::Unavailable(format!(
+                "the object store answered {other}"
+            ))))
+        }
+    }
+    let content_type = stored
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| http::HeaderValue::from_bytes(v.as_bytes()).ok())
+        .unwrap_or(http::HeaderValue::from_static("application/octet-stream"));
+    let length = stored.content_length();
+    let chunks = futures_util::stream::unfold(
+        (stored, Some(admission)),
+        |(mut stored, admission)| async move {
+            admission.as_ref()?;
+            match stored.chunk().await {
+                Ok(Some(chunk)) => Some((Ok(hyper::body::Frame::data(chunk)), (stored, admission))),
+                Ok(None) => None,
+                Err(err) => Some((
+                    Err(Box::new(err) as Box<dyn std::error::Error + Send + Sync>),
+                    (stored, None),
+                )),
+            }
+        },
+    );
+    let mut response = http::Response::new(http_body_util::StreamBody::new(chunks).boxed_unsync());
+    let headers = response.headers_mut();
+    headers.insert(http::header::CONTENT_TYPE, content_type);
+    if let Some(length) = length.and_then(|n| http::HeaderValue::from_str(&n.to_string()).ok()) {
+        headers.insert(http::header::CONTENT_LENGTH, length);
+    }
+    // The App's data, never a page of the App's origin.
+    for (name, value) in [
+        (http::header::CONTENT_DISPOSITION, "attachment"),
+        (http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (http::header::CONTENT_SECURITY_POLICY, "sandbox"),
+        (http::header::CACHE_CONTROL, "private, no-store"),
+    ] {
+        headers.insert(name, http::HeaderValue::from_static(value));
+    }
+    Ok(response)
+}
+
+/// A body of exactly the signed length (or, unsized, at most [`MAX_FILE_BYTES`]) into the store.
+async fn upload(
+    files: &S3Blob,
+    app: &Placed,
+    signed: crate::files::Signed,
+    request: http::Request<Incoming>,
+) -> Result<http::Response<Body>, Refusal> {
+    let declared = request
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    if let (Some(signed), Some(declared)) = (signed.length, declared) {
+        if signed != declared {
+            return Err(Box::new(problem(
+                403,
+                "Forbidden",
+                &format!("This upload link takes exactly {signed} bytes."),
+            )));
+        }
+    }
+    let content_type = request
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.len() <= 255)
+        .map(str::to_owned);
+    let cap = signed.length.unwrap_or(MAX_FILE_BYTES).min(MAX_FILE_BYTES);
+    let too_large = || {
+        Box::new(problem(
+            413,
+            "Payload Too Large",
+            &format!("A file link stores at most {cap} bytes."),
+        ))
+    };
+    let cap = usize::try_from(cap).map_err(|_| too_large())?;
+    let body = Limited::new(request.into_body(), cap)
+        .collect()
+        .await
+        .map_err(|_| too_large())?
+        .to_bytes();
+    if signed
+        .length
+        .is_some_and(|length| length != body.len() as u64)
+    {
+        return Err(Box::new(problem(
+            403,
+            "Forbidden",
+            &format!(
+                "This upload link takes exactly {} bytes.",
+                signed.length.unwrap_or_default()
+            ),
+        )));
+    }
+    files
+        .upload(
+            app,
+            &signed.key,
+            body.to_vec(),
+            content_type,
+            signed.length.is_some(),
+        )
+        .await
+        .map_err(blob_problem)?;
+    Ok(text(200, "text/plain", String::new()))
 }
 
 #[cfg(test)]

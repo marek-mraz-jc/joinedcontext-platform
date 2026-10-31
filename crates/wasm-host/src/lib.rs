@@ -1,6 +1,7 @@
 //! `jc-wasm-host`, the shared host of server WASM Apps (ADR-N-044).
 
 pub mod blob;
+pub mod files;
 pub mod host;
 pub mod jobs;
 pub mod limits;
