@@ -481,6 +481,33 @@ fn paths(value: &Value) -> Option<Vec<Value>> {
         .then_some(list)
 }
 
+/// One of the arguments that choose which hits a page holds, read into its place: `limit`,
+/// `cursor` and `source` stay in the gateway; `pathPrefix`, always a list, goes to the assistant.
+fn paging(
+    name: &str,
+    value: &Value,
+    limit: &mut u64,
+    cursor: &mut Option<String>,
+    source: &mut Option<String>,
+) -> Result<Option<Value>, String> {
+    match (name, value) {
+        ("limit", Value::Number(n)) if n.as_u64().is_some_and(|n| (1..=MAX_LIMIT).contains(&n)) => {
+            *limit = n.as_u64().unwrap_or(DEFAULT_LIMIT);
+        }
+        ("limit", _) => return Err(format!("`limit` is 1 to {MAX_LIMIT}")),
+        ("pathPrefix", value) => {
+            return paths(value).map(|list| Some(Value::Array(list))).ok_or_else(|| format!(
+                "`pathPrefix` is a path starting with /, or a list of at most {MAX_PATHS}, each at most {MAX_PATH} characters, e.g. \"/fi/kasvatus-ja-koulutus\""
+            ))
+        }
+        ("cursor", Value::String(text)) => *cursor = Some(text.clone()),
+        ("cursor", _) => return Err("`cursor` is the nextCursor of the last page".into()),
+        ("source", Value::String(text)) if text.len() <= 127 => *source = Some(text.clone()),
+        _ => return Err("`source` is one attached source such as `helsinki/web`".into()),
+    }
+    Ok(None)
+}
+
 /// The arguments of a search, or what is wrong with them, in words.
 fn asked(arguments: &Map<String, Value>) -> Result<Asked, String> {
     let mut asked = Map::new();
@@ -495,33 +522,11 @@ fn asked(arguments: &Map<String, Value>) -> Result<Asked, String> {
                 add_translations(translations, &mut queries)?;
                 continue;
             }
-            ("limit", Value::Number(n))
-                if n.as_u64().is_some_and(|n| (1..=MAX_LIMIT).contains(&n)) =>
-            {
-                limit = n.as_u64().unwrap_or(DEFAULT_LIMIT);
-                continue;
-            }
-            ("limit", _) => return Err(format!("`limit` is 1 to {MAX_LIMIT}")),
-            ("pathPrefix", value) => match paths(value) {
-                Some(list) => {
-                    asked.insert(name.clone(), Value::Array(list));
-                    continue;
+            ("limit" | "pathPrefix" | "cursor" | "source", value) => {
+                if let Some(kept) = paging(name, value, &mut limit, &mut cursor, &mut source)? {
+                    asked.insert(name.clone(), kept);
                 }
-                None => return Err(format!(
-                    "`pathPrefix` is a path starting with /, or a list of at most {MAX_PATHS}, each at most {MAX_PATH} characters, e.g. \"/fi/kasvatus-ja-koulutus\""
-                )),
-            },
-            ("cursor", Value::String(text)) => {
-                cursor = Some(text.clone());
                 continue;
-            }
-            ("cursor", _) => return Err("`cursor` is the nextCursor of the last page".into()),
-            ("source", Value::String(text)) if text.len() <= 127 => {
-                source = Some(text.clone());
-                continue;
-            }
-            ("source", _) => {
-                return Err("`source` is one attached source such as `helsinki/web`".into())
             }
             ("lang", Value::String(lang)) if is_lang(lang) => {}
             ("lang", _) => return Err("`lang` is a two-letter language code such as `sk`".into()),
