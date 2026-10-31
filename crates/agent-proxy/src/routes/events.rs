@@ -105,16 +105,24 @@ pub async fn handler(
             .into_response();
     }
 
-    if let Err(msg) = state
-        .limits
-        .check_rpm(&run.id, run.requests_per_minute)
-        .await
+    // A kind is a name the Portal matches, stored and streamed to every reader of the run: free
+    // text there would carry what the payload redaction removes (F-R2PLT1-013).
+    if body.kind.is_empty()
+        || body.kind.len() > 32
+        || !body
+            .kind
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b == b'_' || b == b'-')
     {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
-        )
+        return jc_core::ProblemDetails::bad_request()
+            .with_detail(
+                "an event's kind is 1 to 32 characters of a-z, '_' and '-', e.g. `thought`",
+            )
             .into_response();
+    }
+
+    if let Some(refusal) = super::over_rate(&state, &run).await {
+        return refusal;
     }
 
     let mut url = state.config.portal_base.clone();

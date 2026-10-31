@@ -107,6 +107,12 @@ async fn forward(
         Err(p) => return (*p).into_response(),
     };
 
+    // Before the Portal is asked about a stale slug, so a loop of unknown slugs is counted too
+    // (F-R2PLT1-004).
+    if let Some(refusal) = super::over_rate(&state, &run).await {
+        return refusal;
+    }
+
     if super::escapes(&rest) {
         return jc_core::ProblemDetails::forbidden()
             .with_detail("path traversal not permitted")

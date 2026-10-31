@@ -375,3 +375,46 @@ async fn the_events_door_takes_no_get() {
         .expect("an answer");
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+/// F-R2PLT1-013: the kind is stored and streamed to every reader of the run as typed, and the
+/// payload redaction never sees it, so a kind is a short name and nothing else.
+#[tokio::test]
+async fn a_kind_that_is_not_a_short_name_is_refused_before_the_portal_is_asked() {
+    let portal = portal_answering(200, "{}").await;
+    let long = "a".repeat(33);
+    for kind in [
+        "",
+        "Bearer eyJhbGciOiJIUzI1NiJ9",
+        "log\nline",
+        "tööl",
+        long.as_str(),
+    ] {
+        let sent = serde_json::json!({ "kind": kind, "payload": {} }).to_string();
+        let response = proxy(&portal.uri(), 100)
+            .oneshot(
+                authed("POST", "/v1/runs/events")
+                    .body(Body::from(sent))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "kind {kind:?}");
+    }
+    assert!(portal
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .is_empty());
+    for kind in ["thought", "preview_observation", "file-written"] {
+        let sent = serde_json::json!({ "kind": kind, "payload": {} }).to_string();
+        let response = proxy(&portal.uri(), 100)
+            .oneshot(
+                authed("POST", "/v1/runs/events")
+                    .body(Body::from(sent))
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        assert_eq!(response.status(), StatusCode::OK, "kind {kind}");
+    }
+}

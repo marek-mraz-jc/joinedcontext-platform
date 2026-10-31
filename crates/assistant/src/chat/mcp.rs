@@ -63,6 +63,11 @@ pub const MAX_SERVER_ENDPOINTS: usize = 20;
 /// The longest Endpoint title a server's listing lends the router and the answer.
 const MAX_TITLE_CHARS: usize = 120;
 
+/// The most of one gateway or named-server answer read (F-R2PLT1-014): the gateway's own ceiling
+/// for a page it hands on, so an answer it serves is never cut here, and a surface that answers
+/// without end stops at it instead of filling the assistant's memory.
+const MAX_ANSWER_BYTES: usize = 8 << 20;
+
 /// One JSON-RPC message to the gateway at `url`, as `token` or as anyone; the `result`.
 async fn post(
     http: &reqwest::Client,
@@ -87,10 +92,11 @@ async fn post(
     if !status.is_success() {
         return Err(format!("the Endpoint answered {status}"));
     }
-    let body: Value = answer
-        .json()
+    let bytes = jc_core::outbound::read_capped(answer, MAX_ANSWER_BYTES)
         .await
-        .map_err(|err| format!("the Endpoint's answer is not JSON: {}", err.without_url()))?;
+        .map_err(|err| format!("the Endpoint's answer could not be read: {err}"))?;
+    let body: Value = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("the Endpoint's answer is not JSON: {err}"))?;
     if let Some(error) = body.get("error") {
         let message = error
             .get("message")
@@ -390,6 +396,33 @@ mod tests {
             super::super::routed::type_names(&text),
             ["AirQualityObserved", "Tree"]
         );
+    }
+
+    /// F-R2PLT1-014: an answer past the ceiling is refused, not read whole into memory.
+    #[tokio::test]
+    async fn an_answer_past_the_ceiling_is_refused() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let gateway = MockServer::start().await;
+        let huge = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            "a".repeat(super::MAX_ANSWER_BYTES)
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(huge))
+            .mount(&gateway)
+            .await;
+        let surface = super::Surface {
+            gateway: gateway.uri(),
+            slug: "ovzdusie".into(),
+            timeout: std::time::Duration::from_secs(5),
+            token: None,
+        };
+        let refused = surface
+            .call(&reqwest::Client::new(), "list_types", json!({}))
+            .await
+            .expect_err("an answer past the ceiling is refused");
+        assert!(refused.contains("could not be read"), "{refused}");
     }
 
     #[test]

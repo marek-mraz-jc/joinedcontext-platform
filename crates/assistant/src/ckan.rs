@@ -8,6 +8,7 @@
 //! that fails part way removes nothing. Rows are data, not knowledge: CKAN holds none (T-5060),
 //! and the assistant reaches them through its MCP connectors, never through this index.
 
+use crate::html_escape as escape;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -101,20 +102,6 @@ fn is_dataset_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-}
-
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 fn present(value: &Option<String>) -> Option<&str> {
