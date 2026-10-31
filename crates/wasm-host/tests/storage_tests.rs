@@ -595,6 +595,38 @@ async fn a_pooled_connection_comes_back_without_the_last_users_locks() {
     assert_eq!(held, 0);
 }
 
+/// F-R2PLT4-001: `pg_settings` is writable by PUBLIC and its update rule calls `set_config(...,
+/// false)`, which the statement guard never sees. A setting one App changes that way is gone when
+/// the connection comes back, so the next App on it starts from the shard's own settings.
+#[tokio::test]
+async fn a_pooled_connection_comes_back_without_the_last_users_settings() {
+    let db = Db::new().await;
+    let pool = db.pool("s1", 1).await;
+    let store = PgStore::with_pool(pool.clone(), limits());
+    let a = app(&db.id("a"));
+    let mut fresh = pool.acquire().await.expect("a connection");
+    let before: String = sqlx::query_scalar("select current_setting('work_mem')")
+        .fetch_one(&mut *fresh)
+        .await
+        .expect("the setting");
+    drop(fresh);
+    store
+        .run(
+            &a,
+            "update pg_settings set setting = '77MB' where name = 'work_mem'".into(),
+            Vec::new(),
+            Kind::Write,
+        )
+        .await
+        .expect("PUBLIC may update pg_settings");
+    let mut next = pool.acquire().await.expect("the same connection");
+    let after: String = sqlx::query_scalar("select current_setting('work_mem')")
+        .fetch_one(&mut *next)
+        .await
+        .expect("the setting");
+    assert_eq!(after, before);
+}
+
 #[tokio::test]
 async fn a_null_parameter_takes_the_type_of_its_column() {
     let db = Db::new().await;

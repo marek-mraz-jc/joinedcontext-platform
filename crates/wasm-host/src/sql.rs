@@ -509,14 +509,17 @@ fn url_has_password(url: &str) -> bool {
 /// One App's statement runs on a connection the next App's statement reuses. A session lock
 /// (`pg_advisory_lock`, reachable through a view a migration may create) or a `LISTEN` outlives
 /// the transaction, so it would hold for whichever App ran next; releasing all of them on
-/// release closes that (F-PLT3-007). A connection the reset fails on is closed, not reused.
+/// release closes that (F-PLT3-007). So does a session setting: `pg_settings` is writable by
+/// PUBLIC and its update rule calls `set_config(…, false)`, which the statement guard never sees,
+/// so every setting goes back to the login's own (F-R2PLT4-001). A connection the
+/// reset fails on is closed, not reused.
 pub fn pool_options(size: u32) -> PgPoolOptions {
     PgPoolOptions::new()
         .max_connections(size)
         .acquire_timeout(Duration::from_secs(3))
         .after_release(|conn, _| {
             Box::pin(async move {
-                Ok(sqlx::raw_sql("select pg_advisory_unlock_all(); unlisten *")
+                Ok(sqlx::raw_sql("select pg_advisory_unlock_all(); unlisten *; reset all")
                     .execute(conn)
                     .await
                     .is_ok())
