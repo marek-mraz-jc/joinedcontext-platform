@@ -2,7 +2,7 @@
 # (dev/cg-structure.py, T-4587); only ever lowered, in the commit that improves it.
 agent-proxy | 3 | 1
 assistant | 4 | 12
-context-gateway | 12 | 14
+context-gateway | 11 | 14
 jc-app-sdk | 0 | 1
 jc-core | 15 | 17
 jc-dcat | 0 | 0
