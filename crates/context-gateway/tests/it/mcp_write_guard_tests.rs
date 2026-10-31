@@ -379,3 +379,48 @@ async fn a_fresh_basic_header_per_request_buys_no_fresh_rate_limit_bucket() {
     let second = app.clone().oneshot(read(2)).await.expect("an answer");
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+/// EP-61 on a delete, which has no body (F-R2PLT2-005): the attribute the path or `attrId` names
+/// is judged by its term or its expanded IRI, at `/ngsi-ld/v1` and through MCP alike.
+#[tokio::test]
+async fn a_hidden_attribute_is_not_deleted_by_path_or_by_tool() {
+    let realm = common::Realm::new();
+    let ok = json!({ "jsonrpc": "2.0", "id": 7, "result": { "content": [] } });
+    let (upstream, hops) = broker(StatusCode::NO_CONTENT, ok).await;
+    let mut hiding = endpoint(None);
+    hiding.hidden_attributes.insert("contact".to_owned());
+    let app = router(Arc::new(gateway(&upstream, hiding, &realm)));
+    let bearer = format!("Bearer {}", steward(&realm, "jana"));
+    let entity = "urn:ngsi-ld:AirQualityObserved:a";
+
+    for attribute in ["contact", "https%3A%2F%2Fex.org%2Fcontact"] {
+        let request = Request::delete(format!(
+            "/api/endpoint/{SLUG}/ngsi-ld/v1/entities/{entity}/attrs/{attribute}"
+        ))
+        .header("authorization", &bearer)
+        .header("jc-reason", "test")
+        .header("x-forwarded-for", ADDRESS)
+        .body(Body::empty())
+        .expect("a request");
+        let response = app.clone().oneshot(request).await.expect("an answer");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{attribute}");
+    }
+    for attribute in ["contact", "https://ex.org/contact"] {
+        let (status, answer) = send(
+            &app,
+            &mcp(),
+            Some(&bearer),
+            &call(
+                "delete_attribute",
+                json!({ "id": entity, "attrId": attribute }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(refusal(&answer).is_some(), "{attribute}: {answer}");
+    }
+    assert!(
+        hops.lock().expect("the hop log").is_empty(),
+        "a refused delete reached the broker"
+    );
+}

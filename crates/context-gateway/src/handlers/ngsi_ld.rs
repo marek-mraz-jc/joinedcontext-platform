@@ -19,9 +19,9 @@ use crate::handlers::respond::json_response;
 use crate::handlers::schema;
 use crate::handlers::writes::{
     accepted_payload, batch_entry_id, batch_result, body_length, empty_space, filled_units,
-    judge_write, merged_batch, names_no_tenant, owned_guarded, quality_judged, refusal_entries,
-    refused, unsupported_media_type, with_filled_units, write_share, HeldDelete, HeldWrite, Judged,
-    Refused,
+    hidden_refusal, judge_write, merged_batch, names_no_tenant, owned_guarded, quality_judged,
+    refusal_entries, refused, unsupported_media_type, with_filled_units, write_share, HeldDelete,
+    HeldWrite, Judged, Refused,
 };
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Constraints;
@@ -262,7 +262,7 @@ const LOGGED_EXPLANATION: usize = 300;
 
 /// The `type` and `detail` of the broker's problem document, each cut to [`LOGGED_EXPLANATION`]
 /// characters; a body that is no problem document logs neither.
-fn explanation(body: &[u8]) -> (String, String) {
+pub(crate) fn explanation(body: &[u8]) -> (String, String) {
     let problem = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
     let member = |name: &str| {
         problem
@@ -804,15 +804,26 @@ pub(crate) fn caller_links(headers: &mut HeaderMap, root: &str, prefix: &str) {
 /// broker refuses a `joinLevel` past 10 and pages a temporal read (S17, T-3643); these caps are
 /// tighter and silent, as callers already rely on. Every other pair goes on byte for byte.
 pub(crate) fn capped_query(raw: &str) -> String {
+    // A pair is compared as the broker decodes it: `last%4E` is `lastN` (F-R2PLT2-017).
     raw.split('&')
-        .map(|pair| match pair.split_once('=') {
-            Some(("lastN", n)) if n.parse::<u64>().is_ok_and(|n| n > query::LAST_N_CAP) => {
-                format!("lastN={}", query::LAST_N_CAP)
+        .map(|pair| {
+            match pair
+                .split_once('=')
+                .map(|(name, n)| (query::decode(name), query::decode(n)))
+            {
+                Some((name, n))
+                    if name == "lastN" && n.parse::<u64>().is_ok_and(|n| n > query::LAST_N_CAP) =>
+                {
+                    format!("lastN={}", query::LAST_N_CAP)
+                }
+                Some((name, n))
+                    if name == "joinLevel"
+                        && n.parse::<u64>().is_ok_and(|n| n > query::JOIN_LEVEL_CAP) =>
+                {
+                    format!("joinLevel={}", query::JOIN_LEVEL_CAP)
+                }
+                _ => pair.to_owned(),
             }
-            Some(("joinLevel", n)) if n.parse::<u64>().is_ok_and(|n| n > query::JOIN_LEVEL_CAP) => {
-                format!("joinLevel={}", query::JOIN_LEVEL_CAP)
-            }
-            _ => pair.to_owned(),
         })
         .collect::<Vec<_>>()
         .join("&")
@@ -1059,6 +1070,12 @@ pub(crate) async fn view_payload(
         judged_write(endpoint, path, operation, sent, divided)?;
     }
     if operation.is_write() {
+        // The attribute the path names, for a `DELETE` with no body too (EP-61).
+        if let Some(problem) =
+            operations::targeted_attribute(path).and_then(|name| hidden_refusal(endpoint, &name))
+        {
+            return Err(answer(problem));
+        }
         owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
     }
     let declared = endpoint.declared_types.as_ref();
@@ -1253,6 +1270,18 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cap holds however the pair is percent-spelled, since the broker decodes it
+    /// (F-R2PLT2-017); every other pair goes on byte for byte.
+    #[test]
+    fn a_capped_parameter_is_capped_in_any_spelling() {
+        let last = format!("lastN={}", query::LAST_N_CAP);
+        let join = format!("joinLevel={}", query::JOIN_LEVEL_CAP);
+        assert_eq!(capped_query("last%4E=99999"), last);
+        assert_eq!(capped_query("lastN=9%39999"), last);
+        assert_eq!(capped_query("join%4Cevel=9"), join);
+        assert_eq!(capped_query("q=a%3Db&lastN=2"), "q=a%3Db&lastN=2");
+    }
 
     /// DM-128: the URNs of one Entity, a list and a FeatureCollection; nothing from what is none.
     #[test]

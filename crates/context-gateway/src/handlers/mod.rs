@@ -39,10 +39,12 @@ async fn broker_failed(slug: &str, status: StatusCode, body: Body) -> Box<Respon
     let held = axum::body::to_bytes(body, MAX_BODY)
         .await
         .unwrap_or_default();
+    let (kind, detail) = ngsi_ld::explanation(&held);
     tracing::warn!(
         slug,
         status = status.as_u16(),
-        broker = %String::from_utf8_lossy(&held),
+        broker_type = %kind,
+        broker_detail = %detail,
         "the broker failed a read behind a representation; its own explanation is not passed on"
     );
     let problem = match status {

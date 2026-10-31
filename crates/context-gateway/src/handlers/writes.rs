@@ -456,7 +456,9 @@ impl HeldDelete<'_> {
                     plans.push((id.to_owned(), steps));
                     permitted.push(entry);
                 }
-                Err(problem) if problem.status == 409 => refused.push((id.to_owned(), *problem)),
+                Err(problem) if matches!(problem.status, 403 | 409) => {
+                    refused.push((id.to_owned(), *problem))
+                }
                 Err(problem) => return Err(answer(problem)),
             }
         }
@@ -571,7 +573,41 @@ impl HeldDelete<'_> {
             }
         }
         edits.extend(deleted.into_iter().rev());
+        // The changes run as the gateway before the broker's view decides the delete itself, so
+        // a delete the caller's grants refuse changes nothing (F-R2PLT2-002).
+        if !edits.is_empty() {
+            self.may_delete(root)?;
+        }
         Ok(edits)
+    }
+
+    /// Refuses unless the caller's own grants allow deleting `root`, judged as [`Self::may`]
+    /// judges what the rules change.
+    fn may_delete(&self, root: &str) -> Result<(), Box<ProblemDetails>> {
+        let class = jc_core::type_of_id(root).unwrap_or_default();
+        let requested = evaluator::Request {
+            types: BTreeSet::from([class.to_owned()]),
+            ..Default::default()
+        };
+        let allowed = match self.gateway.pdp.decide(
+            self.subject,
+            Operation::DeleteEntity,
+            &requested,
+            self.endpoint,
+        ) {
+            Verdict::Rewrite(granted) => {
+                !granted.empty
+                    && !conditional::state_dependent(&granted)
+                    && write_guard::check_granted_id(root, &granted).is_ok()
+            }
+            _ => false,
+        };
+        if allowed {
+            return Ok(());
+        }
+        Err(Box::new(ProblemDetails::forbidden().with_detail(format!(
+            "you may not delete `{root}`; its model's delete rules change nothing until you may"
+        ))))
     }
 
     /// Every entity of `class` whose end `slot` points at `id`, page by page.
@@ -1217,6 +1253,21 @@ pub(crate) fn judge_write(
     })
 }
 
+/// What an Endpoint does not show cannot be changed through it (EP-61, GW17): the refusal of a
+/// write naming `key`, when `key` is a hidden attribute by its term or an IRI ending in it. Every
+/// write surface asks this one rule, for the body's members and the attribute its path names.
+pub(crate) fn hidden_refusal(endpoint: &Endpoint, key: &str) -> Option<ProblemDetails> {
+    let hidden = endpoint
+        .hidden_attributes
+        .iter()
+        .any(|hidden| write_guard::names_attribute(key, hidden));
+    hidden.then(|| {
+        let refusal = write_guard::Refusal::AttributeOutsideGrant(key.to_owned());
+        tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
+        ProblemDetails::from(refusal)
+    })
+}
+
 /// Checks one entity of a write, or the fragment of an addressed one, against the grants and
 /// the endpoint, and answers with the problem that refuses it (GW17).
 fn refuse_entity(
@@ -1241,18 +1292,11 @@ fn refuse_entity(
                 .map_err(|refusal| Box::new(ProblemDetails::from(refusal)))?;
         }
     }
-    // What an Endpoint does not show cannot be changed through it (EP-61, GW17).
-    if let Some(hidden) = entity.as_object().and_then(|object| {
-        object.keys().find(|key| {
-            endpoint
-                .hidden_attributes
-                .iter()
-                .any(|hidden| write_guard::names_attribute(key, hidden))
-        })
-    }) {
-        let refusal = write_guard::Refusal::AttributeOutsideGrant(hidden.clone());
-        tracing::info!(slug = %endpoint.slug, %refusal, "write refused");
-        return Err(Box::new(ProblemDetails::from(refusal)));
+    if let Some(problem) = entity
+        .as_object()
+        .and_then(|object| object.keys().find_map(|key| hidden_refusal(endpoint, key)))
+    {
+        return Err(Box::new(problem));
     }
     // A batch delete is an array of URN strings: each is an identifier and nothing else
     // (T-0806).
