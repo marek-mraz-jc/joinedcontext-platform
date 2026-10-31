@@ -584,6 +584,88 @@ async fn an_oversized_message_closes_with_1009() {
     assert_eq!(code, Some(1009));
 }
 
+/// A TCP hop in front of `at` as a proxy on dev (linkerd, the edge) behaves: it reads the
+/// gateway's side a little late, and a failed write towards the gateway ends both directions, so
+/// what the gateway sent but the hop had not read yet is lost with a reset.
+async fn late_hop(at: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let hop = listener.local_addr().expect("address").to_string();
+    let at = at.to_owned();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(gateway) = tokio::net::TcpStream::connect(&at).await else {
+                continue;
+            };
+            let (mut client_in, mut client_out) = client.into_split();
+            let (mut gateway_in, mut gateway_out) = gateway.into_split();
+            let back = tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 16 * 1024];
+                loop {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    match gateway_in.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let Some(read) = buffer.get(..n) else { break };
+                            if client_out.write_all(read).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                if tokio::io::copy(&mut client_in, &mut gateway_out)
+                    .await
+                    .is_err()
+                {
+                    back.abort();
+                }
+            });
+        }
+    });
+    hop
+}
+
+/// T-6191: a message far over the bound (1 MiB in the conformance suite, 8 MiB here so it is
+/// still on its way when the gateway closes) closes with 1009 every time, behind a proxy too. The gateway stops reading at the frame's header, so most of the message
+/// sits unread when it closes; dropping the socket then resets it (RST), and the reset discards
+/// the close frame before the proxy reads it ("closed with None" on dev, one gate in three).
+#[tokio::test]
+async fn a_message_far_over_the_bound_closes_with_1009_every_time() {
+    let realm = common::Realm::new();
+    let (upstream, _) = broker().await;
+    let at = late_hop(&gateway("mib", &upstream, &realm).await).await;
+    for run in 0..20 {
+        // Each run its own caller: the gateway holds a closed socket a few seconds, and twenty
+        // runs from one address would pass its per-caller cap.
+        let address = [("x-forwarded-for", format!("203.0.113.{run}"))];
+        let (socket, _) = open(&at, PUBLIC, "", &address).await.expect("upgraded");
+        let (mut to, mut from) = socket.split();
+        // Sent from its own task: the gateway never reads the whole message, so the send can
+        // stay pending while the client reads the close.
+        let sending =
+            tokio::spawn(async move { to.send(Message::text("x".repeat(8 << 20))).await });
+        let mut code = None;
+        while let Ok(Some(Ok(message))) =
+            tokio::time::timeout(Duration::from_secs(10), from.next()).await
+        {
+            if let Message::Close(frame) = message {
+                code = frame.map(|frame| u16::from(frame.code));
+                break;
+            }
+        }
+        sending.abort();
+        assert_eq!(
+            code,
+            Some(1009),
+            "run {run}: an 8 MiB message closed with {code:?}"
+        );
+    }
+}
+
 /// T-5931: a client flooding `x-subscribe` without reading is closed with `x-closing: rate` and
 /// `1008`, and the gateway then reads to the client's close instead of dropping the socket over
 /// the client's unread frames: a drop resets the connection (RST), and a proxy in between loses

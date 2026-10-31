@@ -763,10 +763,15 @@ pub async fn session(
 /// After the gateway's own close frame, reads and discards what the client still sends until
 /// its close frame, the end of its stream or [`CLOSING`]. Dropping the socket over frames the
 /// gateway never read resets the connection (RST), and the client, or a proxy in between, loses
-/// the close frame with it (T-5931, RFC 6455 7.1.1).
+/// the close frame with it (T-5931, RFC 6455 7.1.1). After a read error (a message over the
+/// bound, a broken frame) the stream yields nothing more, tokio-tungstenite ends it at the first
+/// error, while the rest of the offending message is still unread: the socket is then held for
+/// [`CLOSING`] unread, so the close frame reaches the client before the drop resets it (T-6191).
 async fn linger(ended: &Ended, from_client: &mut SplitStream<WebSocket>) {
-    if matches!(ended, Ended::Closed) {
-        return;
+    match ended {
+        Ended::Closed => return,
+        Ended::TooBig | Ended::Broken(..) => return tokio::time::sleep(CLOSING).await,
+        _ => {}
     }
     let drain = async {
         while let Some(Ok(message)) = from_client.next().await {
