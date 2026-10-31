@@ -648,6 +648,39 @@ async fn a_failed_run_says_why_and_a_missing_or_misshapen_export_is_named() {
     }
 }
 
+/// F-R2PLT4-010: a run past its wall time while it waits on the gateway is stopped there, its
+/// call dropped, instead of living on outside the App's cap until the call gives up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_waiting_on_the_gateway_past_its_wall_time_is_dropped() {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a port");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let world = World::new("job-waits", Limits::default(), Some(&url));
+    let app = world.place("kpi", guest());
+    let host = world.host.clone();
+    let run = tokio::spawn(async move {
+        host.run_job(&app, "call-gateway", "t".into(), Duration::from_secs(1))
+            .await
+    });
+    // The gateway takes the call and never answers.
+    let (mut socket, _) = listener.accept().await.expect("the call");
+    let why = run.await.expect("joined").expect_err("stopped");
+    assert!(why.contains("wall time"), "{why}");
+    let mut rest = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match socket.read_buf(&mut rest).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the stopped run's call is still open");
+}
+
 /// AP-154: a run past its wall time is stopped, and the App still answers requests after it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_past_its_wall_time_is_stopped() {
