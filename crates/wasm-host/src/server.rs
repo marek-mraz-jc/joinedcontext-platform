@@ -431,7 +431,7 @@ async fn upload(
         .upload(
             app,
             &signed.key,
-            body.to_vec(),
+            Vec::from(body),
             content_type,
             signed.length.is_some(),
         )
