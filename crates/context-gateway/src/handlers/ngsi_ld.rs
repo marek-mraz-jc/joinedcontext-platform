@@ -1129,7 +1129,8 @@ fn endpoint_held(
     {
         return Err(answer(problem));
     }
-    owned_guarded(sent, path).map_err(|problem| answer(*problem))
+    owned_guarded(sent, path).map_err(|problem| answer(*problem))?;
+    Ok(())
 }
 
 /// A form's minted id on a create, and one entity per create on an Endpoint that counts its
