@@ -107,6 +107,23 @@ pub enum AssembleError {
         /// The other.
         second: String,
     },
+    /// Two objects derive one Keycloak client id or one Kubernetes ServiceAccount name: the
+    /// `-` joins of a project and a name are not one-to-one (`a-b` + `c`, `a` + `b-c`), so the
+    /// two would share one identity (Architecture/12 §3, F-R2PLT3-001..003).
+    #[error(
+        "{what} `{value}` is derived by {first} and by {second}: one identity cannot belong to \
+         both, rename one of them"
+    )]
+    Derived {
+        /// A Keycloak client id or a Kubernetes ServiceAccount.
+        what: &'static str,
+        /// The derived name.
+        value: String,
+        /// One object, `the Kind `name` of the project `p``.
+        first: String,
+        /// The other.
+        second: String,
+    },
     /// The assembled tree does not load.
     #[error(transparent)]
     Load(#[from] LoadError),
@@ -551,6 +568,65 @@ fn unique_across_projects(repository: &Repository) -> Result<(), AssembleError> 
             }
         }
         seen.insert(value, project);
+    }
+    unique_identities(repository)
+}
+
+/// Every identity an object derives (CC-86): the Keycloak client ids, which share one realm with
+/// the platform's own derived clients (`mqtt-*`, `app-*`, `mcp-*`), and the Kubernetes
+/// ServiceAccounts of the shared runner and identities namespaces. Two objects deriving one name
+/// would share its token, so the second is refused here, before anything is written.
+fn unique_identities(repository: &Repository) -> Result<(), AssembleError> {
+    use jc_core::kinds::service_account::keycloak_client_id;
+    use jc_core::kinds::{app_identity, mqtt_broker, pipeline_identity};
+    const CLIENT: &str = "the Keycloak client";
+    const ACCOUNT: &str = "the Kubernetes ServiceAccount";
+    let mut seen: BTreeMap<(&'static str, String), String> = BTreeMap::new();
+    for (id, _) in repository.iter() {
+        let project = id.namespace.as_deref().unwrap_or_default();
+        let name = id.name.as_str();
+        let claims = match id.kind.as_str() {
+            "ServiceAccount" => vec![(CLIENT, keycloak_client_id(project, name))],
+            "Pipeline" => vec![
+                (
+                    CLIENT,
+                    keycloak_client_id(project, &pipeline_identity::account_name(name)),
+                ),
+                (
+                    ACCOUNT,
+                    pipeline_identity::kubernetes_service_account(project, name),
+                ),
+            ],
+            "App" => vec![
+                (CLIENT, format!("app-{name}")),
+                (
+                    CLIENT,
+                    keycloak_client_id(project, &app_identity::account_name(name)),
+                ),
+                (
+                    ACCOUNT,
+                    app_identity::kubernetes_service_account(project, name),
+                ),
+            ],
+            "MqttBroker" => vec![
+                (CLIENT, mqtt_broker::release_name(project, name)),
+                (CLIENT, mqtt_broker::certificate_release_name(project, name)),
+            ],
+            "McpServer" => vec![(CLIENT, format!("mcp-{project}-{name}"))],
+            _ => continue,
+        };
+        let owner = format!("the {} `{name}` of the project `{project}`", id.kind);
+        for (what, value) in claims {
+            if let Some(first) = seen.get(&(what, value.clone())) {
+                return Err(AssembleError::Derived {
+                    what,
+                    value,
+                    first: first.clone(),
+                    second: owner,
+                });
+            }
+            seen.insert((what, value), owner.clone());
+        }
     }
     Ok(())
 }

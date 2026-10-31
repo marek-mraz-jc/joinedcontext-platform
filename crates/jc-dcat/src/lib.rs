@@ -25,7 +25,7 @@ use jc_core::kinds::{
     ProjectCatalog, Representation,
 };
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// What the record is written from: the Endpoint as the gateway resolved it, and its space's
 /// texts, which stand in for an Endpoint that names no title or description.
@@ -973,13 +973,14 @@ pub fn turtle(record: &Value) -> String {
         out.push_str(&format!("@prefix {prefix}: <{namespace}> .\n"));
     }
     out.push('\n');
-    let mut queue = vec![record.clone()];
+    // A FIFO: the feed queues every record of the catalogue, and `Vec::remove(0)` shifts the
+    // whole rest at each node (F-R2PLT3-014).
+    let mut queue = VecDeque::from([record.clone()]);
     if let Some(included) = record.get("@included").and_then(Value::as_array) {
         queue.extend(included.iter().cloned());
     }
     let mut written = std::collections::BTreeSet::new();
-    while !queue.is_empty() {
-        let node = queue.remove(0);
+    while let Some(node) = queue.pop_front() {
         let Some(id) = node.get("@id").and_then(Value::as_str) else {
             continue;
         };
@@ -996,7 +997,7 @@ pub fn turtle(record: &Value) -> String {
 
 /// The predicate-object list of one node; nested nodes with an `@id` are queued as statements
 /// of their own and referenced, nodes without one are written in place as blank nodes.
-fn properties(node: &Value, depth: usize, queue: &mut Vec<Value>) -> String {
+fn properties(node: &Value, depth: usize, queue: &mut VecDeque<Value>) -> String {
     let Some(object) = node.as_object() else {
         return String::new();
     };
@@ -1033,7 +1034,12 @@ fn properties(node: &Value, depth: usize, queue: &mut Vec<Value>) -> String {
 }
 
 /// One object of a triple, in Turtle.
-fn object_term(key: &str, value: &Value, depth: usize, queue: &mut Vec<Value>) -> Option<String> {
+fn object_term(
+    key: &str,
+    value: &Value,
+    depth: usize,
+    queue: &mut VecDeque<Value>,
+) -> Option<String> {
     match value {
         Value::String(text) if IRI_KEYS.contains(&key) => {
             Some(format!("<{}>", iri_ref(&expand(text))))
@@ -1058,7 +1064,7 @@ fn object_term(key: &str, value: &Value, depth: usize, queue: &mut Vec<Value>) -
             }
             if let Some(id) = map.get("@id").and_then(Value::as_str) {
                 if map.len() > 1 {
-                    queue.push(value.clone());
+                    queue.push_back(value.clone());
                 }
                 return Some(format!("<{}>", iri_ref(&expand(id))));
             }

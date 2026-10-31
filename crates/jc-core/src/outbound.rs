@@ -116,11 +116,18 @@ pub fn refused<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a PrivateAddress>
 /// Judges a URL before it is called: `http` or `https` with a host, and an address written into
 /// it on the public internet. A name is judged by [`PublicOnly`] when it is resolved.
 pub fn check(url: &Url) -> Result<(), Refusal> {
+    // The refusal is relayed and logged: a pasted `user:token@` does not go with it.
+    let shown = || {
+        let mut shown = url.clone();
+        let _ = shown.set_password(None);
+        let _ = shown.set_username("");
+        shown.to_string()
+    };
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(Refusal::Scheme(url.to_string()));
+        return Err(Refusal::Scheme(shown()));
     }
     let Some(host) = url.host_str() else {
-        return Err(Refusal::Scheme(url.to_string()));
+        return Err(Refusal::Scheme(shown()));
     };
     // The URL keeps an IPv6 address in brackets; a name parses as no address at all.
     match host
@@ -216,6 +223,18 @@ pub async fn read_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-R2PLT3-015: the refusal is relayed and logged, so it never repeats a pasted credential.
+    #[test]
+    fn a_refusal_repeats_no_userinfo() {
+        for url in [
+            "ftp://robot:hunter2@files.example.org/x",
+            "mailto://hunter2@example.org",
+        ] {
+            let refused = check(&Url::parse(url).expect("a url")).expect_err("refused");
+            assert!(!refused.to_string().contains("hunter2"), "{refused}");
+        }
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

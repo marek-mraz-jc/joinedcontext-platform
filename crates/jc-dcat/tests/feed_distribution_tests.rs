@@ -114,3 +114,17 @@ fn the_page_head_links_each_feed() {
     ), "{head}");
     assert!(page.contains(">Culture (JSON Feed)</a>"), "{page}");
 }
+
+/// F-R2PLT3-014: the feed queues every node of the catalogue; each is written once, and the
+/// queue is a FIFO, so a catalogue of thousands of nodes costs linear time.
+#[test]
+fn a_large_feed_writes_every_node_once() {
+    let included: Vec<Value> = (0..20_000)
+        .map(|i| json!({ "@id": format!("https://example.org/d/{i}"), "@type": "dcat:Dataset", "dct:title": format!("d{i}") }))
+        .collect();
+    let feed = json!({ "@id": "https://example.org/catalog", "@type": "dcat:Catalog", "@included": included });
+    let started = std::time::Instant::now();
+    let turtle = jc_dcat::feed_turtle(&feed);
+    eprintln!("feed_turtle over 20000 nodes: {:?}", started.elapsed());
+    assert_eq!(turtle.matches("a dcat:Dataset").count(), 20_000);
+}

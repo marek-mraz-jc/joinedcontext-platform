@@ -112,7 +112,11 @@ fn validate_url(url: &str) -> Result<()> {
     if authority.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(invalid("spec.repository.url", "is not a repository URL"));
     }
-    Ok(())
+    // The checkout clones it from inside the installation: the host rule of every other remote
+    // (F-R2PLT3-004), so no entry reaches a Service or a private address.
+    let host = crate::kinds::sync::remote_host(authority);
+    crate::kinds::sync::check_remote_host(host)
+        .map_err(|reason| invalid("spec.repository.url", reason))
 }
 
 /// A parameter entry of `spec.parameters`: a declaration in the project file, a value in a

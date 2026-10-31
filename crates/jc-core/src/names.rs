@@ -174,11 +174,22 @@ const CREDENTIAL_PREFIXES: &[&str] = &[
     "hf-",
     "sbp_",
     "sbp-",
-    "akia",
-    "asia",
-    "aiza",
     "ya29.",
 ];
+
+/// Whether `value` is a key whose prefix is also a word (`Asia`, `Aizawl`), so only its whole
+/// shape is taken for one (F-R2PLT3-011): an AWS access key id, `AKIA` or `ASIA` and 16 capitals
+/// or digits, and a Google API key, `AIza` and 35 more characters.
+fn is_cloud_key(value: &str) -> bool {
+    let tail = |prefix: &str, len: usize, ok: fn(&u8) -> bool| {
+        value
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.len() == len && rest.bytes().all(|b| ok(&b)))
+    };
+    let aws = |b: &u8| b.is_ascii_uppercase() || b.is_ascii_digit();
+    let google = |b: &u8| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_';
+    tail("AKIA", 16, aws) || tail("ASIA", 16, aws) || tail("AIza", 35, google)
+}
 
 /// Whether a value carries the shape of a minted credential rather than the name of one (MF-24).
 ///
@@ -192,6 +203,9 @@ pub fn looks_like_a_credential(value: &str) -> bool {
         .iter()
         .any(|prefix| lowered.starts_with(prefix))
     {
+        return true;
+    }
+    if is_cloud_key(value) {
         return true;
     }
     // A PEM block or a JWT: three dot-separated base64url segments starting with a JSON header.

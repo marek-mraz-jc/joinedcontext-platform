@@ -11,6 +11,7 @@
 
 use crate::envelope::{Ref, TypedRef};
 use crate::kinds::pipeline::PipelineSpec;
+use crate::kinds::pipeline_source_deletes::SourceDeleteMode;
 use crate::kinds::policy::{
     EntitySelector, Operation, OperationGroup, OperationRef, PolicyEffect, PolicySpec, Principal,
     PrincipalKind, RegistrationInfo,
@@ -108,7 +109,15 @@ pub fn derive(
             OperationRef::Single(Operation::CreateBatch),
             OperationRef::Single(Operation::QueryBatch),
         ];
-        if spec.expiry.is_some() {
+        // The age sweep and a snapshot or events rule delete through the pipeline's own token
+        // (PL-64, PL-96); `lease` ends entities by `expiresAt`, which needs no delete.
+        let deletes = spec.source_deletes.as_ref().is_some_and(|rule| {
+            matches!(
+                rule.mode,
+                SourceDeleteMode::Snapshot | SourceDeleteMode::Events
+            )
+        });
+        if spec.expiry.is_some() || deletes {
             operations.push(OperationRef::Single(Operation::DeleteBatch));
         }
         policies.push((
@@ -124,7 +133,9 @@ pub fn derive(
         spaces.push(space);
     }
 
-    if let Some(source) = spec.source.as_ref() {
+    // Either shape's sources (PL-54): `v1alpha1`'s one `source`, `v1alpha2`'s `sources`, of which
+    // a `kpi` step reads 2 to 5 (PL-102). The first keeps the name `-r` it always had.
+    for (index, source) in spec.sources().iter().enumerate() {
         if let Some(space) = source
             .endpoint_ref
             .as_ref()
@@ -134,8 +145,12 @@ pub fn derive(
                 .query
                 .as_ref()
                 .and_then(|query| query.entity_type.as_deref());
+            let name = match index {
+                0 => format!("{account}-r"),
+                n => format!("{account}-r-{}", n + 1),
+            };
             policies.push((
-                bounded(&format!("{account}-r")),
+                bounded(&name),
                 policy(
                     &space,
                     &assigner,
@@ -299,6 +314,75 @@ expiry: { after: 21d, types: [CreativeWork] }
             .credentials
             .iter()
             .all(|c| c.kind == CredentialKind::OauthClient));
+    }
+
+    /// PL-102, F-R2PLT3-008: a `v1alpha2` pipeline reads each Endpoint source as itself, so each
+    /// gets its read grant; the first keeps the `-r` a `v1alpha1` source has always had.
+    #[test]
+    fn every_endpoint_source_of_either_shape_gets_its_read_grant() {
+        let kpi = pipeline(
+            r#"
+class: scheduled
+schedule: "0 4 * * *"
+sources:
+  - { name: unis, endpointRef: { kind: Endpoint, name: zilina-uniza }, query: { type: University } }
+  - { name: town, endpointRef: { kind: Endpoint, name: zilina-mesto }, query: { type: District } }
+outputs: [{ targetEndpoint: "urn:ngsi-ld:Endpoint:zilina.sk:zilina-kpi:zilina-kpi" }]
+"#,
+        );
+        let derived = derive(
+            "zilina",
+            "kpi",
+            &kpi,
+            "pipeline-runner",
+            "zilina.sk",
+            spaces,
+        );
+        let grants: Vec<(&str, &str)> = derived
+            .policies
+            .iter()
+            .map(|(name, policy)| (name.as_str(), policy.context_space_ref.name()))
+            .collect();
+        assert_eq!(
+            grants,
+            [
+                ("pl-kpi-w-1", "zilina-kpi"),
+                ("pl-kpi-r", "zilina-uniza"),
+                ("pl-kpi-r-2", "zilina-mesto"),
+            ]
+        );
+        assert_eq!(derived.account.roles.len(), 3);
+    }
+
+    /// PL-96, F-R2PLT3-009: a snapshot or events rule deletes through the pipeline's own token,
+    /// so its write grant carries `deleteBatch`; `never` and `lease` delete nothing.
+    #[test]
+    fn a_source_delete_rule_that_deletes_is_granted_the_delete() {
+        let without_expiry = DREPO.replace("expiry: { after: 21d, types: [CreativeWork] }\n", "");
+        for (rule, deletes) in [
+            ("{ mode: snapshot }", true),
+            ("{ mode: events, deletedWhen: 'this.gone' }", true),
+            ("{ mode: never }", false),
+            ("{ mode: lease }", false),
+        ] {
+            let spec = pipeline(&format!("{without_expiry}sourceDeletes: {rule}\n"));
+            let derived = derive(
+                "zilina",
+                "drepo",
+                &spec,
+                "pipeline-runner",
+                "zilina.sk",
+                spaces,
+            );
+            assert_eq!(
+                derived.policies[0]
+                    .1
+                    .operations
+                    .contains(&OperationRef::Single(Operation::DeleteBatch)),
+                deletes,
+                "{rule}"
+            );
+        }
     }
 
     /// PL-73, PL-55: a route writes only where the pipeline is granted, so each route output

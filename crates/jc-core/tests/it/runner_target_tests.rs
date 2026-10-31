@@ -169,3 +169,25 @@ fn a_pipeline_or_data_source_naming_a_token_service_is_refused() {
         http_source(url).unwrap_or_else(|e| panic!("{url}: {e}"));
     }
 }
+
+/// F-R2PLT3-012: a written-in address is judged by the outbound guard's one rule, so the ranges
+/// the old local list missed (multicast, benchmarking, reserved, documentation) are refused too.
+#[test]
+fn every_address_off_the_internet_is_refused_by_the_one_rule() {
+    use jc_core::kinds::data_source::refused_target;
+    for url in [
+        "http://224.0.0.1/",
+        "http://198.18.0.1/feed",
+        "http://240.0.0.1/",
+        "http://192.0.0.8/",
+        "http://[ff02::1]/",
+        "http://[64:ff9b::a00:1]/",
+        "http://10.43.0.10/",
+        "http://[::ffff:127.0.0.1]/",
+    ] {
+        assert!(refused_target(url).is_some(), "{url} was accepted");
+    }
+    for url in ["https://opendata.example.org/air.json", "http://1.1.1.1/"] {
+        assert_eq!(refused_target(url), None, "{url}");
+    }
+}

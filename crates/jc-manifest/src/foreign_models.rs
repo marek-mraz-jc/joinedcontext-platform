@@ -45,6 +45,10 @@ pub const CONTEXT: &str = "context.jsonld";
 /// publish, so a surface without it is mirrored without it (DM-48, EP-46).
 pub const EXAMPLE: &str = "example.jsonld";
 
+/// The most models one peer's catalogue is mirrored for per run: each costs up to three requests
+/// and a file write, and the catalogue is the peer's text (F-R2PLT3-007). The rest are flagged.
+pub const MAX_MODELS: usize = 100;
+
 /// The part of a peer's schema surface a mirror reads.
 ///
 /// The implementation carries whatever the hop needs — a partner's API key, a proxy, a
@@ -215,7 +219,13 @@ pub fn mirror(
         .and_then(Value::as_array)
         .ok_or_else(|| MirrorError::Index("no `models` array".to_owned()))?;
 
-    for entry in models {
+    if models.len() > MAX_MODELS {
+        out.flags.push(format!(
+            "{base} lists {} models; the first {MAX_MODELS} are mirrored, the rest are not",
+            models.len()
+        ));
+    }
+    for entry in models.iter().take(MAX_MODELS) {
         if let Some(model) = one(&target, &base, fetched_at, entry, repo, api, &mut out.flags)? {
             out.models.push(model);
         }
