@@ -360,7 +360,7 @@ fn page(arguments: Value) -> Value {
     call(arguments)
 }
 
-/// T-6183: three pages of five are the first fifteen hits of one call, in the fused order; each wording asks the assistant for the same window; a cursor of
+/// EP-167, T-6183: three pages of five are the first fifteen hits of one call, in the fused order; each wording asks the assistant for the same window; a cursor of
 /// another caller or another question is refused; past the window's end no cursor is offered.
 #[tokio::test]
 async fn pages_follow_one_ranked_window_and_a_cursor_opens_only_its_own_search() {
@@ -462,7 +462,7 @@ async fn pages_follow_one_ranked_window_and_a_cursor_opens_only_its_own_search()
     assert!(windows.iter().all(|l| *l == 50), "{windows:?}");
 }
 
-/// T-6183: `pathPrefix` and `source` narrow what the assistant is asked, inside the server's own
+/// EP-133, T-6183: `pathPrefix` and `source` narrow what the assistant is asked, inside the server's own
 /// sources; a source the server does not attach is refused before the assistant is asked.
 #[tokio::test]
 async fn a_path_prefix_and_a_source_narrow_the_search_inside_the_attached_sources() {
@@ -502,7 +502,7 @@ async fn a_path_prefix_and_a_source_narrow_the_search_inside_the_attached_source
     );
 }
 
-/// T-6183: `read_knowledge_context` is listed beside the search, asks for the server's own
+/// EP-167, T-6183: `read_knowledge_context` is listed beside the search, asks for the server's own
 /// sources, answers the passages fenced as data, and an unknown chunkId is a refusal in words.
 #[tokio::test]
 async fn the_passages_around_a_hit_are_read_from_the_servers_own_sources() {

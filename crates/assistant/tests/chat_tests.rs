@@ -6253,7 +6253,7 @@ async fn a_filtered_count_is_read_exactly_not_from_the_profile_sample() {
     db::drop_database(w.admin, w.pool, &w.name).await;
 }
 
-/// T-6183: a search keeps to its path prefixes in SQL, `%` and `_` being plain characters; each
+/// EP-133, EP-167, T-6183: a search keeps to its path prefixes in SQL, `%` and `_` being plain characters; each
 /// hit says where it sits (path, breadcrumb, chunkId, ordinal); the passages around a hit come
 /// in order, stop at the page's first and last passage, skip an internal one beside public ones,
 /// and a chunkId outside the named sources or internal answers 404.
