@@ -32,6 +32,20 @@ pub fn file_name(id: &ResourceId) -> String {
 pub fn render(dir: &Path, prefix: &str) -> Result<Vec<(String, String)>, LoadError> {
     let env = environment();
     let repo = Repository::load_preview(dir, env.as_deref(), prefix)?;
+    // The file name is built from the manifest's own names, which the loader takes as written:
+    // one that is no DNS-1123 name (`../../x`) would land outside the output directory
+    // (F-R2PLT4-007).
+    if let Some((id, _)) = repo.iter().find(|(id, _)| {
+        jc_core::names::validate_dns1123_label(&id.name).is_err()
+            || id
+                .namespace
+                .as_deref()
+                .is_some_and(|ns| jc_core::names::validate_namespace(ns).is_err())
+    }) {
+        return Err(LoadError::PathEscapesRepository {
+            path: file_name(id).into(),
+        });
+    }
     Ok(repo
         .iter()
         .map(|(id, loaded)| {
