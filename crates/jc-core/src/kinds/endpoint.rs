@@ -620,7 +620,28 @@ impl Kind for EndpointSpec {
 
     fn validate_spec(&self, meta: &ObjectMeta) -> Result<()> {
         names::validate_dns1123_label(&meta.name)?;
-        self.validate()
+        self.validate()?;
+        // T-6292: the publisher signs in with the instance's apiTokenRef and writes into its
+        // catalogue and organization, so an Endpoint publishes only through its own project's
+        // CkanInstance; a namespace on the reference may only repeat the Endpoint's own.
+        let foreign = self
+            .publish
+            .as_ref()
+            .and_then(|p| p.ckan.as_ref())
+            .and_then(|ckan| match &ckan.instance_ref {
+                Ref::Typed(typed) => typed.namespace.as_deref(),
+                Ref::Name(_) => None,
+            })
+            .filter(|namespace| Some(*namespace) != meta.namespace.as_deref());
+        match foreign {
+            Some(namespace) => Err(Error::Name {
+                field: "publish.ckan.instanceRef",
+                value: namespace.to_owned(),
+                reason: "an Endpoint publishes only through a CkanInstance of its own project: \
+                         drop the namespace and name a CkanInstance of this project",
+            }),
+            None => Ok(()),
+        }
     }
 
     fn context_space(&self) -> Option<&str> {

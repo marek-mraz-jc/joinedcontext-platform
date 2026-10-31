@@ -285,3 +285,41 @@ fn harvest_false_keeps_a_door_out_of_the_feeds_and_out_of_ckan() {
 fn harvest_is_a_boolean() {
     assert!(endpoint("catalog: { harvest: no-thanks }\n").is_err());
 }
+
+/// The whole Endpoint manifest of project `ovzdusie` with `instance_ref`, validated as a door does.
+fn endpoint_in_ovzdusie(instance_ref: &str) -> Result<(), Error> {
+    let manifest: jc_core::kinds::Endpoint = serde_norway::from_str(&format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Endpoint
+metadata:
+  name: air-public
+  namespace: ovzdusie
+spec:
+  contextSpaceRef: ovzdusie
+  slug: zt4qm7ge2xdv6ksb3ncf5arw2y
+  audience: public
+  enabledRepresentations: [ngsi-ld]
+  publish:
+    ckan:
+      instanceRef: {instance_ref}
+"#
+    ))
+    .map_err(|e| Error::Parse(e.to_string()))?;
+    manifest.validate()
+}
+
+/// T-6292: another project's CkanInstance (its token, its catalogue) is refused by the field;
+/// a bare name or the Endpoint's own namespace is the project's instance and passes.
+#[test]
+fn a_publication_through_another_projects_instance_is_refused() {
+    let err = endpoint_in_ovzdusie("{ kind: CkanInstance, name: opendata, namespace: bratislava }")
+        .expect_err("a foreign namespace is refused");
+    let message = err.to_string();
+    assert!(message.contains("publish.ckan.instanceRef"), "{message}");
+    assert!(message.contains("bratislava"), "{message}");
+
+    endpoint_in_ovzdusie("open-data").expect("a bare name is the project's own");
+    endpoint_in_ovzdusie("{ kind: CkanInstance, name: open-data }").expect("typed, no namespace");
+    endpoint_in_ovzdusie("{ kind: CkanInstance, name: open-data, namespace: ovzdusie }")
+        .expect("the Endpoint's own namespace");
+}

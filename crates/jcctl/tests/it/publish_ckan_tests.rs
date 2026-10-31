@@ -128,7 +128,7 @@ fn an_unknown_instance_is_an_error_naming_both_sides() {
             "air-lost",
             "aaaaaaaaaaaaaaaaaaaaaaaaaa",
             "[ngsi-ld]",
-            "  publish:\n    ckan:\n      instanceRef: { kind: CkanInstance, name: nowhere, namespace: elsewhere }\n",
+            "  publish:\n    ckan:\n      instanceRef: { kind: CkanInstance, name: nowhere }\n",
         ),
     );
     let repo = Repository::load(&dir).expect("the repository loads");
@@ -137,8 +137,51 @@ fn an_unknown_instance_is_an_error_naming_both_sides() {
     let message = error.to_string();
     assert!(matches!(error, Error::UnknownInstance { .. }), "{message}");
     assert!(message.contains("air-lost"), "{message}");
-    assert!(message.contains("elsewhere"), "{message}");
+    assert!(message.contains("ovzdusie"), "{message}");
     assert!(message.contains("nowhere"), "{message}");
+}
+
+/// T-6292: an Endpoint naming another project's CkanInstance never resolves it (that
+/// instance's token and catalogue are not its project's), even when the repository holds it;
+/// its own namespace written out resolves as a bare name does.
+#[test]
+fn another_projects_instance_is_never_resolved() {
+    let dir = repo("foreign-instance");
+    common::write(
+        &dir,
+        "projects/elsewhere/ckan/open-data.yaml",
+        &INSTANCE.replace("namespace: ovzdusie", "namespace: elsewhere"),
+    );
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/air-foreign.yaml",
+        &endpoint(
+            "air-foreign",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "[ngsi-ld]",
+            "  publish:\n    ckan:\n      instanceRef: { kind: CkanInstance, name: open-data, namespace: elsewhere }\n",
+        ),
+    );
+    let loaded = Repository::load(&dir).expect("the repository loads");
+    let error = targets(&loaded, "ovzdusie").expect_err("another project's instance");
+    let message = error.to_string();
+    assert!(matches!(error, Error::Spec { .. }), "{message}");
+    assert!(message.contains("air-foreign"), "{message}");
+    assert!(message.contains("publish.ckan.instanceRef"), "{message}");
+
+    common::write(
+        &dir,
+        "projects/ovzdusie/spaces/ovzdusie/endpoints/air-foreign.yaml",
+        &endpoint(
+            "air-foreign",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "[ngsi-ld]",
+            "  publish:\n    ckan:\n      instanceRef: { kind: CkanInstance, name: open-data, namespace: ovzdusie }\n",
+        ),
+    );
+    let loaded = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&loaded, "ovzdusie").expect("its own namespace");
+    assert!(found.iter().all(|t| t.instance_name == "open-data"));
 }
 
 // --- publishing one target -------------------------------------------------------------
@@ -722,7 +765,8 @@ fn no_age_key_file_and_no_env_source_is_refused_naming_how_to_supply_one() {
     assert!(message.contains(AGE_KEY_FILE_ENV), "{message}");
 }
 
-/// EP-62: an instance reference into a namespace that holds none is an error naming it.
+/// EP-62, T-6292: an instance reference into another namespace is an error naming the field,
+/// whether or not that namespace holds the instance.
 #[test]
 fn an_instance_ref_naming_a_missing_namespace_is_refused_by_name() {
     let dir = repo("instance-namespace");
@@ -737,9 +781,12 @@ fn an_instance_ref_naming_a_missing_namespace_is_refused_by_name() {
         ),
     );
     let repo = Repository::load(&dir).expect("the repository loads");
-    let error = targets(&repo, "ovzdusie").expect_err("no instance in doprava");
-    assert!(matches!(error, Error::UnknownInstance { .. }), "{error}");
-    assert!(error.to_string().contains("doprava"), "{error}");
+    let error = targets(&repo, "ovzdusie").expect_err("another namespace");
+    assert!(matches!(error, Error::Spec { .. }), "{error}");
+    assert!(
+        error.to_string().contains("publish.ckan.instanceRef"),
+        "{error}"
+    );
 }
 
 /// EP-67: an instance on plain HTTP never becomes a target: the token would travel in the clear.
