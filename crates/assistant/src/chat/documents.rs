@@ -1,7 +1,8 @@
 //! The search the Context Gateway's `search_documents` calls (API/05 §4, AG-119, EP-133,
 //! T-4659): `POST /internal/v1/search` ranks the public passages of the sources an MCP server
 //! attaches, with the chat's hybrid search and no model call, and `POST /internal/v1/sources`
-//! says what those sources hold, for the tool's description. Cluster network only: a request
+//! says what those sources hold, for the tool's description; `POST /internal/v1/context` reads
+//! the passages around one hit, for `read_knowledge_context` (T-6183). Cluster network only: a request
 //! that came through a proxy is answered as an unknown path, and a NetworkPolicy lets the
 //! gateway alone in. No token: nothing but public passages is ever read here.
 
@@ -25,12 +26,19 @@ use crate::Search;
 pub const MAX_QUERY: usize = 300;
 /// The most sources one call names.
 pub const MAX_SOURCES: usize = 20;
-/// The most hits one call answers.
-pub const MAX_HITS: u8 = 10;
+/// The most hits one call answers: the gateway asks one fixed window of them and pages it, so a
+/// page never repeats or skips a hit (T-6183).
+pub const MAX_HITS: u8 = 50;
 /// The hits a call that names no `limit` answers.
 pub const DEFAULT_HITS: u8 = 5;
 /// The most of a passage a hit carries, in characters.
 pub const MAX_TEXT: usize = 1_200;
+/// The most path prefixes one call keeps to, and the longest of them, in characters.
+pub const MAX_PATHS: usize = 5;
+pub const MAX_PATH: usize = 200;
+/// The most passages read on each side of a hit (owner 2026-10-31: "10 chunks below, 10 chunks
+/// above").
+pub const MAX_AROUND: u8 = 10;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +58,20 @@ struct Asked {
     lang: Option<String>,
     #[serde(default)]
     limit: Option<u8>,
+    /// Passages whose path starts with one of these only (T-6183).
+    #[serde(default, rename = "pathPrefix")]
+    paths: Vec<String>,
+}
+
+/// The passages around one hit (T-6183).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Around {
+    sources: Vec<SourceRef>,
+    #[serde(rename = "chunkId")]
+    chunk: i64,
+    before: u8,
+    after: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +84,7 @@ pub fn router(state: Arc<ChatState>) -> Router {
     Router::new()
         .route("/internal/v1/search", post(search))
         .route("/internal/v1/sources", post(sources))
+        .route("/internal/v1/context", post(context))
         .with_state(state)
 }
 
@@ -140,7 +163,18 @@ fn refused(asked: &Asked) -> Option<String> {
     {
         return Some("lang must be a two-letter language code".into());
     }
+    if asked.paths.len() > MAX_PATHS || !asked.paths.iter().all(|p| is_path(p)) {
+        return Some(format!(
+            "pathPrefix holds at most {MAX_PATHS} paths, each starting with / and at most {MAX_PATH} characters"
+        ));
+    }
     None
+}
+
+/// A path prefix: `/` and up to [`MAX_PATH`] characters, none of them a control character. It is
+/// compared as text (`^@`), so `%` and `_` are plain characters.
+fn is_path(path: &str) -> bool {
+    path.starts_with('/') && path.chars().count() <= MAX_PATH && !path.chars().any(char::is_control)
 }
 
 /// What the page or document of each hit states of itself, its dates as RFC 3339 instants in UTC.
@@ -186,13 +220,33 @@ async fn search(
         Err(err) => return failed(err),
     };
     if let Some(routed) = routed {
-        match ranked(&state, &routed, query, &vector, lang, limit, true).await {
+        match ranked(
+            &state,
+            &routed,
+            query,
+            &vector,
+            (lang, &asked.paths),
+            limit,
+            true,
+        )
+        .await
+        {
             Ok(hits) if !hits.is_empty() => return Json(json!({"hits": hits})).into_response(),
             Ok(_) => {}
             Err(err) => return failed(err),
         }
     }
-    match ranked(&state, &scope, query, &vector, lang, limit, true).await {
+    match ranked(
+        &state,
+        &scope,
+        query,
+        &vector,
+        (lang, &asked.paths),
+        limit,
+        true,
+    )
+    .await
+    {
         Ok(hits) => Json(json!({"hits": hits})).into_response(),
         Err(err) => failed(err),
     }
@@ -299,14 +353,14 @@ fn routed(
 }
 
 /// The best `limit` passages of `scope` for `query` (embedded as `vector`) as hits of API/05 §4,
-/// each with what its page or document states of itself; the `public` passages alone when
-/// `public_only`.
+/// each with what its page or document states of itself and where it sits; the `public` passages
+/// alone when `public_only`, and of `lang` and under `paths` alone when they are given.
 pub(super) async fn ranked(
     state: &ChatState,
     scope: &[(String, Vec<String>)],
     query: &str,
     vector: &[f32],
-    lang: Option<&str>,
+    (lang, paths): (Option<&str>, &[String]),
     limit: u8,
     public_only: bool,
 ) -> Result<Vec<Value>, crate::Error> {
@@ -321,8 +375,9 @@ pub(super) async fn ranked(
             embedding: vector,
             sources: &[],
             public_only,
-            limit: i64::from(limit.saturating_mul(CANDIDATES_PER_HIT)),
+            limit: i64::from(limit).saturating_mul(i64::from(CANDIDATES_PER_HIT)),
             lang,
+            paths,
         },
     )
     .await?;
@@ -343,6 +398,11 @@ pub(super) async fn ranked(
                 "language": crate::extract::language_of(&hit.text).map(str::to_owned).or_else(|| about.language.clone()),
                 "text": hit.text.chars().take(MAX_TEXT).collect::<String>(),
                 "score": hit.score,
+                "chunkId": hit.chunk,
+                "ordinal": hit.ordinal,
+                "path": hit.path,
+                "breadcrumb": about.breadcrumb,
+                "page": hit.page,
             }))
         })
         .collect())
@@ -410,7 +470,26 @@ struct About {
     modified: Option<String>,
     crawled: Option<String>,
     language: Option<String>,
+    /// The titles of the pages above a website page, by the links the crawl followed to it, the
+    /// start page first; empty for a document (T-6183).
+    breadcrumb: Vec<String>,
 }
+
+/// The titles above each hit's page: its crawl parents up to [`MAX_CRUMBS`], each in the hit's
+/// own site, a page without a title by its path.
+const CRUMBS: &str = r#"WITH RECURSIVE up (chunk, site, page, hops) AS (
+    SELECT c.id, c.site_id, p.parent_id, 1 FROM chunks c JOIN pages p ON p.id = c.page_id
+    WHERE c.id = ANY($1) AND (NOT $2 OR c.visibility = 'public')
+    UNION ALL
+    SELECT up.chunk, up.site, p.parent_id, up.hops + 1 FROM up JOIN pages p ON p.id = up.page
+    WHERE p.site_id = up.site AND up.hops < $3
+)
+SELECT up.chunk, array_agg(COALESCE(p.title, jc_chunk_path(p.url)) ORDER BY up.hops DESC) AS crumbs
+FROM up JOIN pages p ON p.id = up.page AND p.site_id = up.site
+GROUP BY up.chunk"#;
+
+/// The most pages a breadcrumb climbs.
+const MAX_CRUMBS: i32 = 8;
 
 /// Each hit's page or document, read in its own project's scope, so the project a chunk is
 /// found in is the publisher it is named by.
@@ -432,10 +511,19 @@ async fn described(
             .bind(public_only)
             .fetch_all(&mut *tx)
             .await?;
+        let crumbs: HashMap<i64, Vec<String>> = sqlx::query_as(CRUMBS)
+            .bind(&ids)
+            .bind(public_only)
+            .bind(MAX_CRUMBS)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
         tx.rollback().await?;
         for row in rows {
+            let id: i64 = row.try_get("id")?;
             found.insert(
-                row.try_get("id")?,
+                id,
                 About {
                     project: project.clone(),
                     title: row.try_get("title")?,
@@ -444,6 +532,7 @@ async fn described(
                     modified: row.try_get("modified")?,
                     crawled: row.try_get("crawled")?,
                     language: row.try_get("language")?,
+                    breadcrumb: crumbs.get(&id).cloned().unwrap_or_default(),
                 },
             );
         }
@@ -513,6 +602,92 @@ async fn sources(
         .into_response()
 }
 
+/// The passages of one hit's page or document around it, by ordinal: the hit must be a public
+/// passage of the named sources, and so must each neighbour, checked one by one, so a public
+/// passage beside an internal one never opens it (T-6183).
+const AROUND: &str = r#"WITH hit AS (
+    SELECT c.site_id, c.page_id, c.document_id, c.ordinal FROM chunks c JOIN sites s ON s.id = c.site_id
+    WHERE c.id = $1 AND s.source = ANY($2) AND c.visibility = 'public'
+)
+SELECT c.id, c.ordinal, c.url, c.text, c.lang, jc_chunk_path(c.url) AS path, jc_chunk_page(c.url) AS page
+FROM hit JOIN chunks c ON c.site_id = hit.site_id
+    AND (c.page_id = hit.page_id OR c.document_id = hit.document_id)
+WHERE c.ordinal BETWEEN hit.ordinal - $3 AND hit.ordinal + $4 AND c.visibility = 'public'
+ORDER BY c.ordinal"#;
+
+/// A row of [`AROUND`]: id, ordinal, url, text, lang, path, page.
+type AroundRow = (
+    i64,
+    i32,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<i32>,
+);
+
+async fn context(
+    State(state): State<Arc<ChatState>>,
+    headers: HeaderMap,
+    body: Result<Json<Around>, JsonRejection>,
+) -> Response {
+    if proxied(&headers) {
+        return unknown();
+    }
+    let Json(around) = match body {
+        Ok(body) => body,
+        Err(rejection) => return unread(&rejection),
+    };
+    if around.sources.is_empty() || around.sources.len() > MAX_SOURCES {
+        return problem(400, format!("sources must name 1 to {MAX_SOURCES} sources"));
+    }
+    if around.before > MAX_AROUND || around.after > MAX_AROUND {
+        return problem(400, format!("before and after are 0 to {MAX_AROUND}"));
+    }
+    for (project, names) in grouped(&around.sources, None) {
+        let rows: Vec<AroundRow> = match async {
+            let mut tx = crate::project_scope(&state.pool, &project).await?;
+            let rows = sqlx::query_as(AROUND)
+                .bind(around.chunk)
+                .bind(&names)
+                .bind(i32::from(around.before))
+                .bind(i32::from(around.after))
+                .fetch_all(&mut *tx)
+                .await?;
+            tx.rollback().await?;
+            Ok::<_, crate::Error>(rows)
+        }
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => return failed(err),
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let passages: Vec<Value> = rows
+            .into_iter()
+            .map(|(id, ordinal, url, text, lang, path, page)| {
+                json!({
+                    "chunkId": id,
+                    "ordinal": ordinal,
+                    "url": url,
+                    "path": path,
+                    "page": page,
+                    "language": crate::extract::language_of(&text).map(str::to_owned).or(lang),
+                    "text": text.chars().take(MAX_TEXT).collect::<String>(),
+                    "hit": id == around.chunk,
+                })
+            })
+            .collect();
+        return Json(json!({"publisher": project, "passages": passages})).into_response();
+    }
+    problem(
+        404,
+        "no public passage of the attached sources has this chunkId; take one from a search hit",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +736,7 @@ mod tests {
             publisher: None,
             lang: lang.map(Into::into),
             limit,
+            paths: Vec::new(),
         };
         assert_eq!(refused(&asked("úradné hodiny", 1, None, Some("sk"))), None);
         assert_eq!(
@@ -574,7 +750,7 @@ mod tests {
             asked("x", 0, None, None),
             asked("x", 21, None, None),
             asked("x", 1, Some(0), None),
-            asked("x", 1, Some(11), None),
+            asked("x", 1, Some(MAX_HITS + 1), None),
             asked("x", 1, None, Some("SK")),
             asked("x", 1, None, Some("slk")),
         ] {
@@ -688,6 +864,7 @@ mod tests {
                 modified: modified.map(Into::into),
                 ..crate::Dates::default()
             },
+            ..crate::Hit::default()
         }
     }
 

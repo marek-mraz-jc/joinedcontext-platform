@@ -179,7 +179,11 @@ fn an_anonymous_caller_may_use_the_named_reads_alone() {
     for name in ANONYMOUS_TOOLS.iter().filter(|name| {
         !matches!(
             **name,
-            "list_endpoints" | "get_endpoint" | "search" | "search_documents"
+            "list_endpoints"
+                | "get_endpoint"
+                | "search"
+                | "search_documents"
+                | "read_knowledge_context"
         )
     }) {
         let tool = TOOLS.iter().find(|tool| tool.name == *name);
@@ -194,6 +198,10 @@ fn an_anonymous_caller_may_use_the_named_reads_alone() {
     // The gateway's own document search reads only (T-4659).
     assert_eq!(
         crate::mcp::documents::tool("")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        crate::mcp::documents::context_tool()["annotations"]["readOnlyHint"],
         true
     );
     for name in [

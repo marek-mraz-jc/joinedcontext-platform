@@ -18,17 +18,23 @@ pub const PDF: &str = "application/pdf";
 pub const DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 pub const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+/// The most folders a file's name may sit in.
+pub const MAX_FOLDERS: usize = 8;
+
 /// The file name as given, when it is one: 1 to [`MAX_NAME_CHARS`] characters, trimmed, with no
-/// path separator and no control character. It is shown and cited, never used as a path.
+/// `\\` and no control character. It may sit in up to [`MAX_FOLDERS`] folders, `/` between them
+/// (`reports/2026/budget.pdf`), which become the path its passages are searched and cited by
+/// (T-6183); no part is empty, `.` or `..`. It is shown and cited, never used as a file path.
 pub fn file_name(name: &str) -> Option<&str> {
     let name = name.trim();
+    let parts: Vec<&str> = name.split('/').collect();
     let fits = !name.is_empty()
         && name.chars().count() <= MAX_NAME_CHARS
-        && !name
-            .chars()
-            .any(|c| c == '/' || c == '\\' || c.is_control())
-        && name != "."
-        && name != "..";
+        && !name.chars().any(|c| c == '\\' || c.is_control())
+        && parts.len() <= MAX_FOLDERS + 1
+        && parts.iter().all(|part| {
+            !part.trim().is_empty() && part.trim() == *part && *part != "." && *part != ".."
+        });
     fits.then_some(name)
 }
 
@@ -469,16 +475,27 @@ mod tests {
     }
 
     #[test]
-    fn a_name_is_a_file_name_and_never_a_path() {
+    fn a_name_is_a_file_name_in_folders_and_never_a_way_out() {
         assert_eq!(
             file_name("  Výročná správa 2025.pdf "),
             Some("Výročná správa 2025.pdf")
         );
+        assert_eq!(
+            file_name("správy/2025/Výročná správa.pdf"),
+            Some("správy/2025/Výročná správa.pdf")
+        );
+        assert!(file_name(&format!("{}b.pdf", "a/".repeat(MAX_FOLDERS))).is_some());
         for bad in [
             "",
             "   ",
             "../etc/passwd",
-            "a/b.pdf",
+            "a/../b.pdf",
+            "./b.pdf",
+            "/b.pdf",
+            "a//b.pdf",
+            "a/b.pdf/",
+            "a /b.pdf",
+            &format!("{}b.pdf", "a/".repeat(MAX_FOLDERS + 1)),
             "a\\b.pdf",
             "..",
             "a\nb",

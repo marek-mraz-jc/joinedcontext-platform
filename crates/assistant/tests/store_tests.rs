@@ -147,6 +147,7 @@ async fn search(
             public_only,
             limit: 10,
             lang: None,
+            paths: &[],
         },
     )
     .await
@@ -814,6 +815,7 @@ async fn sources_of_another_project_are_searched_in_its_own_scope() {
                     public_only: true,
                     limit: 10,
                     lang: None,
+                    paths: &[],
                 },
             )
             .await
@@ -1176,6 +1178,7 @@ async fn the_semantic_arm_walks_the_vector_index_past_other_sources_chunks() {
             public_only: true,
             limit: 10,
             lang: None,
+            paths: &[],
         },
     )
     .await
@@ -1250,6 +1253,7 @@ async fn the_lexical_arm_looks_chunks_up_by_term_and_never_scans_the_project() {
             public_only: true,
             limit: 10,
             lang: None,
+            paths: &[],
         },
     )
     .await
@@ -1307,6 +1311,7 @@ async fn by_words(
             public_only,
             limit: 10,
             lang: None,
+            paths: &[],
         },
     )
     .await

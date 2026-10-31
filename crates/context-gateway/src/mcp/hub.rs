@@ -611,7 +611,7 @@ impl Hub {
                     get_endpoint_tool(),
                 ];
                 if let Some(documents) = &self.gateway.documents {
-                    tools.extend(documents.tool(self.knowledge_sources(documents)).await);
+                    tools.extend(documents.tools(self.knowledge_sources(documents)).await);
                 }
                 tools.extend(tools::hub_tools(&self.gateway, &self.reach));
                 if self.reads_only {
@@ -742,6 +742,15 @@ impl Hub {
                 Some(Answer::Json(
                     documents
                         .call(&self.gateway, &self.caller, sources, id, arguments)
+                        .await,
+                ))
+            }
+            _ if name == super::documents::CONTEXT_NAME => {
+                let documents = self.gateway.documents.as_ref()?;
+                let sources = self.knowledge_sources(documents);
+                Some(Answer::Json(
+                    documents
+                        .around(&self.gateway, &self.caller, sources, id, arguments)
                         .await,
                 ))
             }
