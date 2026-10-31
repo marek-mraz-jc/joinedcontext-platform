@@ -1322,7 +1322,7 @@ fn platform_broker(host: &str) -> bool {
 }
 
 fn refused_host(host_port: &str) -> Option<&'static str> {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::IpAddr;
     const OWN: &str = "a pipeline does not connect to the runner's own pod or a private address: \
                        the runner's stream API and token sidecar answer there for every project \
                        (PL-07)";
@@ -1363,26 +1363,9 @@ fn refused_host(host_port: &str) -> Option<&'static str> {
     {
         return Some(OWN);
     }
-    let v4_refused = |ip: Ipv4Addr| {
-        let [a, b, ..] = ip.octets();
-        ip.is_loopback()
-            || ip.is_unspecified()
-            || ip.is_link_local()
-            || ip.is_private()
-            || ip.is_broadcast()
-            || a == 0
-            || (a == 100 && (64..128).contains(&b))
-    };
+    // One rule for which addresses are off the internet, the outbound guard's (F-R2PLT3-012).
     let refused = match host.parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => v4_refused(ip),
-        Ok(IpAddr::V6(ip)) => {
-            let first = ip.segments()[0];
-            ip.is_loopback()
-                || ip.is_unspecified()
-                || first & 0xfe00 == 0xfc00
-                || first & 0xffc0 == 0xfe80
-                || ip.to_ipv4().is_some_and(v4_refused)
-        }
+        Ok(ip) => !crate::address::is_public(ip),
         // `127.1`, `2130706433`, `0x7f.0.0.1`: a C resolver reads them as addresses.
         Err(_) => {
             !host.is_empty()
@@ -1447,7 +1430,7 @@ mod address_tests {
         }
         for allowed in [
             json!({ "kafka": { "addresses": ["broker.example.org:9092"] } }),
-            json!({ "socket": { "address": "203.0.113.7:9000" } }),
+            json!({ "socket": { "address": "1.1.1.1:9000" } }),
         ] {
             assert!(validate_input_strings(&allowed).is_ok(), "{allowed}");
         }

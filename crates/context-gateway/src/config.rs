@@ -13,7 +13,7 @@ use std::path::PathBuf;
 pub use jc_core::ClientCredential as Credential;
 
 /// The gateway's runtime configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// The address to listen on (`JC_GATEWAY_BIND`, default `0.0.0.0:8080`).
     pub bind: SocketAddr,

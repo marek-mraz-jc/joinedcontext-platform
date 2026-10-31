@@ -16,8 +16,9 @@ use zeroize::Zeroize;
 /// It can be read only through [`Secret::expose`], which is the grep an auditor runs to find
 /// every place a credential can escape. There is no `Display`, no `Serialize` and no
 /// `Deref`, because each of those is a way for the value to reach a log or a response by
-/// accident, and the buffer is wiped when the value is dropped.
-#[derive(Clone, PartialEq, Eq)]
+/// accident, and the buffer is wiped when the value is dropped. There is no `PartialEq` either:
+/// `==` on two credentials runs in time that depends on the bytes (F-R2PLT3-018).
+#[derive(Clone)]
 pub struct Secret(String);
 
 impl Secret {
@@ -56,7 +57,7 @@ impl From<String> for Secret {
 }
 
 /// How a workload proves its own Keycloak client in a request to the realm (PF-47).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ClientCredential {
     /// A client secret, sent with the client id.
     Secret(Secret),
@@ -187,9 +188,11 @@ mod tests {
     }
 
     #[test]
-    fn a_secret_is_still_a_value_that_compares_and_clones() {
-        assert_eq!(Secret::new("a"), Secret::from("a".to_owned()));
-        assert_ne!(Secret::new("a"), Secret::new("b"));
+    fn a_secret_is_still_a_value_that_clones() {
+        assert_eq!(
+            Secret::new("a").clone().expose(),
+            Secret::from("a".to_owned()).expose()
+        );
         assert!(Secret::new("").is_empty());
         assert!(!Secret::new("a").is_empty());
     }

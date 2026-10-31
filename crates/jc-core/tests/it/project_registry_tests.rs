@@ -95,6 +95,30 @@ fn the_repository_is_a_local_name_or_an_https_url() {
     assert!(refused(&secret_on_local).contains("secretRef"));
 }
 
+/// F-R2PLT3-004: the checkout clones an external entry from inside the installation, so its
+/// host follows the rule of every other remote: no address off the internet, no Service name.
+#[test]
+fn an_external_repository_names_a_public_host() {
+    for url in [
+        "https://10.0.0.5/udp/air.git",
+        "https://127.0.0.1/air.git",
+        "https://[::1]/air.git",
+        "https://169.254.169.254/latest",
+        "https://gitea/air.git",
+        "https://gitea.forge.svc/air.git",
+        "https://2130706433/air.git",
+    ] {
+        let entry = ENTRY.replace(
+            "repository: { name: air }",
+            &format!("repository: {{ url: \"{url}\" }}"),
+        );
+        assert!(
+            refused(&entry).contains("spec.repository.url"),
+            "{url} was accepted"
+        );
+    }
+}
+
 /// PF-86: an entry without a ref, or one naming an option, is refused; a ref belongs to an entry.
 #[test]
 fn a_registry_entry_pins_a_ref_and_only_an_entry_does() {

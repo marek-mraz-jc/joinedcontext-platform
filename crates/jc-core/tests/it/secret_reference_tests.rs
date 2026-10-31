@@ -274,3 +274,26 @@ fn a_value_named_env_var_still_passes() {
         env_var(name).unwrap_or_else(|err| panic!("{name}: {err}"));
     }
 }
+
+/// F-R2PLT3-011: `Asia`, `akia` and `AIza` are also the starts of words; a cloud key is taken
+/// for one by its whole shape, so ordinary text and names pass.
+#[test]
+fn a_word_that_starts_like_a_cloud_key_is_no_credential() {
+    for text in [
+        "Asia",
+        "Asian",
+        "asian-markets",
+        "Akiane",
+        "aizawl",
+        "AIzawl",
+        "AKIA-1",
+    ] {
+        assert!(!names::looks_like_a_credential(text), "{text}");
+    }
+    assert!(names::looks_like_a_credential("AKIAIOSFODNN7EXAMPLE"));
+    assert!(names::looks_like_a_credential("ASIAIOSFODNN7EXAMPLE"));
+    assert!(names::looks_like_a_credential(&format!(
+        "AIza{}",
+        "x".repeat(35)
+    )));
+}

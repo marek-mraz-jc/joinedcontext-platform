@@ -724,7 +724,7 @@ pub(crate) fn validate_remote_url(field: &'static str, url: &str, allow_ssh: boo
 
 /// The host of an authority past its userinfo: without the port, the scp form's `:path`
 /// (`git@host:org/repo`) or an IPv6 literal's brackets' tail.
-fn remote_host(host_port: &str) -> &str {
+pub(crate) fn remote_host(host_port: &str) -> &str {
     match host_port.strip_prefix('[') {
         Some(v6) => v6.split(']').next().unwrap_or_default(),
         None => host_port.split(':').next().unwrap_or_default(),
@@ -748,7 +748,7 @@ const INTERNAL_SUFFIXES: [&str; 7] = [
 /// `0x7f.1`, `[::ffff:127.0.0.1]`), a name of one label (an in-cluster Service) or under an
 /// internal suffix, and anything a parser would decode into another host (`%`, non-ASCII).
 /// What a public name resolves to is judged when it is fetched, by the outbound guard.
-fn check_remote_host(host: &str) -> std::result::Result<(), &'static str> {
+pub(crate) fn check_remote_host(host: &str) -> std::result::Result<(), &'static str> {
     const PRIVATE: &str = "the host is a loopback, private, link-local or internal address; a \
                            remote names a public host such as git.example.org";
     if host.is_empty() {

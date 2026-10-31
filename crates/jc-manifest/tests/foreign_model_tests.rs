@@ -238,6 +238,34 @@ fn a_peer_without_a_schema_surface_is_flagged_and_still_referenced() {
     assert!(mirror.flags[0].contains("publishes no schema/index.json"));
 }
 
+/// F-R2PLT3-007: the catalogue is the peer's text; a peer listing ten thousand models is
+/// mirrored for the first [`foreign_models::MAX_MODELS`] and flagged, never walked whole.
+#[test]
+fn a_peer_listing_thousands_of_models_is_capped_and_flagged() {
+    let dir = repo_dir("too-many");
+    let models: Vec<Value> = (0..10_000)
+        .map(|i| json!({ "name": format!("m{i}") }))
+        .collect();
+    let mut peer = Peer::air();
+    peer.documents.insert(
+        format!("{BASE}/schema/index.json"),
+        serde_json::to_vec(&json!({ "models": models })).expect("serializes"),
+    );
+    let mirror = run(&dir, &peer);
+
+    assert!(
+        mirror.flags.len() <= foreign_models::MAX_MODELS + 1,
+        "{} flags",
+        mirror.flags.len()
+    );
+    assert!(
+        mirror.flags[0].contains("lists 10000 models"),
+        "{}",
+        mirror.flags[0]
+    );
+    assert!(peer.asked.borrow().len() <= 1 + 3 * foreign_models::MAX_MODELS);
+}
+
 /// The peer's own model name reaches the filesystem, so it is checked before anything is asked
 /// for: a name that is not a DNS-1123 label costs one request and writes nothing.
 #[test]

@@ -593,3 +593,58 @@ fn a_refused_assembly_puts_the_reused_renders_back() {
         "the last tree still serves ovzdusie"
     );
 }
+
+/// F-R2PLT3-002: the `-` join of project and name is not one-to-one, so the ServiceAccount
+/// `vendorx-parking-push` of `ovzdusie` and `parking-push` of `ovzdusie-vendorx` derive one
+/// Keycloak client, `ovzdusie-vendorx-parking-push`; the second is refused by name.
+#[test]
+fn two_projects_deriving_one_client_id_are_refused() {
+    const ACCOUNT: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: ServiceAccount\nmetadata:\n  name: NAME\n  namespace: PROJECT\nspec:\n  owner: { user: \"jana.k@bb\" }\n  purpose: \"pushes ParkingSpot updates\"\n  roles:\n    - role: space-writer\n      scope: { contextSpace: ovzdusie }\n      types: [ParkingSpot]\n      operations: [createEntity]\n  credentials:\n    - kind: oauth-client\n      name: main\n";
+    let account =
+        |name: &str, project: &str| ACCOUNT.replace("NAME", name).replace("PROJECT", project);
+    let first = project_repository("derived-client-a");
+    write(
+        &first,
+        "access/serviceaccounts/vendorx-parking-push.yaml",
+        &account("vendorx-parking-push", "ovzdusie"),
+    );
+    let second = temp_dir("derived-client-b-project");
+    write(&second, ".jc/layout", "2\n");
+    write(
+        &second,
+        "project.yaml",
+        &PROJECT.replace("name: ovzdusie", "name: ovzdusie-vendorx"),
+    );
+    let entry = ENTRY.replace("name: ovzdusie\n", "name: ovzdusie-vendorx\n");
+    let org = organization(
+        "derived-client",
+        &[("ovzdusie", ENTRY), ("ovzdusie-vendorx", &entry)],
+    );
+    let into = temp_dir("derived-client-into").join("r");
+    let alone = assemble(
+        &org,
+        &checkouts(&[("ovzdusie", &first), ("ovzdusie-vendorx", &second)]),
+        &into,
+        None,
+    );
+    assert!(alone.is_ok(), "{:?}", alone.err().map(|e| e.to_string()));
+
+    write(
+        &second,
+        "access/serviceaccounts/parking-push.yaml",
+        &account("parking-push", "ovzdusie-vendorx"),
+    );
+    let refused = assemble(
+        &org,
+        &checkouts(&[("ovzdusie", &first), ("ovzdusie-vendorx", &second)]),
+        &temp_dir("derived-client-into-2").join("r"),
+        None,
+    )
+    .expect_err("one client id derived twice is refused");
+    match refused {
+        AssembleError::Derived { value, .. } => {
+            assert_eq!(value, "ovzdusie-vendorx-parking-push");
+        }
+        other => panic!("expected a derived-identity conflict, got {other}"),
+    }
+}

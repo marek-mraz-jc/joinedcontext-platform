@@ -114,3 +114,32 @@ fn the_page_head_links_each_feed() {
     ), "{head}");
     assert!(page.contains(">Culture (JSON Feed)</a>"), "{page}");
 }
+
+/// F-R2PLT3-014: the feed queues every node of the catalogue and writes each once, in linear
+/// time: four times the nodes cost about four times as long. With `Vec::remove(0)` the shift
+/// of the rest at each node made it grow with the square (measured 12x and more at this size);
+/// a ratio, unlike a wall-clock bound, holds on a loaded host.
+#[test]
+fn a_large_feed_writes_every_node_once_in_linear_time() {
+    let feed = |n: usize| {
+        let included: Vec<Value> = (0..n)
+            .map(
+                |i| json!({ "@id": format!("https://example.org/d/{i}"), "@type": "dcat:Dataset" }),
+            )
+            .collect();
+        json!({ "@id": "https://example.org/catalog", "@type": "dcat:Catalog", "@included": included })
+    };
+    let timed = |n: usize| {
+        let feed = feed(n);
+        let started = std::time::Instant::now();
+        let turtle = jc_dcat::feed_turtle(&feed);
+        let took = started.elapsed();
+        assert_eq!(turtle.matches("a dcat:Dataset").count(), n);
+        took
+    };
+    let small = timed(50_000);
+    let large = timed(200_000);
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    eprintln!("feed_turtle 50000 nodes {small:?}, 200000 nodes {large:?}, ratio {ratio:.1}");
+    assert!(ratio < 8.0, "4x the nodes took {ratio:.1}x as long");
+}
