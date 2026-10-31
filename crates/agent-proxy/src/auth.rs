@@ -215,7 +215,7 @@ pub async fn authenticate_data(
 
 /// Whether a Linkerd client identity is the workload `expected`: a ServiceAccount, or
 /// `<serviceaccount>.<namespace>`, compared label by label and each label whole.
-fn is_workload(client_id: &str, expected: &str) -> bool {
+pub(crate) fn is_workload(client_id: &str, expected: &str) -> bool {
     let mut labels = client_id.split('.');
     !expected.is_empty() && expected.split('.').all(|want| labels.next() == Some(want))
 }

@@ -562,6 +562,8 @@ async fn a_model_call_carries_the_profiles_reasoning_effort_upstream() {
     let mut run = sample_run(false, "building");
     run.reasoning_effort = Some("medium".to_string());
     run.model_name = "google/gemini-3.8-flash".to_string();
+    // A budget large enough that the body keeps its own output cap (F-R2PLT1-006).
+    run.max_tokens = 100_000;
     let app = router(test_state_with_upstreams(
         run,
         "http://context-gateway:8080",
@@ -1602,6 +1604,37 @@ mod mesh_identity {
                 StatusCode::FORBIDDEN,
                 "{identity} is not this run's workload"
             );
+        }
+    }
+
+    /// F-R2PLT1-010: the Portal-only doors share the workspace's listener; a workspace's call
+    /// to them is refused by its mesh identity before the realm is asked about its token.
+    #[tokio::test]
+    async fn a_portal_only_door_refuses_a_workspace_before_the_realm_is_asked() {
+        let (state, _gateway) = proxy_and_gateway().await;
+        for door in ["identity", "data-credential"] {
+            for identity in [
+                Some(format!(
+                    "agent-run-{RUN}.jc-agents.serviceaccount.identity.linkerd.cluster.local"
+                )),
+                Some("portal.tenant-a.serviceaccount.identity.linkerd.cluster.local".to_owned()),
+                None,
+            ] {
+                let mut request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/internal/runs/{RUN}/{door}"))
+                    .header("authorization", "Bearer some-token")
+                    .header("content-type", "application/json");
+                if let Some(identity) = &identity {
+                    request = request.header("l5d-client-id", identity);
+                }
+                let status = router(state.clone())
+                    .oneshot(request.body(Body::from(r#"{"subjectToken":"x"}"#)).unwrap())
+                    .await
+                    .unwrap()
+                    .status();
+                assert_eq!(status, StatusCode::FORBIDDEN, "{door} as {identity:?}");
+            }
         }
     }
 

@@ -34,16 +34,8 @@ pub async fn handler(
         Err(p) => return (*p).into_response(),
     };
 
-    if let Err(msg) = state
-        .limits
-        .check_rpm(&run.id, run.requests_per_minute)
-        .await
-    {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
-        )
-            .into_response();
+    if let Some(refusal) = super::over_rate(&state, &run).await {
+        return refusal;
     }
 
     let wait = query.wait.unwrap_or(MAX_WAIT_SECS).min(MAX_WAIT_SECS);

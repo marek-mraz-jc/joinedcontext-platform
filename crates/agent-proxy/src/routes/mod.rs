@@ -179,6 +179,27 @@ pub(crate) fn escapes(path: &str) -> bool {
         || path.split('/').any(|segment| matches!(segment, "." | ".."))
 }
 
+/// The `429` for a run past its `requests_per_minute`, or `None` while it is inside it. Every door
+/// a run calls at will counts here, against one window per run (F-R2PLT1-004).
+pub(crate) async fn over_rate(
+    state: &crate::ProxyState,
+    run: &crate::runs::RunContext,
+) -> Option<axum::response::Response> {
+    use axum::response::IntoResponse;
+    let msg = state
+        .limits
+        .check_rpm(&run.id, run.requests_per_minute)
+        .await
+        .err()?;
+    Some(
+        (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
+        )
+            .into_response(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::escapes;

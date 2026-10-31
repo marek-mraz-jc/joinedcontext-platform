@@ -4,6 +4,7 @@
 //! pages are framed only by the deployment's `allowedOrigins`, no page sets a cookie and the
 //! conversation lives in the page; every limit is the chat route's.
 
+use crate::html_escape as escaped;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -64,15 +65,6 @@ async fn visitor() -> Response {
 
 async fn style() -> Response {
     asset(STYLE, "text/css; charset=utf-8")
-}
-
-/// `<`, `>`, `&` and quotes as entities: the configuration rides in an attribute.
-fn escaped(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 /// The page's policy: its own host for scripts, styles and requests, framed by the deployment's

@@ -8,6 +8,7 @@
 //! or a `secretRef`. An `internal`, unknown, disabled or doubly declared `publicId` is `404`.
 //! A document is computed at most once a minute per deployment; the language only picks labels.
 
+use crate::html_escape as escaped;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -417,15 +418,6 @@ pub(super) async fn document(
         headers.insert(header::VARY, HeaderValue::from_static("Origin"));
     }
     response
-}
-
-/// `<`, `>`, `&` and quotes as entities (T-4681): every name on the page is someone's text.
-fn escaped(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 /// The page's own words, in Slovak or English; every other language reads the English ones.

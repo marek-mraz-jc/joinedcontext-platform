@@ -135,16 +135,8 @@ pub async fn handler(
         .into_response();
     }
 
-    if let Err(msg) = state
-        .limits
-        .check_rpm(&run.id, run.requests_per_minute)
-        .await
-    {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            jc_core::ProblemDetails::new(429, "too-many-requests", msg),
-        )
-            .into_response();
+    if let Some(refusal) = super::over_rate(&state, &run).await {
+        return refusal;
     }
 
     let path = format!(

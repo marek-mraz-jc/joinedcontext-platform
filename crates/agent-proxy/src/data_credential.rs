@@ -40,11 +40,6 @@ fn digest(secret: &str) -> [u8; 32] {
     Sha256::digest(secret.as_bytes()).into()
 }
 
-/// Equal in time that does not depend on where the two first differ.
-fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 impl DataCredentials {
     /// A new credential of `run_id`, as the bearer token `jcd_<run>.<secret>`.
     pub fn mint(&self, run_id: &str) -> String {
@@ -81,9 +76,9 @@ impl DataCredentials {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         live.get(run_id).is_some_and(|entries| {
-            entries
-                .iter()
-                .any(|entry| entry.expires > now && same(&entry.digest, &presented))
+            entries.iter().any(|entry| {
+                entry.expires > now && crate::tickets::digests_equal(&entry.digest, &presented)
+            })
         })
     }
 
