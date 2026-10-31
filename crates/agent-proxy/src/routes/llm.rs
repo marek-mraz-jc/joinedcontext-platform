@@ -60,6 +60,37 @@ fn with_model(body: Bytes, model: &str) -> Bytes {
     serde_json::to_vec(&map).map(Bytes::from).unwrap_or(body)
 }
 
+/// The body with its output capped at `left`, what remains of the run's token budget
+/// (F-R2PLT1-006): checking the budget before the call alone let one call asking a large
+/// `max_tokens` spend far past it. Each output field the body names (`max_tokens`, OpenAI's
+/// `max_completion_tokens`) is lowered to `left`; a body naming none gets `max_tokens: left` when
+/// that is below the output a stream is otherwise counted for, the one size every model accepts.
+/// A body that is not a JSON object is sent as is.
+fn within_budget(body: Bytes, left: u64) -> Bytes {
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    let mut named = false;
+    let mut lowered = false;
+    for field in ["max_tokens", "max_completion_tokens"] {
+        if let Some(asked) = map.get(field).and_then(Value::as_u64) {
+            named = true;
+            if asked > left {
+                map.insert(field.into(), json!(left));
+                lowered = true;
+            }
+        }
+    }
+    if !named && left < STREAM_OUTPUT_UNSAID {
+        map.insert("max_tokens".into(), json!(left));
+        lowered = true;
+    }
+    if !lowered {
+        return body;
+    }
+    serde_json::to_vec(&map).map(Bytes::from).unwrap_or(body)
+}
+
 /// Why the body's OpenRouter `provider` field is refused, or `None` when it is absent or holds
 /// only `order` (1 to 8 provider slugs), `sort` (`latency`, `throughput` or `price`; T-4360), at
 /// least one of the two, and `allow_fallbacks` (a boolean); it is sent as is otherwise (T-4292,
@@ -664,6 +695,13 @@ pub async fn handler(
         Some(effort) => with_reasoning(&body_bytes, &rest, effort),
         None => body_bytes,
     };
+    let body_bytes = match &caller {
+        Caller::Run(run) => within_budget(
+            body_bytes,
+            state.limits.tokens_left(&run.id, run.max_tokens).await,
+        ),
+        Caller::Assistant { .. } | Caller::App { .. } => body_bytes,
+    };
     let streamed = wants_stream(&body_bytes);
     let body_bytes = if streamed {
         with_stream_usage(&body_bytes, &rest)
@@ -890,6 +928,21 @@ mod tests {
         assert_eq!(added["model"], "m/run");
         assert_eq!(sent("not json", "m/run"), "not json");
         assert_eq!(sent(r#"{"model":"x"}"#, ""), r#"{"model":"x"}"#);
+    }
+
+    /// F-R2PLT1-006: a cap inside the budget is kept byte for byte, one past it is lowered.
+    #[test]
+    fn an_output_cap_inside_the_budget_is_kept_and_one_past_it_is_lowered() {
+        let inside = Bytes::from_static(br#"{"model":"m","max_tokens":5}"#);
+        assert_eq!(within_budget(inside.clone(), 10), inside);
+        let large = Bytes::from_static(br#"{"model":"m"}"#);
+        assert_eq!(within_budget(large.clone(), 100_000), large);
+        let past: Value = serde_json::from_slice(&within_budget(
+            Bytes::from_static(br#"{"max_tokens":50}"#),
+            7,
+        ))
+        .expect("JSON");
+        assert_eq!(past["max_tokens"], 7);
     }
 
     fn sent(body: &str, rest: &str, effort: &str) -> Value {

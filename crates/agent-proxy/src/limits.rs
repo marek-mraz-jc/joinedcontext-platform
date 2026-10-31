@@ -116,12 +116,17 @@ impl LimitManager {
     }
 
     pub async fn check_tokens(&self, run_id: &str, limit: u64) -> Result<(), &'static str> {
-        let map = self.runs.lock().await;
-        let consumed = map.get(run_id).map_or(0, |entry| entry.tokens_consumed);
-        if consumed >= limit {
+        if self.tokens_left(run_id, limit).await == 0 {
             return Err("token budget exhausted");
         }
         Ok(())
+    }
+
+    /// What is left of the run's token budget: the most one more model call may answer with.
+    pub async fn tokens_left(&self, run_id: &str, limit: u64) -> u64 {
+        let map = self.runs.lock().await;
+        let consumed = map.get(run_id).map_or(0, |entry| entry.tokens_consumed);
+        limit.saturating_sub(consumed)
     }
 
     /// What is left of the run's egress budget. `0` refuses the next fetch, and it is also what

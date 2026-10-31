@@ -79,8 +79,9 @@ impl TicketCache {
     }
 }
 
-/// Equal digests, compared in time independent of where they differ.
-fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
+/// Equal digests, compared in time independent of where they differ; the one compare of a
+/// presented secret's digest in this crate (F-R2PLT1-019).
+pub(crate) fn digests_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

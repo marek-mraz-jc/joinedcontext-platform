@@ -43,6 +43,23 @@ async fn portal_only(state: &ProxyState, headers: &HeaderMap, what: &str) -> Opt
     let Some(bearer) = bearer else {
         return Some(refused());
     };
+    // A workspace shares this listener: before the realm is asked about any token it sends, the
+    // mesh says whether the caller is the Portal's own workload at all (F-R2PLT1-010).
+    if state.config.require_mesh_identity
+        && !crate::auth::is_workload(
+            headers
+                .get("l5d-client-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default(),
+            &state.config.portal_identity,
+        )
+    {
+        return Some(
+            jc_core::ProblemDetails::forbidden()
+                .with_detail("mesh workload identity mismatch")
+                .into_response(),
+        );
+    }
     match state.credentials.grants().is_portal(bearer).await {
         Ok(true) => None,
         Ok(false) => {

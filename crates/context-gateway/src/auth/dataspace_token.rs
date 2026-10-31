@@ -25,6 +25,9 @@ use std::collections::BTreeMap;
 /// The longest a transfer token may live, in seconds (DS-11).
 pub const MAX_LIFETIME: i64 = 15 * 60;
 
+/// How far ahead of the gateway's clock a token's `iat` may be, for the issuer's clock skew.
+pub const IAT_LEEWAY: i64 = 60;
+
 /// One agreement, as the gateway needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Agreement {
@@ -142,7 +145,10 @@ pub fn subject(
     // DS-11 is a property of the token, not of the moment it is presented: a token minted
     // to live an hour is refused on its first second.
     let issued = claims.iat.ok_or(Refused::NoLifetime)?;
-    if claims.exp.saturating_sub(issued) > MAX_LIFETIME {
+    // An `iat` past the clock would carry the window anywhere ahead of `now` (F-R2PLT1-015).
+    if claims.exp.saturating_sub(issued) > MAX_LIFETIME
+        || issued > now.timestamp().saturating_add(IAT_LEEWAY)
+    {
         return Err(Refused::TooLong);
     }
 

@@ -13,6 +13,12 @@ use std::time::Instant;
 /// with DELETE, and all three take `branch`, `author`, `committer` and `message`.
 const CONTENT_WRITES: [Method; 3] = [Method::POST, Method::PUT, Method::DELETE];
 
+/// The body fields a `contents/` write may carry (F-R2PLT1-001). `branch`, `author` and
+/// `committer` are overwritten with the run's own; the rest of Gitea's file options is refused,
+/// since `from_path` would move a file from outside the directory and `new_branch` would commit
+/// to a branch that is not the run's.
+const CONTENT_FIELDS: [&str; 6] = ["content", "sha", "message", "branch", "author", "committer"];
+
 /// The request body as a JSON object, or the refusal to send back (AG-64, T-2362).
 ///
 /// Four forge operations do not forward the body as it arrived: a `contents/` write gains the
@@ -53,9 +59,78 @@ fn directory_of(prefix: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| format!("{trimmed}/"))
 }
 
+/// A `contents/` write's body pinned to the run: its fields checked against `CONTENT_FIELDS`, the
+/// run's branch, the agent as author and committer, and the proposer's trailer (AG-64).
+fn pinned_write(
+    bytes: &[u8],
+    run: &crate::runs::RunContext,
+) -> Result<serde_json::Map<String, serde_json::Value>, Box<Response>> {
+    let mut map = object_body(bytes)?;
+    if let Some(field) = map
+        .keys()
+        .find(|key| !CONTENT_FIELDS.contains(&key.as_str()))
+    {
+        return Err(Box::new(
+            jc_core::ProblemDetails::new(400, "invalid-body", "Bad Request")
+                .with_detail(format!(
+                    "a file write carries only content, sha and message; '{field}' is refused"
+                ))
+                .into_response(),
+        ));
+    }
+    map.insert("branch".to_string(), serde_json::json!(run.branch));
+    map.insert(
+        "author".to_string(),
+        serde_json::json!({
+            "name": format!("agent:app-builder@{}", run.project),
+            "email": format!("agent-builder@{}.local", run.project)
+        }),
+    );
+    map.insert(
+        "committer".to_string(),
+        serde_json::json!({
+            "name": format!("agent:app-builder@{}", run.project),
+            "email": format!("agent-builder@{}.local", run.project)
+        }),
+    );
+    let msg = map
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("agent commit");
+    let trailer = format!("\n\nCo-Proposed-By: {}", run.created_by);
+    if !msg.contains("Co-Proposed-By:") {
+        let message = format!("{msg}{trailer}");
+        map.insert("message".to_string(), serde_json::json!(message));
+    }
+    Ok(map)
+}
+
+/// The branch a file read asks for: `None` reads the default branch (the state the run started
+/// from), `Some` the run's own branch. A `ref` naming any other branch or commit is refused, so a
+/// run reads its directory on main and on its own branch alone (F-R2PLT1-003).
+fn read_ref_of<'a>(query: &str, branch: &'a str) -> Result<Option<&'a str>, Box<Response>> {
+    let mut asked = None;
+    for (key, value) in reqwest::Url::parse(&format!("http://q.invalid/?{query}"))
+        .map(|url| url.query_pairs().into_owned().collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        if key != "ref" || value != branch || branch.is_empty() {
+            return Err(Box::new(
+                jc_core::ProblemDetails::forbidden()
+                    .with_detail(format!(
+                        "a file read takes only ref={branch}, the run's own branch; '{key}={value}' is refused"
+                    ))
+                    .into_response(),
+            ));
+        }
+        asked = Some(branch);
+    }
+    Ok(asked)
+}
+
 fn no_directory() -> Response {
     jc_core::ProblemDetails::forbidden()
-        .with_detail("this run has no application directory, so it writes nothing to the forge")
+        .with_detail("this run has no application directory, so it reaches no file in the forge")
         .into_response()
 }
 
@@ -72,6 +147,7 @@ pub async fn handler(
         Err(p) => return (*p).into_response(),
     };
 
+    let query = req.uri().query().unwrap_or_default().to_owned();
     let body_bytes = match super::body::bounded(req.into_body()).await {
         Ok(bytes) => bytes,
         Err(refusal) => return *refusal,
@@ -80,11 +156,15 @@ pub async fn handler(
     // The body is only read where an operation rewrites or checks it; a read forwards what
     // arrived, untouched.
     let mut pinned: Option<serde_json::Map<String, serde_json::Value>> = None;
+    // The one query this door forwards: a file read on the run's own branch (F-R2PLT1-003).
+    let mut read_ref: Option<&str> = None;
     let directory = directory_of(&run.path_prefix);
     let writes = CONTENT_WRITES.contains(&method);
 
     if let Some(file_path) = rest.strip_prefix("contents/") {
-        if writes && directory.is_none() {
+        // A run with no directory reads nothing either: the empty prefix would admit the whole
+        // configuration repository, every project's manifests included (F-R2PLT1-002).
+        if directory.is_none() {
             return no_directory();
         }
         // Nothing encoded, no backslash, no dot or empty segment (T-0817, `super::escapes`).
@@ -108,36 +188,13 @@ pub async fn handler(
                 )
                 .into_response();
         }
-        if writes {
-            let mut map = match object_body(&body_bytes) {
-                Ok(map) => map,
-                Err(refusal) => return *refusal,
-            };
-            map.insert("branch".to_string(), serde_json::json!(run.branch));
-            map.insert(
-                "author".to_string(),
-                serde_json::json!({
-                    "name": format!("agent:app-builder@{}", run.project),
-                    "email": format!("agent-builder@{}.local", run.project)
-                }),
-            );
-            map.insert(
-                "committer".to_string(),
-                serde_json::json!({
-                    "name": format!("agent:app-builder@{}", run.project),
-                    "email": format!("agent-builder@{}.local", run.project)
-                }),
-            );
-            let msg = map
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("agent commit");
-            let trailer = format!("\n\nCo-Proposed-By: {}", run.created_by);
-            if !msg.contains("Co-Proposed-By:") {
-                let message = format!("{msg}{trailer}");
-                map.insert("message".to_string(), serde_json::json!(message));
-            }
-            pinned = Some(map);
+        let pinning = if writes {
+            pinned_write(&body_bytes, &run).map(|map| pinned = Some(map))
+        } else {
+            read_ref_of(&query, &run.branch).map(|branch| read_ref = branch)
+        };
+        if let Err(refusal) = pinning {
+            return *refusal;
         }
     } else if rest == "branches" && method == Method::POST {
         if directory.is_none() {
@@ -197,10 +254,15 @@ pub async fn handler(
         None => state.config.forge_repo.clone(),
     };
     let base = state.config.forge_base.as_str().trim_end_matches('/');
-    let target_url = format!(
+    let mut target_url = format!(
         "{base}/api/v1/repos/{repository}/{}",
         rest.trim_start_matches('/')
     );
+    if let Some(mut url) = read_ref.and_then(|_| reqwest::Url::parse(&target_url).ok()) {
+        url.query_pairs_mut()
+            .append_pair("ref", read_ref.unwrap_or_default());
+        target_url = url.into();
+    }
     // Whatever the operation, the URL the forge will see, after its parser had its say, is in
     // the run's one repository or the request stops here (AG-86, T-3021). Both sides are parsed,
     // so a base with a path of its own compares the same way.

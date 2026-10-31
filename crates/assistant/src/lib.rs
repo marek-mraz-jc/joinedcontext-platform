@@ -45,6 +45,16 @@ pub const CANDIDATES: i64 = 50;
 /// The `k` of reciprocal rank fusion, `1 / (k + rank)`.
 pub const RRF_K: i32 = 60;
 
+/// `text` safe inside HTML text and inside an attribute of either quote: the one escaper every
+/// page this crate writes uses (F-R2PLT1-018).
+pub(crate) fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// A store error a caller can act on.
 #[derive(Debug)]
 pub enum Error {
@@ -804,6 +814,14 @@ pub async fn rows_dataset_projects(
 
 #[cfg(test)]
 mod tests {
+    /// F-R2PLT1-018: both quotes are escaped, so a value is safe in a single-quoted attribute.
+    #[test]
+    fn html_escape_covers_text_and_both_attribute_quotes() {
+        assert_eq!(
+            super::html_escape(r#"<a href='x' title="y">&</a>"#),
+            "&lt;a href=&#39;x&#39; title=&quot;y&quot;&gt;&amp;&lt;/a&gt;"
+        );
+    }
 
     #[test]
     fn sources_are_grouped_by_the_project_that_holds_them_own_first() {

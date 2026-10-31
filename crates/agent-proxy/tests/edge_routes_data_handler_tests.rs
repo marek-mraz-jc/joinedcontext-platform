@@ -590,3 +590,50 @@ async fn a_door_the_proxy_does_not_have_is_refused() {
         );
     }
 }
+
+/// F-R2PLT1-004: the data door counts against the run's `requests_per_minute` like the MCP door,
+/// so a loop of reads, or of slugs the run does not name, stops at the limit instead of driving
+/// the gateway and the Portal without end.
+#[tokio::test]
+async fn the_data_door_counts_against_the_runs_requests_per_minute() {
+    let gateway = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+        .mount(&gateway)
+        .await;
+    let proxy = app(
+        agent_proxy::runs::RunContext {
+            requests_per_minute: 2,
+            ..sample_run(false)
+        },
+        Bases {
+            gateway: gateway.uri(),
+            ..Bases::default()
+        },
+    );
+    let mut statuses = Vec::new();
+    for _ in 0..3 {
+        let response = proxy
+            .clone()
+            .oneshot(
+                authed("GET", "/v1/data/ngsi-ld/v1/entities?type=Bike")
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("an answer");
+        statuses.push(response.status());
+    }
+    assert_eq!(
+        statuses,
+        [
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::TOO_MANY_REQUESTS
+        ]
+    );
+    assert_eq!(
+        gateway.received_requests().await.unwrap_or_default().len(),
+        2
+    );
+}

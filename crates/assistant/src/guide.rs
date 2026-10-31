@@ -7,6 +7,7 @@
 //! the Portal's address, so an answer that gives the steps of a workflow links into the form of
 //! each step; the section cites the first Portal page it names, else the project's Portal home.
 
+use crate::html_escape as escape;
 use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
@@ -29,13 +30,6 @@ pub struct Section {
     /// The citation: a Portal page of the project, with a fragment naming the section.
     pub url: String,
     pub html: String,
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn is_slug_char(c: char) -> bool {
