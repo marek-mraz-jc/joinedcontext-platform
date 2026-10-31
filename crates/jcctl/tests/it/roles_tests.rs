@@ -100,13 +100,79 @@ fn codeowners_gives_the_rule_setting_paths_to_organization_approvers_only() {
     // A developer proposes but never approves: no line of theirs, on any path.
     assert!(!owners.contains("air-quality-team"), "{owners}");
     assert!(!owners.contains("jana"), "{owners}");
-    // A context space binding that approves owns the space under whichever project holds it.
-    assert!(
-        owners.contains("/projects/*/spaces/parking/ @banskabystrica/parking-reviewers\n"),
-        "{owners}"
-    );
+    // A context space binding to a space no project declares owns no path, never `*`.
+    assert!(!owners.contains("/projects/*/"), "{owners}");
+    assert!(!owners.contains("/spaces/parking/"), "{owners}");
     assert!(owners.starts_with("# Written by `jcctl roles render`"));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn parking_space(project: &str) -> String {
+    format!(
+        "apiVersion: joinedcontext.com/v1alpha1\nkind: ContextSpace\nmetadata:\n  name: parking\n  \
+         namespace: {project}\nspec:\n  isSandbox: false\n"
+    )
+}
+
+/// F-R2PLT4-002: a context-space binding owns its space in the project that declares it, and
+/// no other project's space of the same name.
+#[test]
+fn a_context_space_binding_owns_the_space_of_its_own_project_alone() {
+    let dir = users_repo("codeowners-space");
+    write(
+        &dir,
+        "projects/ovzdusie/spaces/parking/space.yaml",
+        &parking_space("ovzdusie"),
+    );
+    let owners = roles::compile(&load(&dir)).expect("compiles").codeowners;
+    assert!(
+        owners.contains("/projects/ovzdusie/spaces/parking/ @banskabystrica/parking-reviewers\n"),
+        "{owners}"
+    );
+    assert!(!owners.contains("/projects/*/"), "{owners}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F-R2PLT4-002: a space name two projects declare leaves a context-space binding ambiguous;
+/// the render refuses it instead of owning both.
+#[test]
+fn a_context_space_binding_to_a_name_two_projects_declare_is_refused() {
+    let dir = users_repo("codeowners-space-twice");
+    write(
+        &dir,
+        "projects/doprava/project.yaml",
+        &PROJECT.replace("ovzdusie", "doprava"),
+    );
+    for project in ["ovzdusie", "doprava"] {
+        write(
+            &dir,
+            &format!("projects/{project}/spaces/parking/space.yaml"),
+            &parking_space(project),
+        );
+    }
+    let err = roles::compile(&load(&dir)).expect_err("ambiguous");
+    assert!(
+        matches!(&err, RolesError::AmbiguousSpace { space, projects, .. }
+            if space == "parking" && projects == &["doprava", "ovzdusie"]),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F-R2PLT4-015: with a second Organization beside the installation's, the forge handles keep
+/// the installation's organization.
+#[test]
+fn codeowners_handles_name_the_installation_organization() {
+    let dir = users_repo("codeowners-two-orgs");
+    write(
+        &dir,
+        "organizations/zvolen.yaml",
+        &ORG.replace("banskabystrica", "zvolen"),
+    );
+    let owners = roles::compile(&load(&dir)).expect("compiles").codeowners;
+    assert!(owners.contains("/ @banskabystrica/platform-admins\n"), "{owners}");
+    assert!(!owners.contains("@zvolen/"), "{owners}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
