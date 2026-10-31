@@ -136,12 +136,12 @@ pub enum Error {
     /// The repository could not be loaded.
     #[error(transparent)]
     Load(#[from] LoadError),
-    /// An Endpoint's spec does not parse.
+    /// An Endpoint's spec does not parse, or declares what it may not.
     #[error("{endpoint}: endpoint spec: {message}")]
     Spec {
         /// The Endpoint.
         endpoint: Box<ResourceId>,
-        /// What serde said.
+        /// What serde said, or what the spec may not declare.
         message: String,
     },
     /// The publication names a `CkanInstance` the repository does not hold.
@@ -187,8 +187,8 @@ pub enum Error {
 /// Every Endpoint of `project` that declares `spec.publish.ckan`, with its instance
 /// resolved, in repository order (EP-62).
 ///
-/// The instance is looked up in the project the Endpoint is in, unless the reference
-/// names a namespace itself. An Endpoint that names no publication is not a target and
+/// The instance is looked up in the project the Endpoint is in, and only there: a reference
+/// naming another project's namespace is an error (T-6292). An Endpoint that names no publication is not a target and
 /// not an error; one whose spec or instance is broken stops the walk, because a run that
 /// silently skips a misdeclared Endpoint would report a catalogue that is not converged.
 pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
@@ -205,17 +205,21 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
         let Some(publication) = spec.publish.as_ref().and_then(|p| p.ckan.clone()) else {
             continue;
         };
-        let namespace = match &publication.instance_ref {
-            Ref::Typed(typed) => typed
-                .namespace
-                .clone()
-                .unwrap_or_else(|| project.to_owned()),
-            Ref::Name(_) => project.to_owned(),
-        };
+        // T-6292: never another project's instance, whose token and catalogue are not ours.
+        if let Ref::Typed(typed) = &publication.instance_ref {
+            if typed.namespace.as_deref().is_some_and(|n| n != project) {
+                return Err(Error::Spec {
+                    endpoint: Box::new(id.clone()),
+                    message: "publish.ckan.instanceRef names another project's CkanInstance: \
+                              an Endpoint publishes only through one of its own project"
+                        .to_owned(),
+                });
+            }
+        }
         let instance_id = ResourceId::new(
             id.group.clone(),
             CkanInstanceSpec::KIND,
-            Some(namespace),
+            Some(project.to_owned()),
             publication.instance_ref.name(),
         );
         let Some(instance_manifest) = repo.get(&instance_id) else {
