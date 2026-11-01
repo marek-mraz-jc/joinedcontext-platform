@@ -25,6 +25,7 @@ use crate::handlers::writes::{
 };
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Constraints;
+use crate::pdp::metadata::Passed;
 use crate::pdp::write_guard;
 use crate::proxy::{self};
 use crate::resolver::{DeclaredTypes, Endpoint};
@@ -458,7 +459,8 @@ pub(crate) async fn serve_ngsi_ld_view(
     };
     let view = view(&endpoint);
     let mut request = request;
-    if let Err(answer) = answered_here(&endpoint, operation, &view, &params) {
+    let passed = metadata_passed(&endpoint, &subject, operation);
+    if let Err(answer) = answered_here(&endpoint, operation, &view, &params, passed.as_ref()) {
         return *answer;
     }
     let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
@@ -528,11 +530,54 @@ pub(crate) async fn serve_ngsi_ld_view(
         &format!("/x/views/{view}/ngsi-ld/v1"),
         prefix,
     );
+    let answer = stripped(answer, passed.as_ref()).await;
     caller_answer(answer, (&endpoint, &subject), operation, &units_filled).await
 }
 
+/// What the caller's grants pass of each attribute's metadata on a read (ADR-N-066 2.4,
+/// DM-139); `None` when they narrow nothing, a write, or a grant without an `attributes` block.
+fn metadata_passed(endpoint: &Endpoint, subject: &Subject, operation: Operation) -> Option<Passed> {
+    if operation.is_write() {
+        return None;
+    }
+    let now = crate::pdp::now();
+    let versions = crate::pdp::evaluator::grants_action(
+        subject,
+        jc_core::kinds::PlatformAction::ReadVersions,
+        &endpoint.policies,
+        now,
+    );
+    Passed::of(subject, &endpoint.policies, operation, versions, now)
+}
+
+/// A successful read with the metadata members `passed` does not list stripped (DM-139,
+/// DM-151). Fails closed: an answer too large to hold or not JSON is not passed on.
+async fn stripped(answer: Response<Body>, passed: Option<&Passed>) -> Response<Body> {
+    let Some(passed) = passed.filter(|_| answer.status().is_success()) else {
+        return answer;
+    };
+    let (parts, body) = answer.into_parts();
+    let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+        let mut refused = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
+            .with_detail("the answer is too large to narrow to your access; ask for fewer Entities")
+            .into_response();
+        *refused.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+        return refused;
+    };
+    if held.is_empty() {
+        return proxy::with_body(parts, held);
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(&held) else {
+        tracing::error!("a read answer is no JSON, so its metadata cannot be narrowed");
+        return ProblemDetails::internal().into_response();
+    };
+    passed.strip(&mut value);
+    proxy::with_body(parts, serde_json::to_vec(&value).unwrap_or_default())
+}
+
 /// What the gateway answers itself before a view request is judged: an Endpoint without a
-/// view (`503 no-view`) and a query of a shape no view answers. `Ok` goes on to the view, which
+/// view (`503 no-view`), a query of a shape no view answers and a query on a metadata member
+/// the caller's grants do not pass (DM-139). `Ok` goes on to the view, which
 /// answers the type and Attribute lists too, from its catalogue filtered by the caller's grant
 /// (T-4934, T-5391).
 fn answered_here(
@@ -540,9 +585,14 @@ fn answered_here(
     operation: Operation,
     view: &str,
     params: &[(String, String)],
+    passed: Option<&Passed>,
 ) -> Result<(), Box<Response<Body>>> {
     if !has_view(view) {
         return Err(Box::new(no_view(endpoint)));
+    }
+    if let Some(refusal) = passed.and_then(|passed| passed.refusal(params)) {
+        tracing::info!(slug = %endpoint.slug, "refused: a query on a metadata member not passed");
+        return Err(Box::new(refusal.into_response()));
     }
     if operation == Operation::QueryEntity {
         if let Some(refusal) = query_shape_refusal(params) {
@@ -1570,13 +1620,13 @@ mod tests {
         let endpoint = crate::mcp::catalog::tests::fixture();
         let read = Operation::RetrieveEntity;
         let long = "v".repeat(MAX_VIEW_ID + 1);
-        let refused = answered_here(&endpoint, read, &long, &[]);
+        let refused = answered_here(&endpoint, read, &long, &[], None);
         let refused = refused.err().map(|answer| answer.status());
         assert_eq!(refused, Some(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(answered_here(&endpoint, read, "view", &[]).is_ok());
+        assert!(answered_here(&endpoint, read, "view", &[], None).is_ok());
         // The type and Attribute lists are the view's to answer (T-5391).
         for list in [Operation::RetrieveEntityTypes, Operation::RetrieveAttrTypes] {
-            assert!(answered_here(&endpoint, list, "view", &[]).is_ok());
+            assert!(answered_here(&endpoint, list, "view", &[], None).is_ok());
         }
     }
 
