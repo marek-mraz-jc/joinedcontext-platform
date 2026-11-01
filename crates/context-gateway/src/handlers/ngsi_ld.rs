@@ -1068,19 +1068,37 @@ pub(crate) async fn view_request(
             axum::http::HeaderValue::from_static("changes"),
         );
     }
-    // ADR-N-054 2.4: the broker answers `versions=all` only on this grant (DM-114)
-    if crate::pdp::evaluator::grants_action(
-        subject,
-        jc_core::kinds::PlatformAction::ReadVersions,
-        &endpoint.policies,
-        crate::pdp::now(),
-    ) {
-        request.headers_mut().insert(
-            tenancy::READ_VERSIONS,
-            axum::http::HeaderValue::from_static("true"),
-        );
+    // ADR-N-066 2.3: the broker answers `versions=all` only for the attributes the grant
+    // lists (DM-114, DM-149)
+    if let Some(value) =
+        crate::pdp::evaluator::version_reads(subject, &endpoint.policies, crate::pdp::now())
+            .and_then(|names| tenancy::read_versions(names.as_ref()))
+    {
+        request.headers_mut().insert(tenancy::READ_VERSIONS, value);
     }
     Ok(())
+}
+
+/// The attributes a write touches: the one its path names, else every member of its entity or
+/// entities but `id`, `type`, `@context` and `scope`; `None` when it names none (an entity
+/// delete), which is every attribute the entity holds.
+fn touched_attributes(path: &str, sent: &[u8]) -> Option<std::collections::BTreeSet<String>> {
+    if let Some(attr) = crate::operations::targeted_attribute(path) {
+        return Some([attr].into());
+    }
+    let body: Value = serde_json::from_slice(sent).ok()?;
+    let entities = match &body {
+        Value::Array(entities) => entities.iter().collect(),
+        one => vec![one],
+    };
+    let names: std::collections::BTreeSet<String> = entities
+        .into_iter()
+        .filter_map(Value::as_object)
+        .flat_map(|e| e.keys())
+        .filter(|k| !matches!(k.as_str(), "id" | "type" | "@context" | "scope"))
+        .cloned()
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 /// Why a subscription's notification endpoint may not be stored, read off its body: the target
@@ -1173,6 +1191,17 @@ pub(crate) async fn view_payload(
                 .await
                 .map_err(|problem| answer(*problem))?;
         }
+    }
+    // ADR-N-066 2.3: an attribute the grant keeps is kept whatever the client sends (DM-150)
+    if operation.is_write()
+        && crate::pdp::evaluator::keeps_versions(
+            subject,
+            &endpoint.policies,
+            crate::pdp::now(),
+            touched_attributes(path, sent).as_ref(),
+        )
+    {
+        headers.insert(tenancy::AUDIT, HeaderValue::from_static("changes"));
     }
     if sent.len() != before {
         headers.remove(CONTENT_LENGTH);
@@ -1357,6 +1386,32 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-N-066 2.3: the attributes a write touches, read off its path or its entities.
+    #[test]
+    fn a_write_touches_the_attribute_of_its_path_or_the_members_of_its_entities() {
+        let set = |names: &[&str]| Some(names.iter().map(|n| (*n).to_owned()).collect());
+        assert_eq!(
+            touched_attributes("/entities/urn:x/attrs/na%6De", b"{}"),
+            set(&["name"])
+        );
+        assert_eq!(
+            touched_attributes("/entities/urn:x/attrs", br#"{"pm10": {}, "@context": []}"#),
+            set(&["pm10"])
+        );
+        assert_eq!(
+            touched_attributes(
+                "/entityOperations/upsert",
+                br#"[{"id": "a", "type": "Air", "name": {}}, {"id": "b", "pm10": {}}]"#
+            ),
+            set(&["name", "pm10"])
+        );
+        assert_eq!(touched_attributes("/entities/urn:x", b""), None);
+        assert_eq!(
+            touched_attributes("/entities", br#"{"id": "a", "type": "Air"}"#),
+            None
+        );
+    }
 
     /// A cap holds however the pair is percent-spelled, since the broker decodes it
     /// (F-R2PLT2-017); every other pair goes on byte for byte.
