@@ -144,7 +144,7 @@ fn projects_are_listed_without_a_wildcard() {
 }
 
 #[test]
-fn a_segment_outside_the_eight_is_refused() {
+fn a_segment_outside_the_nine_is_refused() {
     let err = refused(&with("segments: [data-read, approve]"));
     assert!(err.contains("approve"), "{err}");
     assert!(refused(&with("segments: []")).contains("spec.segments"));
@@ -157,6 +157,7 @@ fn a_segment_outside_the_eight_is_refused() {
         "publish",
         "apps",
         "operate",
+        "knowledge",
         "admin",
     ] {
         assert!(
