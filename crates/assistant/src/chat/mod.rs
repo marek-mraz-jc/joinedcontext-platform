@@ -588,8 +588,14 @@ async fn preflight(
     }
 }
 
-/// The checks of AG-98 a body passes before anything is spent on it.
-pub fn validate(question: &Question, deployment: &Deployment) -> Result<(), String> {
+/// The checks of AG-98 a body passes before anything is spent on it. `reached` holds the
+/// connector names of the Endpoints the resolver gives the deployment (AG-121): a question may
+/// switch on one its selector joined, not only one `spec.connectors` lists (JC1-18).
+pub fn validate(
+    question: &Question,
+    deployment: &Deployment,
+    reached: &[String],
+) -> Result<(), String> {
     let message = question.message.trim();
     if message.is_empty() || message.chars().count() > MAX_TEXT_CHARS {
         return Err(format!("message is 1 to {MAX_TEXT_CHARS} characters"));
@@ -611,6 +617,7 @@ pub fn validate(question: &Question, deployment: &Deployment) -> Result<(), Stri
         if let Some(unknown) = connectors.iter().find(|c| {
             !deployment.spec.connectors.iter().any(|d| &d.endpoint == *c)
                 && deployment.spec.mcp_server.as_ref() != Some(*c)
+                && !reached.contains(c)
         }) {
             return Err(format!(
                 "connectors: this assistant has no connector `{unknown}`"
@@ -834,6 +841,32 @@ pub async fn warm_types(state: Arc<ChatState>) {
     WARMING.store(false, Ordering::Release);
 }
 
+/// The name a connector gives a resolved Endpoint: `{project}/{endpoint}` for a project of
+/// `scope.projects`, the bare name in the deployment's own project.
+fn connector_name(project: &str, name: &str, deployment: &Deployment) -> String {
+    if project == deployment.project {
+        name.to_owned()
+    } else {
+        format!("{project}/{name}")
+    }
+}
+
+/// The connector names of every Endpoint the resolver gives the deployment (AG-121).
+fn reached(state: &ChatState, deployment: &Deployment) -> Vec<String> {
+    state
+        .snapshot
+        .read()
+        .map(|snapshot| {
+            snapshot
+                .reach(deployment)
+                .endpoints
+                .iter()
+                .map(|resolved| connector_name(&resolved.project, &resolved.name, deployment))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The Endpoints the resolver gives the deployment (AG-121: connectors, selector and named
 /// server, less `exclude`, inside its project's reach), switched on for this question, that the
 /// asker may reach, with their tools: a public Endpoint without a token; on an `internal`
@@ -856,12 +889,7 @@ async fn connected(
         .collect();
     let mut reachable = Vec::new();
     for resolved in snapshot.reach(deployment).endpoints {
-        // The name a connector gives it: `{project}/{endpoint}` for a project of `scope.projects`.
-        let named = if resolved.project == deployment.project {
-            resolved.name.clone()
-        } else {
-            format!("{}/{}", resolved.project, resolved.name)
-        };
+        let named = connector_name(&resolved.project, &resolved.name, deployment);
         if chosen.is_some_and(|chosen| !chosen.contains(&named)) {
             continue;
         }
@@ -1756,7 +1784,11 @@ async fn ask(
             "Asistent je teraz vypnutý. Skúste to neskôr alebo navštívte webovú stránku mesta.",
         );
     }
-    if let Err(why) = validate(&question, &deployment) {
+    let reached = match question.connectors {
+        Some(_) => reached(state, &deployment),
+        None => Vec::new(),
+    };
+    if let Err(why) = validate(&question, &deployment, &reached) {
         return problem(400, why);
     }
     if deployment.spec.channel.is_anonymous() {
@@ -2215,6 +2247,37 @@ async fn ask(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// JC1-18: a question may switch on an Endpoint the deployment's selector joined; one the
+    /// resolver does not give the deployment is refused as before.
+    #[test]
+    fn a_question_switches_on_a_selected_endpoint_and_no_other() {
+        let spec: jc_core::kinds::assistant::AssistantDeploymentSpec =
+            serde_json::from_value(serde_json::json!({
+                "publicId": "bb-help",
+                "channel": "internal",
+                "sources": ["web"],
+            }))
+            .expect("a spec");
+        let deployment = Deployment {
+            project: "bb".into(),
+            name: "help".into(),
+            spec,
+        };
+        let question = Question {
+            conversation: None,
+            message: "Kde zaparkujem?".into(),
+            history: Vec::new(),
+            connectors: Some(vec!["parking".into(), "bbsk/roads".into()]),
+        };
+        let reached = vec![
+            connector_name("bb", "parking", &deployment),
+            connector_name("bbsk", "roads", &deployment),
+        ];
+        assert_eq!(validate(&question, &deployment, &reached), Ok(()));
+        let refused = validate(&question, &deployment, &reached[..1]).expect_err("refused");
+        assert!(refused.contains("bbsk/roads"), "{refused}");
+    }
 
     /// T-5779: a turn's log id is the conversation's hash and the turn, never the id itself.
     #[test]
