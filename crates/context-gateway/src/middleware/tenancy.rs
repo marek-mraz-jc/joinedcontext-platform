@@ -291,6 +291,22 @@ fn encode(value: &str) -> String {
     out
 }
 
+/// The value of [`READ_VERSIONS`] for these attributes (`None`: every one): `true`, the value a
+/// broker before ADR-N-066 reads too, or the names percent-encoded and comma separated; `None`
+/// when the list is empty, which grants nothing.
+pub fn read_versions(names: Option<&std::collections::BTreeSet<String>>) -> Option<HeaderValue> {
+    let value = match names {
+        None => "true".to_owned(),
+        Some(names) if names.is_empty() => return None,
+        Some(names) => names
+            .iter()
+            .map(|n| encode(n))
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    HeaderValue::from_str(&value).ok()
+}
+
 fn list<'a>(
     headers: &mut HeaderMap,
     name: HeaderName,
@@ -339,6 +355,25 @@ pub fn keep_provenance(pinned: &HeaderMap, headers: &mut HeaderMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-N-066 2.3 (DM-149): every attribute is `true`, a list is its names encoded, and an empty
+    /// list sends nothing, which the broker reads as no grant.
+    #[test]
+    fn read_versions_is_true_or_the_encoded_names() {
+        assert_eq!(
+            read_versions(None).as_ref().map(HeaderValue::as_bytes),
+            Some(&b"true"[..])
+        );
+        let names: std::collections::BTreeSet<String> =
+            ["name".to_owned(), "air:pm 10".to_owned()].into();
+        assert_eq!(
+            read_versions(Some(&names))
+                .as_ref()
+                .map(HeaderValue::as_bytes),
+            Some(&b"air%3Apm%2010,name"[..])
+        );
+        assert_eq!(read_versions(Some(&Default::default())), None);
+    }
 
     #[test]
     fn a_clients_mesh_headers_never_reach_the_broker() {

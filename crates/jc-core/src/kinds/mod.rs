@@ -129,9 +129,10 @@ pub use pipeline_history::{AttributeHistory, History, Keep};
 pub use pipeline_lifetime::{AttributeLifetime, End, Lifetime, LifetimeMode};
 pub use pipeline_source_deletes::{SourceDeleteMode, SourceDeletes};
 pub use policy::{
-    is_service_account_user, EntitySelector, Operation, OperationGroup, OperationRef,
-    PlatformAction, PolicyEffect, PolicyRule, PolicySpec, Principal, PrincipalKind,
-    RegistrationInfo, ScopeDefinitionSpec, Validity,
+    is_service_account_user, AttributeCapabilities, EntitySelector, MetadataMember, Operation,
+    OperationGroup, OperationRef, PlatformAction, PolicyEffect, PolicyRule, PolicySpec, Principal,
+    PrincipalKind, RegistrationInfo, ScopeDefinitionSpec, Validity, VersionsCapability,
+    WriteCapability,
 };
 pub use role::{
     BindingValidity, Constraint, RoleBindingSpec, RoleSpec, Rule, Subject, SubjectSource, Verb,
