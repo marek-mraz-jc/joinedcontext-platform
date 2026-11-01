@@ -221,6 +221,58 @@ def test_a_workbook_gives_one_class_per_sheet_with_typed_cells():
     assert answer["rows"] == 3
 
 
+
+def _book(sheets: dict[str, list[list[object]]]) -> bytes:
+    book = openpyxl.Workbook()
+    book.remove(book.active)
+    for title, rows in sheets.items():
+        sheet = book.create_sheet(title)
+        for row in rows:
+            sheet.append(row)
+    buffer = io.BytesIO()
+    book.save(buffer)
+    return buffer.getvalue()
+
+
+def test_sheets_share_a_slot_of_one_name_and_shape_and_rename_only_a_different_one():
+    """JC1-19: a second sheet's `name` column was `name_2` because every earlier sheet's slots
+    counted as taken. One name and shape is one LinkML slot; another shape keeps its own name."""
+    answer = infer(
+        "city.xlsx",
+        _book(
+            {
+                "Stations": [["name", "code"], ["North", "s1"], ["South", "s2"]],
+                "Stops": [["name", "code"], ["Kamppi", 7], ["Kallio", 9]],
+            }
+        ),
+    )
+    model = yaml.safe_load(answer["linkml"])
+    assert model["classes"]["Stations"]["slots"] == ["name", "code"]
+    assert model["classes"]["Stops"]["slots"] == ["name", "code_2"]
+    assert model["slots"]["code"]["range"] == "string"
+    assert model["slots"]["code_2"]["range"] == "integer"
+    assert {"op": "attachSlot", "class": "Stops", "slot": "name"} in answer["operations"]
+    assert [op["name"] for op in answer["operations"] if op["op"] == "addSlot"] == ["name", "code", "code_2"]
+
+
+def test_a_sample_is_read_no_further_than_max_rows(monkeypatch):
+    """JC1-34: the readers stopped at MAX_ROWS only after reading every row."""
+    monkeypatch.setattr(infer_schema, "MAX_ROWS", 3)
+    seen: list[int] = []
+    real = infer_schema.csv.reader
+
+    def counting(*args, **kwargs):
+        for row in real(*args, **kwargs):
+            seen.append(1)
+            yield row
+
+    monkeypatch.setattr(infer_schema.csv, "reader", counting)
+    tables = parse("big.csv", ("n\n" + "".join(f"{i}\n" for i in range(100))).encode())
+    assert len(tables[0][2]) == 3
+    assert len(seen) == 4
+    rows = parse("big.xlsx", _book({"S": [["n"], *[[i] for i in range(100)]]}))[0][2]
+    assert rows == [[0], [1], [2]]
+
 def test_the_excel_reader_refuses_external_entities():
     """DM-55: openpyxl parses through defusedxml, which raises on an entity declaration instead
     of resolving it. The guard is asserted, not assumed."""
