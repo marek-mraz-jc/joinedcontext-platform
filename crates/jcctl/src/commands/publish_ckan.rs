@@ -56,6 +56,9 @@ pub struct Target {
     pub instance_title: Option<String>,
     /// What the public may read of the Endpoint's history: its automatic charts (T-5421).
     pub history: ckan::History,
+    /// The entity types the public role may read by name in the Policies the Endpoint binds:
+    /// the page names them even while the type list lacks one for a moment (T-6329).
+    pub granted: Vec<String>,
 }
 
 impl Target {
@@ -244,7 +247,15 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             .as_ref()
             .and_then(|space| space.default_locale.clone())
             .filter(|locale| !locale.trim().is_empty());
-        let history = history(repo, id, &spec, space.as_ref());
+        let policies = bound_policies(repo, id, &spec);
+        let history = ckan::History {
+            grants: policies.iter().flat_map(temporal_grants).collect(),
+            retention: space
+                .as_ref()
+                .map(|s| s.retention.clone())
+                .unwrap_or_default(),
+        };
+        let granted = granted_types(&policies);
         let instance_title = title_in(
             &instance_manifest.manifest.metadata.rest,
             language.as_deref(),
@@ -259,6 +270,7 @@ pub fn targets(repo: &Repository, project: &str) -> Result<Vec<Target>, Error> {
             language,
             instance_title,
             history,
+            granted,
         });
     }
     Ok(targets)
@@ -286,21 +298,18 @@ fn space_of(
     serde_json::from_value(repo.get(&space)?.manifest.spec.clone()).ok()
 }
 
-/// What the public may read of the history an Endpoint serves (T-5421): the `queryTemporal`
-/// grants to the public role in the Policies of its project and space it binds (all of them
-/// when it names none, ADR-N-057), and the space's retention.
-fn history(
+/// The single-rule Policies of the Endpoint's project and space it binds (all of them when it
+/// names none, ADR-N-057): what the public may read of it, its history included (T-5421).
+fn bound_policies(
     repo: &Repository,
     endpoint: &ResourceId,
     spec: &EndpointSpec,
-    space: Option<&ContextSpaceSpec>,
-) -> ckan::History {
+) -> Vec<PolicySpec> {
     let bound = |name: &str| {
         spec.policy_refs()
             .is_none_or(|refs| refs.iter().any(|r| r.local_id() == name))
     };
-    let grants = repo
-        .iter()
+    repo.iter()
         .filter(|(id, _)| {
             id.kind == PolicySpec::KIND && id.namespace == endpoint.namespace && bound(&id.name)
         })
@@ -309,13 +318,59 @@ fn history(
             policy.expand(&id.name).ok()
         })
         .flatten()
-        .filter(|(_, policy)| policy.context_space_ref.name() == spec.context_space_ref.name())
-        .flat_map(|(_, policy)| temporal_grants(&policy))
+        .map(|(_, policy)| policy)
+        .filter(|policy| policy.context_space_ref.name() == spec.context_space_ref.name())
+        .collect()
+}
+
+/// The entity types the public role may query by name among `policies`, in their order, less
+/// those a public prohibition names whole (T-6329). A type whose entities all expired for a
+/// moment (helsinki-transport's Vehicle, five minutes after its last position) leaves the
+/// Endpoint's type list; its grant stays.
+///
+/// ponytail: a granted type that never holds an entity is named too; its OData set answers 404
+/// until the first one arrives.
+fn granted_types(policies: &[PolicySpec]) -> Vec<String> {
+    let reads = |op: &OperationRef| match op {
+        OperationRef::Single(op) => *op == Operation::QueryEntity,
+        OperationRef::Group(group) => group.operations().contains(&Operation::QueryEntity),
+    };
+    let public = |policy: &&PolicySpec| {
+        policy.assignee.kind == PrincipalKind::Role && policy.assignee.id == "public"
+    };
+    let names = |policy: &PolicySpec, whole: bool| -> Vec<String> {
+        policy
+            .information
+            .iter()
+            .flat_map(|info| &info.entities)
+            .filter(|e| !whole || e.id_pattern.is_none())
+            .map(|e| e.entity_type.clone())
+            .filter(|kind| ckan::is_type_name(kind))
+            .collect()
+    };
+    let refused: Vec<String> = policies
+        .iter()
+        .filter(public)
+        .filter(|p| !p.effect.is_permission() && p.operations.iter().any(reads))
+        .filter(|p| {
+            p.information
+                .iter()
+                .all(|info| info.property_names.is_empty())
+        })
+        .flat_map(|p| names(p, true))
         .collect();
-    ckan::History {
-        grants,
-        retention: space.map(|s| s.retention.clone()).unwrap_or_default(),
+    let mut granted: Vec<String> = Vec::new();
+    for kind in policies
+        .iter()
+        .filter(public)
+        .filter(|p| p.effect.is_permission() && p.operations.iter().any(reads))
+        .flat_map(|p| names(p, false))
+    {
+        if !granted.contains(&kind) && !refused.contains(&kind) {
+            granted.push(kind);
+        }
     }
+    granted
 }
 
 /// The public `queryTemporal` grants of one single-rule Policy, one per `information` entry. A
@@ -499,8 +554,12 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
         url,
         message: format!("the record is not JSON: {e}"),
     })?;
-    let (kind, served) = example_type(&base)?;
-    with_types(&mut record, kind, served);
+    let (kind, served) = example_type(&base, &target.granted)?;
+    with_types(
+        &mut record,
+        kind,
+        served.map(|read| with_granted(read, &target.granted)),
+    );
     Ok(record)
 }
 
@@ -509,13 +568,17 @@ pub fn record(target: &Target, settings: &Settings) -> Result<Value, Error> {
 /// first type that list names (T-4802: the guide of the Bridge-only bbsk-mosty named
 /// AdministrativeArea, so its dataset page sent readers, and the assistant, to a type it does
 /// not serve). `None` when neither answers: the texts then say how to list the types. With it
-/// the types the list names, `None` when it could not be read.
+/// the types the list names, then the `granted` ones it lacks (T-6329), `None` when it could not
+/// be read.
 ///
 /// A read the gateway refused for load (429), failed (5xx) or never answered is an error: the
 /// Endpoint's types are unknown only for that moment, and a page written without them sent the
 /// assistant to no dataset until the next refresh (T-6091: every dataset republished at once
 /// after a Portal restart, bbsk-zariadenia lost its typed addresses for an hour).
-fn example_type(base: &str) -> Result<(Option<String>, Option<Vec<String>>), Error> {
+fn example_type(
+    base: &str,
+    granted: &[String],
+) -> Result<(Option<String>, Option<Vec<String>>), Error> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(FETCH_TIMEOUT)
@@ -545,7 +608,8 @@ fn example_type(base: &str) -> Result<(Option<String>, Option<Vec<String>>), Err
     };
     let guide = read("ws", reqwest::StatusCode::UPGRADE_REQUIRED)?.and_then(|g| guide_type(&g));
     let served = read("ngsi-ld/v1/types", reqwest::StatusCode::OK)?.map(|list| served_types(&list));
-    Ok((example_of(guide, served.clone()), served))
+    let example = example_of(guide, served.clone());
+    Ok((example, served.map(|read| with_granted(read, granted))))
 }
 
 /// `record` with the private members the usage texts read: the example type and the types the
@@ -560,6 +624,16 @@ fn with_types(record: &mut Value, kind: Option<String>, served: Option<Vec<Strin
     if let Some(served) = served.filter(|served| !served.is_empty()) {
         members.insert(ckan::SERVED_TYPES.to_owned(), json!(served));
     }
+}
+
+/// The types `read` from the Endpoint's list, then those it grants the list lacks (T-6329).
+fn with_granted(mut read: Vec<String>, granted: &[String]) -> Vec<String> {
+    for kind in granted {
+        if !read.contains(kind) {
+            read.push(kind.clone());
+        }
+    }
+    read
 }
 
 /// The short names of an NGSI-LD `EntityTypeList`; none for any other answer.
@@ -676,7 +750,9 @@ fn outcome_word(outcome: Outcome) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{example_of, example_type, guide_type, refusal, served_types, with_types};
+    use super::{
+        example_of, example_type, guide_type, refusal, served_types, with_granted, with_types,
+    };
     use reqwest::StatusCode;
     use serde_json::json;
 
@@ -752,6 +828,19 @@ mod tests {
         assert_eq!(list, json!([]));
     }
 
+    /// T-6329: a granted type the read lacks follows the read's own, once; the read's order holds.
+    #[test]
+    fn a_granted_type_the_list_lacks_is_still_named() {
+        let read = vec!["Alert".to_owned(), "GtfsStop".to_owned()];
+        let granted = ["Vehicle".to_owned(), "Alert".to_owned()];
+        assert_eq!(
+            with_granted(read.clone(), &granted),
+            ["Alert", "GtfsStop", "Vehicle"]
+        );
+        assert_eq!(with_granted(Vec::new(), &granted), ["Vehicle", "Alert"]);
+        assert_eq!(with_granted(read.clone(), &[]), read);
+    }
+
     /// T-4132: the guide's example names the type; a guide without one names none.
     #[test]
     fn the_guides_example_names_the_type() {
@@ -808,9 +897,14 @@ mod tests {
     fn a_failed_type_read_fails_the_record_instead_of_dropping_the_type() {
         let types = r#"{"type":"EntityTypeList","typeList":["PointOfInterest"]}"#;
         let answered = gateway(vec![("/ws", 426, "{}"), ("/ngsi-ld/v1/types", 200, types)]);
-        let (kind, served) = example_type(&answered).expect("both read");
+        let (kind, served) = example_type(&answered, &[]).expect("both read");
         assert_eq!(kind.as_deref(), Some("PointOfInterest"));
         assert_eq!(served, Some(vec!["PointOfInterest".to_owned()]));
+        // T-6329: a granted type the list lacks is still served; the example stays a listed one.
+        let granted = ["Vehicle".to_owned()];
+        let (kind, served) = example_type(&answered, &granted).expect("both read");
+        assert_eq!(kind.as_deref(), Some("PointOfInterest"));
+        assert_eq!(served.expect("read"), ["PointOfInterest", "Vehicle"]);
 
         for (status, body) in [
             (429, "too many"),
@@ -820,7 +914,7 @@ mod tests {
                 ("/ws", 426, "{}"),
                 ("/ngsi-ld/v1/types", status, body),
             ]);
-            let error = example_type(&failing)
+            let error = example_type(&failing, &[])
                 .expect_err("a failed read")
                 .to_string();
             assert!(error.contains(&status.to_string()), "{error}");
@@ -828,13 +922,13 @@ mod tests {
         }
         let refused = gateway(vec![("/ws", 503, "")]);
         assert!(
-            example_type(&refused).is_err(),
+            example_type(&refused, &[]).is_err(),
             "the guide's failure counts too"
         );
 
         let private = gateway(vec![("/ws", 401, ""), ("/ngsi-ld/v1/types", 401, "")]);
         assert_eq!(
-            example_type(&private).expect("a refusal is an answer"),
+            example_type(&private, &[]).expect("a refusal is an answer"),
             (None, None)
         );
 
@@ -842,6 +936,9 @@ mod tests {
         let address = silent.local_addr().expect("bound");
         std::thread::spawn(move || silent.incoming().for_each(drop));
         let hung_up = format!("http://{address}/api/endpoint/e");
-        assert!(example_type(&hung_up).is_err(), "no answer is no answer");
+        assert!(
+            example_type(&hung_up, &[]).is_err(),
+            "no answer is no answer"
+        );
     }
 }

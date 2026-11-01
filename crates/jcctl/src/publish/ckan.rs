@@ -1412,7 +1412,7 @@ fn catalog_extras(record: &Value, language: Option<&str>) -> Vec<Value> {
 }
 
 /// A plain entity type name: what a URL path segment carries as itself.
-fn is_type_name(kind: &str) -> bool {
+pub(crate) fn is_type_name(kind: &str) -> bool {
     (1..=100).contains(&kind.len())
         && kind.starts_with(|c: char| c.is_ascii_alphabetic())
         && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
