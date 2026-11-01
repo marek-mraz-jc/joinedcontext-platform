@@ -145,7 +145,8 @@ def analyse(view: SchemaView) -> tuple[list[Relationship], list[str]]:
                     path,
                     "class-range-not-relationship",
                     f"{slot.name} on {owner} points at the class {target} but is a {kind}; "
-                    "a slot whose range is a class is a Relationship",
+                    "a slot whose range is a class is a Relationship: declare it with "
+                    f"`annotations: {{ngsi_ld_kind: Relationship}}` and an inverse slot on {target} that points back",
                 )
             continue
         if target is None or target == EXTERNAL_RANGE:

@@ -1363,7 +1363,10 @@ impl<'a> WriteBindings<'a> {
                 let target = output.target_endpoint.local_id();
                 let key = (project.clone(), target.to_owned());
                 let why = match self.endpoints.get(&key) {
-                    None => Some(format!("project {project} declares no Endpoint {target}")),
+                    None => Some(no_endpoint(&project, target, |name| {
+                        self.endpoints
+                            .contains_key(&(project.clone(), name.to_owned()))
+                    })),
                     Some(endpoint) => {
                         let name = bounded(&format!("{account}-w-{}", index + 1));
                         derived
@@ -2329,6 +2332,18 @@ fn displays_off_the_projection(repo_dir: &Path, repo: &Repository) -> Vec<(Locat
     refused
 }
 
+/// Why a Pipeline output's `targetEndpoint` reaches no Endpoint of `project`, with the form to
+/// write: a client copying a `{project}:{name}` id (T-6392) is told the name alone is the id.
+fn no_endpoint(project: &str, target: &str, declared: impl Fn(&str) -> bool) -> String {
+    let refused = format!("project {project} declares no Endpoint {target}");
+    match target.rsplit_once(':') {
+        Some((_, name)) if declared(name) => format!(
+            "{refused}; write the Endpoint's name alone: targetEndpoint: urn:ngsi-ld:Endpoint:{name}"
+        ),
+        _ => format!("{refused}; write targetEndpoint: urn:ngsi-ld:Endpoint:<name of an Endpoint of {project}>"),
+    }
+}
+
 /// A Context Space has one data model, and names it (DM-61, DM-62, ADR-N-033).
 ///
 /// Refused: a second model of one space, a `dataModelRef` that names no model of that space,
@@ -2362,8 +2377,9 @@ fn one_model_per_space(repo_dir: &Path, repo: &Repository) -> (Located, Located)
                     location.clone(),
                     format!(
                         "DataModel `{}` is a second model of space `{space}` beside `{first}`; a \
-                         space has one model (DM-61). Merge them into one: jcctl model merge \
-                         --repo-dir <repo> --project {} --space {space} (DM-62)",
+                         space has one model (DM-61). Add its classes to `{first}`, or merge them into \
+                         one: jcctl model merge --repo-dir <repo> --project {} --space {space} \
+                         (DM-62)",
                         id.name,
                         id.namespace.as_deref().unwrap_or_default(),
                     ),

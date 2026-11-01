@@ -16,7 +16,7 @@ from pyshacl import validate
 from rdflib import Graph, URIRef
 from rdflib.namespace import OWL, RDF
 
-from common import RelationshipError
+from common import ModelError, RelationshipError
 from gen_context import compile_context
 from gen_json_schema import compile_schema
 from gen_rdf_artifacts import compile_owl, compile_shacl
@@ -177,3 +177,19 @@ def test_the_context_expands_both_ends_as_iris():
     context = compile_context(model("many-to-many"))["@context"]
     assert context["users"]["@type"] == "@id"
     assert context["school"]["@type"] == "@id"
+
+
+def test_a_class_range_property_refusal_says_how_to_declare_the_relationship():
+    """T-6387: the refusal names the annotation to write, so a client fixes it in one try."""
+    with pytest.raises(RelationshipError) as refused:
+        compile_schema(model("one-to-many", BROKEN["class-range-not-relationship"]))
+    (problem,) = [p for p in refused.value.problems if ": class-range-not-relationship: " in p]
+    assert "`annotations: {ngsi_ld_kind: Relationship}`" in problem
+    assert "an inverse slot on School" in problem
+
+
+def test_an_unknown_ngsi_ld_kind_names_the_annotation_to_write():
+    """T-6387: `ngsi_ld_kind: Link` is refused with the spelling a Relationship takes."""
+    with pytest.raises(ModelError) as refused:
+        compile_schema(model("one-to-many", lambda doc: doc["slots"]["school"]["annotations"].update(ngsi_ld_kind="Link")))
+    assert "`annotations: {ngsi_ld_kind: Relationship}`" in str(refused.value)

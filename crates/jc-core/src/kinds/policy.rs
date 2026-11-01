@@ -944,6 +944,18 @@ impl PolicySpec {
                 reason: "assigner must not be empty",
             });
         }
+        // The assigner names the organisation that grants, never a person: an AI client filled
+        // in the e-mail of the account running it (T-6391), personal data that lands in Git.
+        if !self.assigner.starts_with("did:")
+            || self.assigner.chars().any(|c| c == '@' || c.is_whitespace())
+        {
+            return Err(Error::Name {
+                field: "spec.assigner",
+                value: self.assigner.clone(),
+                reason: "the assigner is the organisation's DID, written `did:web:{orgDomain}`; \
+                         an e-mail or a person's name is no assigner",
+            });
+        }
 
         if self.assignee.id.trim().is_empty() {
             return Err(Error::Name {
