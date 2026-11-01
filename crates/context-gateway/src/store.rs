@@ -1087,6 +1087,7 @@ fn portal_personal_data_read(
                 .collect(),
             property_names: Vec::new(),
             relationship_names: Vec::new(),
+            attributes: Default::default(),
         }],
         q: None,
         scope_q: None,

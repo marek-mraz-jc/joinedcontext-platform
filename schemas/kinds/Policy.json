@@ -2,6 +2,57 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AttributeCapabilities": {
+      "additionalProperties": false,
+      "description": "One attribute's capabilities in a grant (ADR-N-066, DM-147). A field left unset takes the `*` entry's field, then the grant's own behaviour without the block.",
+      "properties": {
+        "history": {
+          "description": "Whether its history is readable; `true` needs `queryTemporal` or `retrieveTemporal`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "metadata": {
+          "description": "The metadata members passed for this attribute, e.g. `[observedAt, unitCode]`.",
+          "items": {
+            "$ref": "#/definitions/MetadataMember"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "Whether the current value is readable, e.g. `false` to keep an attribute for history only.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "versions": {
+          "description": "Version capabilities: `read` needs the action `readVersions`, `keep` a write operation.",
+          "items": {
+            "$ref": "#/definitions/VersionsCapability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "write": {
+          "description": "The write kinds allowed on this attribute, e.g. `[update]`; needs a write operation.",
+          "items": {
+            "$ref": "#/definitions/WriteCapability"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Build": {
       "additionalProperties": false,
       "description": "The artifact one build of an `App` published, as the build lane writes it back (AP-13a).",
@@ -111,6 +162,74 @@
         "type"
       ],
       "type": "object"
+    },
+    "MetadataMember": {
+      "description": "A metadata member a grant may pass for an attribute (ADR-N-066 2.4, DM-139).",
+      "oneOf": [
+        {
+          "description": "When the value was observed.",
+          "enum": [
+            "observedAt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The value's unit.",
+          "enum": [
+            "unitCode"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "When the attribute was created.",
+          "enum": [
+            "createdAt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "When the attribute was last changed.",
+          "enum": [
+            "modifiedAt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The organization of the last change.",
+          "enum": [
+            "modifiedBy.organization"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Whether a person, a pipeline or a client made the last change.",
+          "enum": [
+            "modifiedBy.actorKind"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Who made the last change: a person's `sub` or a client id; never public (DM-140).",
+          "enum": [
+            "modifiedBy.actor"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every provenance member of a version; never public (DM-140).",
+          "enum": [
+            "provenance"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The reason typed with a change, which can name a person (DM-151).",
+          "enum": [
+            "reason"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "MultiLanguageMap": {
       "additionalProperties": {
@@ -900,6 +1019,13 @@
       "additionalProperties": false,
       "description": "Specification of target entity types, properties, and relationships (R6).",
       "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AttributeCapabilities"
+          },
+          "description": "What the grant lets a caller do with each attribute, keyed by attribute name or `*` (ADR-N-066, DM-147). It only narrows what the operations and actions grant.",
+          "type": "object"
+        },
         "entities": {
           "description": "Target entity selectors.",
           "items": {
@@ -1049,6 +1175,51 @@
         }
       },
       "type": "object"
+    },
+    "VersionsCapability": {
+      "description": "What a grant may do with an attribute's versions (ADR-N-066 2.3).",
+      "oneOf": [
+        {
+          "description": "Read the version chain (`versions=all`).",
+          "enum": [
+            "read"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Keep every allowed write of the attribute as a version, whatever the client sends.",
+          "enum": [
+            "keep"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "WriteCapability": {
+      "description": "A write kind a grant may allow on an attribute (ADR-N-066 2.1).",
+      "oneOf": [
+        {
+          "description": "Change the attribute's value.",
+          "enum": [
+            "update"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Add the attribute or an instance of it.",
+          "enum": [
+            "append"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Delete the attribute or an instance of it.",
+          "enum": [
+            "delete"
+          ],
+          "type": "string"
+        }
+      ]
     }
   },
   "description": "Kubernetes-style resource envelope (MF-01..MF-04).",

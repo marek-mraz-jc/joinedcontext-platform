@@ -237,6 +237,7 @@ fn policy(
                     }],
                     property_names: Vec::new(),
                     relationship_names: Vec::new(),
+                    attributes: Default::default(),
                 }]
             })
             .unwrap_or_default(),

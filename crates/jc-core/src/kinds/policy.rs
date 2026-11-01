@@ -616,6 +616,92 @@ pub struct RegistrationInfo {
     /// Whitelist of readable or writable relationship names (R6, R9).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationship_names: Vec<String>,
+    /// What the grant lets a caller do with each attribute, keyed by attribute name or `*`
+    /// (ADR-N-066, DM-147). It only narrows what the operations and actions grant.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub attributes: std::collections::BTreeMap<String, AttributeCapabilities>,
+}
+
+/// One attribute's capabilities in a grant (ADR-N-066, DM-147). A field left unset takes the
+/// `*` entry's field, then the grant's own behaviour without the block.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AttributeCapabilities {
+    /// Whether the current value is readable, e.g. `false` to keep an attribute for history only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
+    /// Whether its history is readable; `true` needs `queryTemporal` or `retrieveTemporal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<bool>,
+    /// Version capabilities: `read` needs the action `readVersions`, `keep` a write operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versions: Option<Vec<VersionsCapability>>,
+    /// The metadata members passed for this attribute, e.g. `[observedAt, unitCode]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Vec<MetadataMember>>,
+    /// The write kinds allowed on this attribute, e.g. `[update]`; needs a write operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<Vec<WriteCapability>>,
+}
+
+/// What a grant may do with an attribute's versions (ADR-N-066 2.3).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum VersionsCapability {
+    /// Read the version chain (`versions=all`).
+    Read,
+    /// Keep every allowed write of the attribute as a version, whatever the client sends.
+    Keep,
+}
+
+/// A metadata member a grant may pass for an attribute (ADR-N-066 2.4, DM-139).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub enum MetadataMember {
+    /// When the value was observed.
+    #[serde(rename = "observedAt")]
+    ObservedAt,
+    /// The value's unit.
+    #[serde(rename = "unitCode")]
+    UnitCode,
+    /// When the attribute was created.
+    #[serde(rename = "createdAt")]
+    CreatedAt,
+    /// When the attribute was last changed.
+    #[serde(rename = "modifiedAt")]
+    ModifiedAt,
+    /// The organization of the last change.
+    #[serde(rename = "modifiedBy.organization")]
+    ModifiedByOrganization,
+    /// Whether a person, a pipeline or a client made the last change.
+    #[serde(rename = "modifiedBy.actorKind")]
+    ModifiedByActorKind,
+    /// Who made the last change: a person's `sub` or a client id; never public (DM-140).
+    #[serde(rename = "modifiedBy.actor")]
+    ModifiedByActor,
+    /// Every provenance member of a version; never public (DM-140).
+    #[serde(rename = "provenance")]
+    Provenance,
+    /// The reason typed with a change, which can name a person (DM-151).
+    #[serde(rename = "reason")]
+    Reason,
+}
+
+/// A write kind a grant may allow on an attribute (ADR-N-066 2.1).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum WriteCapability {
+    /// Change the attribute's value.
+    Update,
+    /// Add the attribute or an instance of it.
+    Append,
+    /// Delete the attribute or an instance of it.
+    Delete,
 }
 
 /// Temporal validity window for a policy grant.
@@ -1000,6 +1086,8 @@ impl PolicySpec {
                 }
             }
 
+            self.validate_capabilities(info)?;
+
             let mut seen_rels = std::collections::BTreeSet::new();
             for rel in &info.relationship_names {
                 if rel.trim().is_empty() {
@@ -1016,6 +1104,69 @@ impl PolicySpec {
                         reason: "duplicate relationshipName in relationshipNames list",
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// The `attributes` block of one entry only narrows this grant (ADR-N-066, DM-148, DM-152):
+    /// each key is `*` or a listed name, and each capability is one the operations, the actions
+    /// and the assignee allow.
+    fn validate_capabilities(&self, info: &RegistrationInfo) -> Result<()> {
+        let refused = |value: String, reason| Error::Name {
+            field: "information.attributes",
+            value,
+            reason,
+        };
+        let named = |op: Operation| {
+            self.operations
+                .iter()
+                .any(|r| matches!(r, OperationRef::Single(o) if *o == op))
+        };
+        let temporal = named(Operation::QueryTemporal) || named(Operation::RetrieveTemporal);
+        let public = self.assignee.kind == PrincipalKind::Role && self.assignee.id == "public";
+        let any_name = info.property_names.is_empty() && info.relationship_names.is_empty();
+        for (name, caps) in &info.attributes {
+            let at = |reason| Err(refused(name.clone(), reason));
+            if name != "*"
+                && !any_name
+                && !info.property_names.contains(name)
+                && !info.relationship_names.contains(name)
+            {
+                return at(
+                    "an attribute here is `*` or one propertyNames or relationshipNames lists",
+                );
+            }
+            let versions = caps.versions.as_deref().unwrap_or_default();
+            let write = caps.write.as_deref().unwrap_or_default();
+            let metadata = caps.metadata.as_deref().unwrap_or_default();
+            if caps.history == Some(true) && !temporal {
+                return at("history needs queryTemporal or retrieveTemporal in operations");
+            }
+            if versions.contains(&VersionsCapability::Read)
+                && !self.actions.contains(&PlatformAction::ReadVersions)
+            {
+                return at("versions: [read] needs the action readVersions");
+            }
+            let keep = versions.contains(&VersionsCapability::Keep);
+            if (keep || !write.is_empty()) && public {
+                return at("a public grant never writes or keeps versions");
+            }
+            if (keep || !write.is_empty()) && !self.has_write() {
+                return at("versions: [keep] and write need a write operation");
+            }
+            if public
+                && metadata.iter().any(|m| {
+                    matches!(
+                        m,
+                        MetadataMember::ModifiedByActor | MetadataMember::Provenance
+                    )
+                })
+            {
+                return at("a public grant never passes modifiedBy.actor or provenance (DM-140)");
+            }
+            if repeats(versions) || repeats(write) || repeats(metadata) {
+                return at("a capability list names each value once");
             }
         }
         Ok(())
@@ -1044,6 +1195,11 @@ impl PolicySpec {
                             .is_some_and(|role| !role.is_empty() && !role.contains('/'))
                 })
     }
+}
+
+/// Whether `list` names one value twice.
+fn repeats<T: Ord>(list: &[T]) -> bool {
+    list.iter().collect::<std::collections::BTreeSet<_>>().len() != list.len()
 }
 
 /// Desired specification of a [`ScopeDefinition`][crate::kinds::ScopeDefinition] resource (ADR 005, R19, R29).
