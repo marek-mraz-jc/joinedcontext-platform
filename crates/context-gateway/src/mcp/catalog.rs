@@ -461,8 +461,24 @@ fn query(catalog: &Catalog, arguments: &Map<String, Value>) -> Result<Value, Str
         ));
     }
     let text = |key: &str| arguments.get(key).and_then(Value::as_str);
+    // `type`, `attrs` and `pick` are a name or a list of names, as the tool schema publishes
+    // them; a list is the comma-separated form (JC2-12).
+    let names = |key: &str| -> Result<Option<String>, String> {
+        let wrong = || format!("`{key}` is a name or a list of names");
+        match arguments.get(key) {
+            None => Ok(None),
+            Some(Value::String(one)) => Ok(Some(one.clone())),
+            Some(Value::Array(many)) => many
+                .iter()
+                .map(|name| name.as_str().ok_or_else(wrong))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|many| Some(many.join(","))),
+            Some(_) => Err(wrong()),
+        }
+    };
     let mut sub = json!({ "type": "Subscription" });
-    if let Some(types) = text("type") {
+    if let Some(types) = names("type")? {
+        let types = types.as_str();
         let types = if types.contains(['|', ',', ';', '(']) || types == "*" {
             Value::String(types.to_owned())
         } else {
@@ -526,8 +542,12 @@ fn query(catalog: &Catalog, arguments: &Map<String, Value>) -> Result<Value, Str
             .ok_or("`cursor` is the nextCursor of the previous page, passed back as given")?,
     };
     let key_values = key_values_asked(arguments)?;
-    let attrs: Option<Vec<&str>> = text("pick")
-        .or_else(|| text("attrs"))
+    let attrs_text = match names("pick")? {
+        Some(pick) => Some(pick),
+        None => names("attrs")?,
+    };
+    let attrs: Option<Vec<&str>> = attrs_text
+        .as_deref()
         .map(|names| names.split(',').map(str::trim).collect());
 
     let matching: Vec<&Value> = catalog
@@ -719,6 +739,40 @@ pub(crate) mod tests {
         assert_eq!(because(&endpoint, &workload), "grant");
         endpoint.audience = Audience::ProjectList;
         assert_eq!(because(&endpoint, &person), "project");
+    }
+
+    /// JC2-12: `type` and `pick` as the lists the tool schema publishes narrow the answer, as
+    /// their comma-separated forms do.
+    #[test]
+    fn a_type_and_pick_list_narrow_the_catalog_answer() {
+        let entities = [
+            json!({ "id": "urn:ngsi-ld:Dataset:a", "type": "Dataset", "title": "Air", "description": "d" }),
+            json!({ "id": "urn:ngsi-ld:Organization:b", "type": "Organization", "name": "City" }),
+        ]
+        .into_iter()
+        .map(|entity| {
+            let expanded = entity
+                .as_object()
+                .and_then(|members| expand_entity(members, core(), ExpandOpts::default()).ok())
+                .unwrap_or(Value::Null);
+            (entity, expanded)
+        })
+        .collect();
+        let catalog = Catalog {
+            built_from: Vec::new(),
+            built_for: Vec::new(),
+            public: Arc::new(Vec::new()),
+            entities,
+            index: super::super::search::Index::build(std::iter::empty(), &HashMap::new()),
+        };
+        let arguments = json!({ "type": ["Dataset"], "pick": ["id", "title"] });
+        let answer = query(&catalog, arguments.as_object().expect("object")).expect("answer");
+        let found = &answer["structuredContent"]["entities"];
+        assert_eq!(found.as_array().map(Vec::len), Some(1), "{answer}");
+        assert_eq!(found[0]["id"], "urn:ngsi-ld:Dataset:a");
+        assert!(found[0].get("description").is_none(), "{answer}");
+        let wrong = json!({ "type": [1] });
+        assert!(query(&catalog, wrong.as_object().expect("object")).is_err());
     }
 
     #[test]
