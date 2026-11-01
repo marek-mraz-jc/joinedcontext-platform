@@ -934,6 +934,28 @@ fn reason_refusal(
     })
 }
 
+/// Whether the caller asked for versions with `JC-Record: version` (ADR-N-054 2.9, DM-144). The
+/// header leaves the request either way: the broker believes only the gateway's audit mark. A read
+/// drops it unread; a write with any other value, or several, is refused before the broker.
+fn record_version(
+    operation: Operation,
+    headers: &mut axum::http::HeaderMap,
+) -> Result<bool, Box<Response<Body>>> {
+    let given: Vec<_> = headers.get_all(tenancy::RECORD).iter().cloned().collect();
+    while headers.remove(tenancy::RECORD).is_some() {}
+    if given.is_empty() || !operation.is_write() {
+        return Ok(false);
+    }
+    match given.as_slice() {
+        [one] if one.as_bytes() == b"version" => Ok(true),
+        _ => Err(Box::new(
+            ProblemDetails::bad_request()
+                .with_detail("JC-Record: send it once, with the value `version`, or not at all")
+                .into_response(),
+        )),
+    }
+}
+
 pub(crate) async fn view_request(
     gateway: &Gateway,
     endpoint: &Endpoint,
@@ -976,6 +998,7 @@ pub(crate) async fn view_request(
             return Err(Box::new(ProblemDetails::from(refusal).into_response()));
         }
     }
+    let record_version = record_version(operation, request.headers_mut())?;
     if let Some(refusal) = reason_refusal(operation, subject, request.headers()) {
         tracing::info!(slug = %endpoint.slug, %operation, "write refused: no reason given");
         return Err(Box::new(refusal));
@@ -988,7 +1011,8 @@ pub(crate) async fn view_request(
         request.headers_mut().insert(AUTHORIZATION, federated);
     }
     // ADR-N-054 2.8: the broker keeps every change through an audited Endpoint (DM-136)
-    if operation.is_write() && gateway.audited(&endpoint.slug) {
+    // ADR-N-054 2.9: or because the caller asked for versions of this write (DM-144)
+    if operation.is_write() && (record_version || gateway.audited(&endpoint.slug)) {
         request.headers_mut().insert(
             tenancy::AUDIT,
             axum::http::HeaderValue::from_static("changes"),

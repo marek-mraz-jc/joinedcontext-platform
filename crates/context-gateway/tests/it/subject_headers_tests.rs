@@ -774,3 +774,78 @@ async fn a_read_only_token_reads_and_every_forged_write_is_refused_before_the_br
     assert_eq!(hops.len(), 1, "{hops:?}");
     assert_eq!(values(&hops[0].headers, "x-jc-read-only"), ["true"]);
 }
+
+/// ADR-N-054 2.9, DM-144: `JC-Record: version` on a write becomes the gateway's own audit mark, so
+/// the broker keeps the change as a version; the client's header never reaches the broker, a read
+/// drops it unread, and a write without it through an Endpoint that audits nothing carries no mark.
+#[tokio::test]
+async fn a_version_asked_on_a_write_reaches_the_broker_as_the_gateways_audit_mark_only() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([]), json!([])]).await;
+    let bearer = token(&realm, json!(["/ovzdusie"]));
+    let create = format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities");
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+    let asked = [("jc-record", "version")];
+    for (method, path, extra, body) in [
+        (
+            Method::POST,
+            create.as_str(),
+            &asked[..],
+            Some(entity.clone()),
+        ),
+        (Method::POST, create.as_str(), &[][..], Some(entity)),
+        (Method::GET, &query(), &asked[..], None),
+    ] {
+        status(
+            app(&broker.url, &realm),
+            request(method, path, Some(&bearer), extra, body),
+        )
+        .await;
+    }
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 3, "{hops:?}");
+    let marks: Vec<Vec<String>> = hops
+        .iter()
+        .map(|hop| values(&hop.headers, "jc-provenance-audit"))
+        .collect();
+    assert_eq!(marks, [vec!["changes".to_owned()], vec![], vec![]]);
+    for hop in &hops {
+        assert!(values(&hop.headers, "jc-record").is_empty(), "{hop:?}");
+    }
+}
+
+/// DM-144: a write naming anything but `version`, or the header twice, is refused before the
+/// broker, so a typo never stores a write the caller thought was kept as a version.
+#[tokio::test]
+async fn a_write_with_another_record_word_is_refused_before_the_broker() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([])]).await;
+    let bearer = token(&realm, json!(["/ovzdusie"]));
+    let create = format!("/api/endpoint/{AIR}/ngsi-ld/v1/entities");
+    let entity = json!({ "id": ENTITY, "type": "AirQualityObserved" });
+    for extra in [
+        &[("jc-record", "all")][..],
+        &[("jc-record", "Version")][..],
+        &[("jc-record", "version"), ("jc-record", "version")][..],
+    ] {
+        let (code, problem) = answer(
+            app(&broker.url, &realm),
+            request(
+                Method::POST,
+                &create,
+                Some(&bearer),
+                extra,
+                Some(entity.clone()),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{extra:?}: {problem}");
+        assert!(
+            problem["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("JC-Record")),
+            "{problem}"
+        );
+    }
+    assert!(broker.hops().is_empty());
+}
