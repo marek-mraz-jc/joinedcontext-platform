@@ -459,13 +459,9 @@ pub(crate) async fn serve_ngsi_ld_view(
     };
     let view = view(&endpoint);
     let mut request = request;
-    if let Err(answer) = answered_here(&endpoint, operation, &view, &params) {
-        return *answer;
-    }
     let passed = metadata_passed(&endpoint, &subject, operation);
-    if let Some(refusal) = passed.as_ref().and_then(|p| p.refusal(&params)) {
-        tracing::info!(slug = %endpoint.slug, "refused: a query on a metadata member not passed");
-        return refusal.into_response();
+    if let Err(answer) = answered_here(&endpoint, operation, &view, &params, passed.as_ref()) {
+        return *answer;
     }
     let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
         Ok(share) => share,
@@ -580,7 +576,8 @@ async fn stripped(answer: Response<Body>, passed: Option<&Passed>) -> Response<B
 }
 
 /// What the gateway answers itself before a view request is judged: an Endpoint without a
-/// view (`503 no-view`) and a query of a shape no view answers. `Ok` goes on to the view, which
+/// view (`503 no-view`), a query of a shape no view answers and a query on a metadata member
+/// the caller's grants do not pass (DM-139). `Ok` goes on to the view, which
 /// answers the type and Attribute lists too, from its catalogue filtered by the caller's grant
 /// (T-4934, T-5391).
 fn answered_here(
@@ -588,9 +585,14 @@ fn answered_here(
     operation: Operation,
     view: &str,
     params: &[(String, String)],
+    passed: Option<&Passed>,
 ) -> Result<(), Box<Response<Body>>> {
     if !has_view(view) {
         return Err(Box::new(no_view(endpoint)));
+    }
+    if let Some(refusal) = passed.and_then(|passed| passed.refusal(params)) {
+        tracing::info!(slug = %endpoint.slug, "refused: a query on a metadata member not passed");
+        return Err(Box::new(refusal.into_response()));
     }
     if operation == Operation::QueryEntity {
         if let Some(refusal) = query_shape_refusal(params) {
@@ -1563,13 +1565,13 @@ mod tests {
         let endpoint = crate::mcp::catalog::tests::fixture();
         let read = Operation::RetrieveEntity;
         let long = "v".repeat(MAX_VIEW_ID + 1);
-        let refused = answered_here(&endpoint, read, &long, &[]);
+        let refused = answered_here(&endpoint, read, &long, &[], None);
         let refused = refused.err().map(|answer| answer.status());
         assert_eq!(refused, Some(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(answered_here(&endpoint, read, "view", &[]).is_ok());
+        assert!(answered_here(&endpoint, read, "view", &[], None).is_ok());
         // The type and Attribute lists are the view's to answer (T-5391).
         for list in [Operation::RetrieveEntityTypes, Operation::RetrieveAttrTypes] {
-            assert!(answered_here(&endpoint, list, "view", &[]).is_ok());
+            assert!(answered_here(&endpoint, list, "view", &[], None).is_ok());
         }
     }
 

@@ -437,7 +437,8 @@ mod tests {
             "assignee: { kind: role, id: public }\noperations: [queryTemporal]\n\
              actions: [readVersions]\n",
         );
-        let p = passed(&[public.clone()], &Subject::anonymous(), true).expect("narrows");
+        let p =
+            passed(std::slice::from_ref(&public), &Subject::anonymous(), true).expect("narrows");
         let mut body = entity();
         p.strip(&mut body);
         assert!(body["name"]["modifiedBy"].get("actor").is_none(), "{body}");
