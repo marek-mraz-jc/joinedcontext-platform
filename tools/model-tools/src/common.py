@@ -378,7 +378,8 @@ def ngsi_ld_kind(slot: SlotDefinition) -> str:
     if value not in NGSI_LD_KINDS:
         raise ModelError(
             f"slot '{slot.name}' declares ngsi_ld_kind '{value}', "
-            f"which is not one of {', '.join(NGSI_LD_KINDS)}"
+            f"which is not one of {', '.join(NGSI_LD_KINDS)}; "
+            "write it as `annotations: {ngsi_ld_kind: Relationship}` (or another of them)"
         )
     return value
 
