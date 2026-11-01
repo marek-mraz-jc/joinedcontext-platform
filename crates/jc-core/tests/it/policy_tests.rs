@@ -560,3 +560,63 @@ fn a_user_assignee_is_a_keycloak_id_never_an_e_mail() {
     p.assignee = Principal::new(PrincipalKind::Group, "air-quality-team");
     p.validate().expect("a group assignee is a name");
 }
+
+/// A narrowing the broker cannot parse is refused naming its field (T-6283): Antares refuses the
+/// space's whole rule document over it, so the plan says so instead of planning green.
+#[test]
+fn an_unparsable_q_scope_q_or_geo_q_is_refused_by_its_field() {
+    let golden_geo = "georel=within;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.76],[19.10,48.70]]]";
+    let cases = [
+        // the T-6243 probe: `&` joins, an unknown georel and a one-point ring
+        (
+            format!("geoQ: \"{golden_geo}\""),
+            "geoQ: \"georel=inside&geometry=Polygon&coordinates=[[[24.9,60.1]]]\"".to_owned(),
+            "spec.geoQ",
+        ),
+        (
+            format!("geoQ: \"{golden_geo}\""),
+            "geoQ: \"georel=inside;geometry=Polygon;coordinates=[[[19.10,48.70],[19.20,48.70],[19.20,48.76],[19.10,48.70]]]\"".to_owned(),
+            "spec.geoQ",
+        ),
+        (
+            format!("geoQ: \"{golden_geo}\""),
+            "geoQ: \"georel=within;geometry=Polygon;coordinates=[[[24.9,60.1]]]\"".to_owned(),
+            "spec.geoQ",
+        ),
+        (
+            format!("geoQ: \"{golden_geo}\""),
+            "geoQ: \"georel=within;geometry=Polygon\"".to_owned(),
+            "spec.geoQ",
+        ),
+        (
+            "q: \"pm10>=0\"".to_owned(),
+            "q: \"pm10>\"".to_owned(),
+            "spec.q",
+        ),
+        (
+            "q: \"pm10>=0\"".to_owned(),
+            "q: \"refDistrict{name}==\\\"x\\\"\"".to_owned(),
+            "spec.q",
+        ),
+        (
+            "scopeQ: \"/geo/SK/BB\"".to_owned(),
+            "scopeQ: \"geo SK\"".to_owned(),
+            "spec.scopeQ",
+        ),
+    ];
+    for (from, to, field) in cases {
+        let yaml = GOLDEN_POLICY.replace(&from, &to);
+        assert_ne!(yaml, GOLDEN_POLICY, "{from} is in the golden policy");
+        let p = Policy::from_yaml(&yaml).expect("a narrowing is any string to the parser");
+        let err = p.validate().expect_err(&to).to_string();
+        assert!(err.contains(field), "{to}: {err}");
+    }
+    // the same check runs on each rule of a rules[] Policy
+    let ruled = RULES_POLICY.replace("q: \"open==true\"", "geoQ: \"georel=inside\"");
+    let err = Policy::from_yaml(&ruled)
+        .expect("parses")
+        .validate()
+        .expect_err("a rule's geoQ is checked")
+        .to_string();
+    assert!(err.contains("spec.geoQ"), "{err}");
+}

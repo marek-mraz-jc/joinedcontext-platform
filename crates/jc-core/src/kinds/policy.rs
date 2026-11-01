@@ -902,6 +902,7 @@ impl PolicySpec {
         }
 
         self.validate_information()?;
+        self.validate_narrowing()?;
 
         if let Some(ref val) = self.validity {
             if let (Some(from), Some(to)) = (val.from, val.to) {
@@ -915,6 +916,61 @@ impl PolicySpec {
             }
         }
 
+        Ok(())
+    }
+
+    /// `q`, `scopeQ` and `geoQ` parse as the broker parses them (T-6283): Antares refuses the
+    /// space's whole rule document over one that does not, so a typo is a plan-time refusal
+    /// naming its field rather than a green plan the sync then cannot apply.
+    fn validate_narrowing(&self) -> Result<()> {
+        let refused = |field: &'static str, value: &str, reason| Error::Name {
+            field,
+            value: value.to_owned(),
+            reason,
+        };
+        if let Some(q) = &self.q {
+            match antares_ql::parse_q(q) {
+                Err(_) => {
+                    return Err(refused(
+                        "spec.q",
+                        q,
+                        "q is no NGSI-LD query, e.g. `speed>50;status==\"open\"`",
+                    ))
+                }
+                Ok(node) if node.has_linked_paths() => {
+                    return Err(refused(
+                        "spec.q",
+                        q,
+                        "q reads a linked Entity (`a{b}`), which a Policy cannot follow",
+                    ))
+                }
+                Ok(_) => {}
+            }
+        }
+        if let Some(scope_q) = &self.scope_q {
+            if antares_ql::scope::check_scope_q(scope_q).is_err() {
+                return Err(refused(
+                    "spec.scopeQ",
+                    scope_q,
+                    "scopeQ is no NGSI-LD scope query, e.g. `/geo/SK/BB/#`",
+                ));
+            }
+        }
+        if let Some(geo_q) = &self.geo_q {
+            // Split as the broker's rule document splits it: `;` between members.
+            let params: std::collections::HashMap<String, String> = geo_q
+                .split(';')
+                .filter_map(|part| part.split_once('='))
+                .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+                .collect();
+            if !matches!(antares_ql::geo::GeoQuery::from_params(&params), Ok(Some(_))) {
+                return Err(refused(
+                    "spec.geoQ",
+                    geo_q,
+                    "geoQ is no NGSI-LD geo-query: georel (near;maxDistance==…, within, contains, intersects, equals, disjoint, overlaps), geometry and coordinates joined by `;`, e.g. `georel=within;geometry=Polygon;coordinates=[[[19.1,48.7],[19.2,48.7],[19.2,48.8],[19.1,48.7]]]`",
+                ));
+            }
+        }
         Ok(())
     }
 
