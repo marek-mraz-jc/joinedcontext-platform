@@ -57,6 +57,8 @@ pub enum Segment {
     Apps,
     /// Reads of runs, health, activity and limits, and pipeline runs.
     Operate,
+    /// Knowledge sources and assistant deployments, their crawl state and passage search.
+    Knowledge,
     /// Every tool, within the ceiling.
     Admin,
 }

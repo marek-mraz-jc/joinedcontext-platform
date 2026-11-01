@@ -453,6 +453,13 @@
           "type": "string"
         },
         {
+          "description": "Knowledge sources and assistant deployments, their crawl state and passage search.",
+          "enum": [
+            "knowledge"
+          ],
+          "type": "string"
+        },
+        {
           "description": "Every tool, within the ceiling.",
           "enum": [
             "admin"
