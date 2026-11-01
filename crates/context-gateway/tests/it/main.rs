@@ -133,6 +133,7 @@ mod mcp_server_tests;
 mod mcp_tools_tests;
 mod mcp_view_tests;
 mod mcp_write_guard_tests;
+mod metadata_strip_tests;
 mod metrics_tests;
 mod model_constraint_tests;
 mod model_projection_tests;

@@ -25,6 +25,7 @@ use crate::handlers::writes::{
 };
 use crate::middleware::response::RESULTS_RESTRICTED;
 use crate::pdp::evaluator::Constraints;
+use crate::pdp::metadata::Passed;
 use crate::pdp::write_guard;
 use crate::proxy::{self};
 use crate::resolver::{DeclaredTypes, Endpoint};
@@ -461,6 +462,11 @@ pub(crate) async fn serve_ngsi_ld_view(
     if let Err(answer) = answered_here(&endpoint, operation, &view, &params) {
         return *answer;
     }
+    let passed = metadata_passed(&endpoint, &subject, operation);
+    if let Some(refusal) = passed.as_ref().and_then(|p| p.refusal(&params)) {
+        tracing::info!(slug = %endpoint.slug, "refused: a query on a metadata member not passed");
+        return refusal.into_response();
+    }
     let _share = match write_share(gateway, &endpoint, operation, body_length(&request)).await {
         Ok(share) => share,
         Err(answer) => return *answer,
@@ -528,7 +534,49 @@ pub(crate) async fn serve_ngsi_ld_view(
         &format!("/x/views/{view}/ngsi-ld/v1"),
         prefix,
     );
+    let answer = stripped(answer, passed.as_ref()).await;
     caller_answer(answer, (&endpoint, &subject), operation, &units_filled).await
+}
+
+/// What the caller's grants pass of each attribute's metadata on a read (ADR-N-066 2.4,
+/// DM-139); `None` when they narrow nothing, a write, or a grant without an `attributes` block.
+fn metadata_passed(endpoint: &Endpoint, subject: &Subject, operation: Operation) -> Option<Passed> {
+    if operation.is_write() {
+        return None;
+    }
+    let now = crate::pdp::now();
+    let versions = crate::pdp::evaluator::grants_action(
+        subject,
+        jc_core::kinds::PlatformAction::ReadVersions,
+        &endpoint.policies,
+        now,
+    );
+    Passed::of(subject, &endpoint.policies, operation, versions, now)
+}
+
+/// A successful read with the metadata members `passed` does not list stripped (DM-139,
+/// DM-151). Fails closed: an answer too large to hold or not JSON is not passed on.
+async fn stripped(answer: Response<Body>, passed: Option<&Passed>) -> Response<Body> {
+    let Some(passed) = passed.filter(|_| answer.status().is_success()) else {
+        return answer;
+    };
+    let (parts, body) = answer.into_parts();
+    let Ok(held) = axum::body::to_bytes(body, MAX_BODY).await else {
+        let mut refused = ProblemDetails::new(413, "payload-too-large", "Payload Too Large")
+            .with_detail("the answer is too large to narrow to your access; ask for fewer Entities")
+            .into_response();
+        *refused.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+        return refused;
+    };
+    if held.is_empty() {
+        return proxy::with_body(parts, held);
+    }
+    let Ok(mut value) = serde_json::from_slice::<Value>(&held) else {
+        tracing::error!("a read answer is no JSON, so its metadata cannot be narrowed");
+        return ProblemDetails::internal().into_response();
+    };
+    passed.strip(&mut value);
+    proxy::with_body(parts, serde_json::to_vec(&value).unwrap_or_default())
 }
 
 /// What the gateway answers itself before a view request is judged: an Endpoint without a

@@ -241,7 +241,7 @@ pub fn evaluate(
 }
 
 /// Whether a policy speaks about this caller and this operation at all (GW7).
-fn applies(
+pub(crate) fn applies(
     policy: &PolicySpec,
     subject: &Subject,
     operation: Operation,
