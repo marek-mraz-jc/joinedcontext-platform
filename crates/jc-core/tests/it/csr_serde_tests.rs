@@ -125,6 +125,20 @@ fn a_claim_of_nothing_is_refused() {
     );
 }
 
+#[test]
+fn a_registration_carries_no_attribute_capabilities() {
+    let with_block = LOCAL.replace(
+        "      propertyNames: [location, speed, occupancy]\n",
+        "      propertyNames: [location, speed, occupancy]\n      attributes: { speed: { history: true } }\n",
+    );
+    assert_ne!(with_block, LOCAL);
+    let refusal = Registration::from_yaml(&with_block)
+        .expect("parses")
+        .validate()
+        .expect_err("refused");
+    assert!(refusal.to_string().contains("Policy"), "{refusal}");
+}
+
 /// PF-48: neither identity is a grant, and neither may be arrived at by accident.
 #[test]
 fn an_identity_has_to_be_one_the_forward_can_actually_use() {

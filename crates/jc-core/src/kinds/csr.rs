@@ -199,6 +199,14 @@ impl ContextSourceRegistrationSpec {
                     reason: "an information entry selects at least one entity type",
                 });
             }
+            // Capabilities belong to a Policy grant (ADR-N-066); a registration claims data.
+            if let Some(name) = info.attributes.keys().next() {
+                return Err(Error::Name {
+                    field: "spec.information.attributes",
+                    value: name.clone(),
+                    reason: "attribute capabilities belong to a Policy, not a registration",
+                });
+            }
             // A registration claims ids for its hub the way a policy grants them, so its
             // selectors keep the same rules: an unanchored idPattern would route ids of other
             // members to this one (CC-13, R24).
