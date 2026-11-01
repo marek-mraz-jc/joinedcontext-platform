@@ -278,6 +278,103 @@ pub fn grants_action(
         && !naming.iter().any(|policy| policy.effect.is_prohibition())
 }
 
+/// The attributes whose versions `subject` may read (ADR-N-066 2.3, DM-149): `None` when no
+/// grant gives the action `readVersions` ([`grants_action`]), `Some(None)` for every attribute
+/// (a permit with no entry or an entry with no block, as before ADR-N-066), else the names each
+/// permit's `attributes` block leaves `versions: [read]` on (the default
+/// when an attribute sets nothing). An entry listing no attribute reaches every one unless a
+/// key takes `read` away; then only the named keys that keep it, as no list says "all but".
+pub fn version_reads(
+    subject: &Subject,
+    policies: &[PolicySpec],
+    now: DateTime<Utc>,
+) -> Option<Option<BTreeSet<String>>> {
+    use jc_core::kinds::{PlatformAction, VersionsCapability};
+    if !grants_action(subject, PlatformAction::ReadVersions, policies, now) {
+        return None;
+    }
+    let mut names = BTreeSet::new();
+    for policy in policies.iter().filter(|p| {
+        p.actions.contains(&PlatformAction::ReadVersions)
+            && !p.effect.is_prohibition()
+            && subject.is(&p.assignee)
+            && in_force(p, now)
+    }) {
+        if policy.information.is_empty() {
+            return Some(None);
+        }
+        for info in &policy.information {
+            // no block: today's grant, the broker's engine already narrows which attributes a
+            // history read carries. ponytail: names are not typed, so a name one entry keeps
+            // reads on every type the caller's grants reach; per-type lists are the upgrade.
+            if info.attributes.is_empty() {
+                return Some(None);
+            }
+            let every = info.attributes.get("*");
+            let reads = |name: &str| {
+                info.attributes
+                    .get(name)
+                    .and_then(|c| c.versions.as_ref())
+                    .or_else(|| every.and_then(|c| c.versions.as_ref()))
+                    .is_none_or(|v| v.contains(&VersionsCapability::Read))
+            };
+            let listed: Vec<&String> = info
+                .property_names
+                .iter()
+                .chain(&info.relationship_names)
+                .collect();
+            if listed.is_empty() {
+                if reads("*") && info.attributes.keys().all(|k| reads(k)) {
+                    return Some(None);
+                }
+                names.extend(
+                    info.attributes
+                        .keys()
+                        .filter(|k| *k != "*" && reads(k))
+                        .cloned(),
+                );
+            } else {
+                names.extend(listed.into_iter().filter(|n| reads(n)).cloned());
+            }
+        }
+    }
+    Some(Some(names))
+}
+
+/// Whether a write by `subject` touching `touched` (`None`: every attribute it may reach) must
+/// be kept as versions (ADR-N-066 2.3, DM-150): a write permit of the subject's in force marks
+/// one of those attributes, or `*`, with `versions: [keep]`.
+pub fn keeps_versions(
+    subject: &Subject,
+    policies: &[PolicySpec],
+    now: DateTime<Utc>,
+    touched: Option<&BTreeSet<String>>,
+) -> bool {
+    use jc_core::kinds::VersionsCapability;
+    policies
+        .iter()
+        .filter(|p| {
+            !p.effect.is_prohibition()
+                && p.has_write()
+                && subject.is(&p.assignee)
+                && in_force(p, now)
+        })
+        .flat_map(|p| &p.information)
+        .any(|info| {
+            let keeps = |name: &str| {
+                info.attributes
+                    .get(name)
+                    .and_then(|c| c.versions.as_ref())
+                    .or_else(|| info.attributes.get("*").and_then(|c| c.versions.as_ref()))
+                    .is_some_and(|v| v.contains(&VersionsCapability::Keep))
+            };
+            match touched {
+                None => info.attributes.keys().any(|k| keeps(k)),
+                Some(touched) => touched.iter().any(|name| keeps(name)),
+            }
+        })
+}
+
 /// Whether the policy is inside its validity window (GW7).
 fn in_force(policy: &PolicySpec, now: DateTime<Utc>) -> bool {
     policy.validity.as_ref().is_none_or(|validity| {
@@ -640,6 +737,90 @@ pub const NOTHING: &str = "(jcUnreadablePolicyQ==0;jcUnreadablePolicyQ!=0)";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spec(yaml: &str) -> PolicySpec {
+        serde_norway::from_str(&format!(
+            "contextSpaceRef: air\nassigner: did:web:city.example\n{yaml}"
+        ))
+        .expect("the policy spec parses")
+    }
+
+    /// ADR-N-066 2.3 (DM-149): the broker hears only the attributes whose versions the grant
+    /// reads; without `readVersions` nothing, without a block every attribute.
+    #[test]
+    fn version_reads_list_the_attributes_the_block_leaves_read_on() {
+        let public = Subject {
+            roles: ["public".to_owned()].into(),
+            ..Subject::default()
+        };
+        let air = |actions: &str, attributes: &str| {
+            spec(&format!(
+                "assignee: {{ kind: role, id: public }}\n\
+                 operations: [retrieveTemporal]\nactions: [{actions}]\n\
+                 information:\n  - entities: [{{ type: Air }}]\n    propertyNames: [name, pm10]\n\
+                 {attributes}"
+            ))
+        };
+        let reads = |p: PolicySpec| version_reads(&public, &[p], Utc::now());
+        assert_eq!(reads(air("", "")), None);
+        assert_eq!(reads(air("readVersions", "")), Some(None));
+        let name_only =
+            "    attributes:\n      \"*\": { versions: [] }\n      name: { versions: [read] }\n";
+        assert_eq!(
+            reads(air("readVersions", name_only)),
+            Some(Some(["name".to_owned()].into()))
+        );
+        let none = "    attributes:\n      \"*\": { versions: [] }\n";
+        assert_eq!(
+            reads(air("readVersions", none)),
+            Some(Some(BTreeSet::new()))
+        );
+        let every = spec(
+            "assignee: { kind: role, id: public }\noperations: [retrieveTemporal]\n\
+             actions: [readVersions]\n",
+        );
+        assert_eq!(reads(every), Some(None));
+        let all_but = spec(
+            "assignee: { kind: role, id: public }\noperations: [retrieveTemporal]\n\
+             actions: [readVersions]\ninformation:\n  - entities: [{ type: Air }]\n\
+             \x20   attributes:\n      pm10: { versions: [] }\n      name: { history: true }\n",
+        );
+        assert_eq!(reads(all_but), Some(Some(["name".to_owned()].into())));
+    }
+
+    /// ADR-N-066 2.3 (DM-150): a write touching a kept attribute is kept; one touching only
+    /// others is not, and a write naming no attribute is kept when any attribute is.
+    #[test]
+    fn a_kept_attribute_marks_each_write_touching_it() {
+        let jana = Subject {
+            id: Some("jana".to_owned()),
+            ..Subject::default()
+        };
+        let grant = spec(
+            "assignee: { kind: user, id: jana }\noperations: [updateAttrs]\n\
+             information:\n  - entities: [{ type: Air }]\n    propertyNames: [name, pm10]\n\
+             \x20   attributes:\n      name: { versions: [keep] }\n",
+        );
+        let keeps = |touched: Option<&[&str]>| {
+            let touched: Option<BTreeSet<String>> =
+                touched.map(|t| t.iter().map(|s| (*s).to_owned()).collect());
+            keeps_versions(
+                &jana,
+                std::slice::from_ref(&grant),
+                Utc::now(),
+                touched.as_ref(),
+            )
+        };
+        assert!(keeps(Some(&["name"])));
+        assert!(keeps(Some(&["pm10", "name"])));
+        assert!(!keeps(Some(&["pm10"])));
+        assert!(keeps(None));
+        let other = Subject {
+            id: Some("petra".to_owned()),
+            ..Subject::default()
+        };
+        assert!(!keeps_versions(&other, &[grant], Utc::now(), None));
+    }
 
     /// S-49 (T-5955): a read-only token is refused every write a Policy grants its holder, and
     /// still reads.

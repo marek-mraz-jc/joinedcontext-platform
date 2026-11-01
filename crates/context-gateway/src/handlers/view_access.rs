@@ -92,7 +92,7 @@ pub(crate) async fn document(
     };
     let document = from_view(gateway, endpoint, subject, ViewCall::Document(asked)).await?;
     match format {
-        AccessFormat::AuthZen => Ok(endpoint_document(document, endpoint)),
+        AccessFormat::AuthZen => Ok(endpoint_document(document, endpoint, subject)),
         AccessFormat::GrantAst => Ok(document),
         AccessFormat::Odrl | AccessFormat::Turtle => {
             odrl::published(document, endpoint, gateway.base_url(), sha256_hex).ok_or_else(|| {
@@ -107,10 +107,13 @@ pub(crate) async fn document(
 /// (a view says its Tenant only to a caller who named it); the caller here was admitted to this
 /// Endpoint and its space, and the Portal's matrix shows both (EP-55). The Endpoint's rate goes
 /// beside it, the same for every caller, and an Endpoint without one says nothing (EP-56).
-fn endpoint_document(mut document: Value, endpoint: &Endpoint) -> Value {
+fn endpoint_document(mut document: Value, endpoint: &Endpoint, subject: &Subject) -> Value {
     let Some(members) = document.as_object_mut() else {
         return document;
     };
+    if let Some(versions) = versions_member(subject, &endpoint.policies) {
+        members.insert("versions".to_owned(), versions);
+    }
     members.insert(
         "resource".to_owned(),
         json!({ "type": "endpoint", "id": endpoint.slug, "space": endpoint.space }),
@@ -127,6 +130,16 @@ fn endpoint_document(mut document: Value, endpoint: &Endpoint) -> Value {
         members.insert("limits".to_owned(), Value::Object(named));
     }
     document
+}
+
+/// The attributes whose versions the caller reads (ADR-N-066 2.3), the list the gateway sends
+/// the broker: `{"read": "*"}` for every attribute the grant reads, or `{"read": [names]}`; nothing without `readVersions`. The view's
+/// own document lists read, history and write per attribute, one entry per capability.
+fn versions_member(subject: &Subject, policies: &[jc_core::kinds::PolicySpec]) -> Option<Value> {
+    match crate::pdp::evaluator::version_reads(subject, policies, crate::pdp::now())? {
+        None => Some(json!({ "read": "*" })),
+        Some(names) => Some(json!({ "read": names })),
+    }
 }
 
 /// One call to the view's `access` surface.
@@ -956,6 +969,26 @@ mod tests {
     use super::*;
 
     /// F-PLT2-023: a two-rule Policy is listed once, under the name its manifest carries.
+    #[test]
+    fn the_document_lists_the_attributes_whose_versions_the_caller_reads() {
+        let policy: jc_core::kinds::PolicySpec = serde_norway::from_str(
+            "contextSpaceRef: air\nassigner: did:web:city.example\n\
+             assignee: { kind: role, id: public }\noperations: [retrieveTemporal]\n\
+             actions: [readVersions]\ninformation:\n  - entities: [{ type: Air }]\n\
+             \x20   propertyNames: [name, pm10]\n    attributes:\n      pm10: { versions: [] }\n",
+        )
+        .expect("the policy spec parses");
+        let public = Subject {
+            roles: ["public".to_owned()].into(),
+            ..Subject::default()
+        };
+        assert_eq!(
+            versions_member(&public, std::slice::from_ref(&policy)),
+            Some(json!({ "read": ["name"] }))
+        );
+        assert_eq!(versions_member(&public, &[]), None);
+    }
+
     #[test]
     fn a_policy_of_two_rules_is_listed_once() {
         assert_eq!(

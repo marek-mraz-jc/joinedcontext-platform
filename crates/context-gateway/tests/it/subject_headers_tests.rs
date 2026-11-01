@@ -640,6 +640,79 @@ async fn read_versions_reaches_the_broker_only_on_the_spaces_grant() {
     );
 }
 
+/// ADR-N-066 2.3 (DM-149, DM-150): a grant whose block reads the versions of `name` alone sends
+/// the broker `name`, and a write touching an attribute the grant keeps carries the audit mark
+/// while one touching only others does not, whatever the client sends.
+#[tokio::test]
+async fn a_capability_block_lists_version_reads_and_keeps_its_attributes() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([]), json!([])]).await;
+    let mut air = endpoint(AIR, Audience::Organization, "steward");
+    air.policies = vec![serde_norway::from_str(
+        "contextSpaceRef: ovzdusie\nassigner: did:web:banskabystrica.sk\n\
+         assignee: { kind: role, id: steward }\n\
+         operations: [retrieveTemporal, updateAttrs]\nactions: [readVersions]\n\
+         information:\n  - entities: [{ type: AirQualityObserved }]\n\
+         \x20   propertyNames: [name, pm10]\n    attributes:\n\
+         \x20     \"*\": { versions: [] }\n      name: { versions: [read] }\n\
+         \x20     pm10: { versions: [keep] }\n",
+    )
+    .expect("the policy spec parses")];
+    let gateway = Gateway::new(
+        Broker::new(&broker.url),
+        Box::new(PolicyPdp),
+        "banskabystrica.sk",
+    )
+    .serve(vec![air])
+    .authenticate(
+        Arc::new(realm.verifier()),
+        ServiceAccounts::new(),
+        Some(HOST.to_owned()),
+    );
+    let app = router(Arc::new(gateway));
+    let bearer = token(&realm, json!(["/ovzdusie"]));
+    let base = format!("/api/endpoint/{AIR}/ngsi-ld/v1");
+    let attr = |name: &str| json!({ (name): { "type": "Property", "value": 1 } });
+    for (method, path, body) in [
+        (
+            Method::GET,
+            format!("{base}/temporal/entities/{ENTITY}?versions=all"),
+            None,
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attr("pm10")),
+        ),
+        (
+            Method::PATCH,
+            format!("{base}/entities/{ENTITY}/attrs"),
+            Some(attr("name")),
+        ),
+    ] {
+        status(
+            app.clone(),
+            request(
+                method,
+                &path,
+                Some(&bearer),
+                &[("jc-read-versions", "true")],
+                body,
+            ),
+        )
+        .await;
+    }
+    let hops = broker.hops();
+    assert_eq!(hops.len(), 3, "{hops:?}");
+    assert_eq!(values(&hops[0].headers, "jc-read-versions"), ["name"]);
+    let marks: Vec<Vec<String>> = hops
+        .iter()
+        .skip(1)
+        .map(|hop| values(&hop.headers, "jc-provenance-audit"))
+        .collect();
+    assert_eq!(marks, [vec!["changes".to_owned()], vec![]]);
+}
+
 /// Jana's token with `scope`: `jc:read-only` makes it a read-only connector's (T-5955).
 fn scoped_token(realm: &common::Realm, scope: &str) -> String {
     realm.mint(&json!({
