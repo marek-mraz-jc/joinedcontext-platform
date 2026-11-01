@@ -1137,39 +1137,52 @@ impl PolicySpec {
                     "an attribute here is `*` or one propertyNames or relationshipNames lists",
                 );
             }
-            let versions = caps.versions.as_deref().unwrap_or_default();
-            let write = caps.write.as_deref().unwrap_or_default();
-            let metadata = caps.metadata.as_deref().unwrap_or_default();
-            if caps.history == Some(true) && !temporal {
-                return at("history needs queryTemporal or retrieveTemporal in operations");
-            }
-            if versions.contains(&VersionsCapability::Read)
-                && !self.actions.contains(&PlatformAction::ReadVersions)
-            {
-                return at("versions: [read] needs the action readVersions");
-            }
-            let keep = versions.contains(&VersionsCapability::Keep);
-            if (keep || !write.is_empty()) && public {
-                return at("a public grant never writes or keeps versions");
-            }
-            if (keep || !write.is_empty()) && !self.has_write() {
-                return at("versions: [keep] and write need a write operation");
-            }
-            if public
-                && metadata.iter().any(|m| {
-                    matches!(
-                        m,
-                        MetadataMember::ModifiedByActor | MetadataMember::Provenance
-                    )
-                })
-            {
-                return at("a public grant never passes modifiedBy.actor or provenance (DM-140)");
-            }
-            if repeats(versions) || repeats(write) || repeats(metadata) {
-                return at("a capability list names each value once");
+            if let Some(reason) = self.capability_refusal(caps, temporal, public) {
+                return at(reason);
             }
         }
         Ok(())
+    }
+
+    /// Why one attribute's capabilities exceed this grant, or `None` when they fit.
+    fn capability_refusal(
+        &self,
+        caps: &AttributeCapabilities,
+        temporal: bool,
+        public: bool,
+    ) -> Option<&'static str> {
+        let versions = caps.versions.as_deref().unwrap_or_default();
+        let write = caps.write.as_deref().unwrap_or_default();
+        let metadata = caps.metadata.as_deref().unwrap_or_default();
+        if caps.history == Some(true) && !temporal {
+            return Some("history needs queryTemporal or retrieveTemporal in operations");
+        }
+        if versions.contains(&VersionsCapability::Read)
+            && !self.actions.contains(&PlatformAction::ReadVersions)
+        {
+            return Some("versions: [read] needs the action readVersions");
+        }
+        let keep = versions.contains(&VersionsCapability::Keep);
+        if (keep || !write.is_empty()) && public {
+            return Some("a public grant never writes or keeps versions");
+        }
+        if (keep || !write.is_empty()) && !self.has_write() {
+            return Some("versions: [keep] and write need a write operation");
+        }
+        if public
+            && metadata.iter().any(|m| {
+                matches!(
+                    m,
+                    MetadataMember::ModifiedByActor | MetadataMember::Provenance
+                )
+            })
+        {
+            return Some("a public grant never passes modifiedBy.actor or provenance (DM-140)");
+        }
+        if repeats(versions) || repeats(write) || repeats(metadata) {
+            return Some("a capability list names each value once");
+        }
+        None
     }
 
     /// Returns `true` if any granted operation or group modifies context state: a group by
