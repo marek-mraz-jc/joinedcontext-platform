@@ -57,6 +57,10 @@ pub const PROVENANCE_CLIENT: HeaderName = HeaderName::from_static("jc-provenance
 /// only the gateway may set it, so it shares the provenance prefix the edge and `drop_identity`
 /// remove.
 pub const AUDIT: HeaderName = HeaderName::from_static("jc-provenance-audit");
+/// `version` on a write asks the broker to keep each changed value as a version (ADR-N-054 2.9,
+/// DM-144): the one record header a caller sets. The gateway turns it into [`AUDIT`] and never
+/// forwards it.
+pub const RECORD: HeaderName = HeaderName::from_static("jc-record");
 /// The grant of `versions=all` (ADR-N-054 2.4): only the gateway may set it.
 pub const READ_VERSIONS: &str = "jc-read-versions";
 /// Why a write was made, in the caller's words (DM-113): the one provenance header a caller sets.
