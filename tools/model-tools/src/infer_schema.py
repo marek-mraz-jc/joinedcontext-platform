@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import functools
 import io
+import itertools
 import json
 import re
 from collections import Counter
@@ -153,7 +154,9 @@ def _csv(stem: str, content: bytes) -> list[tuple[str, list[str], list[list[Any]
         dialect: type[csv.Dialect] | csv.Dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel
-    rows = [row for row in csv.reader(io.StringIO(text), dialect) if any(cell.strip() for cell in row)]
+    # The header and MAX_ROWS records are all `parse` keeps: the rest is never read (JC1-34).
+    filled = (row for row in csv.reader(io.StringIO(text), dialect) if any(cell.strip() for cell in row))
+    rows = list(itertools.islice(filled, MAX_ROWS + 1))
     if not rows:
         raise SampleError("the CSV has no header row")
     return [(stem, [cell.strip() for cell in rows[0]], rows[1:])]
@@ -172,7 +175,8 @@ def _xlsx(stem: str, content: bytes) -> list[tuple[str, list[str], list[list[Any
         raise SampleError("the file is not an Excel workbook") from err
     tables = []
     for sheet in book.worksheets:
-        rows = [list(row) for row in sheet.iter_rows(values_only=True) if any(c not in (None, "") for c in row)]
+        filled = (list(row) for row in sheet.iter_rows(values_only=True) if any(c not in (None, "") for c in row))
+        rows = list(itertools.islice(filled, MAX_ROWS + 1))
         if not rows:
             continue
         headers = ["" if cell is None else str(cell).strip() for cell in rows[0]]
@@ -260,6 +264,34 @@ def _slot_name(header: str, index: int, taken: set[str]) -> str:
         name, n = f"{base}_{n}", n + 1
     taken.add(name)
     return name
+
+
+def _definition(
+    header: str, slot: str, column: dict[str, Any], unit: str | None, index: dict[str, list[str]]
+) -> tuple[dict[str, Any], dict[str, str] | None]:
+    """A column's slot definition under the name `slot`, and its catalogue match, if any."""
+    definition: dict[str, Any] = {"range": column["range"]}
+    if header != slot:
+        definition["title"] = {"en": header}
+    for key in ("required", "pattern", "minimum_value", "maximum_value"):
+        if key in column:
+            definition[key] = column[key]
+    if column.get("kind"):
+        definition["annotations"] = {"ngsi_ld_kind": column["kind"]}
+    if unit:
+        definition["unit"] = unit_block(unit)
+    models = index.get(slot) or []
+    if not models:
+        return definition, None
+    subject = models[0].split("/")[0]
+    definition["slot_uri"] = f"{SDM_NAMESPACE}{subject}/{slot}"
+    definition.setdefault("annotations", {})[UPSTREAM_ANNOTATION] = models[0]
+    return definition, {"model": models[0], "slotUri": definition["slot_uri"]}
+
+
+def _slot_shape(definition: dict[str, Any]) -> dict[str, Any]:
+    """What two classes must agree on to share one slot: everything but its title."""
+    return {key: value for key, value in definition.items() if key != "title"}
 
 
 def _class_name(text: str) -> str:
@@ -491,7 +523,9 @@ def infer(
             skip |= {lat, lon}
             detected["location"] = "GeoProperty"
         class_slots: list[str] = []
-        taken = set(slots)
+        # A name is taken within the class; across sheets a column of the same name and shape is
+        # one shared slot, as LinkML means it, and only a different shape gets `name_2` (JC1-19).
+        taken: set[str] = set()
         operations.append({"op": "addClass", "name": cls, "is_a": "Entity"})
         for i, header in enumerate(headers):
             if i in skip or not header or header == "@context":
@@ -503,22 +537,17 @@ def infer(
                 continue
             unit, bare = _unit(header)
             slot = _slot_name(bare, i, taken)
-            definition: dict[str, Any] = {"range": column["range"]}
-            if header != slot:
-                definition["title"] = {"en": header}
-            for key in ("required", "pattern", "minimum_value", "maximum_value"):
-                if key in column:
-                    definition[key] = column[key]
-            if column.get("kind"):
-                definition["annotations"] = {"ngsi_ld_kind": column["kind"]}
-            if unit:
-                definition["unit"] = unit_block(unit)
-            models = index.get(slot) or []
-            if models:
-                subject = models[0].split("/")[0]
-                definition["slot_uri"] = f"{SDM_NAMESPACE}{subject}/{slot}"
-                definition.setdefault("annotations", {})[UPSTREAM_ANNOTATION] = models[0]
-                matches[slot] = {"model": models[0], "slotUri": definition["slot_uri"]}
+            definition, match = _definition(header, slot, column, unit, index)
+            if slot in slots and _slot_shape(slots[slot]) == _slot_shape(definition):
+                class_slots.append(slot)
+                operations.append({"op": "attachSlot", "class": cls, "slot": slot})
+                continue
+            if slot in slots:
+                slot = _slot_name(bare, i, taken | set(slots))
+                taken.add(slot)
+                definition, match = _definition(header, slot, column, unit, index)
+            if match:
+                matches[slot] = match
             slots[slot] = definition
             class_slots.append(slot)
             detected[slot] = column.get("kind") or column["range"]
