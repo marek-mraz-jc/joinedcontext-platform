@@ -80,6 +80,17 @@ pub fn render(policy: &Policy) -> Out<Value> {
         member: "spec.rules".to_owned(),
         reason: e.to_string(),
     })?;
+    // ODRL has no term for a per-attribute capability yet: rendering without it would widen
+    // the grant on the way back in (ADR-N-066).
+    if rules
+        .iter()
+        .any(|(_, rule)| rule.information.iter().any(|i| !i.attributes.is_empty()))
+    {
+        return refuse(
+            "spec.information.attributes",
+            "per-attribute capabilities have no ODRL form yet; the Policy is served as YAML only",
+        );
+    }
     let (mut permission, mut prohibition) = (Vec::new(), Vec::new());
     for (_, rule) in &rules {
         match rule.effect {
@@ -784,6 +795,7 @@ fn add(
             entities: vec![selector],
             property_names: properties,
             relationship_names: relationships,
+            attributes: Default::default(),
         }),
     }
 }

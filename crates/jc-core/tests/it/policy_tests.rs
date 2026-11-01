@@ -620,3 +620,142 @@ fn an_unparsable_q_scope_q_or_geo_q_is_refused_by_its_field() {
         .to_string();
     assert!(err.contains("spec.geoQ"), "{err}");
 }
+
+/// A grant with an `attributes` block (ADR-N-066): `assignee`, `operations`, `actions` and the
+/// block are filled in per case.
+fn capability_policy(assignee: &str, operations: &str, actions: &str, attributes: &str) -> String {
+    format!(
+        r#"apiVersion: joinedcontext.com/v1alpha1
+kind: Policy
+metadata:
+  name: air-capabilities
+  namespace: ovzdusie
+spec:
+  contextSpaceRef: {{ kind: ContextSpace, name: ovzdusie }}
+  assigner: "did:web:banskabystrica.sk"
+  assignee: {assignee}
+  operations: {operations}
+  actions: {actions}
+  information:
+    - entities: [{{ type: AirQualityObserved }}]
+      propertyNames: [name, pm10]
+      attributes: {attributes}
+"#
+    )
+}
+
+const PUBLIC: &str = "{ kind: role, id: public }";
+const STAFF: &str = "{ kind: group, id: air-team }";
+
+fn refusal(yaml: &str) -> String {
+    let policy = Policy::from_yaml(yaml).expect("parses");
+    policy.validate().expect_err("refused").to_string()
+}
+
+#[test]
+fn a_public_grant_may_read_history_and_versions_of_one_attribute() {
+    let yaml = capability_policy(
+        PUBLIC,
+        "[retrieveOps, queryTemporal, retrieveTemporal]",
+        "[readVersions]",
+        r#"{ "*": { history: false }, name: { history: true, versions: [read], metadata: [observedAt, reason] } }"#,
+    );
+    let policy = Policy::from_yaml(&yaml).expect("parses");
+    policy.validate().expect("valid");
+    let name = &policy.spec.information[0].attributes["name"];
+    assert_eq!(name.history, Some(true));
+    let back = Policy::from_yaml(&policy.to_yaml().expect("yaml")).expect("roundtrip");
+    assert_eq!(back, policy);
+}
+
+#[test]
+fn an_attribute_the_grant_does_not_list_is_refused() {
+    let yaml = capability_policy(STAFF, "[retrieveOps]", "[]", "{ pm25: { read: true } }");
+    assert!(refusal(&yaml).contains("pm25"), "{}", refusal(&yaml));
+}
+
+#[test]
+fn a_capability_the_operations_do_not_give_is_refused() {
+    for (operations, actions, block, says) in [
+        (
+            "[retrieveOps]",
+            "[]",
+            "{ name: { history: true } }",
+            "queryTemporal",
+        ),
+        (
+            "[retrieveOps]",
+            "[]",
+            "{ name: { versions: [read] } }",
+            "readVersions",
+        ),
+        (
+            "[retrieveOps]",
+            "[]",
+            "{ name: { write: [update] } }",
+            "write operation",
+        ),
+        (
+            "[retrieveOps]",
+            "[]",
+            "{ name: { versions: [keep] } }",
+            "write operation",
+        ),
+    ] {
+        let message = refusal(&capability_policy(STAFF, operations, actions, block));
+        assert!(message.contains(says), "{block}: {message}");
+    }
+}
+
+#[test]
+fn a_public_grant_never_writes_keeps_versions_or_shows_the_actor() {
+    for block in [
+        "{ name: { write: [update] } }",
+        "{ name: { versions: [keep] } }",
+        "{ name: { metadata: [modifiedBy.actor] } }",
+        "{ name: { metadata: [provenance] } }",
+    ] {
+        let message = refusal(&capability_policy(
+            PUBLIC,
+            "[retrieveOps, updateOps]",
+            "[readVersions]",
+            block,
+        ));
+        assert!(message.contains("public"), "{block}: {message}");
+    }
+}
+
+#[test]
+fn an_internal_grant_edits_name_but_not_pm10() {
+    let yaml = capability_policy(
+        STAFF,
+        "[retrieveOps, updateOps]",
+        "[]",
+        "{ name: { write: [update], versions: [keep] }, pm10: { write: [] } }",
+    );
+    Policy::from_yaml(&yaml)
+        .expect("parses")
+        .validate()
+        .expect("valid");
+}
+
+#[test]
+fn an_unknown_capability_or_a_repeated_value_is_refused() {
+    let unknown = capability_policy(STAFF, "[retrieveOps]", "[]", "{ name: { share: true } }");
+    assert!(Policy::from_yaml(&unknown).is_err(), "deny_unknown_fields");
+    let repeated = capability_policy(
+        STAFF,
+        "[retrieveOps]",
+        "[]",
+        "{ name: { metadata: [observedAt, observedAt] } }",
+    );
+    assert!(refusal(&repeated).contains("once"));
+}
+
+#[test]
+fn a_policy_with_capabilities_has_no_odrl_form_yet() {
+    let yaml = capability_policy(STAFF, "[retrieveOps]", "[]", "{ name: { read: true } }");
+    let policy = Policy::from_yaml(&yaml).expect("parses");
+    let refusal = jc_core::kinds::policy_odrl::render(&policy).expect_err("refused");
+    assert_eq!(refusal.member, "spec.information.attributes");
+}
