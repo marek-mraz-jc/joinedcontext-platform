@@ -260,6 +260,9 @@ fn the_schema_round_trips_and_names_the_rules() {
         "aboveCeiling",
         "data-read",
         "propose",
+        "create",
+        "edit",
+        "delete",
     ] {
         assert!(text.contains(word), "{word} missing from the schema");
     }

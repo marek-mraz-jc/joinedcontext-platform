@@ -70,10 +70,88 @@ pub enum Segment {
 pub enum ConnectorVerb {
     /// Read and list manifests of the kind.
     Read,
-    /// Plan and open a change of the kind, which a person approves in the Portal.
+    /// Plan and open any change of the kind: `create`, `edit` and `delete` together.
     Propose,
+    /// Plan and open a change creating an object of the kind that does not exist yet.
+    Create,
+    /// Plan and open a `replace` or `patch` of an existing object of the kind.
+    Edit,
+    /// Plan and open a change deleting an object of the kind.
+    Delete,
     /// Start a run (`Pipeline` only).
     Run,
+}
+
+impl ConnectorVerb {
+    /// Whether holding `self` allows `wanted`: the verb itself, or `propose` standing for
+    /// `create`, `edit` and `delete` (policies written before T-6302).
+    pub fn grants(self, wanted: ConnectorVerb) -> bool {
+        self == wanted
+            || (self == ConnectorVerb::Propose
+                && matches!(
+                    wanted,
+                    ConnectorVerb::Create | ConnectorVerb::Edit | ConnectorVerb::Delete
+                ))
+    }
+
+    /// The verb's word on the wire, such as `create`.
+    pub fn word(self) -> &'static str {
+        match self {
+            ConnectorVerb::Read => "read",
+            ConnectorVerb::Propose => "propose",
+            ConnectorVerb::Create => "create",
+            ConnectorVerb::Edit => "edit",
+            ConnectorVerb::Delete => "delete",
+            ConnectorVerb::Run => "run",
+        }
+    }
+}
+
+/// Whether `verbs` allow `wanted` on their kind (see [`ConnectorVerb::grants`]).
+pub fn verbs_allow(verbs: &[ConnectorVerb], wanted: ConnectorVerb) -> bool {
+    verbs.iter().any(|held| held.grants(wanted))
+}
+
+/// Checks a list of verbs per kind, the policy's `spec.kinds` or a connector's `kinds`, naming
+/// `field` (`spec.kinds` or `kinds`) in each refusal: registry kinds, each once, at least one
+/// verb each, no verb twice, `run` on `Pipeline` only.
+pub fn validate_kind_verbs(field: &'static str, kinds: &[KindVerbs]) -> Result<()> {
+    let (kind_field, verbs_field) = match field {
+        "kinds" => ("kinds[].kind", "kinds[].verbs"),
+        _ => ("spec.kinds[].kind", "spec.kinds[].verbs"),
+    };
+    for (at, entry) in kinds.iter().enumerate() {
+        if crate::registry::by_kind(&entry.kind).is_none() {
+            return Err(refuse(
+                kind_field,
+                entry.kind.clone(),
+                "not a kind of the platform registry, such as Pipeline or Endpoint",
+            ));
+        }
+        if kinds[..at].iter().any(|seen| seen.kind == entry.kind) {
+            return Err(refuse(kind_field, entry.kind.clone(), "listed twice"));
+        }
+        if entry.verbs.is_empty() {
+            return Err(refuse(
+                verbs_field,
+                entry.kind.clone(),
+                "at least one of read, create, edit, delete, run (propose: create, edit and delete)",
+            ));
+        }
+        for (at, verb) in entry.verbs.iter().enumerate() {
+            if entry.verbs[..at].contains(verb) {
+                return Err(refuse(verbs_field, entry.kind.clone(), "listed twice"));
+            }
+        }
+        if entry.verbs.contains(&ConnectorVerb::Run) && entry.kind != "Pipeline" {
+            return Err(refuse(
+                verbs_field,
+                entry.kind.clone(),
+                "`run` starts a pipeline run and applies to kind Pipeline only",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The verbs a connector may carry on one kind.
@@ -82,7 +160,8 @@ pub enum ConnectorVerb {
 pub struct KindVerbs {
     /// A kind of the platform registry, such as `Pipeline`.
     pub kind: String,
-    /// At least one of `read`, `propose`, `run`.
+    /// At least one of `read`, `create`, `edit`, `delete`, `run`; `propose` stands for
+    /// `create`, `edit` and `delete` together.
     pub verbs: Vec<ConnectorVerb>,
 }
 
@@ -283,46 +362,7 @@ impl DelegationPolicySpec {
                 "leave kinds out for reads only, or list at least one",
             ));
         }
-        for (at, entry) in kinds.iter().enumerate() {
-            if crate::registry::by_kind(&entry.kind).is_none() {
-                return Err(refuse(
-                    "spec.kinds[].kind",
-                    entry.kind.clone(),
-                    "not a kind of the platform registry, such as Pipeline or Endpoint",
-                ));
-            }
-            if kinds[..at].iter().any(|seen| seen.kind == entry.kind) {
-                return Err(refuse(
-                    "spec.kinds[].kind",
-                    entry.kind.clone(),
-                    "listed twice",
-                ));
-            }
-            if entry.verbs.is_empty() {
-                return Err(refuse(
-                    "spec.kinds[].verbs",
-                    entry.kind.clone(),
-                    "at least one of read, propose, run",
-                ));
-            }
-            for (at, verb) in entry.verbs.iter().enumerate() {
-                if entry.verbs[..at].contains(verb) {
-                    return Err(refuse(
-                        "spec.kinds[].verbs",
-                        entry.kind.clone(),
-                        "listed twice",
-                    ));
-                }
-            }
-            if entry.verbs.contains(&ConnectorVerb::Run) && entry.kind != "Pipeline" {
-                return Err(refuse(
-                    "spec.kinds[].verbs",
-                    entry.kind.clone(),
-                    "`run` starts a pipeline run and applies to kind Pipeline only",
-                ));
-            }
-        }
-        Ok(())
+        validate_kind_verbs("spec.kinds", kinds)
     }
 
     fn validate_clients(&self, clients: &[String]) -> Result<()> {
@@ -460,6 +500,63 @@ mod tests {
         let mut spec = policy();
         spec.allowed_clients = Some(vec!["http://x".into()]);
         assert_eq!(field_of(&spec), "spec.allowedClients");
+    }
+
+    #[test]
+    fn propose_stands_for_create_edit_and_delete_and_nothing_else() {
+        use ConnectorVerb::*;
+        for wanted in [Create, Edit, Delete] {
+            assert!(Propose.grants(wanted));
+            assert!(verbs_allow(&[Read, Propose], wanted));
+        }
+        assert!(!Propose.grants(Run));
+        assert!(!Propose.grants(Read));
+        assert!(!Create.grants(Edit));
+        assert!(!Edit.grants(Delete));
+        assert!(verbs_allow(&[Read, Create], Create));
+        assert!(!verbs_allow(&[Read, Create], Edit));
+        let parsed: Vec<ConnectorVerb> =
+            serde_json::from_value(serde_json::json!(["create", "edit", "delete", "propose"]))
+                .expect("the split verbs parse");
+        assert_eq!(parsed, vec![Create, Edit, Delete, Propose]);
+        assert_eq!(Edit.word(), "edit");
+    }
+
+    #[test]
+    fn a_policy_takes_the_split_verbs_and_a_connector_list_is_checked_alike() {
+        let mut spec = policy();
+        spec.kinds = Some(vec![KindVerbs {
+            kind: "Endpoint".into(),
+            verbs: vec![ConnectorVerb::Read, ConnectorVerb::Create],
+        }]);
+        assert!(spec.validate().is_ok());
+        assert!(verbs_allow(
+            spec.verbs_for("Endpoint"),
+            ConnectorVerb::Create
+        ));
+        assert!(!verbs_allow(
+            spec.verbs_for("Endpoint"),
+            ConnectorVerb::Edit
+        ));
+        let twice = [KindVerbs {
+            kind: "App".into(),
+            verbs: vec![ConnectorVerb::Edit, ConnectorVerb::Edit],
+        }];
+        match validate_kind_verbs("kinds", &twice) {
+            Err(Error::Name { field, .. }) => assert_eq!(field, "kinds[].verbs"),
+            other => panic!("expected a field refusal, got {other:?}"),
+        }
+        let unknown = [KindVerbs {
+            kind: "Nope".into(),
+            verbs: vec![ConnectorVerb::Read],
+        }];
+        assert!(matches!(
+            validate_kind_verbs("kinds", &unknown),
+            Err(Error::Name {
+                field: "kinds[].kind",
+                ..
+            })
+        ));
     }
 
     #[test]

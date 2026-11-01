@@ -110,9 +110,30 @@
           "type": "string"
         },
         {
-          "description": "Plan and open a change of the kind, which a person approves in the Portal.",
+          "description": "Plan and open any change of the kind: `create`, `edit` and `delete` together.",
           "enum": [
             "propose"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Plan and open a change creating an object of the kind that does not exist yet.",
+          "enum": [
+            "create"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Plan and open a `replace` or `patch` of an existing object of the kind.",
+          "enum": [
+            "edit"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Plan and open a change deleting an object of the kind.",
+          "enum": [
+            "delete"
           ],
           "type": "string"
         },
@@ -272,7 +293,7 @@
           "type": "string"
         },
         "verbs": {
-          "description": "At least one of `read`, `propose`, `run`.",
+          "description": "At least one of `read`, `create`, `edit`, `delete`, `run`; `propose` stands for `create`, `edit` and `delete` together.",
           "items": {
             "$ref": "#/definitions/ConnectorVerb"
           },
