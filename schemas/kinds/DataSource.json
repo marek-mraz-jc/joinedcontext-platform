@@ -164,6 +164,14 @@
           ],
           "description": "The MQTT connection, present when `type` is `mqtt`."
         },
+        "personalFields": {
+          "description": "The fields of this source's records that hold personal data (AG-158): a sample of the source answered to an MCP client or an agent run leaves them out and names them.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
         "secrets": {
           "description": "Secret references for runner-provided inputs (PL-50, MF-35).",
           "items": {

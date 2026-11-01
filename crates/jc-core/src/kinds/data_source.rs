@@ -430,7 +430,15 @@ pub struct DataSourceSpec {
     /// Secret references for runner-provided inputs (PL-50, MF-35).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<SecretRef>,
+    /// The fields of this source's records that hold personal data (AG-158): a sample of the
+    /// source answered to an MCP client or an agent run leaves them out and names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 256))]
+    pub personal_fields: Vec<String>,
 }
+
+/// The most bytes one `spec.personalFields` entry may hold.
+const PERSONAL_FIELD_BYTES: usize = 256;
 
 impl Kind for DataSourceSpec {
     const KIND: &'static str = "DataSource";
@@ -473,6 +481,34 @@ impl DataSourceSpec {
     /// check holds it to its project's folder.
     pub fn validate(&self) -> Result<()> {
         self.validate_reading_files("/data/")
+    }
+
+    /// Each `spec.personalFields` entry a field name: 1 to 256 bytes, no control character,
+    /// named once (AG-158).
+    fn validate_personal_fields(&self) -> Result<()> {
+        if self.personal_fields.len() > 256 {
+            return Err(Error::Invalid {
+                field: "spec.personalFields".to_owned(),
+                reason: format!("names {} fields; at most 256", self.personal_fields.len()),
+            });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for (i, field) in self.personal_fields.iter().enumerate() {
+            let reason = if field.is_empty() || field.len() > PERSONAL_FIELD_BYTES {
+                "a field name of 1 to 256 bytes, such as `rider`"
+            } else if field.chars().any(char::is_control) {
+                "a field name holds no control character"
+            } else if !seen.insert(field.as_str()) {
+                "each field is named once"
+            } else {
+                continue;
+            };
+            return Err(Error::Invalid {
+                field: format!("spec.personalFields[{i}]"),
+                reason: reason.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// [`Self::validate`] with every file a runner input reads held under `files`.
@@ -549,6 +585,7 @@ impl DataSourceSpec {
         }
 
         self.validate_secret_references()?;
+        self.validate_personal_fields()?;
 
         // Every string of a typed connection reaches the runner as written, and the runner fills
         // `${NAME}` from its environment: a header or a topic is the same door as a URL (PL-16,
