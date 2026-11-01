@@ -151,8 +151,9 @@ pub enum Scope {
     /// Project-level resource (namespace must be a project slug).
     Project,
     /// A kind that lives in either: the organization's own copy in `org`, or a project's own
-    /// copy in that project's namespace. `Role` is the one, so a project defines roles of its
-    /// own without reaching outside it (PF-68).
+    /// copy in that project's namespace. `Role`, `DataModel` and `McpServer` are these, so a
+    /// project defines roles, models and MCP servers of its own without reaching outside it
+    /// (PF-68).
     OrganizationOrProject,
 }
 

@@ -203,26 +203,38 @@ impl Kind for RoleSpec {
 impl RoleSpec {
     /// What a role that lives inside a project may name (PF-68).
     ///
-    /// A project role reaches only the kinds that live inside a project, which is exactly the
-    /// catalogue's project-scoped kinds. `Role`, `RoleBinding`, `Group`, `Organization` and
-    /// `Project` are not among them, so no project role writes roles, bindings or the
-    /// organization itself, and none of them reaches another project. The list is derived from
-    /// the catalogue rather than written twice, so a kind added tomorrow is covered by the rule
-    /// its own scope already states.
+    /// A project role reaches only the kinds that live inside a project: the catalogue's
+    /// project-scoped kinds and the project's own copies of the kinds that live in either
+    /// place (`DataModel`, `McpServer`), except `Role`, so no project role grants roles.
+    /// `RoleBinding`, `Group`, `Organization` and `Project` live in the organization only, so
+    /// no project role writes bindings or the organization itself, and none of them reaches
+    /// another project. The list is derived from the catalogue rather than written twice, so a
+    /// kind added tomorrow is covered by the rule its own scope already states.
     pub fn validate_in_project(&self) -> Result<()> {
+        use crate::envelope::Scope;
         for rule in &self.rules {
             for kind in &rule.kinds {
-                let project_kind = crate::registry::by_kind(kind)
-                    .is_some_and(|info| info.scope == crate::envelope::Scope::Project);
-                if !project_kind {
-                    return Err(Error::Name {
-                        field: "spec.rules[].kinds",
-                        value: kind.clone(),
-                        reason: "a role inside a project names project kinds only; Role, \
-                                 RoleBinding, Group, Organization and Project belong to the \
-                                 organization's own roles (PF-68)",
-                    });
-                }
+                let reason = match crate::registry::by_kind(kind).map(|info| info.scope) {
+                    Some(Scope::Project) => continue,
+                    Some(Scope::OrganizationOrProject) if kind != Self::KIND => continue,
+                    Some(Scope::OrganizationOrProject) => {
+                        "a project role grants no roles; roles and their bindings belong to the \
+                         organization's own roles (PF-68)"
+                    }
+                    None if kind != PERSON => {
+                        "no kind of that name lives in a project; a kind is written as in the \
+                         manifest, e.g. `Pipeline` (PF-68)"
+                    }
+                    Some(Scope::Organization) | None => {
+                        "this kind lives in the organization only, so only the organization's own \
+                         roles name it; a project role names the kinds a project holds (PF-68)"
+                    }
+                };
+                return Err(Error::Name {
+                    field: "spec.rules[].kinds",
+                    value: kind.clone(),
+                    reason,
+                });
             }
         }
         Ok(())

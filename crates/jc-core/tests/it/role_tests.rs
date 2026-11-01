@@ -437,6 +437,40 @@ fn a_project_role_names_no_person() {
     assert!(spec.validate_in_project().is_err());
 }
 
+/// A project role reads and proposes the kinds a project holds, its own data models and MCP
+/// servers included, and never grants roles or reaches an organization kind (PF-68).
+#[test]
+fn a_project_role_names_what_a_project_holds() {
+    let rule = |kind: &str| -> jc_core::kinds::RoleSpec {
+        serde_json::from_value(serde_json::json!({
+            "rules": [{ "kinds": [kind], "verbs": ["read", "propose"] }]
+        }))
+        .expect("a role spec")
+    };
+    for kind in ["DataModel", "McpServer", "Pipeline", "Endpoint"] {
+        rule(kind)
+            .validate_in_project()
+            .unwrap_or_else(|err| panic!("{kind} in a project role: {err}"));
+    }
+    for (kind, says) in [
+        ("Role", "grants no roles"),
+        ("RoleBinding", "lives in the organization only"),
+        ("Group", "lives in the organization only"),
+        ("Organization", "lives in the organization only"),
+        ("Project", "lives in the organization only"),
+        ("Environment", "lives in the organization only"),
+        ("Person", "lives in the organization only"),
+        ("Pipelin", "no kind of that name"),
+    ] {
+        let err = rule(kind)
+            .validate_in_project()
+            .expect_err("an organization kind in a project role");
+        let text = err.to_string();
+        assert!(text.contains(&format!("`{kind}`")), "{kind}: {text}");
+        assert!(text.contains(says), "{kind}: {text}");
+    }
+}
+
 #[test]
 fn every_verb_is_written_as_a_manifest_writes_it() {
     for verb in [
