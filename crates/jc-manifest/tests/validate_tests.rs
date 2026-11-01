@@ -1718,6 +1718,45 @@ fn writer(
     );
 }
 
+/// T-6392: a `targetEndpoint` written `{project}:{endpoint}` is refused with the form to write, the
+/// Endpoint's name alone, which then passes the check.
+#[test]
+fn a_project_prefixed_target_endpoint_is_told_to_write_the_name_alone() {
+    let dir = valid_repo("t6392-prefixed-target");
+    let pipeline = |target: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha2\nkind: Pipeline\nmetadata:\n  name: stations\n  namespace: ovzdusie\nspec:\n  class: scheduled\n  schedule: \"0 * * * *\"\n  sources:\n    - dataSourceRef: feed\n  outputs:\n    - targetEndpoint: {target}\n      type: AirQualityObserved\n      mode: upsert\n"
+        )
+    };
+    data_source(&dir, "ovzdusie", "feed");
+    let path = "projects/ovzdusie/pipelines/stations/pipeline.yaml";
+    write(
+        &dir,
+        path,
+        &pipeline("urn:ngsi-ld:Endpoint:ovzdusie:public-air"),
+    );
+    let report = validate::run(&dir);
+    let found = citing(&report, "ADR-N-057");
+    assert!(
+        found
+            .iter()
+            .any(|f| f.contains("declares no Endpoint ovzdusie:public-air")
+                && f.contains("targetEndpoint: urn:ngsi-ld:Endpoint:public-air")),
+        "{found:?}"
+    );
+
+    write(&dir, path, &pipeline("urn:ngsi-ld:Endpoint:public-air"));
+    let report = validate::run(&dir);
+    assert!(
+        !citing(&report, "ADR-N-057")
+            .iter()
+            .any(|f| f.contains("declares no Endpoint")),
+        "{:?}",
+        report.findings
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A second space `verejne` with its Endpoint `verejne-air`.
 fn second_space(dir: &Path) {
     write(

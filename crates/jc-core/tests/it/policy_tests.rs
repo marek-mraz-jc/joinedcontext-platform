@@ -561,6 +561,31 @@ fn a_user_assignee_is_a_keycloak_id_never_an_e_mail() {
     p.validate().expect("a group assignee is a name");
 }
 
+/// T-6391: the assigner names the granting organisation by its DID; an AI client's account e-mail
+/// or a person's name is refused naming `spec.assigner`, so it never lands in the project's Git.
+#[test]
+fn the_assigner_is_an_organisation_did_never_an_e_mail() {
+    let mut p = Policy::from_yaml(GOLDEN_POLICY)
+        .expect("valid golden YAML")
+        .spec;
+    for assigner in ["did:web:banskabystrica.sk", "did:web:{orgDomain}"] {
+        p.assigner = assigner.into();
+        p.validate()
+            .unwrap_or_else(|err| panic!("{assigner}: {err}"));
+    }
+    for assigner in [
+        "owner@example.com",
+        "did:web:owner@example.com",
+        "Jana Novakova",
+        "banskabystrica.sk",
+    ] {
+        p.assigner = assigner.into();
+        let err = p.validate().expect_err(assigner).to_string();
+        assert!(err.contains("spec.assigner"), "{assigner}: {err}");
+        assert!(err.contains("did:web:{orgDomain}"), "{assigner}: {err}");
+    }
+}
+
 /// A narrowing the broker cannot parse is refused naming its field (T-6283): Antares refuses the
 /// space's whole rule document over it, so the plan says so instead of planning green.
 #[test]
