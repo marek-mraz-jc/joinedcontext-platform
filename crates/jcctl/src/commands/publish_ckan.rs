@@ -331,46 +331,42 @@ fn bound_policies(
 /// ponytail: a granted type that never holds an entity is named too; its OData set answers 404
 /// until the first one arrives.
 fn granted_types(policies: &[PolicySpec]) -> Vec<String> {
-    let reads = |op: &OperationRef| match op {
-        OperationRef::Single(op) => *op == Operation::QueryEntity,
-        OperationRef::Group(group) => group.operations().contains(&Operation::QueryEntity),
-    };
-    let public = |policy: &&PolicySpec| {
-        policy.assignee.kind == PrincipalKind::Role && policy.assignee.id == "public"
-    };
-    let names = |policy: &PolicySpec, whole: bool| -> Vec<String> {
-        policy
-            .information
-            .iter()
-            .flat_map(|info| &info.entities)
-            .filter(|e| !whole || e.id_pattern.is_none())
-            .map(|e| e.entity_type.clone())
-            .filter(|kind| ckan::is_type_name(kind))
-            .collect()
-    };
     let refused: Vec<String> = policies
         .iter()
-        .filter(public)
-        .filter(|p| !p.effect.is_permission() && p.operations.iter().any(reads))
-        .filter(|p| {
-            p.information
-                .iter()
-                .all(|info| info.property_names.is_empty())
-        })
-        .flat_map(|p| names(p, true))
+        .flat_map(|p| public_reads(p, false))
         .collect();
     let mut granted: Vec<String> = Vec::new();
-    for kind in policies
-        .iter()
-        .filter(public)
-        .filter(|p| p.effect.is_permission() && p.operations.iter().any(reads))
-        .flat_map(|p| names(p, false))
-    {
+    for kind in policies.iter().flat_map(|p| public_reads(p, true)) {
         if !granted.contains(&kind) && !refused.contains(&kind) {
             granted.push(kind);
         }
     }
     granted
+}
+
+/// The types a public `queryEntity` Policy of this effect names: a permission each it names, a
+/// prohibition those it refuses whole (no idPattern, no propertyNames).
+fn public_reads(policy: &PolicySpec, permission: bool) -> Vec<String> {
+    let reads = |op: &OperationRef| match op {
+        OperationRef::Single(op) => *op == Operation::QueryEntity,
+        OperationRef::Group(group) => group.operations().contains(&Operation::QueryEntity),
+    };
+    let public = policy.assignee.kind == PrincipalKind::Role && policy.assignee.id == "public";
+    if !public
+        || policy.effect.is_permission() != permission
+        || !policy.operations.iter().any(reads)
+    {
+        return Vec::new();
+    }
+    policy
+        .information
+        .iter()
+        .filter(|info| permission || info.property_names.is_empty())
+        .flat_map(|info| &info.entities)
+        .filter(|e| permission || e.id_pattern.is_none())
+        .map(|e| e.entity_type.clone())
+        .filter(|kind| ckan::is_type_name(kind))
+        .collect()
 }
 
 /// The public `queryTemporal` grants of one single-rule Policy, one per `information` entry. A
