@@ -885,3 +885,40 @@ fn a_platform_broker_is_reached_by_brokerref_only() {
         .validate()
         .expect("an outside broker keeps its URL");
 }
+
+/// AG-158: `spec.personalFields` names the source fields a connector's sample leaves out; each
+/// is a field name named once.
+#[test]
+fn personal_fields_are_field_names_named_once() {
+    let listed = HTTP.replace(
+        "  type: http\n",
+        "  type: http\n  personalFields: [rider, phone]\n",
+    );
+    let source = DataSource::from_yaml(&listed).expect("parses");
+    assert_eq!(source.spec.personal_fields, ["rider", "phone"]);
+    source.validate().expect("two field names are valid");
+    assert!(DataSource::from_yaml(HTTP)
+        .expect("parses")
+        .spec
+        .personal_fields
+        .is_empty());
+
+    for (fields, why) in [
+        ("[rider, rider]", "named once"),
+        ("[\"\"]", "1 to 256 bytes"),
+        ("[\"a\\nb\"]", "control character"),
+    ] {
+        let wrong = HTTP.replace(
+            "  type: http\n",
+            &format!("  type: http\n  personalFields: {fields}\n"),
+        );
+        let error = DataSource::from_yaml(&wrong)
+            .expect("parses")
+            .validate()
+            .expect_err(fields);
+        assert!(
+            error.to_string().contains("spec.personalFields[") && error.to_string().contains(why),
+            "{error}"
+        );
+    }
+}
