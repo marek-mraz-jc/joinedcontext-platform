@@ -474,7 +474,8 @@ pub(super) fn without_dangling(answer: &str, cited: &[Citation]) -> (String, u64
             .collect();
         dropped += (numbers.len() - kept.len()) as u64;
         if kept.is_empty() {
-            out.truncate(out.trim_end().len());
+            // The space before a dropped marker goes, a line break stays (JC1-47).
+            out.truncate(out.trim_end_matches([' ', '\t']).len());
         } else if kept.len() == numbers.len() {
             out.push_str(&after[..=close]);
         } else {
@@ -1362,6 +1363,10 @@ mod tests {
             (clean.to_owned(), 0)
         );
         assert_eq!(without_dangling("[3] Nič", &[]), (" Nič".to_owned(), 1));
+        assert_eq!(
+            without_dangling("Prvý.\n[6] Druhý", &[]),
+            ("Prvý.\n Druhý".to_owned(), 1)
+        );
         assert_eq!(
             markers(&without_dangling(answer, &cited(&[1, 2])).0),
             HashSet::from([1])
