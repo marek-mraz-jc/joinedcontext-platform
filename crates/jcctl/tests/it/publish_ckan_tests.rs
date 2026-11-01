@@ -986,6 +986,68 @@ fn the_walk_reads_the_public_temporal_grants_and_the_retention_of_the_space() {
     assert_eq!(history.window("WeatherObserved", "no2"), None);
 }
 
+/// helsinki-transport (T-6329): the types its public read Policy names stay on its page while
+/// the type list lacks one (every Vehicle expired five minutes after its last position), so
+/// the three other Endpoints over the space still find their Vehicle rows' dataset. A type a
+/// public prohibition names whole, a type behind another role and a history-only grant are left
+/// out.
+#[test]
+fn the_walk_names_the_types_the_public_may_read() {
+    let dir = repo("granted-types");
+    let at = "projects/ovzdusie/spaces/ovzdusie/policies";
+    common::write(
+        &dir,
+        &format!("{at}/read.yaml"),
+        &policy(
+            "read",
+            "[retrieveOps]",
+            "  information:\n    - entities: [{ type: Vehicle }, { type: Alert }, { type: Secret }]\n",
+        ),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/alerts.yaml"),
+        &policy(
+            "alerts",
+            "[queryEntity]",
+            "  information:\n    - entities: [{ type: Alert }, { type: GtfsStop, idPattern: '^urn:ngsi-ld:GtfsStop:a' }]\n",
+        ),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/history.yaml"),
+        &policy(
+            "history",
+            "[queryTemporal]",
+            "  information:\n    - entities: [{ type: TrafficFlowObserved }]\n",
+        ),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/hidden.yaml"),
+        &policy(
+            "hidden",
+            "[retrieveOps]",
+            "  effect: prohibition\n  information:\n    - entities: [{ type: Secret }]\n",
+        ),
+    );
+    common::write(
+        &dir,
+        &format!("{at}/staff.yaml"),
+        &policy(
+            "staff",
+            "[retrieveOps]",
+            "  information:\n    - entities: [{ type: Payroll }]\n",
+        )
+        .replace("id: public", "id: staff"),
+    );
+    let repo = Repository::load(&dir).expect("the repository loads");
+    let found = targets(&repo, "ovzdusie").expect("the walk");
+    let mut granted = found[0].granted.clone();
+    granted.sort();
+    assert_eq!(granted, ["Alert", "GtfsStop", "Vehicle"]);
+}
+
 /// F-PLT3-009: a manifest whose `envVar` names a variable that is not a CKAN token is refused
 /// before anything is read or sent, and the refusal names the way out.
 #[test]
