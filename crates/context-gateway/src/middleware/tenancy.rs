@@ -518,6 +518,29 @@ mod tests {
         }
     }
 
+    /// EP-169 (T-6409): the broker hears the groups a `group` grant is matched against: the
+    /// person's groups in the Endpoint's Organization once the token carries `jc_groups`.
+    #[test]
+    fn the_broker_hears_the_groups_of_the_organization_when_the_token_has_them() {
+        let groups = |organization_groups: Option<&[&str]>| {
+            let person = Subject {
+                user: Some("jana".to_owned()),
+                groups: ["analysts".to_owned(), "helsinki/analysts".to_owned()].into(),
+                organization_groups: organization_groups
+                    .map(|names| names.iter().map(|name| (*name).to_owned()).collect()),
+                ..Subject::default()
+            };
+            let mut request = Request::new(axum::body::Body::empty());
+            pin_caller(&mut request, "air", &person).expect("a usable space");
+            request.headers()[GROUPS]
+                .to_str()
+                .map(str::to_owned)
+                .expect("ascii")
+        };
+        assert_eq!(groups(Some(&["analysts"])), "analysts");
+        assert_eq!(groups(None), "analysts,helsinki%2Fanalysts");
+    }
+
     #[test]
     fn a_hop_names_the_organization_and_kind_and_an_mcp_call_is_an_agents() {
         let mut request = Request::new(axum::body::Body::empty());
