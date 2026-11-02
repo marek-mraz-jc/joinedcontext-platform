@@ -138,6 +138,18 @@ fn provider_refusal(body: &Bytes) -> Option<&'static str> {
     None
 }
 
+/// The body without its `provider` member: OpenRouter's routing, which another upstream may refuse
+/// as an unknown field (AG-72). A body naming none is sent as is.
+fn without_routing(body: Bytes) -> Bytes {
+    let Ok(Value::Object(mut map)) = serde_json::from_slice::<Value>(&body) else {
+        return body;
+    };
+    if map.remove("provider").is_none() {
+        return body;
+    }
+    serde_json::to_vec(&map).map(Bytes::from).unwrap_or(body)
+}
+
 /// Each reasoning effort and the thinking budget it is on Anthropic messages (AG-72).
 const BUDGETS: [(&str, u64); 3] = [("low", 2048), ("medium", 8192), ("high", 24576)];
 
@@ -693,6 +705,11 @@ pub async fn handler(
             .with_detail(why)
             .into_response();
     }
+    let body_bytes = if state.config.model_routes {
+        body_bytes
+    } else {
+        without_routing(body_bytes)
+    };
 
     let body_bytes = match &caller {
         Caller::Run(run) => with_model(body_bytes, &run.model_name),

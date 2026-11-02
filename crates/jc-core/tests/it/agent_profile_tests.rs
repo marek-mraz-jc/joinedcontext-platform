@@ -221,6 +221,57 @@ fn an_access_block_outside_mf_40_is_refused() {
     }
 }
 
+/// AG-72: `model.routing` is optional, round-trips, and takes the routing an Assistant takes.
+#[test]
+fn routing_is_optional_and_checked_like_an_assistants() {
+    let profile = AgentProfile::from_yaml(VALID_YAML).expect("valid yaml");
+    assert_eq!(profile.spec.model.routing, None);
+    assert!(!profile.to_yaml().unwrap().contains("routing"));
+
+    let with = |routing: &str| {
+        VALID_YAML
+            .replace("provider: anthropic", "provider: openai-compatible")
+            .replace(
+                "maxTokensPerRun: 2000000",
+                &format!("maxTokensPerRun: 2000000\n    routing: {routing}"),
+            )
+    };
+    let profile = AgentProfile::from_yaml(&with(
+        "{order: [google-ai-studio/flex, google-ai-studio], allowFallbacks: true}",
+    ))
+    .expect("valid routing");
+    profile.validate().expect("valid profile");
+    let routing = profile.spec.model.routing.as_ref().expect("a routing");
+    assert_eq!(
+        routing.openrouter(),
+        serde_json::json!({
+            "order": ["google-ai-studio/flex", "google-ai-studio"],
+            "allow_fallbacks": true,
+        })
+    );
+    let again = AgentProfile::from_yaml(&profile.to_yaml().unwrap()).unwrap();
+    assert_eq!(again, profile);
+
+    for (routing, field) in [
+        ("{allowFallbacks: true}", "model.routing"),
+        ("{order: []}", "model.routing.order"),
+        ("{order: [UPPER]}", "model.routing.order"),
+    ] {
+        let err = AgentProfile::from_yaml(&with(routing))
+            .expect("parses")
+            .validate()
+            .expect_err(routing)
+            .to_string();
+        assert!(err.contains(field), "{routing}: {err}");
+    }
+    assert!(AgentProfile::from_yaml(&with("{ignore: [google-vertex]}")).is_err());
+
+    let mut anthropic = AgentProfile::from_yaml(&with("{sort: latency}")).expect("parses");
+    anthropic.spec.model.provider = ModelProvider::Anthropic;
+    let err = anthropic.validate().expect_err("no route on Anthropic");
+    assert!(err.to_string().contains("model.routing"), "{err}");
+}
+
 #[test]
 fn reasoning_effort_is_optional_and_one_of_three() {
     let profile = AgentProfile::from_yaml(VALID_YAML).expect("valid yaml");
