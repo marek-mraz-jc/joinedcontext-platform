@@ -292,7 +292,11 @@ async fn a_member_of_the_organization_in_no_project_is_admitted_by_jc_org() {
     let token = member(&fixture.realm, SLUG, "hel", &["members"], &["member"]);
     let (status, body) = read(&fixture, SLUG, &token).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(fixture.broker.hops().len(), 1, "the read reached the broker");
+    assert_eq!(
+        fixture.broker.hops().len(),
+        1,
+        "the read reached the broker"
+    );
 }
 
 /// ADR-N-067 2.3, EP-171: admission is only the door. The broker decides the read (ADR-N-050)
@@ -316,7 +320,11 @@ async fn a_member_without_a_grant_reaches_the_broker_with_nothing_added() {
             .to_owned()
     };
     assert_eq!(heard("x-jc-groups"), "members");
-    assert!(!heard("x-jc-roles").contains("member"), "{}", heard("x-jc-roles"));
+    assert!(
+        !heard("x-jc-roles").contains("member"),
+        "{}",
+        heard("x-jc-roles")
+    );
     assert!(!heard("x-jc-groups").contains(PROJECT));
 }
 
