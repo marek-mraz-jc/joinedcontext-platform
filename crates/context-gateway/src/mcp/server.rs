@@ -384,16 +384,15 @@ fn projects_of(gateway: &Gateway, claims: &Claims) -> Vec<String> {
     {
         return vec![project];
     }
-    group_projects(&claims.groups)
+    group_projects(claims.group_names())
 }
 
 /// The projects a person's groups name: the reconciler renders a project's groups as
 /// `{slug}-readers` and `{slug}-writers` (PF-87), and a group named exactly as a project keeps
 /// counting as it did.
-fn group_projects<'a>(groups: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+fn group_projects<'a>(groups: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut projects = Vec::new();
     for group in groups {
-        let group = group.trim_start_matches('/');
         projects.push(group.to_owned());
         if let Some(project) = group
             .strip_suffix("-readers")
@@ -760,17 +759,16 @@ mod tests {
     #[test]
     fn group_projects_reads_the_rendered_project_groups() {
         let groups = [
-            "/helsinki-readers",
+            "helsinki-readers",
             "espoo-writers",
             "helsinki-other",
             "-readers",
-        ]
-        .map(str::to_owned);
-        let projects = group_projects(&groups);
+        ];
+        let projects = group_projects(groups);
         assert!(projects.contains(&"helsinki".to_owned()));
         assert!(projects.contains(&"espoo".to_owned()));
         assert!(!projects.contains(&String::new()));
-        let other = group_projects(&["helsinki-other".to_owned()]);
+        let other = group_projects(["helsinki-other"]);
         assert_eq!(other, ["helsinki-other"]);
     }
 

@@ -118,6 +118,16 @@ impl Claims {
             .unwrap_or_default()
     }
 
+    /// The token's groups as the platform names them (ADR-N-067 2.2): Keycloak writes each as
+    /// its full path, and exactly one leading `/` goes, so a root group reads as its name and an
+    /// Organization's subgroup as `helsinki/members`, which no project, Group or grant name can
+    /// equal (a `/` is no DNS-1123 character). Only one: `//members` stays `/members`.
+    pub fn group_names(&self) -> impl Iterator<Item = &str> {
+        self.groups
+            .iter()
+            .map(|group| group.strip_prefix('/').unwrap_or(group))
+    }
+
     /// Whether the token names any of `audiences`.
     pub fn names_audience(&self, audiences: &[String]) -> bool {
         self.aud.iter().any(|audience| audiences.contains(audience))
@@ -450,6 +460,21 @@ mod tests {
 
     fn slug() -> Vec<String> {
         vec!["slug".to_owned()]
+    }
+
+    /// ADR-N-067 2.2 (T-6408): Keycloak writes full paths; one leading `/` goes, no more, so a
+    /// subgroup keeps its Organization and `//members` never reads as `members`.
+    #[test]
+    fn a_group_loses_one_leading_slash_and_a_subgroup_keeps_its_path() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "s", "iss": "i", "exp": NOW,
+            "groups": ["/helsinki", "/helsinki/members", "//members", "bare"],
+        }))
+        .expect("claims");
+        assert_eq!(
+            claims.group_names().collect::<Vec<_>>(),
+            ["helsinki", "helsinki/members", "/members", "bare"]
+        );
     }
 
     #[test]
