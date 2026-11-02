@@ -486,10 +486,14 @@ pub struct EndpointSpec {
     /// Whitelist of project slugs permitted when audience is `project-list` (EP-14, EP-15).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_projects: Vec<String>,
-    /// Optional NGSI-LD Policy URN attached to this endpoint; means `policyRefs: [it]`.
+    /// Optional NGSI-LD Policy URN attached to this endpoint; means `policyRefs: [it]`. Written
+    /// `urn:ngsi-ld:Policy:{orgDomain}:{space}:{name}`, where `{space}` is the rendered segment of
+    /// the space: its `urnSegment`, else `{project}-{name}`, never the bare space name (EP-117).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_ref: Option<Urn>,
-    /// The Policies this Endpoint evaluates, each a Policy URN of its space (ADR-N-057 decision 2).
+    /// The Policies this Endpoint evaluates, each a Policy URN of its space (ADR-N-057 decision 2),
+    /// written `urn:ngsi-ld:Policy:{orgDomain}:{space}:{name}`, where `{space}` is the rendered
+    /// segment of the space: its `urnSegment`, else `{project}-{name}`, never the bare space name.
     /// Never set beside `policyRef` and never empty; read both through
     /// [`EndpointSpec::policy_refs`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1011,7 +1015,9 @@ impl EndpointSpec {
                 return Err(Error::Name {
                     field: "policyRef",
                     value: policy.to_string(),
-                    reason: "a policyRef is urn:ngsi-ld:Policy:{orgDomain}:{space}:{name} (EP-117)",
+                    reason: "a policyRef is urn:ngsi-ld:Policy:{orgDomain}:{space}:{name}, where \
+                             {space} is the space's rendered segment: its urnSegment, else \
+                             {project}-{name} (EP-117)",
                 });
             }
         }
