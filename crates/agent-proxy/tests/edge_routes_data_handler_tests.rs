@@ -9,6 +9,7 @@ mod common;
 use axum::body::Body;
 use axum::http::StatusCode;
 use common::{app, authed, body_of, sample_run, Bases, RUN_ID, SLUG, TICKET};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -635,5 +636,49 @@ async fn the_data_door_counts_against_the_runs_requests_per_minute() {
     assert_eq!(
         gateway.received_requests().await.unwrap_or_default().len(),
         2
+    );
+}
+
+/// A gateway that streams its answer, as the live one does for a read (T-6434): the proxy buffers
+/// the body, so what it sends the run has to be framed for that body, not for the gateway's stream.
+/// Only a real connection shows it: hyper refuses the head while writing, after the handler ended.
+#[tokio::test]
+async fn a_chunked_gateway_answer_reaches_the_run_over_a_real_connection() {
+    let gateway = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_at = format!("http://{}", gateway.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = gateway.accept().await.unwrap();
+            let mut asked = [0u8; 4096];
+            let _ = socket.read(&mut asked).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                      transfer-encoding: chunked\r\n\r\n5\r\n[1,2]\r\n0\r\n\r\n",
+                )
+                .await;
+        }
+    });
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_at = proxy.local_addr().unwrap();
+    let app = with_gateway(false, &gateway_at);
+    tokio::spawn(async move { axum::serve(proxy, app).await.unwrap() });
+
+    let mut run = tokio::net::TcpStream::connect(proxy_at).await.unwrap();
+    let asked = format!(
+        "GET /v1/data/ngsi-ld/v1/entities?type=A HTTP/1.1\r\nhost: proxy\r\n\
+         x-jc-run: {RUN_ID}\r\nx-jc-ticket: {TICKET}\r\nconnection: close\r\n\r\n"
+    );
+    run.write_all(asked.as_bytes()).await.unwrap();
+    let mut answer = String::new();
+    run.read_to_string(&mut answer).await.unwrap();
+
+    assert!(answer.starts_with("HTTP/1.1 200"), "answer: {answer:?}");
+    assert!(answer.contains("[1,2]"), "answer: {answer:?}");
+    let heads = answer.to_lowercase();
+    assert_eq!(
+        heads.matches("transfer-encoding").count() + heads.matches("content-length").count(),
+        1,
+        "one framing header: {answer:?}"
     );
 }

@@ -21,6 +21,19 @@ const FORBIDDEN_CLIENT_HEADERS: &[&str] = &[
     "x-consumer-identity",
 ];
 
+/// What never crosses this hop of an answer: the gateway's cookies, and the hop-by-hop headers of
+/// RFC 9110 7.6.1, which describe the connection the proxy read from.
+const DROPPED_ANSWER_HEADERS: &[&str] = &[
+    "set-cookie",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
 /// The MCP tools that only read: the gateway's and the broker's (Antares `docs/src/mcp.md`).
 /// Named rather than the writes, so a write tool under a name nobody listed is refused, not
 /// passed (T-3806).
@@ -250,8 +263,11 @@ async fn forward(
     }
     let mut resp_builder = Response::builder().status(status);
 
+    // The body is buffered below, so the gateway's framing does not describe what the run gets:
+    // `transfer-encoding` beside the length axum sets makes hyper drop the connection after the
+    // audit line, and Linkerd answers the run an empty 500 (T-6434).
     for (k, v) in upstream_resp.headers().iter() {
-        if k.as_str().to_lowercase() != "set-cookie" {
+        if !DROPPED_ANSWER_HEADERS.contains(&k.as_str()) {
             resp_builder = resp_builder.header(k, v);
         }
     }
