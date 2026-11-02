@@ -661,6 +661,13 @@ struct Simulated {
     roles: Vec<String>,
     #[serde(default)]
     service_account: Option<String>,
+    /// The token's `jc_org`: the Organizations the person is a member of (ADR-N-067 2.2).
+    #[serde(default)]
+    organizations: Vec<String>,
+    /// The token's `jc_groups`, full paths such as `/helsinki/members`; absent is a token
+    /// without the claim, which keeps the plain `groups` match (ADR-N-067 2.3).
+    #[serde(default)]
+    organization_groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -918,17 +925,23 @@ fn simulated(gateway: &Gateway, endpoint: &Endpoint, who: &Simulated) -> Option<
     let nobody = who.user.is_none()
         && who.service_account.is_none()
         && who.groups.is_empty()
-        && who.roles.is_empty();
+        && who.roles.is_empty()
+        && who.organizations.is_empty()
+        && who.organization_groups.is_none();
     if nobody {
         return endpoint.admits(None).then(|| anonymous_on(endpoint));
     }
-    // The claims a token of theirs would carry. A member with no person is the empty user, which
-    // no Policy can name; a service account is its client's own service-account user.
+    subject_from(gateway, endpoint, &claims_of(who)?).ok()
+}
+
+/// The claims a token of `who` would carry. A member with no person is the empty user, which no
+/// Policy can name; a service account is its client's own service-account user.
+fn claims_of(who: &Simulated) -> Option<Claims> {
     let (azp, user) = match &who.service_account {
         Some(client) => (Some(client.clone()), format!("service-account-{client}")),
         None => (None, who.user.clone().unwrap_or_default()),
     };
-    let claims: Claims = serde_json::from_value(json!({
+    serde_json::from_value(json!({
         "sub": user,
         "iss": "simulated",
         "exp": 0,
@@ -936,9 +949,10 @@ fn simulated(gateway: &Gateway, endpoint: &Endpoint, who: &Simulated) -> Option<
         "preferred_username": user,
         "groups": who.groups,
         "realm_access": { "roles": who.roles },
+        "jc_org": who.organizations,
+        "jc_groups": who.organization_groups,
     }))
-    .ok()?;
-    subject_from(gateway, endpoint, &claims).ok()
+    .ok()
 }
 
 /// This surface's routes; `app::router` merges them under its guards.
@@ -987,6 +1001,37 @@ mod tests {
             Some(json!({ "read": ["name"] }))
         );
         assert_eq!(versions_member(&public, &[]), None);
+    }
+
+    /// ADR-N-067 (T-6411): a simulated person stands in their Organization as their token would:
+    /// `organizations` is `jc_org`, `organizationGroups` is `jc_groups`, and leaving the latter out
+    /// is a token without the claim.
+    #[test]
+    fn a_simulated_person_carries_their_organization_and_its_groups() {
+        let who: Simulated = serde_json::from_value(json!({
+            "user": "a1", "groups": ["helsinki/members", "helsinki/traffic-analysts"],
+            "organizations": ["helsinki"],
+            "organizationGroups": ["/helsinki/members", "/helsinki/traffic-analysts"],
+        }))
+        .expect("the subject parses");
+        let claims = claims_of(&who).expect("the claims build");
+        let analysts = ["members".to_owned(), "traffic-analysts".to_owned()].into();
+        assert_eq!(
+            crate::auth::subject::standing(&claims, Some("helsinki")),
+            (true, Some(analysts))
+        );
+        assert_eq!(
+            crate::auth::subject::standing(&claims, Some("espoo")),
+            (false, Some(std::collections::BTreeSet::new()))
+        );
+        let legacy: Simulated =
+            serde_json::from_value(json!({ "user": "a1", "groups": ["helsinki"] }))
+                .expect("the subject parses");
+        let claims = claims_of(&legacy).expect("the claims build");
+        assert_eq!(
+            crate::auth::subject::standing(&claims, Some("helsinki")),
+            (false, None)
+        );
     }
 
     #[test]
