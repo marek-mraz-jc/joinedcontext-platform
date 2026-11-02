@@ -5,7 +5,9 @@
 //! that person (RFC 8693, Keycloak standard token exchange V2) with a refresh token of the same
 //! session, and keeps both in memory for the run alone. Every data call of the run carries that
 //! token; a run without one reads nothing. When the run ends the refresh token is revoked
-//! (RFC 7009). Nothing here is written to disk or to a log line.
+//! (RFC 7009), unless another run still holds a grant of the same session: Keycloak's revocation
+//! ends every grant of this client in that session, not the one token. The last grant of a
+//! session revokes them all. Nothing here is written to disk or to a log line.
 
 use crate::config::Config;
 use crate::runs::{RunContext, RunError, RunResolver};
@@ -93,6 +95,15 @@ struct Tokens {
     expires_in: u64,
     #[serde(default)]
     refresh_token: Option<String>,
+    #[serde(default)]
+    session_state: Option<String>,
+}
+
+/// A held grant with the realm session it belongs to, which every refresh keeps.
+#[derive(Clone)]
+struct Held {
+    session: Option<String>,
+    grant: Arc<Mutex<Grant>>,
 }
 
 /// The grants of the runs this proxy holds, one per run id.
@@ -102,7 +113,7 @@ pub struct Grants {
     http: reqwest::Client,
     // ponytail: every grant sits behind its own lock, so one run's refresh never waits on another
     // run's; the map lock is held for lookups only.
-    held: Arc<Mutex<HashMap<String, Arc<Mutex<Grant>>>>>,
+    held: Arc<Mutex<HashMap<String, Held>>>,
 }
 
 impl Grants {
@@ -169,7 +180,8 @@ impl Grants {
     ///
     /// The token must be active and name the run's own person: the Portal handing over the wrong
     /// session would otherwise let one person's run read as another. A grant the run already
-    /// held is replaced and revoked.
+    /// held is replaced: revoked when it came from another session, dropped when it shares this
+    /// one's, since a revocation would end the new grant as well.
     pub async fn bind(&self, run: &RunContext, subject_token: &str) -> Result<(), BindError> {
         let seen = self
             .introspect(subject_token)
@@ -216,14 +228,13 @@ impl Grants {
             refresh,
         };
 
-        let replaced = self
-            .held
-            .lock()
-            .await
-            .insert(run.id.clone(), Arc::new(Mutex::new(grant)));
+        let held = Held {
+            session: tokens.session_state,
+            grant: Arc::new(Mutex::new(grant)),
+        };
+        let replaced = self.held.lock().await.insert(run.id.clone(), held);
         if let Some(old) = replaced {
-            let refresh = old.lock().await.refresh.clone();
-            self.revoke(&run.id, &refresh).await;
+            self.retire(&run.id, old).await;
         }
         tracing::info!(run = %run.id, user = %run.created_by, "the run holds its person's grant");
         Ok(())
@@ -240,7 +251,8 @@ impl Grants {
             .await
             .get(run_id)
             .cloned()
-            .ok_or(GrantError::Missing)?;
+            .ok_or(GrantError::Missing)?
+            .grant;
         let mut grant = grant.lock().await;
         if grant.until > Instant::now() + LEEWAY {
             return Ok(grant.access.clone());
@@ -283,10 +295,27 @@ impl Grants {
     /// Drops the run's grant and revokes its refresh token (ADR-N-038 §3.5). A run with no grant
     /// is nothing to do.
     pub async fn end(&self, run_id: &str) {
-        let Some(grant) = self.held.lock().await.remove(run_id) else {
+        let Some(held) = self.held.lock().await.remove(run_id) else {
             return;
         };
-        let refresh = grant.lock().await.refresh.clone();
+        self.retire(run_id, held).await;
+    }
+
+    /// Revokes a grant already out of `held`, unless a grant still held shares its session: the
+    /// realm would end that one too, and the last grant of the session revokes them all.
+    async fn retire(&self, run_id: &str, retired: Held) {
+        let shared = retired.session.is_some()
+            && self
+                .held
+                .lock()
+                .await
+                .values()
+                .any(|other| other.session == retired.session);
+        if shared {
+            tracing::info!(run = %run_id, "the run's grant is dropped; its session serves another run");
+            return;
+        }
+        let refresh = retired.grant.lock().await.refresh.clone();
         self.revoke(run_id, &refresh).await;
     }
 

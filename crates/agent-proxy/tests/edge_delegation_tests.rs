@@ -16,13 +16,14 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use wiremock::matchers::{body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 const PERSON: &str = "demo.steward@hel.fi";
 const PORTAL_TOKEN: &str = "portal-service-account-token";
 const PERSON_TOKEN: &str = "person-access-token";
 const DELEGATED: &str = "delegated-access-token";
 const REFRESH: &str = "delegated-refresh-token";
+const SESSION: &str = "realm-session-of-the-person";
 const TOKEN_PATH: &str = "/realms/jc/protocol/openid-connect/token";
 const INTROSPECT_PATH: &str = "/realms/jc/protocol/openid-connect/token/introspect";
 const REVOKE_PATH: &str = "/realms/jc/protocol/openid-connect/revoke";
@@ -55,7 +56,7 @@ async fn realm(expires_in: u64) -> MockServer {
         .and(body_string_contains("token-exchange"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "access_token": DELEGATED, "expires_in": expires_in, "refresh_token": REFRESH,
-            "token_type": "Bearer",
+            "session_state": SESSION, "token_type": "Bearer",
         })))
         .mount(&realm)
         .await;
@@ -342,6 +343,138 @@ async fn a_finished_runs_grant_is_revoked() {
         state.credentials.get_run_token(RUN_ID).await,
         Err(agent_proxy::delegation::GrantError::Missing)
     ));
+}
+
+/// Keycloak's revocation as 26.8.1 does it: one refresh token revoked ends every grant of the
+/// client in that session, and a later refresh answers `invalid_grant`.
+#[derive(Clone, Default)]
+struct RevocableSession(Arc<Mutex<bool>>);
+
+impl Respond for RevocableSession {
+    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+        let mut ended = self.0.lock().expect("the session flag");
+        if request.url.path() == REVOKE_PATH {
+            *ended = true;
+            return ResponseTemplate::new(200);
+        }
+        if *ended {
+            return ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": "Session doesn't have required client",
+            }));
+        }
+        ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "refreshed-token", "expires_in": 300, "refresh_token": REFRESH,
+            "session_state": SESSION,
+        }))
+    }
+}
+
+/// A realm whose grants live a second, so every token call refreshes at the edge of its grant.
+async fn realm_of_one_session() -> MockServer {
+    let realm = realm(1).await;
+    let session = RevocableSession::default();
+    Mock::given(method("POST"))
+        .and(path(REVOKE_PATH))
+        .respond_with(session.clone())
+        .with_priority(1)
+        .mount(&realm)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(TOKEN_PATH))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .respond_with(session)
+        .mount(&realm)
+        .await;
+    realm
+}
+
+fn run_named(id: &str) -> agent_proxy::runs::RunContext {
+    agent_proxy::runs::RunContext {
+        id: id.to_owned(),
+        ..sample_run(false)
+    }
+}
+
+fn grants_over(realm: &MockServer) -> agent_proxy::delegation::Grants {
+    state(
+        sample_run(false),
+        Bases {
+            realm: Some(format!("{}/realms/jc", realm.uri())),
+            ..Bases::default()
+        },
+    )
+    .credentials
+    .grants()
+    .clone()
+}
+
+/// A conversation's turns are runs of one session: the turn that ended must not take the next
+/// turn's grant with it at the moment that grant is due for a refresh (T-6483).
+#[tokio::test]
+async fn a_later_turn_refreshes_after_the_turn_before_ended() {
+    let realm = realm_of_one_session().await;
+    let grants = grants_over(&realm);
+    let (first, second) = (run_named("first-turn"), run_named("second-turn"));
+    grants.bind(&first, PERSON_TOKEN).await.expect("a grant");
+    grants.bind(&second, PERSON_TOKEN).await.expect("a grant");
+
+    grants.end(&first.id).await;
+    assert!(bodies(&realm, REVOKE_PATH).await.is_empty());
+    assert_eq!(
+        grants.token(&second.id).await.expect("the grant holds"),
+        "refreshed-token"
+    );
+
+    // The last grant of the session revokes it, so nothing outlives the runs.
+    grants.end(&second.id).await;
+    assert_eq!(bodies(&realm, REVOKE_PATH).await.len(), 1);
+}
+
+/// The person's next turn hands the run their token again: the grant it replaces is of the same
+/// session, and revoking it would end the new one.
+#[tokio::test]
+async fn a_grant_handed_over_again_in_its_session_survives_its_own_replacement() {
+    let realm = realm_of_one_session().await;
+    let grants = grants_over(&realm);
+    let run = run_named("a-turn");
+    grants.bind(&run, PERSON_TOKEN).await.expect("a grant");
+    grants.bind(&run, PERSON_TOKEN).await.expect("a grant");
+
+    assert!(bodies(&realm, REVOKE_PATH).await.is_empty());
+    assert_eq!(
+        grants.token(&run.id).await.expect("the grant holds"),
+        "refreshed-token"
+    );
+}
+
+/// A grant of another session shares nothing with the new one: the person signed in again, and
+/// the old session's grant is revoked as ever. So is one the realm named no session for.
+#[tokio::test]
+async fn a_grant_of_another_session_or_none_is_revoked() {
+    let realm = realm(300).await;
+    for session in [json!("the-session-after-signing-in-again"), json!(null)] {
+        Mock::given(method("POST"))
+            .and(path(TOKEN_PATH))
+            .and(body_string_contains("token-exchange"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": DELEGATED, "expires_in": 300, "refresh_token": REFRESH,
+                "session_state": session,
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .expect(1)
+            .mount(&realm)
+            .await;
+        let grants = grants_over(&realm);
+        let run = run_named("a-turn");
+        grants.bind(&run, PERSON_TOKEN).await.expect("a grant");
+        grants.bind(&run, PERSON_TOKEN).await.expect("a grant");
+        let before = bodies(&realm, REVOKE_PATH).await.len();
+        grants.end(&run.id).await;
+        assert_eq!(bodies(&realm, REVOKE_PATH).await.len(), before + 1);
+    }
+    assert_eq!(bodies(&realm, REVOKE_PATH).await.len(), 4);
 }
 
 /// ADR-N-038 decision 6: a run's data credentials end with the run, not only with their TTL.
