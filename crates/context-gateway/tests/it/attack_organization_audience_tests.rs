@@ -339,7 +339,11 @@ async fn a_person_bound_in_a_project_is_admitted_to_its_organization_endpoint() 
     let outsider = bound(&fixture.realm, SLUG, "zilina", "zilina-readers");
     let (status, refused) = read(&fixture, SLUG, &outsider).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
-    assert_eq!(fixture.broker.hops().len(), hops, "the broker was not asked");
+    assert_eq!(
+        fixture.broker.hops().len(),
+        hops,
+        "the broker was not asked"
+    );
 }
 
 /// EP-172, T-6461: `{project}-readers` and `-writers` name the project on a `project-list` audience as a
@@ -380,7 +384,11 @@ async fn a_person_bound_in_the_project_is_admitted_to_its_project_list_endpoint(
         let (status, body) = read(&fixture, SLUG, &token).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{group}: {body}");
     }
-    assert_eq!(fixture.broker.hops().len(), hops, "the broker was not asked");
+    assert_eq!(
+        fixture.broker.hops().len(),
+        hops,
+        "the broker was not asked"
+    );
 }
 
 /// ADR-N-067 2.3, EP-171: admission is only the door. The broker decides the read (ADR-N-050)
