@@ -406,18 +406,15 @@ fn loadtest_writes() -> Response<Body> {
 /// The 503 of a full gateway: nothing of the request was read or forwarded, so sending it again
 /// after `Retry-After` is safe.
 pub(crate) fn busy(what: &str) -> Response<Body> {
-    unavailable(
-        format!("{what}; send this request again after the seconds Retry-After names"),
-        RETRY_SECONDS,
-    )
+    unavailable(format!("{what}; try again in a moment"), RETRY_SECONDS)
 }
 
 /// The 429 of a full anonymous share (T-5124): nothing of the request was read or forwarded.
 fn anonymous_share_taken() -> Response<Body> {
     let mut answer = ProblemDetails::new(429, "too-many-requests", "Too Many Requests")
         .with_detail(
-            "the gateway serves as many requests without a token as it may at once; send this \
-             request again after the seconds Retry-After names, or sign in",
+            "the gateway serves as many requests without a token as it may at once; try again \
+             in a moment, or sign in",
         )
         .into_response();
     answer
@@ -594,6 +591,20 @@ mod tests {
             .body(Body::empty())
             .expect("a request");
         assert_eq!(Class::of(&basic), ANONYMOUS_READ, "only a bearer signs in");
+    }
+
+    /// An App shows this detail to a visitor as it stands (T-6503): it names no header.
+    #[tokio::test]
+    async fn a_visitor_reads_a_busy_answer_in_plain_words() {
+        for answer in [busy("the gateway is busy"), anonymous_share_taken()] {
+            let body = axum::body::to_bytes(answer.into_body(), 4096)
+                .await
+                .expect("body");
+            let problem: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            let detail = problem["detail"].as_str().expect("a detail");
+            assert!(detail.contains("try again in a moment"), "{detail}");
+            assert!(!detail.contains("Retry-After"), "{detail}");
+        }
     }
 
     #[test]
