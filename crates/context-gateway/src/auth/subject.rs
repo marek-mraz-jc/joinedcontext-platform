@@ -554,11 +554,6 @@ pub(crate) fn subject_of(
     })
 }
 
-/// Whether `project` is of the Endpoint's own Organization, which an `organization` audience
-/// asks of every caller (EP-14, ADR-N-058 2.4): one realm serves several Organizations, so a
-/// valid token says nothing about which one its holder belongs to. Each project's Organization
-/// comes from its Project manifest; while the gateway holds none for the Endpoint's project, the
-/// installation is one Organization and every member passes, as before ADR-N-058.
 /// A person's standing in the Organization of `endpoint`'s project (ADR-N-067 2.3): whether
 /// `jc_org` names it, and their groups in it when the token carries `jc_groups`. That
 /// Organization is every Policy's the Endpoint is decided by (their project and space are the
@@ -590,6 +585,11 @@ pub(crate) fn standing(
     )
 }
 
+/// Whether `project` is of the Endpoint's own Organization, which an `organization` audience
+/// asks of every caller (EP-14, ADR-N-058 2.4): one realm serves several Organizations, so a
+/// valid token says nothing about which one its holder belongs to. Each project's Organization
+/// comes from its Project manifest; while the gateway holds none for the Endpoint's project, the
+/// installation is one Organization and every member passes, as before ADR-N-058.
 fn of_its_organization(gateway: &Gateway, endpoint: &Endpoint, project: &str) -> bool {
     if endpoint.audience != Audience::Organization {
         return true;
