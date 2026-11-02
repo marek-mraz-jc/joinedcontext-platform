@@ -226,9 +226,9 @@ fn a_policy_ref_of_another_domain_binds_nothing() {
 #[test]
 fn a_policy_ref_binds_by_the_domains_of_its_project() {
     const ORGANIZATIONS: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  \
-         name: hel\n  namespace: org\nspec:\n  domain: hel.fi\n  installation: true\n  locales: [\"fi\"]\n  \
+         name: hel\nspec:\n  domain: hel.fi\n  installation: true\n  locales: [\"fi\"]\n  \
          defaultLocale: fi\n---\napiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  \
-         name: bratislava\n  namespace: org\nspec:\n  domain: bratislava.sk\n  locales: [\"sk\"]\n  \
+         name: bratislava\nspec:\n  domain: bratislava.sk\n  locales: [\"sk\"]\n  \
          defaultLocale: sk\n";
     let project = |organization: &str, domain: &str| {
         format!(
@@ -244,7 +244,7 @@ fn a_policy_ref_binds_by_the_domains_of_its_project() {
         ("bratislava", "  domain: bratislava.sk\n", "vantaa.fi", 0),
     ] {
         let dir = repo(&format!("{organization}-{domain}-{bound}"));
-        write(&dir, "org.yaml", ORGANIZATIONS);
+        write(&dir, "organizations.yaml", ORGANIZATIONS);
         write(&dir, "project.yaml", &project(organization, own));
         write(
             &dir,
