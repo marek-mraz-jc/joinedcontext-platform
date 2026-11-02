@@ -27,7 +27,8 @@ impl Subject {
         let id = assignee.id.as_str();
         match assignee.kind {
             PrincipalKind::User => self.user_principal() == Some(id),
-            PrincipalKind::Group => self.groups.contains(id),
+            PrincipalKind::Group => self.grant_groups().contains(id),
+            PrincipalKind::Organization => self.member_of_organization,
             PrincipalKind::Role => self.roles.contains(id),
             PrincipalKind::ServiceAccount => match id.split_once('/') {
                 Some((project, name)) => {
@@ -759,6 +760,86 @@ mod tests {
         };
         assert!(!member.is(&group("members")));
         assert!(member.is(&group("helsinki/members")));
+    }
+
+    /// A person as the gateway reads one from a token with these claims, on an Endpoint of
+    /// `organization`'s project (ADR-N-067 2.3).
+    fn person_of(claims: serde_json::Value, organization: Option<&str>) -> Subject {
+        let mut token = serde_json::json!({"sub": "s", "iss": "i", "exp": 1});
+        for (key, value) in claims.as_object().into_iter().flatten() {
+            token[key] = value.clone();
+        }
+        let claims: crate::auth::token::Claims = serde_json::from_value(token).expect("claims");
+        let (member_of_organization, organization_groups) =
+            crate::auth::subject::standing(&claims, organization);
+        Subject {
+            id: Some("s".to_owned()),
+            groups: claims.group_names().map(str::to_owned).collect(),
+            member_of_organization,
+            organization_groups,
+            ..Subject::default()
+        }
+    }
+
+    fn reads(subject: &Subject, assignee: &str) -> bool {
+        let policy = spec(&format!(
+            "assignee: {assignee}\noperations: [queryEntity]\n\
+             information:\n  - entities:\n      - type: Vehicle\n"
+        ));
+        !evaluate(
+            subject,
+            Operation::QueryEntity,
+            &Request::default(),
+            "air",
+            &[policy],
+            Utc::now(),
+        )
+        .is_deny()
+    }
+
+    /// EP-168, ADR-N-067 2.3 (T-6409): an `organization` grant reaches a member of the Policy's own
+    /// Organization and nobody else: not a member of another, not a token without `jc_org`.
+    #[test]
+    fn an_organization_grant_reaches_its_own_members_only() {
+        let grant = "{ kind: organization }";
+        let member = serde_json::json!({"jc_org": ["helsinki"], "groups": ["/helsinki/members"]});
+        assert!(reads(&person_of(member.clone(), Some("helsinki")), grant));
+        // The same person on an Endpoint of espoo: espoo's grant is not for them.
+        assert!(!reads(&person_of(member.clone(), Some("espoo")), grant));
+        // A project without an Organization matches nobody.
+        assert!(!reads(&person_of(member, None), grant));
+        let other = serde_json::json!({"jc_org": ["espoo"], "groups": ["/espoo/members"]});
+        assert!(!reads(&person_of(other, Some("helsinki")), grant));
+        // No `jc_org`: groups that look like membership grant nothing.
+        let without = serde_json::json!({"groups": ["/helsinki", "/helsinki/members", "helsinki"]});
+        assert!(!reads(&person_of(without, Some("helsinki")), grant));
+        assert!(!reads(&Subject::anonymous(), grant));
+    }
+
+    /// EP-169, ADR-N-067 2.3 (T-6409): with `jc_groups` a group grant matches `/{policy organization}/{id}`,
+    /// so a member of helsinki's `analysts` reaches helsinki's grant to `analysts` and not espoo's;
+    /// without `jc_groups` the plain `groups` match holds (transition).
+    #[test]
+    fn a_group_grant_matches_the_group_of_the_policys_organization_only() {
+        let grant = "{ kind: group, id: analysts }";
+        let analyst = serde_json::json!({
+            "jc_org": ["helsinki"],
+            "groups": ["/helsinki/analysts", "/analysts"],
+            "jc_groups": ["/helsinki/members", "/helsinki/analysts"],
+        });
+        assert!(reads(&person_of(analyst.clone(), Some("helsinki")), grant));
+        // espoo's grant to its own `analysts`: the root group `/analysts` in `groups` and
+        // helsinki's same-named group both stay out once `jc_groups` is present.
+        assert!(!reads(&person_of(analyst.clone(), Some("espoo")), grant));
+        assert!(!reads(&person_of(analyst, None), grant));
+        // An espoo analyst on helsinki's Endpoint.
+        let theirs = serde_json::json!({"jc_org": ["espoo"], "jc_groups": ["/espoo/analysts"]});
+        assert!(!reads(&person_of(theirs, Some("helsinki")), grant));
+        // A token of a realm without the mapper keeps today's match by the plain claim.
+        let legacy = serde_json::json!({"groups": ["/analysts"]});
+        assert!(reads(&person_of(legacy, Some("helsinki")), grant));
+        let legacy = serde_json::json!({"groups": ["/helsinki/analysts"]});
+        assert!(!reads(&person_of(legacy, Some("helsinki")), grant));
     }
 
     /// ADR-N-066 2.3 (DM-149): the broker hears only the attributes whose versions the grant

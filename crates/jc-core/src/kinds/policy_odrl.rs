@@ -91,6 +91,17 @@ pub fn render(policy: &Policy) -> Out<Value> {
             "per-attribute capabilities have no ODRL form yet; the Policy is served as YAML only",
         );
     }
+    // ODRL has no party for "the Organization of this project": exporting it as a Role would
+    // read back as a different assignee (ADR-N-067 2.3).
+    if rules
+        .iter()
+        .any(|(_, rule)| rule.assignee.kind == PrincipalKind::Organization)
+    {
+        return refuse(
+            "spec.assignee.kind",
+            "an organization assignee has no ODRL form yet; the Policy is served as YAML only",
+        );
+    }
     let (mut permission, mut prohibition) = (Vec::new(), Vec::new());
     for (_, rule) in &rules {
         match rule.effect {
@@ -875,6 +886,23 @@ mod tests {
         let set = render(&policy)?;
         assert_eq!(set["uid"], "urn:joinedcontext:policy:ovzdusie:ovzdusie:air");
         assert_eq!(import(&set, &Names::default())?, policy);
+        Ok(())
+    }
+
+    /// EP-168, ADR-N-067 2.3 (T-6409): ODRL has no party for the project's own Organization, so the
+    /// export refuses it rather than write a Role that reads back as another assignee.
+    #[test]
+    fn an_organization_assignee_has_no_odrl_form() -> Out<()> {
+        let yaml = POLICY.replace("{ kind: role, id: public }", "{ kind: organization }");
+        let policy = Policy::from_yaml(&yaml).map_err(|e| Refusal {
+            member: "fixture".into(),
+            reason: e.to_string(),
+        })?;
+        let refusal = render(&policy).err();
+        assert_eq!(
+            refusal.map(|r| r.member).as_deref(),
+            Some("spec.assignee.kind")
+        );
         Ok(())
     }
 

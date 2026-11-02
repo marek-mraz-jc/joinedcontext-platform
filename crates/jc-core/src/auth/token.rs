@@ -59,6 +59,15 @@ pub struct Claims {
     /// The groups Keycloak asserts.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// The Organizations the person is a member of, from their `/{organization}/…` groups
+    /// (ADR-N-067 2.2): what an `organization` assignee matches.
+    #[serde(default)]
+    pub jc_org: Vec<String>,
+    /// The person's groups under an Organization as full paths, `/{organization}/{group}`
+    /// (ADR-N-067 2.2). Absent on a token from a realm without the mapper, which is not the
+    /// same as an empty list.
+    #[serde(default)]
+    pub jc_groups: Option<Vec<String>>,
     /// The client roles Keycloak asserts, by client id (ADR-N-030, AP-97).
     #[serde(default)]
     pub resource_access: HashMap<String, RealmAccess>,
@@ -126,6 +135,27 @@ impl Claims {
         self.groups
             .iter()
             .map(|group| group.strip_prefix('/').unwrap_or(group))
+    }
+
+    /// Whether `jc_org` names `organization` (ADR-N-067 2.2). An empty name is no Organization.
+    pub fn member_of(&self, organization: &str) -> bool {
+        !organization.is_empty() && self.jc_org.iter().any(|named| named == organization)
+    }
+
+    /// The person's groups in `organization`: `g` for each `/{organization}/g` of `jc_groups`
+    /// (ADR-N-067 2.3). A path under another Organization, a deeper path and an empty name give
+    /// nothing, so a group of one Organization is never read as another's.
+    pub fn groups_in<'a>(&'a self, organization: &'a str) -> impl Iterator<Item = &'a str> {
+        self.jc_groups
+            .iter()
+            .flatten()
+            .filter(move |_| !organization.is_empty())
+            .filter_map(move |path| {
+                path.strip_prefix('/')?
+                    .strip_prefix(organization)?
+                    .strip_prefix('/')
+            })
+            .filter(|group| !group.is_empty() && !group.contains('/'))
     }
 
     /// Whether the token names any of `audiences`.
@@ -474,6 +504,40 @@ mod tests {
         assert_eq!(
             claims.group_names().collect::<Vec<_>>(),
             ["helsinki", "helsinki/members", "/members", "bare"]
+        );
+    }
+
+    /// EP-168, EP-169, ADR-N-067 2.3 (T-6409): `jc_org` must name the Organization exactly, and a group counts
+    /// only directly under it: `/espoo/analysts`, `/helsinkix/a`, `/helsinki/a/b` and a bare
+    /// `analysts` are no group of helsinki.
+    #[test]
+    fn an_organization_reads_only_its_own_members_and_groups() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "s", "iss": "i", "exp": NOW,
+            "jc_org": ["helsinki"],
+            "jc_groups": ["/helsinki/members", "/helsinki/analysts", "/espoo/analysts",
+                          "/helsinkix/a", "/helsinki/a/b", "/helsinki/", "analysts", "helsinki/x"],
+        }))
+        .expect("claims");
+        assert!(claims.member_of("helsinki"));
+        assert!(!claims.member_of("espoo"));
+        assert!(!claims.member_of("helsink"));
+        assert!(!claims.member_of(""));
+        assert_eq!(
+            claims.groups_in("helsinki").collect::<Vec<_>>(),
+            ["members", "analysts"]
+        );
+        assert_eq!(claims.groups_in("espoo").collect::<Vec<_>>(), ["analysts"]);
+        assert_eq!(claims.groups_in("").count(), 0);
+
+        let without: Claims = serde_json::from_value(
+            serde_json::json!({"sub": "s", "iss": "i", "exp": NOW, "groups": ["/helsinki"]}),
+        )
+        .expect("claims");
+        assert!(!without.member_of("helsinki"), "no jc_org is no member");
+        assert!(
+            without.jc_groups.is_none(),
+            "an absent jc_groups is not an empty one"
         );
     }
 

@@ -940,7 +940,7 @@
       "description": "Identity principal receiving a policy grant (ADR 002).",
       "properties": {
         "id": {
-          "description": "Identifier of the principal (username, role name, group name, DID).",
+          "description": "Identifier of the principal (username, role name, group name, DID). An `organization` assignee has none: it is always the Policy's own Organization (ADR-N-067 2.3).",
           "type": "string"
         },
         "kind": {
@@ -953,7 +953,6 @@
         }
       },
       "required": [
-        "id",
         "kind"
       ],
       "type": "object"
@@ -993,6 +992,13 @@
           "description": "Decentralized identifier (`did:web:...`).",
           "enum": [
             "did"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every member of the Policy's own Organization, the one its project belongs to: the verified token's `jc_org` names it (ADR-N-067 2.3). It carries no id, so a manifest cannot name another Organization.",
+          "enum": [
+            "organization"
           ],
           "type": "string"
         }

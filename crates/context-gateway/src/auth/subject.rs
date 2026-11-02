@@ -31,6 +31,12 @@ pub struct Subject {
     pub service_account_project: Option<String>,
     /// The groups the token asserts.
     pub groups: BTreeSet<String>,
+    /// The token's `jc_org` names the Organization of the Endpoint's project, the Organization of
+    /// every Policy decided for it: what an `organization` assignee matches (ADR-N-067 2.3).
+    pub member_of_organization: bool,
+    /// The person's groups in that Organization, `g` for each `/{organization}/g` of the token's
+    /// `jc_groups`; `None` when the token carries no `jc_groups` (ADR-N-067 2.3).
+    pub organization_groups: Option<BTreeSet<String>>,
     /// The roles the token asserts. An anonymous caller holds exactly `public` (GW22).
     pub roles: BTreeSet<String>,
     /// The decentralized identifier of a data-space participant, when one is calling.
@@ -61,6 +67,16 @@ impl Subject {
             roles: BTreeSet::from(["public".to_owned()]),
             ..Self::default()
         }
+    }
+
+    /// The groups a `group` assignee is matched against (ADR-N-067 2.3): the person's groups in
+    /// the Policy's Organization when the token carries `jc_groups`, so a same-named group of
+    /// another Organization never matches; the plain `groups` claim only when it does not.
+    pub fn grant_groups(&self) -> &BTreeSet<String> {
+        // ponytail: the plain `groups` fallback serves tokens of realms without the `jc_groups`
+        // mapper; remove it once every realm's clients carry it (ADR-N-067 step 1 applied on
+        // dev and prod) and every group Policy names a group under an Organization.
+        self.organization_groups.as_ref().unwrap_or(&self.groups)
     }
 
     /// What a `user` assignee or subject names this caller by: a person's Keycloak id, never a
@@ -267,6 +283,7 @@ fn preview_reader(
         tracing::warn!(slug = %endpoint.slug, "a preview reader with a service-account username");
         return Err(Box::new(ProblemDetails::not_found()));
     }
+    let (member_of_organization, organization_groups) = in_organization(gateway, endpoint, claims);
     Ok(Subject {
         user: Some(user),
         id: Some(claims.sub.clone()),
@@ -274,6 +291,8 @@ fn preview_reader(
         service_account_project: None,
         roles: roles_on(preview.audience, claims.roles().iter().cloned()),
         groups: claims.group_names().map(str::to_owned).collect(),
+        member_of_organization,
+        organization_groups,
         did: None,
         agreement: None,
         via: None,
@@ -444,6 +463,8 @@ pub(crate) fn subject_of(
                 // A workload's grants are its manifest's (PF-35, T-2545): a group the token
                 // claims is Keycloak membership nobody reviewed, so it reaches no group Policy.
                 groups: BTreeSet::new(),
+                member_of_organization: false,
+                organization_groups: None,
                 did: None,
                 agreement: None,
                 via: None,
@@ -514,6 +535,7 @@ pub(crate) fn subject_of(
         return Err(Box::new(ProblemDetails::forbidden()));
     }
 
+    let (member_of_organization, organization_groups) = in_organization(gateway, endpoint, claims);
     Ok(Subject {
         user: Some(user),
         id: Some(claims.sub.clone()),
@@ -521,6 +543,8 @@ pub(crate) fn subject_of(
         service_account_project: None,
         roles: roles_on(endpoint.audience, claims.roles().iter().cloned()),
         groups,
+        member_of_organization,
+        organization_groups,
         did: None,
         agreement: None,
         via,
@@ -528,6 +552,37 @@ pub(crate) fn subject_of(
         organization: gateway.organization_of(&project),
         read_only: claims.read_only(),
     })
+}
+
+/// A person's standing in the Organization of `endpoint`'s project (ADR-N-067 2.3): whether
+/// `jc_org` names it, and their groups in it when the token carries `jc_groups`. That
+/// Organization is every Policy's the Endpoint is decided by (their project and space are the
+/// Endpoint's), never one a header, the token's text or a URN names (ADR-N-041). A project the
+/// repository gives no Organization matches neither.
+fn in_organization(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+) -> (bool, Option<BTreeSet<String>>) {
+    standing(
+        claims,
+        gateway.organization_of(&endpoint.project).as_deref(),
+    )
+}
+
+/// [`in_organization`] once the Organization is known: `None` is a project without one.
+pub(crate) fn standing(
+    claims: &Claims,
+    organization: Option<&str>,
+) -> (bool, Option<BTreeSet<String>>) {
+    let organization = organization.unwrap_or_default();
+    (
+        claims.member_of(organization),
+        claims
+            .jc_groups
+            .as_ref()
+            .map(|_| claims.groups_in(organization).map(str::to_owned).collect()),
+    )
 }
 
 /// Whether `project` is of the Endpoint's own Organization, which an `organization` audience

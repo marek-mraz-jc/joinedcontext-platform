@@ -67,6 +67,8 @@ fn jana() -> Subject {
         client: None,
         organization: None,
         read_only: false,
+        member_of_organization: false,
+        organization_groups: None,
     }
 }
 
@@ -102,6 +104,8 @@ fn a_principal_kind_matches_only_its_own_field() {
         client: Some("shared-name".to_owned()),
         organization: None,
         read_only: false,
+        member_of_organization: false,
+        organization_groups: None,
     };
 
     assert_eq!(
