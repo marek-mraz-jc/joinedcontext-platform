@@ -18,6 +18,7 @@ import re
 import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from collections.abc import Callable
 from typing import Any
 
 import requests
@@ -207,10 +208,16 @@ def resolve(node: Any, commons: dict[str, Any] | None, _depth: int = 0) -> Any:
     return {key: resolve(value, commons, _depth + 1) for key, value in node.items()}
 
 
-def fetch(model: str, ref: str = "master") -> dict[str, Any]:
-    """Fetch the documents one import needs, pinned to a commit."""
+def fetch(
+    model: str, ref: str = "master", commit_of: Callable[..., str] = resolve_commit
+) -> dict[str, Any]:
+    """Fetch the documents one import needs, pinned to a commit.
+
+    `commit_of` is `resolve_commit`; the mirror hands in a cached one, so converting every model
+    asks the GitHub API once per repository and not once per model.
+    """
     subject, name = split_identifier(model)
-    commit = resolve_commit(subject, ref)
+    commit = commit_of(subject, ref)
 
     def document(filename: str, *, of_the_model: bool = True) -> Any:
         under = f"{name}/" if of_the_model else ""
@@ -221,7 +228,7 @@ def fetch(model: str, ref: str = "master") -> dict[str, Any]:
     # are whatever `master` held that afternoon is not reproducible. A failure here is not
     # survivable — a model quietly missing `name`, `owner` and `dataProvider` is the defect
     # this fetch exists to fix — so it is left to raise.
-    commons_commit = resolve_commit(COMMONS_REPO)
+    commons_commit = commit_of(COMMONS_REPO)
     commons = _get(f"{RAW_BASE}{COMMONS_REPO}/{commons_commit}/{COMMONS_FILE}").json()
 
     return {
@@ -305,6 +312,10 @@ def _kind_of(slot_name: str, definition: dict[str, Any], context: dict[str, Any]
 #: JSON Schema string formats whose LinkML range schema-automator leaves at the default.
 #: A timestamp typed as a string is a timestamp nothing can filter on (DM-20).
 FORMAT_RANGES = {"date-time": "datetime", "date": "date", "time": "time", "uri": "uriorcurie"}
+
+#: A nested attribute's JSON type, where no format says more: schema-automator never sees a
+#: nested attribute, so `L1: {type: number}` would otherwise arrive as LinkML's default string.
+JSON_RANGES = {"number": "float", "integer": "integer", "boolean": "boolean"}
 
 #: What a catalogue attribute's prose calls a unit, and the UN/CEFACT code it is (DM-06, T-1100).
 #:
@@ -487,7 +498,7 @@ def _nested_classes(
         )
         attribute = {
             "description": sub.get("description"),
-            "range": nested or FORMAT_RANGES.get(sub.get("format") or ""),
+            "range": nested or FORMAT_RANGES.get(sub.get("format") or "") or JSON_RANGES.get(sub.get("type")),
             "required": attribute_name in required,
             "annotations": {
                 "ngsi_ld_kind": _kind_of(attribute_name, sub, {}),

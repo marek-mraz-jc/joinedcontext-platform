@@ -1,0 +1,50 @@
+id: https://github.com/smart-data-models/dataModel.Sample/Nested
+name: Nested
+title: Nested
+description: Nested sample
+prefixes:
+  linkml: https://w3id.org/linkml/
+  sdm: https://smartdatamodels.org/
+default_range: string
+imports:
+- linkml:types
+- ngsi-ld-core
+annotations:
+  spec.source.repository: https://github.com/smart-data-models/dataModel.Sample
+  spec.source.path: Nested/schema.json
+  spec.source.commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+classes:
+  Nested:
+    class_uri: https://github.com/smart-data-models/dataModel.Sample#Nested
+    description: Nested sample
+    is_a: Entity
+    slots:
+    - pm10
+    - voltage
+    annotations:
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  Voltage:
+    description: Property. Voltage
+    attributes:
+      L1:
+        description: Property. Line 1
+        range: float
+        annotations:
+          ngsi_ld_kind: Property
+          upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    annotations:
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+slots:
+  pm10:
+    description: Property. PM10
+    range: float
+    annotations:
+      ngsi_ld_kind: Property
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    slot_uri: https://smartdatamodels.org/dataModel.Sample/pm10
+  voltage:
+    description: Property. Voltage
+    range: Voltage
+    annotations:
+      ngsi_ld_kind: JsonProperty
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
