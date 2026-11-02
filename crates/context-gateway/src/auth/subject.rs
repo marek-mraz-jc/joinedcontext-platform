@@ -563,12 +563,30 @@ fn refuse_outside(
     Ok(())
 }
 
+/// The projects a person's groups name: the reconciler renders a project's groups as
+/// `{slug}-readers` and `{slug}-writers` (PF-87), and a group named exactly as a project keeps
+/// counting as it did.
+pub(crate) fn group_projects<'a>(groups: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut projects = Vec::new();
+    for group in groups {
+        projects.push(group.to_owned());
+        if let Some(project) = group
+            .strip_suffix("-readers")
+            .or_else(|| group.strip_suffix("-writers"))
+            .filter(|project| !project.is_empty())
+        {
+            projects.push(project.to_owned());
+        }
+    }
+    projects
+}
+
 /// The project a person's `groups` name on `endpoint`: its own or an allowed one, by a group
 /// named as the project or the `{project}-readers` and `{project}-writers` its bindings fill
 /// (PF-87, T-6461); else, for an `organization` audience, the first group that is a project of
 /// the Endpoint's Organization (ADR-N-058 2.4); empty when none is.
 fn project_of(gateway: &Gateway, endpoint: &Endpoint, groups: &BTreeSet<String>) -> String {
-    let projects = crate::mcp::server::group_projects(groups.iter().map(String::as_str));
+    let projects = group_projects(groups.iter().map(String::as_str));
     std::iter::once(&endpoint.project)
         .chain(endpoint.allowed_projects.iter())
         .find(|project| projects.contains(*project))
@@ -763,6 +781,24 @@ pub(crate) fn discoverable(gateway: &Gateway, space: &Space, subject: &Subject) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-5699, F-PLT2-022: a member of `helsinki-readers` or `-writers` acts in `helsinki`; a
+    /// group merely starting with the name does not.
+    #[test]
+    fn group_projects_reads_the_rendered_project_groups() {
+        let groups = [
+            "helsinki-readers",
+            "espoo-writers",
+            "helsinki-other",
+            "-readers",
+        ];
+        let projects = group_projects(groups);
+        assert!(projects.contains(&"helsinki".to_owned()));
+        assert!(projects.contains(&"espoo".to_owned()));
+        assert!(!projects.contains(&String::new()));
+        let other = group_projects(["helsinki-other"]);
+        assert_eq!(other, ["helsinki-other"]);
+    }
 
     /// AG-95: the audit line of a delegated call names the person and the account it came
     /// through; an ordinary person or workload is named alone.

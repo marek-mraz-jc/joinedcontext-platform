@@ -14,7 +14,7 @@
 
 use crate::app::{Gateway, MAX_BODY};
 use crate::auth::subject::Subject;
-use crate::auth::subject::{authenticate, subject_from, EDGE_AUDIENCE, HUB_PATH};
+use crate::auth::subject::{authenticate, group_projects, subject_from, EDGE_AUDIENCE, HUB_PATH};
 use crate::auth::token::{self, Claims};
 use crate::mcp::hub::{misrouted, Answer, Hub};
 use crate::mcp::jsonrpc::{self, error, refused, result};
@@ -387,24 +387,6 @@ fn projects_of(gateway: &Gateway, claims: &Claims) -> Vec<String> {
     group_projects(claims.group_names())
 }
 
-/// The projects a person's groups name: the reconciler renders a project's groups as
-/// `{slug}-readers` and `{slug}-writers` (PF-87), and a group named exactly as a project keeps
-/// counting as it did.
-pub(crate) fn group_projects<'a>(groups: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut projects = Vec::new();
-    for group in groups {
-        projects.push(group.to_owned());
-        if let Some(project) = group
-            .strip_suffix("-readers")
-            .or_else(|| group.strip_suffix("-writers"))
-            .filter(|project| !project.is_empty())
-        {
-            projects.push(project.to_owned());
-        }
-    }
-    projects
-}
-
 /// `initialize` of a named server: its title and description are what the client reads.
 pub(crate) fn initialized(server: Option<&McpServer>) -> Value {
     let (name, title, description) = server.map_or(("", None, None), |server| {
@@ -753,24 +735,6 @@ pub async fn protected_resource(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// T-5699, F-PLT2-022: a member of `helsinki-readers` or `-writers` acts in `helsinki`; a
-    /// group merely starting with the name does not.
-    #[test]
-    fn group_projects_reads_the_rendered_project_groups() {
-        let groups = [
-            "helsinki-readers",
-            "espoo-writers",
-            "helsinki-other",
-            "-readers",
-        ];
-        let projects = group_projects(groups);
-        assert!(projects.contains(&"helsinki".to_owned()));
-        assert!(projects.contains(&"espoo".to_owned()));
-        assert!(!projects.contains(&String::new()));
-        let other = group_projects(["helsinki-other"]);
-        assert_eq!(other, ["helsinki-other"]);
-    }
 
     /// EP-122, MF-57: the organization's built-in server selects everything an organization
     /// member reads and attaches no knowledge sources, so it lists no `search_documents`.
