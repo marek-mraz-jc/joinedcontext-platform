@@ -1,0 +1,32 @@
+id: https://github.com/smart-data-models/dataModel.Sample/Good
+name: Good
+title: Good
+description: Good sample
+prefixes:
+  linkml: https://w3id.org/linkml/
+  sdm: https://smartdatamodels.org/
+default_range: string
+imports:
+- linkml:types
+- ngsi-ld-core
+annotations:
+  spec.source.repository: https://github.com/smart-data-models/dataModel.Sample
+  spec.source.path: Good/schema.json
+  spec.source.commit: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+classes:
+  Good:
+    class_uri: https://github.com/smart-data-models/dataModel.Sample#Good
+    description: Good sample
+    is_a: Entity
+    slots:
+    - pm10
+    annotations:
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+slots:
+  pm10:
+    description: Property. PM10
+    range: float
+    annotations:
+      ngsi_ld_kind: Property
+      upstream_source: https://github.com/smart-data-models/dataModel.Sample@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    slot_uri: https://smartdatamodels.org/dataModel.Sample/pm10

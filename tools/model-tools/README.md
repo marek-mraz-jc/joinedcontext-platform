@@ -16,6 +16,7 @@ the Smart Data Models organisation and nothing else (DM-10, DM-18).
 | `src/gen_typescript.py` | `jc-types.ts` for a generated application: one type per entity class, each attribute as the App SDK's row cell | SDK-03, SDK-10 |
 | `src/gen_broker_schema.py` | the model in the broker's LinkML subset, which the Portal writes to a Context Space's broker tenant (`PUT /q/schemas/{tenant}`) | T-3703 |
 | `src/import_sdm.py` | a LinkML model from a Smart Data Models catalogue identifier, with provenance | DM-07…DM-11 |
+| `src/sdm_mirror.py` | every Smart Data Model converted ahead of time into the mirror the Portal bakes in; run nightly by joinedcontext-sdm-linkml | DM-08, DM-11 |
 | `src/infer_schema.py` | a draft LinkML model and the editor operations that build it, from a sample file parsed in memory | DM-54, DM-55 |
 
 `models/ngsi-ld-core.linkml.yaml` is the shared import: a model writes `imports:
