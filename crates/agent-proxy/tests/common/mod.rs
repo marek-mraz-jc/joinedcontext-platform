@@ -70,6 +70,8 @@ pub struct Bases {
     /// The realm, when a suite stubs one: the proxy then holds a real client secret and asks the
     /// realm for every token, and no stub token is minted (ADR-N-038).
     pub realm: Option<String>,
+    /// Whether the proxy takes the model stub for OpenRouter, as it does `openrouter.ai`.
+    pub routes: bool,
 }
 
 impl Default for Bases {
@@ -80,12 +82,13 @@ impl Default for Bases {
             forge: "http://gitea-http.invalid:3000".to_owned(),
             portal: "http://portal.invalid:8080".to_owned(),
             realm: None,
+            routes: true,
         }
     }
 }
 
 pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
-    let config = Config::from_lookup(|key| match key {
+    let mut config = Config::from_lookup(|key| match key {
         "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
         // No mesh in a test process: these tests are about other checks (F-PLT1-008).
         "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
@@ -101,6 +104,7 @@ pub fn state(run: RunContext, bases: Bases) -> Arc<ProxyState> {
         _ => None,
     })
     .expect("the test configuration is complete");
+    config.model_routes = bases.routes;
 
     let config = Arc::new(config);
     let portal_base = config.portal_base.clone();

@@ -127,6 +127,17 @@
             }
           ],
           "description": "How hard the model thinks on every call of a run; absent, no reasoning setting is sent (AG-72)."
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderRouting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which of the model's OpenRouter routes every call of a run asks for, in OpenRouter's terms (AG-72). `jc-agent-proxy` passes it to OpenRouter alone."
         }
       },
       "required": [
@@ -608,6 +619,67 @@
           "description": "The platform holds something the repository does not declare, or no longer holds what it does (CC-21, UI-25). Configuration cannot reach this phase — every component reads it from the repository (CC-72) — so it is a space whose seed entities the broker answers differently, and the two resolutions of UI-26 are what a person does about it.",
           "enum": [
             "Drifted"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ProviderRouting": {
+      "additionalProperties": false,
+      "description": "OpenRouter provider routing, sent as its `provider` request field (T-4292, MF-52).",
+      "properties": {
+        "allowFallbacks": {
+          "description": "Whether another provider may answer when these fail; default `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "order": {
+          "description": "Provider slugs, tried in this order, e.g. `cerebras`, `groq`; 1 to 8.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "sort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProviderSort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How OpenRouter ranks the providers `order` does not pin (T-4360)."
+        }
+      },
+      "type": "object"
+    },
+    "ProviderSort": {
+      "description": "OpenRouter's `provider.sort` (T-4360).",
+      "oneOf": [
+        {
+          "description": "The provider that answers first.",
+          "enum": [
+            "latency"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The provider that writes the most tokens a second.",
+          "enum": [
+            "throughput"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The cheapest provider.",
+          "enum": [
+            "price"
           ],
           "type": "string"
         }
