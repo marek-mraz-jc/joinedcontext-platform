@@ -6,6 +6,9 @@
 //! mapping the runner folds the run's pages with; its tests hold the mapping to a reference
 //! evaluator. A division by zero, an average over nothing or a source that did not answer
 //! writes no value (PL-104).
+//!
+//! `prev(sum(parking.occupied), P7D)` reads a term one period back (PL-117): the run adds one
+//! Temporal API read per source and period, and the term folds those rows as they stood then.
 
 use crate::error::{Error, Result};
 use crate::names;
@@ -24,6 +27,8 @@ pub const MAX_SOURCES: usize = 5;
 pub const MAX_FORMULA_CHARS: usize = 512;
 /// The most aggregate terms in one formula (PL-103).
 pub const MAX_TERMS: usize = 64;
+/// The most pairs of source and period one formula reads back (PL-117).
+pub const MAX_EARLIER_READS: usize = 3;
 /// The most indicators one run of an entity or area join writes (PL-104).
 pub const MAX_KEYS: usize = 500;
 /// The longest indicator name, leaving room for a key's slug in the `{localId}`.
@@ -53,7 +58,8 @@ pub struct KpiStep {
     /// A title for people.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Arithmetic over `sum|avg|min|max(input.attribute)` and `count(input)` (PL-103).
+    /// Arithmetic over `sum|avg|min|max(input.attribute)` and `count(input)` (PL-103), a term
+    /// read one period back as `prev(sum(input.attribute), P7D)` (PL-117).
     pub formula: String,
     /// The result's UN/CEFACT common code.
     pub unit_code: String,
@@ -159,6 +165,8 @@ pub enum Expr {
         input: String,
         /// The attribute; only `count` goes without.
         attr: Option<String>,
+        /// The period back a `prev` term reads, `P7D` (PL-117); the current page when absent.
+        back: Option<String>,
     },
     /// `-x`.
     Neg(Box<Expr>),
@@ -170,9 +178,17 @@ impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Num(n) => write!(f, "{n}"),
-            Self::Term { agg, input, attr } => match attr {
-                Some(attr) => write!(f, "{}({input}.{attr})", agg.word()),
-                None => write!(f, "{}({input})", agg.word()),
+            Self::Term {
+                agg,
+                input,
+                attr,
+                back,
+            } => match (attr, back) {
+                (Some(attr), Some(back)) => {
+                    write!(f, "prev({}({input}.{attr}), {back})", agg.word())
+                }
+                (Some(attr), None) => write!(f, "{}({input}.{attr})", agg.word()),
+                (None, _) => write!(f, "{}({input})", agg.word()),
             },
             Self::Neg(inner) => write!(f, "-{inner}"),
             Self::Bin(op, a, b) => write!(f, "({a} {op} {b})"),
@@ -276,32 +292,10 @@ impl Parser<'_> {
             }
             Some(c) if c.is_ascii_alphabetic() => {
                 let word = self.word();
-                let agg = Agg::parse(&word).ok_or_else(|| {
-                    invalid(format!(
-                        "`{word}` is not a function: use sum, avg, min, max or count"
-                    ))
-                })?;
-                self.expect(b'(')?;
-                let input = self.word();
-                let attr = if self.peek() == Some(b'.') {
-                    self.at += 1;
-                    Some(self.word())
-                } else {
-                    None
-                };
-                self.expect(b')')?;
-                if input.is_empty() || attr.as_deref() == Some("") {
-                    return Err(invalid(format!(
-                        "{word}() names a source and an attribute: {word}(source.attribute)"
-                    )));
+                if word == "prev" {
+                    return self.earlier();
                 }
-                if attr.is_none() && agg != Agg::Count {
-                    return Err(invalid(format!(
-                        "{word}({input}) needs an attribute: {word}({input}.attribute)"
-                    )));
-                }
-                self.terms += 1;
-                Ok(Expr::Term { agg, input, attr })
+                self.term(&word)
             }
             Some(c) => Err(invalid(format!(
                 "`{}` at character {} is not part of a formula",
@@ -310,6 +304,75 @@ impl Parser<'_> {
             ))),
             None => Err(invalid("the formula ends too early")),
         }
+    }
+
+    /// The rest of a term once its function's name is read.
+    fn term(&mut self, word: &str) -> Result<Expr> {
+        let agg = Agg::parse(word).ok_or_else(|| {
+            invalid(format!(
+                "`{word}` is not a function: use sum, avg, min, max, count or prev"
+            ))
+        })?;
+        self.expect(b'(')?;
+        let input = self.word();
+        let attr = if self.peek() == Some(b'.') {
+            self.at += 1;
+            Some(self.word())
+        } else {
+            None
+        };
+        self.expect(b')')?;
+        if input.is_empty() || attr.as_deref() == Some("") {
+            return Err(invalid(format!(
+                "{word}() names a source and an attribute: {word}(source.attribute)"
+            )));
+        }
+        if attr.is_none() && agg != Agg::Count {
+            return Err(invalid(format!(
+                "{word}({input}) needs an attribute: {word}({input}.attribute)"
+            )));
+        }
+        self.terms += 1;
+        Ok(Expr::Term {
+            agg,
+            input,
+            attr,
+            back: None,
+        })
+    }
+
+    /// `prev(term, period)` after its name (PL-117): one attribute term and a duration.
+    fn earlier(&mut self) -> Result<Expr> {
+        let shape = "prev() reads one attribute one period back, such as \
+                     prev(sum(parking.occupied), P7D)";
+        self.expect(b'(')?;
+        let word = self.word();
+        if word.is_empty() {
+            return Err(invalid(shape));
+        }
+        let Expr::Term {
+            agg,
+            input,
+            attr: Some(attr),
+            ..
+        } = self.term(&word)?
+        else {
+            return Err(invalid(shape));
+        };
+        self.expect(b',')?;
+        let period = self.word();
+        self.expect(b')')?;
+        if !WINDOW_RE.is_match(&period) {
+            return Err(invalid(format!(
+                "`{period}` is not a period such as PT1H, P1D or P7D"
+            )));
+        }
+        Ok(Expr::Term {
+            agg,
+            input,
+            attr: Some(attr),
+            back: Some(period),
+        })
     }
 }
 
@@ -415,16 +478,125 @@ fn show(unit: &BTreeMap<String, i32>) -> String {
         .join("·")
 }
 
-fn terms<'e>(expr: &'e Expr, out: &mut Vec<(&'e str, Option<&'e str>, Agg)>) {
+/// One term as the checks read it: source, attribute, aggregate and period back.
+type TermRef<'e> = (&'e str, Option<&'e str>, Agg, Option<&'e str>);
+
+fn terms<'e>(expr: &'e Expr, out: &mut Vec<TermRef<'e>>) {
     match expr {
         Expr::Num(_) => {}
-        Expr::Term { agg, input, attr } => out.push((input, attr.as_deref(), *agg)),
+        Expr::Term {
+            agg,
+            input,
+            attr,
+            back,
+        } => out.push((input, attr.as_deref(), *agg, back.as_deref())),
         Expr::Neg(inner) => terms(inner, out),
         Expr::Bin(_, a, b) => {
             terms(a, out);
             terms(b, out);
         }
     }
+}
+
+/// One read back of a formula (PL-117): a source at one period, with the attributes it folds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Earlier {
+    /// The source's `name`.
+    pub input: String,
+    /// The period back, `P7D`.
+    pub period: String,
+    /// The attributes the formula's `prev` terms read at that period.
+    pub attrs: Vec<String>,
+}
+
+impl Earlier {
+    /// The name this read's page goes by in a run and in [`evaluate`]; `@` is in no source name.
+    pub fn page(&self) -> String {
+        page_of(&self.input, &self.period)
+    }
+
+    /// The mapping's variable for this read's rows.
+    fn var(&self) -> String {
+        format!(
+            "$was_{}_{}",
+            self.input.replace('-', "_"),
+            self.period.to_lowercase()
+        )
+    }
+}
+
+fn page_of(input: &str, period: &str) -> String {
+    format!("{input}@{period}")
+}
+
+/// Every read back `expr` needs, each pair of source and period once, in the formula's order.
+pub fn earlier_reads(expr: &Expr) -> Vec<Earlier> {
+    let mut used = Vec::new();
+    terms(expr, &mut used);
+    let mut reads: Vec<Earlier> = Vec::new();
+    for (input, attr, _, back) in used {
+        let (Some(attr), Some(period)) = (attr, back) else {
+            continue;
+        };
+        let read = match reads
+            .iter_mut()
+            .position(|r| r.input == input && r.period == period)
+        {
+            Some(at) => &mut reads[at],
+            None => {
+                reads.push(Earlier {
+                    input: input.to_owned(),
+                    period: period.to_owned(),
+                    attrs: Vec::new(),
+                });
+                let last = reads.len() - 1;
+                &mut reads[last]
+            }
+        };
+        if !read.attrs.iter().any(|a| a == attr) {
+            read.attrs.push(attr.to_owned());
+        }
+    }
+    reads
+}
+
+/// A checked period's number and unit in seconds: `P7D` is 7 and 86400.
+fn period_parts(period: &str) -> (u32, u32) {
+    let digits: String = period.chars().filter(char::is_ascii_digit).collect();
+    let unit = match (period.starts_with("PT"), period.ends_with('M')) {
+        (false, _) => 86_400,
+        (true, true) => 60,
+        (true, false) => 3_600,
+    };
+    (digits.parse().unwrap_or(0), unit)
+}
+
+/// A checked period in seconds: `PT1H` is 3600.
+pub fn period_seconds(period: &str) -> u32 {
+    let (number, unit) = period_parts(period);
+    number * unit
+}
+
+/// A period in words: `P7D` is `7 days`, `PT1H` is `1 hour`.
+pub fn period_words(period: &str) -> String {
+    let (number, unit) = period_parts(period);
+    let unit = match unit {
+        60 => "minute",
+        3_600 => "hour",
+        _ => "day",
+    };
+    let plural = if number == 1 { "" } else { "s" };
+    format!("{number} {unit}{plural}")
+}
+
+/// Why a read back with no rows gives no value (PL-117), for the run's failed line and the
+/// preview's problem.
+pub fn no_history(period: &str) -> String {
+    format!(
+        "it has no history {} back, so there is no value; check that its space keeps this \
+         attribute's history and that much of it exists",
+        period_words(period)
+    )
 }
 
 fn field(name: &str, reason: impl Into<String>) -> Error {
@@ -449,7 +621,11 @@ impl KpiStep {
                 format!("an indicator name has at most {MAX_NAME_CHARS} characters"),
             ));
         }
-        if !(MIN_SOURCES..=MAX_SOURCES).contains(&inputs.len()) {
+        // A term read back is a second read of the one source (PL-117).
+        // A formula that does not parse is refused below, by its own reason.
+        let earlier = parse(&self.formula).map_or(true, |expr| !earlier_reads(&expr).is_empty());
+        let least = if earlier { 1 } else { MIN_SOURCES };
+        if !(least..=MAX_SOURCES).contains(&inputs.len()) {
             return Err(Error::Invalid {
                 field: "spec.sources".to_owned(),
                 reason: format!(
@@ -479,7 +655,27 @@ impl KpiStep {
         self.validate_join(inputs)?;
         let expr = parse(&self.formula)?;
         formula_terms(&expr, inputs)?;
+        self.check_earlier(&expr)?;
         self.check_unit(expr, inputs)
+    }
+
+    /// A read back goes with a join by time, a few times per formula (PL-117).
+    /// ponytail: a past row carries no key of its own, so a change per area would match it to
+    /// the current rows by id; the upgrade path is that match in `bloblang` and `evaluate`.
+    fn check_earlier(&self, expr: &Expr) -> Result<()> {
+        let reads = earlier_reads(expr);
+        if !reads.is_empty() && self.join.by != JoinBy::Time {
+            return Err(field(
+                "join",
+                "a value one period back is computed over all rows of the run: join by time",
+            ));
+        }
+        if reads.len() > MAX_EARLIER_READS {
+            return Err(invalid(format!(
+                "a formula reads at most {MAX_EARLIER_READS} sources or periods back"
+            )));
+        }
+        Ok(())
     }
 
     /// The join's keys name one read attribute (or id) of each source and nothing else.
@@ -589,7 +785,7 @@ fn source_names(inputs: &[Input]) -> Result<()> {
 fn formula_terms(expr: &Expr, inputs: &[Input]) -> Result<()> {
     let mut used = Vec::new();
     terms(expr, &mut used);
-    for (name, attr, agg) in &used {
+    for (name, attr, agg, _) in &used {
         let Some(input) = inputs.iter().find(|i| i.name == *name) else {
             return Err(invalid(format!(
                 "`{name}` is not a source: the sources are {}",
@@ -643,34 +839,49 @@ fn key_query(attr: &str) -> String {
     format!("e.get({at}).value.or(e.get({at}).object).or(e.get({at}))")
 }
 
-fn values(rows: &str, attr: &str) -> String {
+/// The numbers of `attr` on `rows`; a row read back holds a list of instances, newest first.
+fn values(rows: &str, attr: &str, earlier: bool) -> String {
     let at = lit(attr);
-    format!(
-        "{rows}.map_each(e -> e.get({at}).value.or(e.get({at}))).filter(v -> v.type() == \"number\")"
-    )
+    let member = if earlier {
+        format!("e.get({at}).index(0).or(e.get({at}))")
+    } else {
+        format!("e.get({at})")
+    };
+    format!("{rows}.map_each(e -> {member}.value.or({member})).filter(v -> v.type() == \"number\")")
 }
 
 /// `expr` as a Bloblang query over the per-source row variables `rows(name)`.
 fn query(expr: &Expr, rows: &dyn Fn(&str) -> String) -> String {
     match expr {
         Expr::Num(n) => format!("{n:?}"),
-        Expr::Term { agg, input, attr } => {
-            let rows = rows(input);
+        Expr::Term {
+            agg,
+            input,
+            attr,
+            back,
+        } => {
+            let earlier = back.as_ref().map(|period| Earlier {
+                input: input.clone(),
+                period: period.clone(),
+                attrs: Vec::new(),
+            });
+            let rows = earlier.as_ref().map_or_else(|| rows(input), Earlier::var);
             let Some(attr) = attr else {
                 return format!("{rows}.length()");
             };
-            let values = values(&rows, attr);
+            let values = values(&rows, attr, earlier.is_some());
             let empty = lit(&format!("{expr} has no values"));
+            let guarded = |fold: String| {
+                format!("(if {values}.length() == 0 {{ throw({empty}) }} else {{ {fold} }})")
+            };
             match agg {
-                Agg::Count => format!("{values}.length()"),
-                Agg::Sum => format!("{values}.sum()"),
-                Agg::Avg => format!(
-                    "(if {values}.length() == 0 {{ throw({empty}) }} else {{ {values}.sum() / {values}.length() }})"
-                ),
-                Agg::Min | Agg::Max => format!(
-                    "(if {values}.length() == 0 {{ throw({empty}) }} else {{ {values}.{}() }})",
-                    agg.word()
-                ),
+                // A count or sum over nothing is 0 now; one period back it is no history.
+                Agg::Count if earlier.is_none() => format!("{values}.length()"),
+                Agg::Sum if earlier.is_none() => format!("{values}.sum()"),
+                Agg::Count => guarded(format!("{values}.length()")),
+                Agg::Sum => guarded(format!("{values}.sum()")),
+                Agg::Avg => guarded(format!("{values}.sum() / {values}.length()")),
+                Agg::Min | Agg::Max => guarded(format!("{values}.{}()", agg.word())),
             }
         }
         Expr::Neg(inner) => format!("(0 - {})", query(inner, rows)),
@@ -722,7 +933,12 @@ pub fn bloblang(step: &KpiStep, expr: &Expr, inputs: &[Input], target: &Target<'
     let mut out = String::from(
         "let domain = env(\"JC_ORG_DOMAIN\")\nlet now = now()\nlet pages = this.or([])\n",
     );
-    let names: Vec<String> = inputs.iter().map(|i| lit(&i.name)).collect();
+    let reads = earlier_reads(expr);
+    let names: Vec<String> = inputs
+        .iter()
+        .map(|i| lit(&i.name))
+        .chain(reads.iter().map(|read| lit(&read.page())))
+        .collect();
     out.push_str(&format!(
         "let missing = [{}].filter(n -> $pages.filter(p -> p.input == n).length() == 0)\n\
          let failed = $pages.filter(p -> p.error != null).map_each(p -> \"input \" + p.input + \": \" + p.error.string())\n\
@@ -735,6 +951,13 @@ pub fn bloblang(step: &KpiStep, expr: &Expr, inputs: &[Input], target: &Target<'
             "let in_{} = $pages.filter(p -> p.input == {}).index(0).entities.or([])\n",
             input.name.replace('-', "_"),
             lit(&input.name)
+        ));
+    }
+    for read in &reads {
+        out.push_str(&format!(
+            "let {} = $pages.filter(p -> p.input == {}).index(0).entities.or([])\n",
+            read.var().trim_start_matches('$'),
+            lit(&read.page())
         ));
     }
     let provenance = |rows: &dyn Fn(&str) -> String| -> String {
@@ -754,6 +977,17 @@ pub fn bloblang(step: &KpiStep, expr: &Expr, inputs: &[Input], target: &Target<'
                 source_space(index),
                 lit(&format!(":{}, ", input.endpoint)),
                 rows(&input.name)
+            ));
+        }
+        for read in &reads {
+            text.push_str(&format!(
+                " + {} + {}.length().string() + \" rows\"",
+                lit(&format!(
+                    "; {} {} back: ",
+                    read.input,
+                    period_words(&read.period)
+                )),
+                read.var()
             ));
         }
         text
@@ -841,9 +1075,14 @@ pub fn bloblang(step: &KpiStep, expr: &Expr, inputs: &[Input], target: &Target<'
 
 // The reference evaluator the compiled mapping is held to (the example's bento test asserts
 // the same values) and the Portal's preview computes with (PL-105).
-/// The number an attribute holds on a row: a Property's `value` or a keyValues number.
+/// The number an attribute holds on a row: a Property's `value`, a keyValues number, or the first
+/// of a temporal row's instances, newest first.
 fn number(row: &Value, attr: &str) -> Option<f64> {
     let member = row.get(attr)?;
+    let member = member
+        .as_array()
+        .and_then(|instances| instances.first())
+        .unwrap_or(member);
     member
         .get("value")
         .unwrap_or(member)
@@ -868,13 +1107,23 @@ fn key(row: &Value, attr: &str) -> Option<String> {
 fn eval(expr: &Expr, rows: &BTreeMap<&str, Vec<&Value>>) -> std::result::Result<f64, String> {
     Ok(match expr {
         Expr::Num(n) => *n,
-        Expr::Term { agg, input, attr } => {
-            let rows = rows.get(input.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+        Expr::Term {
+            agg,
+            input,
+            attr,
+            back,
+        } => {
+            let page = back.as_ref().map(|period| page_of(input, period));
+            let page = page.as_deref().unwrap_or(input);
+            let rows = rows.get(page).map(Vec::as_slice).unwrap_or(&[]);
             let Some(attr) = attr else {
                 return Ok(rows.len() as f64);
             };
             let values: Vec<f64> = rows.iter().filter_map(|row| number(row, attr)).collect();
             match agg {
+                _ if back.is_some() && values.is_empty() => {
+                    return Err(format!("{expr} has no values"))
+                }
                 Agg::Count => values.len() as f64,
                 Agg::Sum => values.iter().sum(),
                 _ if values.is_empty() => return Err(format!("{expr} has no values")),
@@ -922,9 +1171,10 @@ pub fn evaluate(
     }
     let mut used = Vec::new();
     terms(expr, &mut used);
-    for (name, _, _) in &used {
-        if !pages.contains_key(*name) {
-            return Err(format!("input {name} did not answer in this run"));
+    for (name, _, _, back) in &used {
+        let page = back.map_or_else(|| (*name).to_owned(), |period| page_of(name, period));
+        if !pages.contains_key(&page) {
+            return Err(format!("input {page} did not answer in this run"));
         }
     }
     if step.join.by == JoinBy::Time {
@@ -1029,6 +1279,174 @@ mod tests {
             expr.to_string(),
             "(((sum(parking.occupied) / count(stops)) * 100) - -1)"
         );
+    }
+
+    #[test]
+    fn a_term_read_back_parses_and_names_its_read() {
+        let expr =
+            parse("sum(parking.occupied) - prev(sum(parking.occupied), P7D)").expect("parses");
+        assert_eq!(
+            expr.to_string(),
+            "(sum(parking.occupied) - prev(sum(parking.occupied), P7D))"
+        );
+        let expr = parse(
+            "prev(avg(parking.occupied), P7D) + prev(max(parking.capacity), P7D) + prev(count(stops.wait), PT1H)",
+        )
+        .expect("parses");
+        let reads = earlier_reads(&expr);
+        assert_eq!(reads.len(), 2);
+        assert_eq!(reads[0].page(), "parking@P7D");
+        assert_eq!(reads[0].attrs, ["occupied", "capacity"]);
+        assert_eq!(reads[1].page(), "stops@PT1H");
+    }
+
+    #[test]
+    fn a_read_back_of_anything_but_one_attribute_term_is_refused() {
+        for (formula, reason) in [
+            ("prev(count(parking), P7D)", "prev() reads one attribute"),
+            ("prev(sum(parking.occupied) + 1, P7D)", "expected `,`"),
+            ("prev(1, P7D)", "not a function"),
+            ("prev(sum(parking.occupied))", "expected `,`"),
+            ("prev(sum(parking.occupied), 7)", "not a period"),
+            ("prev(sum(parking.occupied), P1Y)", "not a period"),
+            ("prev(median(parking.occupied), P7D)", "not a function"),
+            (
+                "prev(prev(sum(parking.occupied), P1D), P7D)",
+                "not a function",
+            ),
+        ] {
+            let err = step(formula, "C62").validate(&inputs()).expect_err(formula);
+            assert!(err.to_string().contains(reason), "{formula}: {err}");
+        }
+        let err = step("prev(sum(cars.occupied), P7D)", "C62")
+            .validate(&inputs())
+            .expect_err("unknown source");
+        assert!(err.to_string().contains("`cars` is not a source"), "{err}");
+        let err = step("prev(sum(parking.free), P7D)", "C62")
+            .validate(&inputs())
+            .expect_err("an attribute the source does not read");
+        assert!(err.to_string().contains("`free` is not among"), "{err}");
+    }
+
+    #[test]
+    fn a_read_back_takes_one_source_a_join_by_time_and_a_few_reads() {
+        let one = &inputs()[..1];
+        let change = "sum(parking.occupied) - prev(sum(parking.occupied), P7D)";
+        step(change, "C62").validate(one).expect("one source");
+        let err = step("sum(parking.occupied)", "C62")
+            .validate(one)
+            .expect_err("one source with nothing read back");
+        assert!(err.to_string().contains("reads 2 to 5"), "{err}");
+
+        let mut by_area = step(change, "C62");
+        by_area.join.by = JoinBy::Area;
+        by_area.join.keys = BTreeMap::from([("parking".into(), "district".into())]);
+        let err = by_area.validate(one).expect_err("a join by area");
+        assert!(err.to_string().contains("join by time"), "{err}");
+
+        let four = "prev(sum(parking.occupied), P1D) + prev(sum(parking.occupied), P2D) \
+                    + prev(sum(parking.occupied), P3D) + prev(sum(parking.occupied), P4D)";
+        let err = step(four, "C62").validate(one).expect_err("four reads");
+        assert!(err.to_string().contains("at most 3"), "{err}");
+    }
+
+    #[test]
+    fn a_term_read_back_keeps_its_unit() {
+        let mut ins = inputs();
+        ins[0].units.insert("occupied".into(), "HUR".into());
+        let err = step("sum(stops.wait) - prev(sum(parking.occupied), P7D)", "MIN")
+            .validate(&ins)
+            .expect_err("minutes minus hours");
+        assert!(err.to_string().contains("one unit"), "{err}");
+        step("prev(sum(stops.wait), P7D) - sum(stops.wait)", "MIN")
+            .validate(&ins)
+            .expect("one unit");
+    }
+
+    #[test]
+    fn a_period_reads_in_words() {
+        assert_eq!(period_words("P7D"), "7 days");
+        assert_eq!(period_words("P1D"), "1 day");
+        assert_eq!(period_words("PT1H"), "1 hour");
+        assert_eq!(period_words("PT15M"), "15 minutes");
+        assert!(no_history("P7D").contains("7 days back"));
+        assert_eq!(period_seconds("P7D"), 604_800);
+        assert_eq!(period_seconds("PT15M"), 900);
+    }
+
+    /// A temporal row as the broker answers one on dev: each attribute a list of instances.
+    fn back(value: f64) -> Value {
+        json!({ "id": "urn:a", "type": "ParkingSite",
+                "occupied": [{ "type": "Property", "value": value }] })
+    }
+
+    #[test]
+    fn a_change_folds_the_current_page_minus_the_page_read_back() {
+        let s = step(
+            "sum(parking.occupied) - prev(sum(parking.occupied), P7D)",
+            "C62",
+        );
+        let ins = &inputs()[..1];
+        let expr = s.validate(ins).expect("valid");
+        let pages = BTreeMap::from([
+            (
+                "parking".to_owned(),
+                vec![json!({ "id": "urn:a", "occupied": { "type": "Property", "value": 30 } })],
+            ),
+            ("parking@P7D".to_owned(), vec![back(10.0), back(12.0)]),
+        ]);
+        let computed = evaluate(&s, &expr, &pages).expect("computed");
+        assert_eq!(computed[0].value, 8.0);
+        // One instance can come as a bare object too (T-5432).
+        let mut one = pages.clone();
+        one.insert(
+            "parking@P7D".to_owned(),
+            vec![json!({ "occupied": { "type": "Property", "value": 5 } })],
+        );
+        assert_eq!(evaluate(&s, &expr, &one).expect("computed")[0].value, 25.0);
+    }
+
+    #[test]
+    fn no_history_is_no_value_never_a_zero() {
+        let s = step(
+            "sum(parking.occupied) - prev(sum(parking.occupied), P7D)",
+            "C62",
+        );
+        let expr = s.validate(&inputs()[..1]).expect("valid");
+        let mut pages = BTreeMap::from([(
+            "parking".to_owned(),
+            vec![json!({ "occupied": { "type": "Property", "value": 30 } })],
+        )]);
+        let err = evaluate(&s, &expr, &pages).expect_err("the read did not answer");
+        assert!(err.contains("input parking@P7D did not answer"), "{err}");
+        pages.insert("parking@P7D".to_owned(), Vec::new());
+        let err = evaluate(&s, &expr, &pages).expect_err("no rows back");
+        assert!(err.contains("has no values"), "{err}");
+    }
+
+    #[test]
+    fn the_compiled_mapping_guards_a_read_back_and_says_what_it_read() {
+        let s = step(
+            "sum(parking.occupied) - prev(sum(parking.occupied), P7D)",
+            "C62",
+        );
+        let ins = &inputs()[..1];
+        let expr = s.validate(ins).expect("valid");
+        let target = Target {
+            pipeline_space: "helsinki",
+            pipeline: "change",
+        };
+        let mapping = bloblang(&s, &expr, ins, &target);
+        assert!(
+            mapping.contains("\"parking\", \"parking@P7D\""),
+            "{mapping}"
+        );
+        assert!(mapping.contains("let was_parking_p7d = "), "{mapping}");
+        assert!(
+            mapping.contains("throw(\"prev(sum(parking.occupied), P7D) has no values\")"),
+            "{mapping}"
+        );
+        assert!(mapping.contains("; parking 7 days back: "), "{mapping}");
     }
 
     #[test]

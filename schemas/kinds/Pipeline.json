@@ -536,7 +536,7 @@
       "description": "A `kpi` step (PL-102).",
       "properties": {
         "formula": {
-          "description": "Arithmetic over `sum|avg|min|max(input.attribute)` and `count(input)` (PL-103).",
+          "description": "Arithmetic over `sum|avg|min|max(input.attribute)` and `count(input)` (PL-103), a term read one period back as `prev(sum(input.attribute), P7D)` (PL-117).",
           "type": "string"
         },
         "join": {
