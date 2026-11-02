@@ -496,47 +496,13 @@ pub(crate) fn subject_of(
         );
         return Err(Box::new(ProblemDetails::forbidden()));
     }
-    let project = std::iter::once(&endpoint.project)
-        .chain(endpoint.allowed_projects.iter())
-        .find(|project| groups.contains(*project))
-        .or_else(|| {
-            // An `organization` audience admits a member of any project of the Endpoint's
-            // Organization (ADR-N-058 2.4): the first group that is one.
-            (endpoint.audience == Audience::Organization)
-                .then(|| {
-                    groups
-                        .iter()
-                        .find(|group| of_its_organization(gateway, endpoint, group))
-                })
-                .flatten()
-        })
-        .cloned()
-        .unwrap_or_default();
+    let project = project_of(gateway, endpoint, &groups);
     let (member_of_organization, organization_groups) = in_organization(gateway, endpoint, claims);
     // An `organization` audience admits a member of the Endpoint's Organization by the verified
     // `jc_org`, no project group needed (ADR-N-067 2.3); what they read is the Policies' to say.
     let member = endpoint.audience == Audience::Organization && member_of_organization;
-    if !member && !of_its_organization(gateway, endpoint, &project) {
-        // Another Organization's Endpoint is answered as a slug nobody created (PF-32, R20).
-        tracing::warn!(
-            user = %user,
-            azp = claims.azp.as_deref().unwrap_or_default(),
-            slug = %endpoint.slug,
-            "the token names no project of this endpoint's organization"
-        );
-        return Err(Box::new(ProblemDetails::not_found()));
-    }
-    if !member && !endpoint.admits(Some(&project)) {
-        // T-3033: an App's client minted tokens with no `groups` claim, and every project-bound
-        // read was a 403 with no line anywhere. The person, the client, the endpoint; never the
-        // token or its groups.
-        tracing::warn!(
-            user = %user,
-            azp = claims.azp.as_deref().unwrap_or_default(),
-            slug = %endpoint.slug,
-            "the token names no project this endpoint admits"
-        );
-        return Err(Box::new(ProblemDetails::forbidden()));
+    if !member {
+        refuse_outside(gateway, endpoint, claims, &user, &project)?;
     }
     // A member admitted without a project group writes under the Endpoint's own Organization.
     let organization = if project.is_empty() {
@@ -561,6 +527,60 @@ pub(crate) fn subject_of(
         organization,
         read_only: claims.read_only(),
     })
+}
+
+/// Refuses a person whose `project` is of another Organization than `endpoint`'s (404, PF-32)
+/// or not one `endpoint` admits (403, EP-14, EP-15).
+fn refuse_outside(
+    gateway: &Gateway,
+    endpoint: &Endpoint,
+    claims: &Claims,
+    user: &str,
+    project: &str,
+) -> Result<(), Box<ProblemDetails>> {
+    if !of_its_organization(gateway, endpoint, project) {
+        // Another Organization's Endpoint is answered as a slug nobody created (PF-32, R20).
+        tracing::warn!(
+            user = %user,
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "the token names no project of this endpoint's organization"
+        );
+        return Err(Box::new(ProblemDetails::not_found()));
+    }
+    if !endpoint.admits(Some(project)) {
+        // T-3033: an App's client minted tokens with no `groups` claim, and every project-bound
+        // read was a 403 with no line anywhere. The person, the client, the endpoint; never the
+        // token or its groups.
+        tracing::warn!(
+            user = %user,
+            azp = claims.azp.as_deref().unwrap_or_default(),
+            slug = %endpoint.slug,
+            "the token names no project this endpoint admits"
+        );
+        return Err(Box::new(ProblemDetails::forbidden()));
+    }
+    Ok(())
+}
+
+/// The project a person's `groups` name on `endpoint`: its own or an allowed one, else, for an
+/// `organization` audience, the first group that is a project of the Endpoint's Organization
+/// (ADR-N-058 2.4); empty when none is.
+fn project_of(gateway: &Gateway, endpoint: &Endpoint, groups: &BTreeSet<String>) -> String {
+    std::iter::once(&endpoint.project)
+        .chain(endpoint.allowed_projects.iter())
+        .find(|project| groups.contains(*project))
+        .or_else(|| {
+            (endpoint.audience == Audience::Organization)
+                .then(|| {
+                    groups
+                        .iter()
+                        .find(|group| of_its_organization(gateway, endpoint, group))
+                })
+                .flatten()
+        })
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// A person's standing in the Organization of `endpoint`'s project (ADR-N-067 2.3): whether
