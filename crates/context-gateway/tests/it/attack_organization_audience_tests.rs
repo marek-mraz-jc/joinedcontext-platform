@@ -222,6 +222,14 @@ async fn a_person_of_the_same_organization_is_admitted_to_an_organization_endpoi
         2,
         "both reads reached the broker"
     );
+    // A project group is no `jc_org`: the broker grants them no `organization` assignee.
+    for hop in fixture.broker.hops() {
+        assert!(
+            hop.headers.get("x-jc-member").is_none(),
+            "{:?}",
+            hop.headers
+        );
+    }
 }
 
 /// A ServiceAccount of another Organization's project is refused the same way; one of the
@@ -320,6 +328,8 @@ async fn a_member_without_a_grant_reaches_the_broker_with_nothing_added() {
             .to_owned()
     };
     assert_eq!(heard("x-jc-groups"), "members");
+    // The broker grants an `organization` assignee on this verified marker (Antares T-6419).
+    assert_eq!(heard("x-jc-member"), "true");
     assert!(
         !heard("x-jc-roles").contains("member"),
         "{}",

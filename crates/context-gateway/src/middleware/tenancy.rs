@@ -107,6 +107,9 @@ pub const RESTRICTED: HeaderName = HeaderName::from_static("x-jc-restricted");
 pub const READ_ONLY: HeaderName = HeaderName::from_static("x-jc-read-only");
 /// The data-space participant a transfer token names (DS-02, map K38, T-3800).
 pub const DID: HeaderName = HeaderName::from_static("x-jc-did");
+/// `true` when the token's verified `jc_org` names the Organization of the Endpoint's project:
+/// the broker grants an `organization` assignee to this caller (ADR-N-067 2.3, Antares T-6419).
+pub const MEMBER: HeaderName = HeaderName::from_static("x-jc-member");
 
 /// The service account the gateway's own hops to the broker run as (T-3767): its Keycloak
 /// client. The rule document the Portal writes grants it the reads and the unlinking those hops
@@ -201,6 +204,9 @@ pub fn pin_caller(
     // The broker matches a `group` assignee as the gateway does (ADR-N-067 2.3).
     list(headers, GROUPS, subject.grant_groups(), false);
     list(headers, ROLES, &subject.roles, true);
+    if subject.member_of_organization {
+        headers.insert(MEMBER, HeaderValue::from_static("true"));
+    }
     if asked {
         headers.insert(RESTRICTED, HeaderValue::from_static("true"));
     }
@@ -539,6 +545,32 @@ mod tests {
         };
         assert_eq!(groups(Some(&["analysts"])), "analysts");
         assert_eq!(groups(None), "analysts,helsinki%2Fanalysts");
+    }
+
+    /// ADR-N-067 2.3: the broker hears `x-jc-member` only for a member the gateway verified; a
+    /// client's own copy never crosses.
+    #[test]
+    fn the_broker_hears_a_member_only_when_the_gateway_verified_one() {
+        let member = |member_of_organization: bool| {
+            let mut request = Request::new(axum::body::Body::empty());
+            request
+                .headers_mut()
+                .insert(MEMBER, HeaderValue::from_static("true"));
+            let person = Subject {
+                user: Some("jana".to_owned()),
+                member_of_organization,
+                ..Subject::default()
+            };
+            pin_caller(&mut request, "air", &person).expect("a usable space");
+            request
+                .headers()
+                .get_all(MEMBER)
+                .iter()
+                .map(|v| v.to_str().map(str::to_owned).expect("ascii"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(member(true), ["true"]);
+        assert!(member(false).is_empty(), "{:?}", member(false));
     }
 
     #[test]
