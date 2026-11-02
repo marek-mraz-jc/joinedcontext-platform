@@ -769,8 +769,7 @@ mod tests {
         for (key, value) in claims.as_object().into_iter().flatten() {
             token[key] = value.clone();
         }
-        let claims: crate::auth::token::Claims =
-            serde_json::from_value(token).expect("claims");
+        let claims: crate::auth::token::Claims = serde_json::from_value(token).expect("claims");
         let (member_of_organization, organization_groups) =
             crate::auth::subject::standing(&claims, organization);
         Subject {

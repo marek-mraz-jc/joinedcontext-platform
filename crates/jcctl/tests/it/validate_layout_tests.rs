@@ -106,14 +106,18 @@ fn an_organization_assignee_validates_and_one_naming_an_organization_is_refused(
     write(
         &project,
         "spaces/ovzdusie/policies/staff.yaml",
-        &POLICY.replace("{ kind: organization }", "{ kind: organization, id: espoo }"),
+        &POLICY.replace(
+            "{ kind: organization }",
+            "{ kind: organization, id: espoo }",
+        ),
     );
     let report = run_project(&project, None, "example.org", &BTreeMap::new());
     let found = messages(&report);
     assert!(
-        found.iter().any(|m| m
-            .starts_with("spaces/ovzdusie/policies/staff.yaml")
-            && m.contains("spec.assignee.id")),
+        found
+            .iter()
+            .any(|m| m.starts_with("spaces/ovzdusie/policies/staff.yaml")
+                && m.contains("spec.assignee.id")),
         "{found:?}"
     );
 }

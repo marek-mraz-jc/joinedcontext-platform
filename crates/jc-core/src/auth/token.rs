@@ -535,7 +535,10 @@ mod tests {
         )
         .expect("claims");
         assert!(!without.member_of("helsinki"), "no jc_org is no member");
-        assert!(without.jc_groups.is_none(), "an absent jc_groups is not an empty one");
+        assert!(
+            without.jc_groups.is_none(),
+            "an absent jc_groups is not an empty one"
+        );
     }
 
     #[test]

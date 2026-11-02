@@ -159,10 +159,7 @@ pub fn taxonomy() -> Vec<Seeded> {
             purpose: "Every person of the organization: signs in, reads the catalogue and the \
                       connector ceilings, keeps their own settings and connectors; reads no \
                       Endpoint by itself, data comes only from Policies (ADR-N-067).",
-            rules: vec![rule(
-                vec!["DelegationPolicy".into()],
-                vec![Verb::Read],
-            )],
+            rules: vec![rule(vec!["DelegationPolicy".into()], vec![Verb::Read])],
         },
         Seeded {
             name: "viewer",

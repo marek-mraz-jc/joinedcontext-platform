@@ -569,7 +569,10 @@ fn in_organization(
     endpoint: &Endpoint,
     claims: &Claims,
 ) -> (bool, Option<BTreeSet<String>>) {
-    standing(claims, gateway.organization_of(&endpoint.project).as_deref())
+    standing(
+        claims,
+        gateway.organization_of(&endpoint.project).as_deref(),
+    )
 }
 
 /// [`in_organization`] once the Organization is known: `None` is a project without one.

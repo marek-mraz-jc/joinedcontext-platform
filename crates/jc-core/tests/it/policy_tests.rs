@@ -573,9 +573,15 @@ fn an_organization_assignee_carries_no_id() {
     assert_ne!(yaml, GOLDEN_POLICY, "the fixture names a role assignee");
     let policy = Policy::from_yaml(&yaml).expect("an organization assignee parses with no id");
     assert_eq!(policy.spec.assignee.kind, PrincipalKind::Organization);
-    policy.validate().expect("an organization assignee validates");
+    policy
+        .validate()
+        .expect("an organization assignee validates");
     let written = serde_norway::to_string(&policy.spec.assignee).expect("serialize");
-    assert_eq!(written.trim(), "kind: organization", "no empty id is written back");
+    assert_eq!(
+        written.trim(),
+        "kind: organization",
+        "no empty id is written back"
+    );
 
     let mut spec = policy.spec;
     for id in ["helsinki", "espoo", " "] {
@@ -597,7 +603,10 @@ fn an_organization_assignee_carries_no_id() {
         .expect("parses")
         .validate()
         .expect("an organization rule validates");
-    let named = rules.replace("{ kind: organization }", "{ kind: organization, id: espoo }");
+    let named = rules.replace(
+        "{ kind: organization }",
+        "{ kind: organization, id: espoo }",
+    );
     let err = Policy::from_yaml(&named)
         .expect("parses")
         .validate()
