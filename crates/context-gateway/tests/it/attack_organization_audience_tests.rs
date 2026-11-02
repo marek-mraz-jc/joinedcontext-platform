@@ -307,9 +307,11 @@ async fn a_member_of_the_organization_in_no_project_is_admitted_by_jc_org() {
     );
 }
 
-/// A person bound by RoleBinding alone (T-6461): the realm's `{project}-readers` carries the
-/// Organization, so the token names it in `jc_org` and the group in `jc_groups`.
-fn bound(realm: &common::Realm, slug: &str, organization: &str, group: &str) -> String {
+/// A person bound by RoleBinding alone (T-6461): the token names the project's group in `groups`
+/// and `jc_groups`, with the path of `hel` when `jc_org` names nobody; `jc_org` comes from the
+/// Organization's own groups, never from this one (T-6470).
+fn bound(realm: &common::Realm, slug: &str, jc_org: Option<&str>, group: &str) -> String {
+    let path = format!("/{}/{group}", jc_org.unwrap_or("hel"));
     realm.mint(&json!({
         "iss": common::ISSUER,
         "sub": "f:1:bound",
@@ -318,8 +320,8 @@ fn bound(realm: &common::Realm, slug: &str, organization: &str, group: &str) -> 
         "iat": common::in_seconds(-10),
         "preferred_username": "t6025-full",
         "groups": ["platform-readers", group],
-        "jc_org": [organization],
-        "jc_groups": [format!("/{organization}/{group}")],
+        "jc_org": jc_org.into_iter().collect::<Vec<_>>(),
+        "jc_groups": [path],
         "realm_access": { "roles": ["member"] },
     }))
 }
@@ -331,12 +333,12 @@ fn bound(realm: &common::Realm, slug: &str, organization: &str, group: &str) -> 
 async fn a_person_bound_in_a_project_is_admitted_to_its_organization_endpoint() {
     let fixture = fixture("bound-organization").await;
     let group = format!("{PROJECT}-readers");
-    let token = bound(&fixture.realm, SLUG, "hel", &group);
+    let token = bound(&fixture.realm, SLUG, Some("hel"), &group);
     let (status, body) = read(&fixture, SLUG, &token).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
     let hops = fixture.broker.hops().len();
-    let outsider = bound(&fixture.realm, SLUG, "zilina", "zilina-readers");
+    let outsider = bound(&fixture.realm, SLUG, Some("zilina"), "zilina-readers");
     let (status, refused) = read(&fixture, SLUG, &outsider).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
     assert_eq!(
@@ -344,6 +346,37 @@ async fn a_person_bound_in_a_project_is_admitted_to_its_organization_endpoint() 
         hops,
         "the broker was not asked"
     );
+}
+
+/// EP-173, T-6470: a vendor bound on one project holds its group and no `jc_org`. They read that
+/// project's `organization` Endpoint; on another project's Endpoint of the same Organization they
+/// are the outsider of EP-14, answered as a slug nobody made, and the broker is not asked. The
+/// `jc_groups` path of the project's group proves nothing about the Organization.
+#[tokio::test]
+async fn a_vendor_bound_on_a_project_reaches_only_that_projects_organization_endpoint() {
+    let fixture = fixture("bound-vendor").await;
+    let own = bound(&fixture.realm, SLUG, None, &format!("{PROJECT}-writers"));
+    let (status, body) = read(&fixture, SLUG, &own).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let hops = fixture.broker.hops().len();
+    let sibling = format!("{SIBLING}-readers");
+    let vendor = bound(&fixture.realm, SLUG, None, &sibling);
+    let (status, refused) = read(&fixture, SLUG, &vendor).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    let nobodys = bound(&fixture.realm, NOBODYS, None, &sibling);
+    let (_, unknown) = read(&fixture, NOBODYS, &nobodys).await;
+    assert_eq!(refused, unknown, "told apart from a slug nobody made");
+    assert_eq!(
+        fixture.broker.hops().len(),
+        hops,
+        "the broker was not asked"
+    );
+
+    // The same person of the Organization, whose `/hel/members` gives `jc_org`, keeps the reach.
+    let member = bound(&fixture.realm, SLUG, Some("hel"), &sibling);
+    let (status, body) = read(&fixture, SLUG, &member).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 /// EP-172, T-6461: `{project}-readers` and `-writers` name the project on a `project-list` audience as a
@@ -374,13 +407,18 @@ async fn a_person_bound_in_the_project_is_admitted_to_its_project_list_endpoint(
         _repo: repo,
     };
     for ending in ["readers", "writers"] {
-        let token = bound(&fixture.realm, SLUG, "hel", &format!("{PROJECT}-{ending}"));
+        let token = bound(
+            &fixture.realm,
+            SLUG,
+            Some("hel"),
+            &format!("{PROJECT}-{ending}"),
+        );
         let (status, body) = read(&fixture, SLUG, &token).await;
         assert_eq!(status, StatusCode::OK, "{ending}: {body}");
     }
     let hops = fixture.broker.hops().len();
     for group in [format!("{SIBLING}-readers"), format!("{PROJECT}-auditors")] {
-        let token = bound(&fixture.realm, SLUG, "hel", &group);
+        let token = bound(&fixture.realm, SLUG, Some("hel"), &group);
         let (status, body) = read(&fixture, SLUG, &token).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{group}: {body}");
     }
