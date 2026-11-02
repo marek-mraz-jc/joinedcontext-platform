@@ -964,27 +964,7 @@ impl PolicySpec {
             });
         }
 
-        if self.assignee.kind == PrincipalKind::Organization {
-            // The Organization is the project's, never one the text names (ADR-N-041, ADR-N-067).
-            if !self.assignee.id.is_empty() {
-                return Err(Error::Name {
-                    field: "spec.assignee.id",
-                    value: self.assignee.id.clone(),
-                    reason: "an organization assignee names no id: it is always the Organization \
-                             of the Policy's own project; write `assignee: { kind: organization }`",
-                });
-            }
-        } else if self.assignee.id.trim().is_empty() {
-            return Err(Error::Name {
-                field: "spec.assignee.id",
-                value: self.assignee.id.clone(),
-                reason: "assignee id must not be empty",
-            });
-        }
-        if self.assignee.kind == PrincipalKind::User && !is_service_account_user(&self.assignee.id)
-        {
-            crate::kinds::group::validate_person_id("spec.assignee.id", &self.assignee.id)?;
-        }
+        self.validate_assignee()?;
 
         if self.operations.is_empty() && self.actions.is_empty() {
             return Err(Error::Name {
@@ -1031,6 +1011,33 @@ impl PolicySpec {
             }
         }
 
+        Ok(())
+    }
+
+    /// The assignee names whom the Policy grants: an id for every kind but `organization`,
+    /// which is always the Policy's own Organization and names none.
+    fn validate_assignee(&self) -> Result<()> {
+        if self.assignee.kind == PrincipalKind::Organization {
+            // The Organization is the project's, never one the text names (ADR-N-041, ADR-N-067).
+            if !self.assignee.id.is_empty() {
+                return Err(Error::Name {
+                    field: "spec.assignee.id",
+                    value: self.assignee.id.clone(),
+                    reason: "an organization assignee names no id: it is always the Organization \
+                             of the Policy's own project; write `assignee: { kind: organization }`",
+                });
+            }
+        } else if self.assignee.id.trim().is_empty() {
+            return Err(Error::Name {
+                field: "spec.assignee.id",
+                value: self.assignee.id.clone(),
+                reason: "assignee id must not be empty",
+            });
+        }
+        if self.assignee.kind == PrincipalKind::User && !is_service_account_user(&self.assignee.id)
+        {
+            crate::kinds::group::validate_person_id("spec.assignee.id", &self.assignee.id)?;
+        }
         Ok(())
     }
 
