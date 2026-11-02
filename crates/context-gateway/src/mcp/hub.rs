@@ -102,6 +102,9 @@ fn kept_as(claims: Option<&Claims>, serving: Option<Representation>) -> Option<S
                 .as_ref()
                 .map(|access| sorted(&access.roles)),
             sorted(&claims.groups),
+            // An `organization` or Organization-group grant follows these (ADR-N-067 2.3).
+            sorted(&claims.jc_org),
+            claims.jc_groups.as_deref().map(sorted),
             clients,
             sorted(&claims.aud),
             &claims.scope,

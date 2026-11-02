@@ -123,6 +123,7 @@ mod mcp_facade_tests;
 mod mcp_hub_anonymous_tests;
 mod mcp_hub_audit_tests;
 mod mcp_hub_catalog_tests;
+mod mcp_hub_member_tests;
 mod mcp_hub_names_tests;
 mod mcp_hub_tests;
 mod mcp_member_log_tests;
