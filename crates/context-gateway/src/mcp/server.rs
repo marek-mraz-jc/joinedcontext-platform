@@ -390,7 +390,7 @@ fn projects_of(gateway: &Gateway, claims: &Claims) -> Vec<String> {
 /// The projects a person's groups name: the reconciler renders a project's groups as
 /// `{slug}-readers` and `{slug}-writers` (PF-87), and a group named exactly as a project keeps
 /// counting as it did.
-fn group_projects<'a>(groups: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+pub(crate) fn group_projects<'a>(groups: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut projects = Vec::new();
     for group in groups {
         projects.push(group.to_owned());
