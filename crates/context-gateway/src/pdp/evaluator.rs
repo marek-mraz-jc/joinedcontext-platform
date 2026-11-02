@@ -813,6 +813,18 @@ mod tests {
         // No `jc_org`: groups that look like membership grant nothing.
         let without = serde_json::json!({"groups": ["/helsinki", "/helsinki/members", "helsinki"]});
         assert!(!reads(&person_of(without, Some("helsinki")), grant));
+        // T-6470: a vendor bound on one project names its group in `jc_groups` and holds no
+        // `jc_org`: no grant to the whole Organization matches them.
+        let vendor = serde_json::json!({
+            "groups": ["doprava-readers"],
+            "jc_groups": ["/helsinki/doprava-readers"],
+        });
+        assert!(!reads(&person_of(vendor.clone(), Some("helsinki")), grant));
+        // A grant to the project's own group still does: that is the reach they were bound to.
+        assert!(reads(
+            &person_of(vendor, Some("helsinki")),
+            "{ kind: group, id: doprava-readers }"
+        ));
         assert!(!reads(&Subject::anonymous(), grant));
     }
 
