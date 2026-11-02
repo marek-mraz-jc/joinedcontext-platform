@@ -6,6 +6,7 @@
 
 mod common;
 
+use agent_proxy::config::Config;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{app, authed, body_of, sample_run, Bases, PROXY_CLIENT};
@@ -343,4 +344,59 @@ async fn a_pinned_provider_reaches_openrouter_and_an_unknown_field_is_refused() 
         .await
         .contains("latency, throughput or price"));
     assert_eq!(reached(&provider).await, 2, "the refused calls never left");
+}
+
+/// AG-72: an upstream that is not OpenRouter never sees the `provider` member, which it may refuse
+/// as an unknown field; the rest of the body reaches it unchanged.
+#[tokio::test]
+async fn only_openrouter_sees_the_provider_member() {
+    let (realm, provider) = (realm().await, provider().await);
+    let proxy = app(
+        sample_run(false),
+        Bases {
+            model: provider.uri(),
+            realm: Some(format!("{}/realms/jc", realm.uri())),
+            routes: false,
+            ..Bases::default()
+        },
+    );
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/llm/v1/chat/completions")
+        .header("authorization", format!("Bearer {ASSISTANT_TOKEN}"))
+        .header("x-jc-assistant-deployment", "bb/eval-cerebras")
+        .header("x-jc-assistant-tokens-per-day", "100000")
+        .body(Body::from(
+            r#"{"model":"m","messages":[],"provider":{"sort":"latency"}}"#,
+        ))
+        .expect("a request");
+    let answer = proxy.oneshot(request).await.expect("an answer");
+    assert_eq!(answer.status(), StatusCode::OK);
+    let seen = provider.received_requests().await.unwrap_or_default();
+    let body: serde_json::Value = serde_json::from_slice(&seen[0].body).expect("a JSON body");
+    assert_eq!(body["model"], "m");
+    assert!(body.get("provider").is_none(), "{body}");
+}
+
+/// AG-72: the proxy takes an upstream for OpenRouter by its host alone.
+#[test]
+fn the_openrouter_host_alone_routes() {
+    let routes = |base: &str| {
+        Config::from_lookup(|key| match key {
+            "JC_PROXY_BIND" => Some("127.0.0.1:0".to_owned()),
+            "JC_REQUIRE_MESH_IDENTITY" => Some("false".to_owned()),
+            "JC_GATEWAY_BASE" => Some("http://gateway.invalid".to_owned()),
+            "JC_MODEL_BASE" => Some(base.to_owned()),
+            "JC_FORGE_BASE" => Some("http://forge.invalid".to_owned()),
+            "JC_PORTAL_BASE" => Some("http://portal.invalid".to_owned()),
+            "JC_MODEL_KEY" => Some("key".to_owned()),
+            "JC_FORGE_TOKEN" => Some("token".to_owned()),
+            _ => None,
+        })
+        .expect("a configuration")
+        .model_routes
+    };
+    assert!(routes("https://openrouter.ai/api/v1"));
+    assert!(!routes("https://api.openai.com/v1"));
+    assert!(!routes("https://openrouter.ai.example.org/api/v1"));
 }

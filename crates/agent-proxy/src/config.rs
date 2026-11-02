@@ -55,6 +55,8 @@ pub struct Config {
     /// Which provider's protocol `model_base` speaks (`JC_MODEL_PROVIDER`, default
     /// `anthropic`).
     pub model_provider: String,
+    /// Whether `model_base` is OpenRouter, the one upstream that reads a body's `provider` member.
+    pub model_routes: bool,
     /// Where the realm's token endpoint is, for the same reason the gateway needs one
     /// (`JC_OIDC_TOKEN_URL`, T-2272): the issuer is the address a browser uses, and a pod cannot
     /// dial its own cluster's ingress hostname. The issuer's own endpoint when none is named.
@@ -117,6 +119,7 @@ impl std::fmt::Debug for Config {
             .field("model_base", &self.model_base.as_str())
             .field("model_key", &"[redacted]")
             .field("model_provider", &self.model_provider)
+            .field("model_routes", &self.model_routes)
             .field("oidc_token_url", &self.oidc_token_url)
             .field("require_mesh_identity", &self.require_mesh_identity)
             .field("portal_client_id", &self.portal_client_id)
@@ -248,6 +251,7 @@ impl Config {
             reason: e.to_string(),
         })?;
 
+        let model_routes = model_base.host_str() == Some("openrouter.ai");
         let model_key = read_secret(&lookup, "JC_MODEL_KEY_FILE", "JC_MODEL_KEY")?;
         let model_provider = lookup("JC_MODEL_PROVIDER").unwrap_or_else(|| "anthropic".to_string());
 
@@ -315,6 +319,7 @@ impl Config {
             model_base,
             model_key,
             model_provider,
+            model_routes,
             require_mesh_identity,
             portal_client_id,
             functions_identity,

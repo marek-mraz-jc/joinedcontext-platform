@@ -826,6 +826,30 @@ impl ProviderRouting {
         }
     }
 
+    /// An order, a sort or both, and an order of 1 to 8 slugs (MF-52); `field` and `order_field`
+    /// are where the manifest holds them.
+    pub fn validate(&self, field: &'static str, order_field: &'static str) -> Result<()> {
+        if self.order.is_none() && self.sort.is_none() {
+            return Err(name(field, String::new(), "names an order, a sort or both"));
+        }
+        let order = self.order.as_deref().unwrap_or_default();
+        if self.order.is_some() && (order.is_empty() || order.len() > MAX_PROVIDERS) {
+            return Err(name(
+                order_field,
+                order.len().to_string(),
+                "names 1 to 8 providers",
+            ));
+        }
+        if let Some(slug) = order.iter().find(|s| !is_provider_slug(s)) {
+            return Err(name(
+                order_field,
+                slug.clone(),
+                "a provider is at most 64 characters of a-z 0-9 . _ / -",
+            ));
+        }
+        Ok(())
+    }
+
     /// The field as OpenRouter reads it: `{order, sort, allow_fallbacks}`.
     pub fn openrouter(&self) -> serde_json::Value {
         let mut field = serde_json::json!({
@@ -1644,28 +1668,7 @@ impl AssistantDeploymentSpec {
                 }
             }
             if let Some(provider) = &model.provider {
-                if provider.order.is_none() && provider.sort.is_none() {
-                    return Err(name(
-                        "model.provider",
-                        String::new(),
-                        "model.provider names an order, a sort or both",
-                    ));
-                }
-                let order = provider.order.as_deref().unwrap_or_default();
-                if provider.order.is_some() && (order.is_empty() || order.len() > MAX_PROVIDERS) {
-                    return Err(name(
-                        "model.provider.order",
-                        order.len().to_string(),
-                        "model.provider.order names 1 to 8 providers",
-                    ));
-                }
-                if let Some(slug) = order.iter().find(|s| !is_provider_slug(s)) {
-                    return Err(name(
-                        "model.provider.order",
-                        slug.clone(),
-                        "a provider is at most 64 characters of a-z 0-9 . _ / -",
-                    ));
-                }
+                provider.validate("model.provider", "model.provider.order")?;
             }
         }
         Ok(())

@@ -6,6 +6,7 @@
 
 use crate::envelope::{Kind, ObjectMeta, Scope};
 use crate::error::{Error, Result};
+use crate::kinds::assistant::ProviderRouting;
 use crate::names;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -67,6 +68,10 @@ pub struct AgentModel {
     /// (AG-72).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Which of the model's OpenRouter routes every call of a run asks for, in OpenRouter's terms
+    /// (AG-72). `jc-agent-proxy` passes it to OpenRouter alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ProviderRouting>,
 }
 
 /// The provider's reasoning setting a run's model calls carry (AG-72).
@@ -358,6 +363,16 @@ impl AgentProfileSpec {
                 value: "0".to_string(),
                 reason: "maxTokensPerRun must be greater than 0",
             });
+        }
+        if let Some(routing) = &self.model.routing {
+            if self.model.provider == ModelProvider::Anthropic {
+                return Err(Error::Name {
+                    field: "model.routing",
+                    value: "anthropic".to_string(),
+                    reason: "routing is OpenRouter's, on an openai-compatible provider",
+                });
+            }
+            routing.validate("model.routing", "model.routing.order")?;
         }
 
         if self.limits.steps_per_run == 0 {
