@@ -561,6 +561,51 @@ fn a_user_assignee_is_a_keycloak_id_never_an_e_mail() {
     p.validate().expect("a group assignee is a name");
 }
 
+/// EP-168, ADR-N-067 2.3 (T-6409): `{kind: organization}` is every member of the Policy's own
+/// Organization; it validates with no id, and an id on it is refused naming the field, so a
+/// manifest cannot name another Organization.
+#[test]
+fn an_organization_assignee_carries_no_id() {
+    let yaml = GOLDEN_POLICY.replace(
+        "assignee:\n    kind: role\n    id: public",
+        "assignee:\n    kind: organization",
+    );
+    assert_ne!(yaml, GOLDEN_POLICY, "the fixture names a role assignee");
+    let policy = Policy::from_yaml(&yaml).expect("an organization assignee parses with no id");
+    assert_eq!(policy.spec.assignee.kind, PrincipalKind::Organization);
+    policy.validate().expect("an organization assignee validates");
+    let written = serde_norway::to_string(&policy.spec.assignee).expect("serialize");
+    assert_eq!(written.trim(), "kind: organization", "no empty id is written back");
+
+    let mut spec = policy.spec;
+    for id in ["helsinki", "espoo", " "] {
+        spec.assignee = Principal::new(PrincipalKind::Organization, id);
+        let err = spec.validate().expect_err(id).to_string();
+        assert!(err.contains("spec.assignee.id"), "{id}: {err}");
+        assert!(err.contains("names no id"), "{id}: {err}");
+    }
+    // Every other kind still needs its id.
+    spec.assignee = Principal::new(PrincipalKind::Group, "");
+    assert!(spec.validate().is_err(), "a group assignee without an id");
+
+    // The rules shape of the ADR's example: the same rule per rule.
+    let rules = RULES_POLICY.replace(
+        "- assignee: { kind: role, id: public }",
+        "- assignee: { kind: organization }",
+    );
+    Policy::from_yaml(&rules)
+        .expect("parses")
+        .validate()
+        .expect("an organization rule validates");
+    let named = rules.replace("{ kind: organization }", "{ kind: organization, id: espoo }");
+    let err = Policy::from_yaml(&named)
+        .expect("parses")
+        .validate()
+        .expect_err("an organization rule naming one")
+        .to_string();
+    assert!(err.contains("spec.assignee.id"), "{err}");
+}
+
 /// T-6391: the assigner names the granting organisation by its DID; an AI client's account e-mail
 /// or a person's name is refused naming `spec.assigner`, so it never lands in the project's Git.
 #[test]

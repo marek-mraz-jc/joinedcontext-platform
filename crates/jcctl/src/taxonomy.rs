@@ -1,6 +1,6 @@
 //! The role taxonomy every organization starts from (PF-56, PF-71, T-0873).
 //!
-//! Nine roles, written as `Role` manifests into `users/roles/`: what a person may read, what
+//! Ten roles, written as `Role` manifests into `users/roles/`: what a person may read, what
 //! each kind of editor may propose, who approves, and who may let data out to the public. They
 //! are a seed a person extends by proposing further roles, never a list the platform enforces:
 //! `jcctl roles seed` writes a file only where there is none, so an edited role stays edited.
@@ -146,10 +146,24 @@ fn without(kinds: Vec<String>, dropped: &str) -> Vec<String> {
     kinds.into_iter().filter(|kind| kind != dropped).collect()
 }
 
-/// The nine roles of the taxonomy (PF-56, PF-71, PF-91).
+/// The ten roles of the taxonomy (PF-56, PF-71, PF-91, ADR-N-067 2.6).
 pub fn taxonomy() -> Vec<Seeded> {
     let project = project_kinds;
     vec![
+        // Membership implies it: signing in, the catalogue, the person's own settings and
+        // connectors are a person's own and need no rule. The one rule reads the delegation
+        // ceilings the person's connectors run under, so `member` reads no Endpoint and no
+        // project: data comes only from Policies (ADR-N-067 2.6).
+        Seeded {
+            name: "member",
+            purpose: "Every person of the organization: signs in, reads the catalogue and the \
+                      connector ceilings, keeps their own settings and connectors; reads no \
+                      Endpoint by itself, data comes only from Policies (ADR-N-067).",
+            rules: vec![rule(
+                vec!["DelegationPolicy".into()],
+                vec![Verb::Read],
+            )],
+        },
         Seeded {
             name: "viewer",
             purpose: "Reads everything in a project and changes nothing.",

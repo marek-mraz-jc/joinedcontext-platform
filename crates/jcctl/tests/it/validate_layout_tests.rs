@@ -90,6 +90,34 @@ fn a_project_repository_validates_alone_with_its_own_paths() {
     );
 }
 
+/// EP-168, ADR-N-067 2.3 (T-6409): `jcctl validate` takes a Policy whose rule is for every member of
+/// the project's Organization, and refuses one that names an Organization, naming the field.
+#[test]
+fn an_organization_assignee_validates_and_one_naming_an_organization_is_refused() {
+    const POLICY: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: Policy\nmetadata:\n  \
+                          name: staff\n  namespace: ovzdusie\nspec:\n  contextSpaceRef: ovzdusie\n  \
+                          assigner: did:web:example.org\n  rules:\n    \
+                          - assignee: { kind: organization }\n      operations: [retrieveOps]\n";
+    let project = project_repository("validate-organization-assignee");
+    write(&project, "spaces/ovzdusie/policies/staff.yaml", POLICY);
+    let report = run_project(&project, None, "example.org", &BTreeMap::new());
+    assert!(report.is_valid(), "{:?}", messages(&report));
+
+    write(
+        &project,
+        "spaces/ovzdusie/policies/staff.yaml",
+        &POLICY.replace("{ kind: organization }", "{ kind: organization, id: espoo }"),
+    );
+    let report = run_project(&project, None, "example.org", &BTreeMap::new());
+    let found = messages(&report);
+    assert!(
+        found.iter().any(|m| m
+            .starts_with("spaces/ovzdusie/policies/staff.yaml")
+            && m.contains("spec.assignee.id")),
+        "{found:?}"
+    );
+}
+
 /// CC-88, CC-90: a parameter without a default needs a value to check the project with, and
 /// `--param` gives it; a project named `{project}` needs the slug to check it under.
 #[test]

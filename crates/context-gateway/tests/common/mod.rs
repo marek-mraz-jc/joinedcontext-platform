@@ -665,6 +665,8 @@ pub fn named_types(
                 PrincipalKind::ServiceAccount => client.as_ref() == Some(id),
                 PrincipalKind::Group => !anonymous && groups.contains(id),
                 PrincipalKind::Did => false,
+                // The broker hears no Organization yet (ADR-N-067 step 3).
+                PrincipalKind::Organization => false,
             }
         })
         .flat_map(|policy| {

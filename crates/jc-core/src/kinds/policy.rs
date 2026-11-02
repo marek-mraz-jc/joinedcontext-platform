@@ -458,7 +458,9 @@ impl fmt::Display for OperationRef {
 pub struct Principal {
     /// Category of principal.
     pub kind: PrincipalKind,
-    /// Identifier of the principal (username, role name, group name, DID).
+    /// Identifier of the principal (username, role name, group name, DID). An `organization`
+    /// assignee has none: it is always the Policy's own Organization (ADR-N-067 2.3).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
 }
 
@@ -508,6 +510,10 @@ pub enum PrincipalKind {
     ServiceAccount,
     /// Decentralized identifier (`did:web:...`).
     Did,
+    /// Every member of the Policy's own Organization, the one its project belongs to: the
+    /// verified token's `jc_org` names it (ADR-N-067 2.3). It carries no id, so a manifest
+    /// cannot name another Organization.
+    Organization,
 }
 
 impl PrincipalKind {
@@ -519,6 +525,7 @@ impl PrincipalKind {
             Self::Role => "role",
             Self::ServiceAccount => "serviceAccount",
             Self::Did => "did",
+            Self::Organization => "organization",
         }
     }
 }
@@ -957,7 +964,17 @@ impl PolicySpec {
             });
         }
 
-        if self.assignee.id.trim().is_empty() {
+        if self.assignee.kind == PrincipalKind::Organization {
+            // The Organization is the project's, never one the text names (ADR-N-041, ADR-N-067).
+            if !self.assignee.id.is_empty() {
+                return Err(Error::Name {
+                    field: "spec.assignee.id",
+                    value: self.assignee.id.clone(),
+                    reason: "an organization assignee names no id: it is always the Organization \
+                             of the Policy's own project; write `assignee: { kind: organization }`",
+                });
+            }
+        } else if self.assignee.id.trim().is_empty() {
             return Err(Error::Name {
                 field: "spec.assignee.id",
                 value: self.assignee.id.clone(),

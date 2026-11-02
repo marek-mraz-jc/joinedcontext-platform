@@ -32,6 +32,7 @@ fn every_seeded_role_is_a_valid_role_manifest() {
     assert_eq!(
         names,
         vec![
+            "member",
             "viewer",
             "model-editor",
             "pipeline-editor",
@@ -158,6 +159,24 @@ fn people_admin_manages_people_and_org_admin_holds_it() {
     }
 }
 
+/// EP-170, ADR-N-067 2.6 (T-6409): `member` reads the connector ceilings and nothing else: no project
+/// kind, no Endpoint, no Policy, and no verb but `read`.
+#[test]
+fn a_member_reads_no_endpoint_and_proposes_nothing() {
+    let member = role("member");
+    for rule in &member.rules {
+        assert_eq!(rule.kinds, ["DelegationPolicy"], "{rule:?}");
+        assert_eq!(rule.verbs, [Verb::Read], "{rule:?}");
+    }
+    let project = taxonomy::project_kinds();
+    assert!(project.contains(&"Endpoint".to_owned()));
+    assert!(member
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.kinds)
+        .all(|kind| !project.contains(kind)));
+}
+
 #[test]
 fn an_editor_never_approves_and_never_deletes() {
     for name in [
@@ -184,7 +203,7 @@ fn seeding_twice_writes_nothing_the_second_time_and_leaves_an_edited_role_alone(
     std::fs::create_dir_all(&dir).expect("a temporary repository");
 
     let written = taxonomy::seed(&dir).expect("seeds");
-    assert_eq!(written.len(), 9);
+    assert_eq!(written.len(), 10);
     let steward = dir.join("users/roles/steward.yaml");
     std::fs::write(&steward, "# edited by a person\n").expect("edit the steward");
 

@@ -198,7 +198,8 @@ pub fn pin_caller(
             None => name.to_owned(),
         });
     one(headers, CLIENT, client.as_deref());
-    list(headers, GROUPS, &subject.groups, false);
+    // The broker matches a `group` assignee as the gateway does (ADR-N-067 2.3).
+    list(headers, GROUPS, subject.grant_groups(), false);
     list(headers, ROLES, &subject.roles, true);
     if asked {
         headers.insert(RESTRICTED, HeaderValue::from_static("true"));
