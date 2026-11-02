@@ -3,7 +3,8 @@
 //!
 //! One installation serves several Organizations from one realm, each with its own group subtree
 //! (ADR-N-058). An `organization` audience admits the members of the Endpoint's own Organization:
-//! a person whose groups name one of its projects, or a ServiceAccount of one of them. A caller of
+//! a person whose verified `jc_org` names it (ADR-N-067 2.3), a person whose groups name one of
+//! its projects, or a ServiceAccount of one of them. A caller of
 //! another Organization holds a valid token of the same realm, so the token alone says nothing;
 //! the gateway reads each project's Organization from the Project manifests (`Provenance`).
 //!
@@ -195,7 +196,8 @@ async fn a_person_of_another_organization_is_not_admitted_to_an_organization_end
     assert_eq!(fixture.broker.hops().len(), 0, "the broker was never asked");
 }
 
-/// A person whose groups name no project at all is no member of any Organization.
+/// F-SEC1-009 under ADR-N-067: a person whose groups name no project at all and whose token
+/// carries no `jc_org` (a `platform-readers`-only token) is no member of any Organization.
 #[tokio::test]
 async fn a_person_of_no_project_is_not_admitted_to_an_organization_endpoint() {
     let fixture = fixture("no-project").await;
@@ -253,4 +255,135 @@ async fn a_person_of_no_group_is_not_admitted_while_the_organization_is_unknown(
     let member = person(&fixture.realm, SLUG, &[SIBLING]);
     let (status, body) = read(&fixture, SLUG, &member).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A person by the claims ADR-N-067 2.2 adds: `jc_org` and `jc_groups` beside full-path
+/// `groups`, with `roles` as their realm roles.
+fn member(
+    realm: &common::Realm,
+    slug: &str,
+    organization: &str,
+    groups: &[&str],
+    roles: &[&str],
+) -> String {
+    let paths: Vec<String> = groups
+        .iter()
+        .map(|group| format!("/{organization}/{group}"))
+        .collect();
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "f:1:member",
+        "aud": slug,
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+        "preferred_username": "demo.orgmember",
+        "groups": paths,
+        "jc_org": [organization],
+        "jc_groups": paths,
+        "realm_access": { "roles": roles },
+    }))
+}
+
+/// ADR-N-067 2.3, EP-171: a member of the Endpoint's Organization, in no project, is admitted by `jc_org`
+/// and reads what the Policy grants them.
+#[tokio::test]
+async fn a_member_of_the_organization_in_no_project_is_admitted_by_jc_org() {
+    let fixture = fixture("member-by-jc-org").await;
+    let token = member(&fixture.realm, SLUG, "hel", &["members"], &["member"]);
+    let (status, body) = read(&fixture, SLUG, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(fixture.broker.hops().len(), 1, "the read reached the broker");
+}
+
+/// ADR-N-067 2.3, EP-171: admission is only the door. The broker decides the read (ADR-N-050)
+/// and hears the member as they are: their groups in the Organization and their own roles, no
+/// project and no role the door added, so a member the Policies grant nothing reads nothing.
+#[tokio::test]
+async fn a_member_without_a_grant_reaches_the_broker_with_nothing_added() {
+    let fixture = fixture("member-without-grant").await;
+    let token = member(&fixture.realm, SLUG, "hel", &["members"], &[]);
+    let (status, body) = read(&fixture, SLUG, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hops = fixture.broker.hops();
+    let [hop] = hops.as_slice() else {
+        panic!("one hop, got {}", hops.len())
+    };
+    let heard = |name: &str| {
+        hop.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(heard("x-jc-groups"), "members");
+    assert!(!heard("x-jc-roles").contains("member"), "{}", heard("x-jc-roles"));
+    assert!(!heard("x-jc-groups").contains(PROJECT));
+}
+
+/// ADR-N-067 §3, EP-171: a member of Žilina, with groups named like Helsinki's projects and `members`,
+/// reaches nothing of Helsinki's Endpoint and is told what a missing slug tells.
+#[tokio::test]
+async fn a_member_of_another_organization_with_same_named_groups_reads_nothing() {
+    let fixture = fixture("member-of-another").await;
+    let groups = ["members", PROJECT, SIBLING];
+    let token = member(&fixture.realm, SLUG, OUTSIDER, &groups, &["member"]);
+    let (status, body) = read(&fixture, SLUG, &token).await;
+    let nobodys = member(&fixture.realm, NOBODYS, OUTSIDER, &groups, &["member"]);
+    let (missing_status, missing_body) = read(&fixture, NOBODYS, &nobodys).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!((status, body), (missing_status, missing_body));
+    assert_eq!(fixture.broker.hops().len(), 0, "the broker was never asked");
+}
+
+/// ADR-N-067 2.2: `jc_org` is not a header a client sends. A person without the claim who sends
+/// one is still no member.
+#[tokio::test]
+async fn a_jc_org_header_admits_nobody() {
+    let fixture = fixture("jc-org-header").await;
+    let token = person(&fixture.realm, SLUG, &["platform-readers"]);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=BikeHireDockingStation"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("jc_org", "hel")
+                .header("x-jc-org", "hel")
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fixture.broker.hops().len(), 0, "the broker was never asked");
+}
+
+/// ADR-N-067 §3: an anonymous read of an organization Endpoint carries no entity body and never
+/// reaches the broker. It stays the 401 that tells a client to sign in (EP-16, GW22).
+#[tokio::test]
+async fn an_anonymous_read_of_an_organization_endpoint_returns_no_entity() {
+    let fixture = fixture("anonymous").await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/ngsi-ld/v1/entities?type=BikeHireDockingStation"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("a readable body");
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    assert!(!body.is_array() && body.get("id").is_none(), "{body}");
+    assert_eq!(fixture.broker.hops().len(), 0, "the broker was never asked");
 }

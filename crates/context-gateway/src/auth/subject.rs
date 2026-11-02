@@ -512,7 +512,11 @@ pub(crate) fn subject_of(
         })
         .cloned()
         .unwrap_or_default();
-    if !of_its_organization(gateway, endpoint, &project) {
+    let (member_of_organization, organization_groups) = in_organization(gateway, endpoint, claims);
+    // An `organization` audience admits a member of the Endpoint's Organization by the verified
+    // `jc_org`, no project group needed (ADR-N-067 2.3); what they read is the Policies' to say.
+    let member = endpoint.audience == Audience::Organization && member_of_organization;
+    if !member && !of_its_organization(gateway, endpoint, &project) {
         // Another Organization's Endpoint is answered as a slug nobody created (PF-32, R20).
         tracing::warn!(
             user = %user,
@@ -522,7 +526,7 @@ pub(crate) fn subject_of(
         );
         return Err(Box::new(ProblemDetails::not_found()));
     }
-    if !endpoint.admits(Some(&project)) {
+    if !member && !endpoint.admits(Some(&project)) {
         // T-3033: an App's client minted tokens with no `groups` claim, and every project-bound
         // read was a 403 with no line anywhere. The person, the client, the endpoint; never the
         // token or its groups.
@@ -534,8 +538,13 @@ pub(crate) fn subject_of(
         );
         return Err(Box::new(ProblemDetails::forbidden()));
     }
+    // A member admitted without a project group writes under the Endpoint's own Organization.
+    let organization = if project.is_empty() {
+        gateway.organization_of(&endpoint.project)
+    } else {
+        gateway.organization_of(&project)
+    };
 
-    let (member_of_organization, organization_groups) = in_organization(gateway, endpoint, claims);
     Ok(Subject {
         user: Some(user),
         id: Some(claims.sub.clone()),
@@ -549,7 +558,7 @@ pub(crate) fn subject_of(
         agreement: None,
         via,
         client: claims.azp.clone(),
-        organization: gateway.organization_of(&project),
+        organization,
         read_only: claims.read_only(),
     })
 }
