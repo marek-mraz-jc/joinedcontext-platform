@@ -23,6 +23,7 @@ import io
 import itertools
 import json
 import re
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -254,7 +255,9 @@ def _pdf(stem: str, content: bytes) -> list[tuple[str, list[str], list[list[Any]
 
 
 def _slot_name(header: str, index: int, taken: set[str]) -> str:
-    name = re.sub(r"[^A-Za-z0-9_]+", "_", header.split("(")[0].split("[")[0].strip()).strip("_")
+    # A letter keeps its base letter: `Názov` is Nazov, never N_zov, which matches no column (T-6445).
+    latin = "".join(c for c in unicodedata.normalize("NFD", header) if not unicodedata.combining(c))
+    name = re.sub(r"[^A-Za-z0-9_]+", "_", latin.split("(")[0].split("[")[0].strip()).strip("_")
     if not name:
         name = f"column_{index + 1}"
     if name[0].isdigit():

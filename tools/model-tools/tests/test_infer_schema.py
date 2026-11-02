@@ -433,3 +433,10 @@ def test_every_unit_the_inference_emits_is_a_code_of_the_list_with_its_qudt_anch
         assert "://" not in block["exact_mappings"][1] + block["has_quantity_kind"], code
     # Every prefix the emitted CURIEs use, so `check_unit_prefixes` has something to find.
     assert {"ucefact", "qudt-unit", "qudt-quantkind"} <= set(UNIT_PREFIXES)
+
+
+def test_a_header_with_diacritics_keeps_its_letters_in_the_slot_name() -> None:
+    assert infer_schema._slot_name("Zemepisná šírka", 0, set()) == "Zemepisna_sirka"
+    assert infer_schema._slot_name("Názov (SK)", 1, set()) == "Nazov"
+    assert infer_schema._slot_name("Überprüft", 2, set()) == "Uberpruft"
+    assert infer_schema._slot_name("名前", 3, set()) == "column_4"
