@@ -466,6 +466,17 @@ mod tests {
         }
     }
 
+    /// ADR-N-067 2.2 (T-6408): a person's groups arrive with one leading `/` trimmed, so an
+    /// Organization's subgroup reads `helsinki/air-stewards` and binds no policy naming the bare
+    /// `air-stewards`.
+    #[test]
+    fn a_subgroup_path_binds_no_policy_of_the_same_bare_name() {
+        let spec = policy();
+        assert!(spec.binds("someone", &["air-stewards"]));
+        assert!(!spec.binds("someone", &["helsinki/air-stewards"]));
+        assert!(!spec.binds("someone", &["/air-stewards"]));
+    }
+
     fn field_of(spec: &DelegationPolicySpec) -> &'static str {
         match spec.validate() {
             Err(Error::Name { field, .. }) => field,

@@ -745,6 +745,22 @@ mod tests {
         .expect("the policy spec parses")
     }
 
+    /// ADR-N-067 2.2 (T-6408): a Group assignee matches a group name whole, so a member of the
+    /// subgroup `/helsinki/members` (held as `helsinki/members`) is not the group `members`.
+    #[test]
+    fn a_group_assignee_matches_no_subgroup_of_its_bare_name() {
+        let member = Subject {
+            groups: ["helsinki/members".to_owned()].into(),
+            ..Subject::default()
+        };
+        let group = |id: &str| Principal {
+            kind: PrincipalKind::Group,
+            id: id.to_owned(),
+        };
+        assert!(!member.is(&group("members")));
+        assert!(member.is(&group("helsinki/members")));
+    }
+
     /// ADR-N-066 2.3 (DM-149): the broker hears only the attributes whose versions the grant
     /// reads; without `readVersions` nothing, without a block every attribute.
     #[test]

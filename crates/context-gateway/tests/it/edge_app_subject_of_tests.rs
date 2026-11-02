@@ -393,13 +393,35 @@ async fn a_group_with_a_leading_slash_is_trimmed_before_matching() {
         .await;
         assert_eq!(status, StatusCode::OK, "{group}: {document}");
     }
-    // Only the leading slash: a subgroup path is another group.
+    // Only the one leading slash: a subgroup path is another group (ADR-N-067 2.2), and so is
+    // a doubled slash.
     let (status, _) = access(
         &fixture,
-        json!({ "preferred_username": "jana", "groups": ["/city/ovzdusie", "ovzdusie/"] }),
+        json!({ "preferred_username": "jana", "groups": ["/city/ovzdusie", "ovzdusie/", "//ovzdusie"] }),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// ADR-N-067 2.2 (T-6408): Keycloak writes an Organization's subgroup as its full path, so a
+/// member of `/helsinki/stewards` reaches no Policy granted to the group `stewards`; the root
+/// group `/stewards` does.
+#[tokio::test]
+async fn an_organizations_subgroup_reaches_no_policy_of_the_same_bare_name() {
+    let fixture = fixture("subgroup", Audience::ProjectList, PROJECT).await;
+    let held = |group: &'static str| json!({ "preferred_username": "jana", "groups": ["/ovzdusie", group] });
+    let (status, document) = access(&fixture, held("/helsinki/stewards")).await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert!(
+        !granted(&document).contains(&"GroupView".to_owned()),
+        "{document}"
+    );
+    let (status, document) = access(&fixture, held("/stewards")).await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert!(
+        granted(&document).contains(&"GroupView".to_owned()),
+        "{document}"
+    );
 }
 
 /// PF-46: no roles claim is no roles, never a default grant; on a public endpoint a login keeps

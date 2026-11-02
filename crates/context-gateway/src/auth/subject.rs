@@ -273,11 +273,7 @@ fn preview_reader(
         service_account: None,
         service_account_project: None,
         roles: roles_on(preview.audience, claims.roles().iter().cloned()),
-        groups: claims
-            .groups
-            .iter()
-            .map(|group| group.trim_start_matches('/').to_owned())
-            .collect(),
+        groups: claims.group_names().map(str::to_owned).collect(),
         did: None,
         agreement: None,
         via: None,
@@ -375,11 +371,7 @@ pub(crate) fn subject_of(
         .map_err(|refused| Box::new(ProblemDetails::from(refused)));
     }
 
-    let groups: BTreeSet<String> = claims
-        .groups
-        .iter()
-        .map(|group| group.trim_start_matches('/').to_owned())
-        .collect();
+    let groups: BTreeSet<String> = claims.group_names().map(str::to_owned).collect();
 
     // A workload: `azp` has to name a ServiceAccount this repository declares, or the
     // token is valid and the account is unknown, which is an account with no grants
