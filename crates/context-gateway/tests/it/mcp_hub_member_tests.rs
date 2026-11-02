@@ -335,6 +335,33 @@ async fn a_member_of_another_organization_sees_none_of_hels_internal_endpoints()
     }
 }
 
+/// EP-173, T-6470: a vendor bound on `mobility` by RoleBinding holds its group and no `jc_org`.
+/// The hub lists what is public; the Endpoint shared with the whole Organization is not for them,
+/// though it lives in the very project they are bound on.
+#[tokio::test]
+async fn a_vendor_bound_on_a_project_matches_no_grant_to_the_organization() {
+    let realm = common::Realm::new();
+    let app = app(&realm);
+    let vendor = realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "f:1:vendor",
+        "aud": ["mcp-hub"],
+        "azp": "mcp-hub",
+        "scope": "openid endpoint:*",
+        "preferred_username": "vendor",
+        "groups": ["mobility-readers"],
+        "jc_groups": ["/hel/mobility-readers"],
+        "realm_access": { "roles": ["default-roles-dev"] },
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+    }));
+    let (slugs, pages, _) = walked(&app, Some(&vendor)).await;
+    assert_eq!(slugs, [OPEN], "{pages}");
+    for word in ["Sharedbox", SHARED] {
+        assert!(!pages.contains(word), "{word}: {pages}");
+    }
+}
+
 /// The hub keeps a caller's reach for a few seconds by what its token says (T-4528). A token
 /// whose Organization claims differ, all else equal, is another caller: a reach kept for a
 /// member never answers the same person once `jc_org` and `jc_groups` no longer name `hel`.
