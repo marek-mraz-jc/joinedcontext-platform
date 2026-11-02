@@ -307,6 +307,90 @@ async fn a_member_of_the_organization_in_no_project_is_admitted_by_jc_org() {
     );
 }
 
+/// A person bound by RoleBinding alone (T-6461): the realm's `{project}-readers` carries the
+/// Organization, so the token names it in `jc_org` and the group in `jc_groups`.
+fn bound(realm: &common::Realm, slug: &str, organization: &str, group: &str) -> String {
+    realm.mint(&json!({
+        "iss": common::ISSUER,
+        "sub": "f:1:bound",
+        "aud": slug,
+        "exp": common::in_seconds(300),
+        "iat": common::in_seconds(-10),
+        "preferred_username": "t6025-full",
+        "groups": ["platform-readers", group],
+        "jc_org": [organization],
+        "jc_groups": [format!("/{organization}/{group}")],
+        "realm_access": { "roles": ["member"] },
+    }))
+}
+
+/// EP-172, T-6461, T-6451 turns 04-05: the org-admin who made an Endpoint reads it the moment their
+/// binding fills the project's group; the same group of another Organization's project does not,
+/// and it is no project of the Endpoint's, so nothing is learned about the slug.
+#[tokio::test]
+async fn a_person_bound_in_a_project_is_admitted_to_its_organization_endpoint() {
+    let fixture = fixture("bound-organization").await;
+    let group = format!("{PROJECT}-readers");
+    let token = bound(&fixture.realm, SLUG, "hel", &group);
+    let (status, body) = read(&fixture, SLUG, &token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let hops = fixture.broker.hops().len();
+    let outsider = bound(&fixture.realm, SLUG, "zilina", "zilina-readers");
+    let (status, refused) = read(&fixture, SLUG, &outsider).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    assert_eq!(
+        fixture.broker.hops().len(),
+        hops,
+        "the broker was not asked"
+    );
+}
+
+/// EP-172, T-6461: `{project}-readers` and `-writers` name the project on a `project-list` audience as a
+/// group of the project's name does; a sibling's group, or the project's name with another
+/// ending, stays outside (EP-14, PF-87).
+#[tokio::test]
+async fn a_person_bound_in_the_project_is_admitted_to_its_project_list_endpoint() {
+    let realm = common::Realm::new();
+    let broker = common::BrokerStub::start(vec![json!([]), json!([])]).await;
+    let repo = Repo::new("bound-project-list", &[PROJECT, OUTSIDER]);
+    let accounts =
+        accounts_of(&jc_manifest::loader::Repository::load(&repo.0).expect("the repository loads"));
+    let listed = Endpoint {
+        audience: Audience::ProjectList,
+        ..endpoint()
+    };
+    let gateway = Gateway::new(
+        Broker::new(broker.url.clone()),
+        Box::new(PolicyPdp),
+        "hel.fi",
+    )
+    .serve([listed])
+    .authenticate(Arc::new(realm.verifier()), accounts, None);
+    let fixture = Fixture {
+        realm,
+        app: router(Arc::new(gateway)),
+        broker,
+        _repo: repo,
+    };
+    for ending in ["readers", "writers"] {
+        let token = bound(&fixture.realm, SLUG, "hel", &format!("{PROJECT}-{ending}"));
+        let (status, body) = read(&fixture, SLUG, &token).await;
+        assert_eq!(status, StatusCode::OK, "{ending}: {body}");
+    }
+    let hops = fixture.broker.hops().len();
+    for group in [format!("{SIBLING}-readers"), format!("{PROJECT}-auditors")] {
+        let token = bound(&fixture.realm, SLUG, "hel", &group);
+        let (status, body) = read(&fixture, SLUG, &token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{group}: {body}");
+    }
+    assert_eq!(
+        fixture.broker.hops().len(),
+        hops,
+        "the broker was not asked"
+    );
+}
+
 /// ADR-N-067 2.3, EP-171: admission is only the door. The broker decides the read (ADR-N-050)
 /// and hears the member as they are: their groups in the Organization and their own roles, no
 /// project and no role the door added, so a member the Policies grant nothing reads nothing.

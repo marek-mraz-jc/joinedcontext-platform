@@ -563,13 +563,15 @@ fn refuse_outside(
     Ok(())
 }
 
-/// The project a person's `groups` name on `endpoint`: its own or an allowed one, else, for an
-/// `organization` audience, the first group that is a project of the Endpoint's Organization
-/// (ADR-N-058 2.4); empty when none is.
+/// The project a person's `groups` name on `endpoint`: its own or an allowed one, by a group
+/// named as the project or the `{project}-readers` and `{project}-writers` its bindings fill
+/// (PF-87, T-6461); else, for an `organization` audience, the first group that is a project of
+/// the Endpoint's Organization (ADR-N-058 2.4); empty when none is.
 fn project_of(gateway: &Gateway, endpoint: &Endpoint, groups: &BTreeSet<String>) -> String {
+    let projects = crate::mcp::server::group_projects(groups.iter().map(String::as_str));
     std::iter::once(&endpoint.project)
         .chain(endpoint.allowed_projects.iter())
-        .find(|project| groups.contains(*project))
+        .find(|project| projects.contains(*project))
         .or_else(|| {
             (endpoint.audience == Audience::Organization)
                 .then(|| {
