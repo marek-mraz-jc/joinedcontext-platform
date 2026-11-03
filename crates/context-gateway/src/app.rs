@@ -571,7 +571,8 @@ impl Gateway {
                         "a source registered on this space asks for the caller's own token, but \
                          it is an address outside this platform or an Endpoint this gateway does \
                          not serve, and the token never leaves the platform; register it with \
-                         spec.federation.identity: serviceAccount",
+                         spec.federation.identity: serviceAccount, or anonymous for a public \
+                         address elsewhere",
                     )
                     .into_response(),
             ));

@@ -123,6 +123,27 @@ fn a_plain_string_title_names_the_registration() {
     assert!(legacy["registrationName"].is_string(), "{legacy}");
 }
 
+/// T-6545 (PF-48): an anonymous registration is written with its own address and nothing that
+/// asks the broker to pass the request's `Authorization` on, so no token leaves the platform.
+#[test]
+fn an_anonymous_source_is_registered_with_no_credential() {
+    let anonymous = EXTERNAL.replace("identity: caller", "identity: anonymous");
+    assert_ne!(anonymous, EXTERNAL, "the fixture names caller identity");
+    let body = registration(&manifest(&anonymous), &no_endpoints()).expect("builds");
+
+    assert_eq!(
+        body["endpoint"],
+        json!("https://context.zvolen.sk/ngsi-ld/v1")
+    );
+    assert!(body.get("contextSourceInfo").is_none(), "{body}");
+    assert!(body.get("tenant").is_none(), "{body}");
+    let spec = serde_json::from_value::<jc_core::kinds::ContextSourceRegistrationSpec>(
+        manifest(&anonymous).spec,
+    )
+    .expect("the spec parses");
+    assert!(!forwards_caller_identity(&spec));
+}
+
 #[test]
 fn an_external_source_keeps_its_own_url_and_its_expiry() {
     let body = registration(&manifest(EXTERNAL), &no_endpoints()).expect("builds");
