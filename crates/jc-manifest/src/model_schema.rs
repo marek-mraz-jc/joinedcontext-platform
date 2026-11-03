@@ -894,6 +894,8 @@ fn normalized(
     let closed = definition.is_some()
         && !open_world
         && definition.and_then(|d| d.get("additionalProperties")) != Some(&Value::Bool(true));
+    let properties = Value::Object(properties);
+    let definitions = reachable(&properties, definitions);
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
@@ -902,6 +904,45 @@ fn normalized(
         "additionalProperties": !closed,
         "definitions": definitions,
     })
+}
+
+/// The definitions `schema` reaches by `$ref`, directly or through each other: what one class's
+/// schema needs to resolve. The whole model's definitions in every class made each class schema
+/// as large as the model, so a model of N classes rendered N copies of itself into every
+/// pipeline's stage and the Portal grew past its memory limit at start (T-6548).
+fn reachable(schema: &Value, definitions: &Map<String, Value>) -> Map<String, Value> {
+    let mut kept = Map::new();
+    let mut pending = Vec::new();
+    refs(schema, &mut pending);
+    while let Some(name) = pending.pop() {
+        if kept.contains_key(&name) {
+            continue;
+        }
+        if let Some(definition) = definitions.get(&name) {
+            refs(definition, &mut pending);
+            kept.insert(name, definition.clone());
+        }
+    }
+    kept
+}
+
+/// The definition names of every local `$ref` in `value`.
+fn refs(value: &Value, names: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(name) = object.get("$ref").and_then(Value::as_str).and_then(|r| {
+                r.strip_prefix("#/definitions/")
+                    .or_else(|| r.strip_prefix("#/$defs/"))
+            }) {
+                // A JSON pointer token: its first segment is the definition's name.
+                let token = name.split('/').next().unwrap_or(name);
+                names.push(token.replace("~1", "/").replace("~0", "~"));
+            }
+            object.values().for_each(|v| refs(v, names));
+        }
+        Value::Array(items) => items.iter().for_each(|v| refs(v, names)),
+        _ => {}
+    }
 }
 
 /// One attribute of the normalized form: an object of the slot's NGSI-LD kind whose value
@@ -1230,6 +1271,47 @@ mod tests {
             &["Station".into(), "Draft".into()],
             false,
         )
+    }
+
+    /// T-6548: each class schema carries only the definitions it reaches, through a chain of
+    /// `$ref`s too, and still holds a record to them: the whole model in every class made every
+    /// pipeline's stage N copies of the model.
+    #[test]
+    fn a_class_schema_holds_only_the_definitions_it_reaches() {
+        let model = ModelSchema::compile(
+            "places",
+            "1.0.0",
+            &json!({ "definitions": {
+                "Address": { "type": "object", "properties": { "country": { "$ref": "#/definitions/Country" } } },
+                "Country": { "enum": ["SK", "CZ"], "type": "string" },
+                "Unused": { "type": "string" },
+                "Shop": { "properties": {
+                    "address": { "$ref": "#/definitions/Address", "x-ngsi-ld-kind": "Property" }
+                } },
+                "Park": { "properties": { "area": { "type": "number", "x-ngsi-ld-kind": "Property" } } }
+            }}),
+            &["Shop".into(), "Park".into()],
+            false,
+        );
+        let kept = |class: &str| -> Vec<String> {
+            model.classes[class]["definitions"]
+                .as_object()
+                .expect("definitions")
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(kept("Shop"), ["Address", "Country"]);
+        assert!(kept("Park").is_empty());
+        let shop = |country: &str| {
+            json!({ "id": "urn:ngsi-ld:Shop:1", "type": "Shop",
+                    "address": { "type": "Property", "value": { "country": country } } })
+        };
+        assert!(model.check(&shop("SK")).is_empty());
+        assert!(
+            !model.check(&shop("DE")).is_empty(),
+            "the chained enum still holds"
+        );
     }
 
     /// T-3223: a type's attributes as an editor maps onto them, required first, identity left out.
