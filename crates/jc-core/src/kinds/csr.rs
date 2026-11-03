@@ -21,9 +21,10 @@ use serde::{Deserialize, Serialize};
 
 /// Which identity a forwarded request carries (PF-48).
 ///
-/// Neither mode is a grant. `ServiceAccount` reads a source with the grants a `Policy` on that
-/// source gave the named account; `Caller` reads it with the caller's own. In both, the hub
-/// Endpoint's policy set applies as well and the narrower one wins.
+/// No mode is a grant. `ServiceAccount` reads a source with the grants a `Policy` on that
+/// source gave the named account; `Caller` reads it with the caller's own; `Anonymous` reads an
+/// address outside this platform with no credential at all, so it sees what any visitor of that
+/// address sees. In each, the hub Endpoint's policy set applies as well and the narrower one wins.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FederationIdentity {
@@ -32,6 +33,9 @@ pub enum FederationIdentity {
     ServiceAccount,
     /// The caller's own token is forwarded, rewritten for the source's audience.
     Caller,
+    /// No credential is forwarded: only for an `endpoint` outside this platform that answers
+    /// anonymous reads (T-6545), so no token or account ever leaves the platform for it.
+    Anonymous,
 }
 
 /// How the broker treats a source's answer relative to its own data (CIM 009 clause 5.2.9).
@@ -215,7 +219,32 @@ impl ContextSourceRegistrationSpec {
             }
         }
         crate::kinds::validate_mirror_schedule(self.schedule.as_ref())?;
-        self.federation.validate()
+        self.federation.validate()?;
+        self.validate_anonymous_target()
+    }
+
+    /// An anonymous forward reaches only an `https` address outside this platform (T-6545): a
+    /// member Endpoint here is read under its own Policy, which an anonymous forward would skip,
+    /// and a plain `http` hop would carry the answer in the clear over the internet.
+    fn validate_anonymous_target(&self) -> Result<()> {
+        if self.federation.identity != FederationIdentity::Anonymous {
+            return Ok(());
+        }
+        match &self.endpoint {
+            Some(url) if url.starts_with("https://") => Ok(()),
+            Some(url) => Err(Error::Name {
+                field: "spec.endpoint",
+                value: url.clone(),
+                reason: "anonymous identity reaches an https address outside this platform \
+                         (PF-48)",
+            }),
+            None => Err(Error::Name {
+                field: "spec.federation.identity",
+                value: "anonymous".to_owned(),
+                reason: "anonymous identity reaches an address outside this platform; an \
+                         Endpoint here is read as serviceAccount or caller (PF-48)",
+            }),
+        }
     }
 
     /// Refuses a member outside the hub's own project (PF-48).
@@ -271,6 +300,18 @@ impl Federation {
                     value: String::new(),
                     reason: "serviceAccount identity names the ServiceAccount to forward as \
                              (PF-48)",
+                })
+            }
+            FederationIdentity::Anonymous if self.service_account_ref.is_some() => {
+                Err(Error::Name {
+                    field: "spec.federation.serviceAccountRef",
+                    value: self
+                        .service_account_ref
+                        .as_ref()
+                        .map(|r| r.name().to_owned())
+                        .unwrap_or_default(),
+                    reason: "anonymous identity forwards no credential, so a ServiceAccount here \
+                             would never be used (PF-48)",
                 })
             }
             FederationIdentity::Caller if self.service_account_ref.is_some() => Err(Error::Name {

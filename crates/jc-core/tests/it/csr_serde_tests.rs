@@ -429,3 +429,35 @@ fn a_credential_in_the_endpoint_address_is_refused_and_not_repeated() {
     );
     verdict(&path).expect("an @ after the host");
 }
+
+/// T-6545 (PF-48): `anonymous` forwards no credential, so it is only for an https address
+/// outside this platform; a member Endpoint here, a plain http hop or an account it would never
+/// use is refused by the field to change.
+#[test]
+fn an_anonymous_forward_reaches_only_an_https_address_elsewhere() {
+    let anonymous = EXTERNAL.replace("identity: caller", "identity: anonymous");
+    let parsed = Registration::from_yaml(&anonymous).expect("parses");
+    parsed.validate().expect("valid");
+    assert_eq!(
+        parsed.spec.federation.identity,
+        FederationIdentity::Anonymous
+    );
+
+    let plain_http = anonymous.replace("https://regional", "http://regional");
+    let refusal = verdict(&plain_http).expect_err("http refused");
+    assert!(refusal.contains("spec.endpoint"), "{refusal}");
+
+    let with_account = anonymous.replace(
+        "identity: anonymous",
+        "identity: anonymous\n    serviceAccountRef: { kind: ServiceAccount, name: hub-reader }",
+    );
+    let refusal = verdict(&with_account).expect_err("account refused");
+    assert!(refusal.contains("serviceAccountRef"), "{refusal}");
+
+    let local = LOCAL.replace(
+        "identity: serviceAccount\n    serviceAccountRef: { kind: ServiceAccount, name: hub-reader }",
+        "identity: anonymous",
+    );
+    let refusal = verdict(&local).expect_err("a member Endpoint refused");
+    assert!(refusal.contains("spec.federation.identity"), "{refusal}");
+}

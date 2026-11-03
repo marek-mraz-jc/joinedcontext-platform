@@ -8,7 +8,8 @@
 //! What it does hold is the one thing the gateway has to decide before forwarding: whose
 //! identity a forward carries. `serviceAccount` forwards as the hub's account; `caller` forwards
 //! a token of the caller the gateway exchanged for the member brokers' audiences ([`exchange`],
-//! T-3999, PF-113), which only a member on this platform receives (PF-48).
+//! T-3999, PF-113), which only a member on this platform receives (PF-48); `anonymous` forwards
+//! nothing to a public address elsewhere (T-6545), so the gateway has nothing to decide for it.
 //!
 //! It also holds the member names, which the MCP surface lists so a tool description can say
 //! what an endpoint federates. Names only: an address never leaves this platform (EP-71).

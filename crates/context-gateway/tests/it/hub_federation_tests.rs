@@ -128,11 +128,12 @@ fn written(members: &[Member]) -> Repository {
             FederationIdentity::ServiceAccount => {
                 "\n    serviceAccountRef: { kind: ServiceAccount, name: hub-reader }"
             }
-            FederationIdentity::Caller => "",
+            FederationIdentity::Caller | FederationIdentity::Anonymous => "",
         };
         let identity = match member.identity {
             FederationIdentity::ServiceAccount => "serviceAccount",
             FederationIdentity::Caller => "caller",
+            FederationIdentity::Anonymous => "anonymous",
         };
         let target = if member.external {
             "  endpoint: https://other.example/ngsi-ld/v1".to_owned()
@@ -656,6 +657,26 @@ async fn a_registration_that_forwards_the_callers_token_is_not_served_yet() {
         calls.lock().expect("the call log").is_empty(),
         "nothing was forwarded, so no member answered a request the platform cannot attribute"
     );
+}
+
+/// T-6545 (PF-48): an `anonymous` registration of an address elsewhere carries no token, so the
+/// gateway has nothing to refuse or exchange and serves the read as it serves any other hub;
+/// the 501 stays for `caller` alone (stage answered 501 on every Endpoint of nine spaces when
+/// its prod registrations were written as `caller`).
+#[tokio::test]
+async fn an_anonymous_registration_elsewhere_is_served_without_a_token() {
+    let (broker, calls) = partial_broker().await;
+    let members = table(vec![Member {
+        name: "prod-parcels".to_owned(),
+        identity: FederationIdentity::Anonymous,
+        external: true,
+        view: None,
+    }]);
+    assert_eq!(members.caller_members(PROJECT, HUB).count(), 0);
+    let (status, _, body) = query(&broker, members).await;
+
+    assert_eq!(status, StatusCode::MULTI_STATUS, "{body}");
+    assert_eq!(calls.lock().expect("the call log").len(), 1);
 }
 
 /// A space with no registration at all is not a hub and is served the way it always was.
