@@ -931,7 +931,7 @@ async fn connected(
         reachable.push((
             connector,
             (endpoint.title.clone(), endpoint.titles.clone()),
-            endpoint.publisher.clone(),
+            (endpoint.publisher.clone(), endpoint.dataset.clone()),
             near,
             surface,
         ));
@@ -957,7 +957,7 @@ async fn connected(
         .collect()
         .await;
     let mut connected = Vec::new();
-    for ((connector, (title, titles), label, near, surface), listed) in
+    for ((connector, (title, titles), (label, dataset), near, surface), listed) in
         reachable.into_iter().zip(listed)
     {
         match listed {
@@ -969,6 +969,7 @@ async fn connected(
                 tools,
                 label,
                 siblings: near,
+                dataset,
             }),
             Ok(_) => {
                 tracing::warn!(endpoint = %connector.endpoint, "the Endpoint offers none of the connector's tools")
@@ -1083,6 +1084,7 @@ async fn lent(
         match listed.map(|listed| mcp::picked(&listed, &tools)) {
             Ok(offered) if !offered.is_empty() => connected.push(Connected {
                 label: publisher_of(state, &endpoint.slug),
+                dataset: dataset_of(state, &endpoint.slug),
                 title: endpoint.title,
                 // A lent Endpoint's title comes from its server's listing, one language.
                 titles: Default::default(),
@@ -1107,6 +1109,16 @@ fn publisher_of(state: &ChatState, slug: &str) -> Option<String> {
         .values()
         .find(|endpoint| endpoint.slug == slug)
         .and_then(|endpoint| endpoint.publisher.clone())
+}
+
+/// The CKAN dataset page of the public Endpoint with `slug`, from its manifest (T-6566).
+fn dataset_of(state: &ChatState, slug: &str) -> Option<String> {
+    let snapshot = state.snapshot.read().ok()?;
+    snapshot
+        .endpoints
+        .values()
+        .find(|endpoint| endpoint.slug == slug)
+        .and_then(|endpoint| endpoint.dataset.clone())
 }
 
 /// The siblings of the Endpoint with `slug` (T-4802): a named server's Endpoint finds the
@@ -2302,6 +2314,7 @@ mod tests {
             space: space.into(),
             publisher: None,
             title: None,
+            dataset: None,
         };
         let endpoints = std::collections::BTreeMap::from([
             (("bb".into(), "verejne".into()), at("rpfq", "verejne")),

@@ -265,18 +265,7 @@ pub fn pages_of(
             .as_ref()
             .map(|p| p.hidden_attributes.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        let ckan_dataset = spec
-            .publish
-            .as_ref()
-            .and_then(|publish| publish.ckan.as_ref())
-            .and_then(|publication| {
-                let base = ckan.get(publication.instance_ref.name())?;
-                Some(format!(
-                    "{}/dataset/{}",
-                    base.trim_end_matches('/'),
-                    publication.dataset_name(&id.name)
-                ))
-            });
+        let ckan_dataset = ckan_dataset(&spec, &id.name, |instance| ckan.get(instance).cloned());
         let rest = &resource.manifest.metadata.rest;
         pages.push(EndpointPage {
             name: id.name.clone(),
@@ -313,6 +302,23 @@ pub fn pages_of(
         });
     }
     pages
+}
+
+/// The CKAN dataset page the Endpoint `name` publishes to (`spec.publish.ckan`), at the URL
+/// `instance` gives for its `CkanInstance`; `None` when it publishes none or the instance is
+/// unknown.
+pub fn ckan_dataset(
+    spec: &EndpointSpec,
+    name: &str,
+    instance: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let publication = spec.publish.as_ref()?.ckan.as_ref()?;
+    let base = instance(publication.instance_ref.name())?;
+    Some(format!(
+        "{}/dataset/{}",
+        base.trim_end_matches('/'),
+        publication.dataset_name(name)
+    ))
 }
 
 /// An Endpoint with no dataset of its own, as the pages a passage cites (T-4793): each type
