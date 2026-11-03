@@ -67,6 +67,10 @@ pub struct Connected {
     /// The slugs of the project's Endpoints over the same context space, its own included: one
     /// that publishes a type as a CKAN dataset is the page its rows cite (T-4625).
     pub siblings: Vec<String>,
+    /// The CKAN dataset page the Endpoint publishes to, from its manifest when it is public
+    /// ([`crate::worker::EndpointRef::dataset`]): rows it served cite it, titled as the
+    /// Endpoint (T-6566).
+    pub dataset: Option<String>,
 }
 
 /// A turn the channel sent back (AG-99).
@@ -1100,10 +1104,44 @@ async fn run_script(
     }
 }
 
+/// Names live data by its Endpoint's manifest (T-6566), before and whatever the index holds:
+/// rows of a public Endpoint that publishes a CKAN dataset link that dataset's page and carry
+/// the Endpoint's title, which is the dataset's, in place of a listing for programs titled by
+/// the type; a read with neither a page nor a title is named by its Endpoint's title, never by
+/// the connector's name. A page the read already links (a dataset another Endpoint publishes)
+/// stays, and so does a type's listing of an Endpoint without a dataset.
+fn by_manifest(connectors: &[Connected], citations: &mut [Citation]) {
+    for citation in citations.iter_mut().filter(|c| c.tool.is_some()) {
+        let Some(connector) = connectors
+            .iter()
+            .find(|c| Some(&c.endpoint) == citation.endpoint.as_ref())
+        else {
+            continue;
+        };
+        let listing = citation
+            .url
+            .as_deref()
+            .is_none_or(|url| endpoint_slug(url).is_some());
+        match (&connector.dataset, &connector.title) {
+            (Some(dataset), title) if listing || citation.url.as_ref() == Some(dataset) => {
+                citation.url = Some(dataset.clone());
+                if title.is_some() {
+                    citation.title = title.clone();
+                }
+            }
+            (_, Some(title)) if citation.url.is_none() && citation.title.is_none() => {
+                citation.title = Some(title.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Names each cited source for a visitor (T-3325): a page by its title, live data by the page
 /// the sources hold about its Endpoint, which it then links. A lookup that fails leaves the
 /// citations as they were: the answer still goes out.
 pub(super) async fn name_sources(ask: &Ask<'_>, citations: &mut [Citation]) {
+    by_manifest(ask.connectors, citations);
     if citations.is_empty() || ask.sources.is_empty() {
         return;
     }
@@ -1407,6 +1445,89 @@ mod tests {
         );
     }
 
+    /// T-6566 (owner, dev 2026-11-03): "How many bridges are in the BBSK bridge register?"
+    /// answered 1,651 from bbsk-mosty and cited "Bridge, not in the open data catalogue": the
+    /// index scan found no page, so the citation kept the type and the listing for programs.
+    /// Rows of a public Endpoint publishing a CKAN dataset cite that dataset by the Endpoint's
+    /// title; an Endpoint without one keeps its type's listing (the unlisted card); a read with
+    /// neither is named by the Endpoint's title, never by its connector's name.
+    #[test]
+    fn live_data_is_named_by_its_endpoints_dataset_from_the_manifest() {
+        let connector = |endpoint: &str, title: Option<&str>, dataset: Option<&str>| Connected {
+            titles: Default::default(),
+            endpoint: endpoint.into(),
+            title: title.map(str::to_owned),
+            surface: Surface {
+                gateway: "http://gateway".into(),
+                slug: endpoint.into(),
+                timeout: std::time::Duration::from_secs(1),
+                token: None,
+            },
+            tools: Vec::new(),
+            label: None,
+            siblings: Vec::new(),
+            dataset: dataset.map(str::to_owned),
+        };
+        let listing = |slug: &str| {
+            format!("https://api.dev.example/api/endpoint/{slug}/ngsi-ld/v1/entities?type=Bridge&limit=1000")
+        };
+        let cite = |n: usize, endpoint: &str, url: Option<String>, title: Option<&str>| Citation {
+            n,
+            url,
+            tool: Some("query_entities".into()),
+            endpoint: Some(endpoint.into()),
+            title: title.map(str::to_owned),
+            cards: Vec::new(),
+            dates: Default::default(),
+        };
+        let mosty = "https://opendata.dev.example/dataset/bbsk-mosty";
+        let sibling = "https://opendata.dev.example/dataset/bbsk-zariadenia";
+        let connectors = [
+            connector(
+                "bbsk-mosty",
+                Some("Bridges — Banská Bystrica Region"),
+                Some(mosty),
+            ),
+            connector("bbsk-registre", Some("Registers of the region"), None),
+            connector("bbsk-kpi", None, None),
+        ];
+        let mut citations = vec![
+            cite(1, "bbsk-mosty", Some(listing("omto6")), Some("Bridge")),
+            cite(2, "bbsk-registre", Some(listing("lws6d")), Some("Bridge")),
+            cite(3, "bbsk-registre", None, None),
+            cite(4, "bbsk-mosty", Some(sibling.into()), None),
+            cite(5, "bbsk-kpi", None, None),
+        ];
+        let passage = Citation {
+            tool: None,
+            endpoint: None,
+            ..cite(6, "", Some("https://www.bbsk.sk/mosty".into()), None)
+        };
+        citations.push(passage.clone());
+        by_manifest(&connectors, &mut citations);
+        let named: Vec<(Option<&str>, Option<&str>)> = citations
+            .iter()
+            .map(|c| (c.url.as_deref(), c.title.as_deref()))
+            .collect();
+        let registre = listing("lws6d");
+        assert_eq!(
+            named,
+            vec![
+                (Some(mosty), Some("Bridges — Banská Bystrica Region")),
+                (Some(registre.as_str()), Some("Bridge")),
+                (None, Some("Registers of the region")),
+                (Some(sibling), None),
+                (None, None),
+                (Some("https://www.bbsk.sk/mosty"), None),
+            ]
+        );
+        assert_eq!(citations[5], passage);
+        // No citation is named by a connector's or a space's name.
+        assert!(citations
+            .iter()
+            .all(|c| !matches!(c.title.as_deref(), Some("bbsk-registre" | "bbsk-mosty"))));
+    }
+
     /// T-4748: the agent's data tools are the standard ones, named once whatever the number of
     /// Endpoints, and the Endpoints are listed for it to name.
     #[test]
@@ -1428,6 +1549,7 @@ mod tests {
             }],
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         };
         let connectors = [
             connector("ovzdusie", Some("Ovzdušie")),
@@ -1467,6 +1589,7 @@ mod tests {
             tools: Vec::new(),
             label: label.map(str::to_owned),
             siblings: Vec::new(),
+            dataset: None,
         };
         let registre = connector(Some("Registre kraja"), Some("BBSK"));
         let page = Some("https://data.example/dataset/mosty".to_owned());

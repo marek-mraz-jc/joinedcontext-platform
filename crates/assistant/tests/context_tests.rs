@@ -201,6 +201,7 @@ async fn app(test: &str) -> (axum::Router, MockServer, MockServer, Database) {
                 title: None,
                 publisher: None,
                 space: String::new(),
+                dataset: None,
             },
         );
         snapshot

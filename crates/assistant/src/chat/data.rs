@@ -743,6 +743,7 @@ mod tests {
                 .collect(),
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         }
     }
 

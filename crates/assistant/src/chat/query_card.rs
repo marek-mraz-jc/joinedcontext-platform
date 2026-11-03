@@ -151,6 +151,7 @@ mod tests {
                 .collect(),
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         }
     }
 
@@ -294,6 +295,7 @@ mod edges {
             }],
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         }
     }
 
@@ -383,6 +385,7 @@ mod sizes {
                 .into(),
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         }
     }
 
