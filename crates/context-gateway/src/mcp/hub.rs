@@ -1130,7 +1130,7 @@ fn compact(entry: &Value, lang: &str) -> Value {
         "domains": entry["domains"],
         "themes": entry["themes"],
     });
-    for key in ["place", "period", "broker"] {
+    for key in ["place", "period", "broker", "page"] {
         if let Some(value) = entry.get(key) {
             row[key] = value.clone();
         }
@@ -1524,6 +1524,27 @@ pub async fn protected_resource(State(gateway): State<Arc<Gateway>>) -> Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-6569: a `list_endpoints` row keeps the Endpoint's open data portal page, and a row of
+    /// an Endpoint with none has no `page`.
+    #[test]
+    fn a_listed_row_keeps_the_open_data_page() {
+        let entry = |page: Option<&str>| {
+            let mut entry = json!({
+                "slug": "qjos5uyy46rmn7hzxupmldkcwt2wzghd",
+                "title": { "en": "Barcelona facilities" },
+                "space": "barcelona",
+                "access": "public",
+            });
+            if let Some(page) = page {
+                entry["page"] = json!(page);
+            }
+            entry
+        };
+        let page = "https://opendata.example/dataset/barcelona-places";
+        assert_eq!(compact(&entry(Some(page)), "en")["page"], page);
+        assert!(compact(&entry(None), "en").get("page").is_none());
+    }
 
     /// An author's title is one cell of one row: a line break and a `|` in it start neither a
     /// row nor a column an agent would read as the listing's own (F-R2PLT2-008).
