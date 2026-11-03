@@ -109,10 +109,20 @@ UNIT_PREFIXES = {
     "qudt-unit": "http://qudt.org/vocab/unit/",
     "qudt-quantkind": "http://qudt.org/vocab/quantitykind/",
 }
-LATITUDES = {"lat", "latitude", "y"}
-LONGITUDES = {"lon", "lng", "long", "longitude", "x"}
+#: Header names, folded (`_folded`), that hold a latitude or a longitude: the same words the
+#: Portal's row import reads (ui/src/pages/spaces/importRows.ts), Finnish, Slovak, Czech, German.
+LATITUDES = {"lat", "latitude", "y", "leveys", "sirka", "zemepisnasirka", "breite"}
+LONGITUDES = {"lon", "lng", "long", "longitude", "x", "pituus", "dlzka", "delka", "zemepisnadlzka", "lange"}
 DATE_FORMS = ("%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S")
-TRUE_FALSE = {"true", "false", "yes", "no"}
+#: Yes and no, folded, in the languages the Portal's row import reads the same way.
+TRUES = {"true", "yes", "ano", "ja", "kylla"}
+FALSES = {"false", "no", "nie", "ne", "nein", "ei"}
+
+
+def _folded(text: str) -> str:
+    """`text` without case, diacritics or separators: `Zemepisná šírka` is `zemepisnasirka`."""
+    latin = "".join(c for c in unicodedata.normalize("NFD", text) if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", latin.lower())
 
 
 class SampleError(ValueError):
@@ -395,9 +405,9 @@ def _classify(value: Any) -> tuple[str, Any]:
     if isinstance(value, list):
         return "list", value
     text = str(value).strip()
-    lowered = text.lower()
-    if lowered in TRUE_FALSE:
-        return "boolean", lowered in ("true", "yes")
+    folded = _folded(text)
+    if folded in TRUES or folded in FALSES:
+        return "boolean", folded in TRUES
     if re.fullmatch(r"[+-]?\d+", text):
         return "integer", int(text)
     if re.fullmatch(r"[+-]?(\d+[.,]\d*|[.,]\d+)([eE][+-]?\d+)?", text):
@@ -517,7 +527,7 @@ def infer(
         taken_classes.add(cls)
         rows += len(records)
         columns = {i: [r[i] if i < len(r) else None for r in records] for i in range(len(headers))}
-        lowered = [h.strip().lower() for h in headers]
+        lowered = [_folded(h) for h in headers]
         # A latitude/longitude pair is the entity's `location`, one GeoProperty (DM-54).
         lat = next((i for i, h in enumerate(lowered) if h in LATITUDES), None)
         lon = next((i for i, h in enumerate(lowered) if h in LONGITUDES), None)

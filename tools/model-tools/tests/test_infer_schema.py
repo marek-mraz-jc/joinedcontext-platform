@@ -68,6 +68,17 @@ def test_core_slots_and_a_coordinate_pair_are_recorded_and_not_redeclared():
     assert "lat" not in answer["detectedTypes"]
 
 
+def test_slovak_coordinate_headers_and_yes_no_words_are_a_location_and_a_boolean():
+    """A city's own sheet (T-6567): `Zemepisná šírka`/`dĺžka` is `location`, `áno`/`nie` yes or no."""
+    sample = "Názov,Zemepisná šírka,Zemepisná dĺžka,Bezbariérové\nA,48.73,19.12,áno\nB,48.75,19.16,nie\n".encode()
+    answer = infer("ihriska.csv", sample)
+
+    slots = slots_of(answer)
+    assert answer["detectedTypes"]["location"] == "GeoProperty"
+    assert not {"Zemepisna_sirka", "Zemepisna_dlzka"} & set(slots)
+    assert slots["Bezbarierove"]["range"] == "boolean"
+
+
 def test_a_header_becomes_a_name_and_keeps_its_text_as_the_title():
     """DM-55: the original header travels as `title`, text, never markup."""
     sample = b"<b>Temp</b> (\xc2\xb0C);2nd reading;temperature (\xc2\xb0C)\n1;2;3\n"
