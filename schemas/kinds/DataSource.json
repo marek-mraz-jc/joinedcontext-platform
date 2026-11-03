@@ -377,6 +377,13 @@
             "null"
           ]
         },
+        "records": {
+          "description": "Where the records sit in a JSON body: a dotted path to an array, `data.stations` for a GBFS feed. The runner hands each element to the steps as one message; absent, the whole body is one message. Names only, never an expression (PL-114).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "timeout": {
           "description": "Request timeout as a Bento duration, `10s`.",
           "type": [

@@ -52,6 +52,11 @@ pub struct Sample {
     /// How the sample is split into messages.
     #[serde(default)]
     pub format: SampleFormat,
+    /// The dotted path to the array a JSON sample keeps its records in, as the DataSource's
+    /// `http.records` names it: each element is one message before any step, as the runner splits
+    /// it (PL-114).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<String>,
 }
 
 /// Why a harness cannot be built from this manifest and sample.
@@ -165,6 +170,21 @@ pub fn harness(
         processors.push(json!({ "catch": [{ "mapping": format!(
             "meta jc_fetch_error = \"{FETCH_FAILED}\" + error()\nroot = \"\""
         )}]}));
+    }
+    if let Some(path) = &sample.records {
+        let take = jc_core::kinds::data_source::records_mapping(path)
+            .map_err(|reason| HarnessError::Step(format!("sample records `{path}`: {reason}")))?;
+        // A body without the array fails here with that reason, and only a split body is cut
+        // to the test's messages; a failed fetch keeps its own error, which the envelope reads
+        // first.
+        processors.push(json!({ "mapping": take }));
+        processors.push(json!({ "switch": [{
+            "check": "!errored()",
+            "processors": [
+                { "mapping": format!("root = this.slice(0, {MAX_MESSAGES})") },
+                { "unarchive": { "format": "json_array" } },
+            ],
+        }]}));
     }
     match sample.format {
         SampleFormat::Text => {}
@@ -536,6 +556,7 @@ mod tests {
             text: Some("station_id,pm10\n01,18.2\n02,7.5\n03,11.0\n".into()),
             url: None,
             format: SampleFormat::Csv,
+            records: None,
         };
         let config = harness(
             &spec(Some("root.id = this.station_id")),
@@ -592,6 +613,54 @@ mod tests {
         );
     }
 
+    /// T-6572: a feed whose records sit in `data.stations` reaches the steps one station per
+    /// message, split right after the fetch as the runner splits it (PL-114), so a 100 KB GBFS
+    /// page never travels as one message; a path that is not dotted names builds no harness.
+    #[test]
+    fn a_sample_with_records_splits_the_fetched_body_before_the_steps() {
+        let sample = Sample {
+            text: None,
+            url: Some("https://feeds.example/gbfs/station_information.json".into()),
+            format: SampleFormat::Json,
+            records: Some("data.stations".into()),
+        };
+        let config = harness(
+            &spec(Some("root.id = this.station_id")),
+            &sample,
+            "http://p",
+        )
+        .expect("a harness");
+        let processors = config["pipeline"]["processors"]
+            .as_array()
+            .expect("processors");
+        // The fetch, its empty-body check and its catch come first.
+        assert!(processors[0].get("http").is_some());
+        let take = processors[3]["mapping"]
+            .as_str()
+            .expect("the records mapping");
+        assert!(
+            take.starts_with("let records = this.\"data\".\"stations\""),
+            "{take}"
+        );
+        let split = &processors[4]["switch"][0];
+        assert_eq!(split["check"], "!errored()");
+        assert_eq!(
+            split["processors"][0]["mapping"],
+            "root = this.slice(0, 20)"
+        );
+        assert_eq!(split["processors"][1]["unarchive"]["format"], "json_array");
+        assert!(processors[6]["mapping"]
+            .as_str()
+            .is_some_and(|m| m.contains("meta jc_input")));
+
+        let refused = Sample {
+            records: Some("data[0]".into()),
+            ..sample
+        };
+        let error = harness(&spec(None), &refused, "http://p").unwrap_err();
+        assert!(matches!(error, HarnessError::Step(_)), "{error:?}");
+    }
+
     #[test]
     fn a_text_sample_reaches_the_runner_as_bytes_it_never_interpolates() {
         // T-3229: the runner fills `${NAME}` and `${! … }` in a stream's configuration from its
@@ -603,6 +672,7 @@ mod tests {
             ),
             url: None,
             format: SampleFormat::Json,
+            records: None,
         };
         let config = harness(&spec(None), &sample, "http://p").expect("a harness");
         let written = config["input"]["generate"]["mapping"]
@@ -621,6 +691,7 @@ mod tests {
             text: None,
             url: Some("https://feeds.example/air.json".into()),
             format: SampleFormat::Text,
+            records: None,
         };
         let config = harness(&spec(None), &sample, "http://portal/c").expect("a harness");
         // The input emits one empty message and a processor does the fetch. An `http_client`
@@ -671,6 +742,7 @@ mod tests {
             text: None,
             url: Some("https://feeds.example/air.json".into()),
             format: SampleFormat::Text,
+            records: None,
         };
         let config = harness(&spec(None), &sample, "http://portal/c").expect("a harness");
         let envelope = config["pipeline"]["processors"]
@@ -704,6 +776,7 @@ mod tests {
             text: Some("x".into()),
             url: Some("http://a".into()),
             format: SampleFormat::Text,
+            records: None,
         };
         assert_eq!(
             harness(&spec(None), &both, "http://p").unwrap_err(),
@@ -713,6 +786,7 @@ mod tests {
             text: None,
             url: Some("ftp://a".into()),
             format: SampleFormat::Text,
+            records: None,
         };
         assert!(matches!(
             harness(&spec(None), &ftp, "http://p").unwrap_err(),
@@ -731,6 +805,7 @@ mod tests {
                 text: None,
                 url: Some(url.into()),
                 format: SampleFormat::Json,
+                records: None,
             };
             let refused = harness(&spec(None), &sample, "http://p").unwrap_err();
             assert!(
@@ -746,12 +821,14 @@ mod tests {
             text: None,
             url: Some("https://opendata.example/aq.json".into()),
             format: SampleFormat::Json,
+            records: None,
         };
         assert!(harness(&spec(None), &public, "http://p").is_ok());
         let big = Sample {
             text: Some("x".repeat(MAX_SAMPLE_BYTES + 1)),
             url: None,
             format: SampleFormat::Text,
+            records: None,
         };
         assert!(matches!(
             harness(&spec(None), &big, "http://p").unwrap_err(),
@@ -767,6 +844,7 @@ mod tests {
             text: Some("x".into()),
             url: None,
             format: SampleFormat::Text,
+            records: None,
         };
         assert!(matches!(
             harness(&wasm, &text, "http://p").unwrap_err(),
@@ -865,6 +943,7 @@ mod tests {
                 text: Some("{}".into()),
                 url: None,
                 format: SampleFormat::Json,
+                records: None,
             },
             "http://portal:9090/internal/pipeline-tests/abc",
         )
@@ -897,6 +976,7 @@ mod tests {
                 text: Some("{}".into()),
                 url: None,
                 format: SampleFormat::Json,
+                records: None,
             },
             "http://p",
         )
@@ -1072,6 +1152,7 @@ mod tests {
             text: Some("station_id,pm10\n01,18.2\n".into()),
             url: None,
             format: SampleFormat::Csv,
+            records: None,
         };
         let config = harness(
             &second,

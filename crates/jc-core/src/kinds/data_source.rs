@@ -182,6 +182,11 @@ pub struct HttpConnection {
     /// the header's column names; absent, the whole body is one message (PL-114).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<HttpBodyFormat>,
+    /// Where the records sit in a JSON body: a dotted path to an array, `data.stations` for a
+    /// GBFS feed. The runner hands each element to the steps as one message; absent, the whole
+    /// body is one message. Names only, never an expression (PL-114).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<String>,
     /// The largest response body accepted, in bytes; 32 MiB when absent, at most 256 MiB. The
     /// runner refuses a larger body before any step of the pipeline sees it (PL-113).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,6 +203,36 @@ impl HttpConnection {
     pub fn max_bytes(&self) -> u64 {
         self.max_bytes.unwrap_or(Self::DEFAULT_MAX_BYTES)
     }
+}
+
+/// The most names a `records` path holds.
+pub const RECORDS_PATH_NAMES: usize = 8;
+/// The most bytes one name of a `records` path holds.
+pub const RECORDS_NAME_BYTES: usize = 64;
+
+/// The Bloblang mapping that takes the array at the dotted `records` path out of a JSON body
+/// (PL-114), the one split the runner, the sample and the DataSource Check run: a body without
+/// an array there fails with what it holds instead. Each name is letters, digits, `_` or `-` and
+/// goes into the mapping quoted, so the path is read, never evaluated.
+pub fn records_mapping(path: &str) -> std::result::Result<String, &'static str> {
+    let names: Vec<&str> = path.split('.').collect();
+    if names.len() > RECORDS_PATH_NAMES {
+        return Err("a records path holds at most 8 names");
+    }
+    let plain = |name: &&str| {
+        !name.is_empty()
+            && name.len() <= RECORDS_NAME_BYTES
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    if !names.iter().all(plain) {
+        return Err("a records path is dot-separated names of letters, digits, `_` and `-`, each 1 to 64, such as data.stations");
+    }
+    let at: String = names.iter().map(|name| format!(".\"{name}\"")).collect();
+    Ok(format!(
+        "let records = this{at}\nroot = if $records.type() == \"array\" {{ $records }} else {{ throw(\"the body holds no array at records path {path}, it holds %s\".format($records.type())) }}"
+    ))
 }
 
 /// How an `http` connection splits the body it fetched into messages (PL-114).
@@ -620,6 +655,20 @@ impl DataSourceSpec {
                 }
                 if let Some(archive) = &http.archive {
                     archive.validate(http)?;
+                }
+                if let Some(records) = &http.records {
+                    records_mapping(records).map_err(|reason| Error::Name {
+                        field: "spec.http.records",
+                        value: records.clone(),
+                        reason,
+                    })?;
+                    if http.format == Some(HttpBodyFormat::Csv) {
+                        return Err(Error::Name {
+                            field: "spec.http.records",
+                            value: records.clone(),
+                            reason: "records splits a JSON body; a body of format csv is split by its rows already",
+                        });
+                    }
                 }
                 if !(1..=HttpConnection::MAX_BYTES).contains(&http.max_bytes()) {
                     return Err(Error::Name {

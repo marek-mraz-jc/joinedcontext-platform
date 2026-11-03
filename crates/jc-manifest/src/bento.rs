@@ -10,7 +10,7 @@
 //! except for the decoder the GTFS-realtime type has to prepend and the ranged read of an
 //! archive's named members (PL-72).
 
-use jc_core::kinds::data_source::{check_class, env_var_of};
+use jc_core::kinds::data_source::{check_class, env_var_of, records_mapping};
 use jc_core::kinds::mqtt_broker;
 use jc_core::kinds::{
     DataSourceSpec, DataSourceType, GtfsFeed, HttpArchive, HttpBodyFormat, IdMint, Mint,
@@ -274,7 +274,8 @@ pub fn input_of(spec: &DataSourceSpec, context: &InputContext) -> Value {
 /// GTFS-realtime prepends its protobuf decoder: the feed arrives as protobuf and every pipeline
 /// reading it would otherwise decode it again in its own mapping. An `http` connection refuses a
 /// body over its `maxBytes` (`body_bound`), then, with an `archive`, reads its named members
-/// (`archive_processors`), and with `format: csv` splits it into one message per row (PL-114).
+/// (`archive_processors`), with `format: csv` splits it into one message per row and with
+/// `records` into one message per element of that array (PL-114).
 pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Vec<Value> {
     if let (DataSourceType::Http, Some(http)) = (&spec.source_type, spec.http.as_ref()) {
         let mut processors = body_bound(http.max_bytes());
@@ -283,6 +284,13 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
         }
         if http.format == Some(HttpBodyFormat::Csv) {
             processors.push(csv_rows());
+        }
+        if let Some(mapping) = http
+            .records
+            .as_deref()
+            .and_then(|p| records_mapping(p).ok())
+        {
+            processors.extend(json_records(mapping));
         }
         return processors;
     }
@@ -299,6 +307,33 @@ pub fn prepended_processors(spec: &DataSourceSpec, context: &InputContext) -> Ve
     let mut processor = Mapping::new();
     processor.insert(key("protobuf"), Value::Mapping(protobuf));
     vec![Value::Mapping(processor)]
+}
+
+/// One message per element of the array at the connection's `records` path (PL-114): the path
+/// is validated with the manifest, and one that is not renders no split. A body without the
+/// array is logged at ERROR and dropped, as a body over its bound is, so no step sees it.
+fn json_records(mapping: String) -> [Value; 3] {
+    let one = |name: &str, body: Value| {
+        let mut processor = Mapping::new();
+        processor.insert(key(name), body);
+        Value::Mapping(processor)
+    };
+    let mut log = Mapping::new();
+    log.insert(key("level"), text("ERROR"));
+    log.insert(key("message"), text("http read refused: ${! error() }"));
+    let mut unarchive = Mapping::new();
+    unarchive.insert(key("format"), text("json_array"));
+    [
+        one("mapping", text(&mapping)),
+        one(
+            "catch",
+            Value::Sequence(vec![
+                one("log", Value::Mapping(log)),
+                one("mapping", text("root = deleted()")),
+            ]),
+        ),
+        one("unarchive", Value::Mapping(unarchive)),
+    ]
 }
 
 /// One message per CSV row, keyed by the header, as the `csv` input sends them (PL-114).
