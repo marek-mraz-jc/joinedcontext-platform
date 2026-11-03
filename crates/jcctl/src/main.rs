@@ -2070,6 +2070,7 @@ fn pipeline_test(options: &PipelineTestOptions) -> ExitCode {
         text: Some(text),
         url: None,
         format: options.format,
+        records: None,
     };
     match jcctl::pipeline_test::harness(&envelope.spec, &sample, &options.capture) {
         Ok(harness) => match serde_json::to_string_pretty(&harness) {

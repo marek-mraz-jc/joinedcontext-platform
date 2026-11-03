@@ -809,6 +809,54 @@ fn an_http_body_bound_is_one_byte_to_256_mib() {
     assert!(refused.contains("spec.http.maxBytes"), "{refused}");
 }
 
+/// PL-114, T-6572: `records` names the array a JSON body keeps its records in; it survives a
+/// round trip, renders a quoted path, and is refused when it is anything but dotted names.
+#[test]
+fn an_http_records_path_round_trips_and_is_names_only() {
+    let plain = ZIP.split("    archive:").next().unwrap().to_owned();
+    let gbfs = format!("{plain}    records: data.stations\n");
+    let source = DataSource::from_yaml(&gbfs).expect("parses");
+    source.validate().expect("a dotted path");
+    let again = DataSource::from_yaml(&serde_norway::to_string(&source).expect("serializes"))
+        .expect("parses again");
+    assert_eq!(again, source);
+    assert_eq!(
+        again.spec.http.as_ref().unwrap().records.as_deref(),
+        Some("data.stations")
+    );
+    let mapping = jc_core::kinds::data_source::records_mapping("data.stations").unwrap();
+    assert!(
+        mapping.starts_with("let records = this.\"data\".\"stations\"\n"),
+        "{mapping}"
+    );
+
+    let nine = ["a"; 9].join(".");
+    let long = "a".repeat(65);
+    for path in [
+        "",
+        "data.",
+        ".data",
+        "data..stations",
+        "data stations",
+        "data.\"x\"",
+        "data[0]",
+        "${! meta(\"x\") }",
+        nine.as_str(),
+        long.as_str(),
+    ] {
+        let yaml = format!("{plain}    records: '{}'\n", path.replace('\'', "''"));
+        let refused = DataSource::from_yaml(&yaml).map_or(true, |s| s.validate().is_err());
+        assert!(refused, "{path:?} is refused");
+    }
+    let csv = format!("{plain}    format: csv\n    records: data.stations\n");
+    let err = DataSource::from_yaml(&csv)
+        .unwrap()
+        .validate()
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("spec.http.records"), "{err}");
+}
+
 /// T-5561: a platform broker is read by `brokerRef`, which names one of the DataSource's own
 /// project; by URL, project A could name B's broker Service and read B's devices, and by the
 /// runner's username it could pass as B's runner on any listener.

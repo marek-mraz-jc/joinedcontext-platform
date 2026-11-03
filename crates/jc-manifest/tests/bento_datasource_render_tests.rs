@@ -537,6 +537,44 @@ fn a_csv_http_body_reaches_the_steps_one_row_per_message() {
     );
 }
 
+/// PL-114, T-6572: a JSON body with `records` reaches the author's steps one element of that
+/// array per message, after the body bound (PL-113), so a GBFS feed of 460 stations is 460
+/// messages and none of them carries the whole 100 KB page.
+#[test]
+fn a_json_http_body_with_records_reaches_the_steps_one_element_per_message() {
+    let spec = source(&CSV_HTTP.replace("    format: csv\n", "    records: data.stations\n"));
+    let out = render(
+        "pipeline:\n  processors:\n    - mapping: root = this\n",
+        &spec,
+        &context("stations-csv"),
+    )
+    .expect("renders");
+    let doc: serde_norway::Value = serde_norway::from_str(&out).expect("yaml");
+    let processors = doc["pipeline"]["processors"]
+        .as_sequence()
+        .expect("processors");
+    assert_eq!(processors.len(), 6, "{out}");
+    let take = processors[2]["mapping"].as_str().expect("a mapping");
+    assert!(
+        take.starts_with("let records = this.\"data\".\"stations\"\n"),
+        "{take}"
+    );
+    assert!(
+        take.contains("throw("),
+        "a body without the array fails with a reason"
+    );
+    assert!(
+        processors[3].get("catch").is_some(),
+        "and is dropped: {out}"
+    );
+    assert_eq!(
+        processors[4]["unarchive"]["format"].as_str(),
+        Some("json_array"),
+        "{out}"
+    );
+    assert_eq!(processors[5]["mapping"].as_str(), Some("root = this"));
+}
+
 /// PL-114: `csv` is the only body format; anything else is refused when the manifest is read.
 #[test]
 fn an_unknown_http_body_format_is_refused() {
