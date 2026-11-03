@@ -1430,3 +1430,66 @@ async fn chunk_terms_keep_to_their_project_and_follow_the_text() {
     app.close().await;
     drop_database(admin, pool, &name).await;
 }
+
+/// T-6547: the embedder's claim of chunks without a vector reads index `chunks_embedding_pending`
+/// as the app role under row-level security, never every chunk of every project (on dev 1.2 to
+/// 2.4 s a claim, 105 an hour), and still answers only the session's project's pending chunks.
+#[tokio::test]
+async fn the_claim_of_unembedded_chunks_reads_its_index_and_keeps_to_the_project() {
+    let (admin, pool, name) = database("claimindex").await;
+    let embedded = site(
+        &pool,
+        "helsinki",
+        "hel-web",
+        &[
+            ("Library opening hours", "en", "public", embedding(0, None)),
+            ("Library staff rota", "en", "public", embedding(2, None)),
+        ],
+    )
+    .await;
+    site(
+        &pool,
+        "espoo",
+        "esp-web",
+        &[("Library in Espoo", "en", "public", embedding(1, None))],
+    )
+    .await;
+    sqlx::query("UPDATE chunks SET embedding = NULL WHERE id <> $1")
+        .bind(embedded[0])
+        .execute(&pool)
+        .await
+        .expect("unembed");
+    let app = app_pool(&pool).await;
+    let mut tx = project_scope(&app, "helsinki").await.expect("scope");
+    // A table of three rows is read whole whatever its indexes: the planner is told to prefer
+    // an index, and without the partial one it takes the primary key and filters every row.
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *tx)
+        .await
+        .expect("no seq scan");
+    let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN {}",
+        assistant::embed::CLAIM_UNEMBEDDED.replace("$1", "16")
+    )))
+    .fetch_all(&mut *tx)
+    .await
+    .expect("plan");
+    let claimed: Vec<(i64, String)> = sqlx::query_as(assistant::embed::CLAIM_UNEMBEDDED)
+        .bind(16_i64)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("claim");
+    tx.rollback().await.expect("rollback");
+    let plan = plan.join("\n");
+    assert!(
+        plan.contains("chunks_embedding_pending"),
+        "the claim reads its index:\n{plan}"
+    );
+    assert_eq!(
+        claimed,
+        vec![(embedded[1], "Library staff rota".to_owned())],
+        "helsinki's own pending chunk alone, espoo's waits for espoo"
+    );
+    app.close().await;
+    drop_database(admin, pool, &name).await;
+}

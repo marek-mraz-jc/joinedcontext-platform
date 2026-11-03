@@ -289,6 +289,11 @@ impl Embedder {
     }
 }
 
+/// The claim of up to `$1` chunks of the session's project still without a vector, oldest
+/// first; index `chunks_embedding_pending` answers it (T-6547).
+pub const CLAIM_UNEMBEDDED: &str =
+    "SELECT id, text FROM chunks WHERE embedding IS NULL ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED";
+
 /// Embeds up to `limit` chunks of `project` that have none yet, [`BATCH`] per round, and
 /// returns how many it embedded. A chunk gets one when it is stored or replaced (its page or
 /// document changed), so this is the whole of "re-embed on change"; a batch the model fails on
@@ -302,12 +307,10 @@ pub async fn embed_missing(
     let mut done = 0;
     while (done as i64) < limit {
         let mut tx = crate::project_scope(pool, project).await?;
-        let rows: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT id, text FROM chunks WHERE embedding IS NULL ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED",
-        )
-        .bind((limit - done as i64).min(BATCH as i64))
-        .fetch_all(&mut *tx)
-        .await?;
+        let rows: Vec<(i64, String)> = sqlx::query_as(CLAIM_UNEMBEDDED)
+            .bind((limit - done as i64).min(BATCH as i64))
+            .fetch_all(&mut *tx)
+            .await?;
         if rows.is_empty() {
             tx.rollback().await?;
             break;
