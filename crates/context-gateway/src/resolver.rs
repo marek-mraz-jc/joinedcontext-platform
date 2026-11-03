@@ -163,6 +163,9 @@ pub struct Endpoint {
     pub calendars: Vec<jc_core::kinds::IcalOutput>,
     /// The catalogue widget's map defaults per class, served at `widget.json` (API/11 EP-163).
     pub map_defaults: std::collections::BTreeMap<String, jc_core::kinds::MapDefaults>,
+    /// Its dataset page on the open data portal, from `spec.publish.ckan` and the project's
+    /// `CkanInstance` (T-6569); `None` for an internal Endpoint or one that publishes none.
+    pub page: Option<String>,
 }
 
 /// The types a space's one model declares (DM-61, ADR-N-033).

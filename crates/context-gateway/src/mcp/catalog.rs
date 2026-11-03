@@ -322,6 +322,7 @@ async fn of(gateway: &Gateway, reach: &[(Arc<Endpoint>, Subject)]) -> Arc<Catalo
                     .map(|theme| theme.code().to_owned())
                     .collect(),
                 words: classified.keywords.into_values().flatten().collect(),
+                page: endpoint.page.clone(),
             },
         );
         let index = json!({ "endpoint": endpoint.slug, "models": [] });
@@ -713,6 +714,7 @@ pub(crate) mod tests {
             feeds: Vec::new(),
             calendars: Vec::new(),
             map_defaults: Default::default(),
+            page: None,
             base_path: String::new(),
             models: Vec::new(),
             policy_names: Vec::new(),

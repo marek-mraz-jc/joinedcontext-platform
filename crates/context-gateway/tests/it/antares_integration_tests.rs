@@ -327,6 +327,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![public_grant()],
@@ -1060,6 +1061,7 @@ async fn a_service_account_writes_only_what_its_own_manifest_grants() {
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: vec![serde_norway::from_str(

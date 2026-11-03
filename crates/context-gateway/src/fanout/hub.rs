@@ -800,6 +800,7 @@ pub(crate) mod tests_support {
             feeds: Vec::new(),
             calendars: Vec::new(),
             map_defaults: Default::default(),
+            page: None,
             base_path: "/api/endpoint/s".to_owned(),
             models: Vec::new(),
             policy_names: Vec::new(),

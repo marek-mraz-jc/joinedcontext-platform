@@ -52,6 +52,7 @@ fn endpoint() -> Endpoint {
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         base_path: format!("/api/endpoint/{AIR}"),
         models: vec![Model {
             name: "air-quality".to_owned(),
