@@ -708,6 +708,39 @@ fn app_of(repo: &Repository, project: &str, endpoint: &str) -> Option<String> {
         .then(|| endpoint.to_owned())
 }
 
+/// The site of each `CkanInstance`, by (project, name), without its trailing slash.
+fn ckan_sites(repo: &Repository) -> BTreeMap<(String, String), String> {
+    repo.iter()
+        .filter(|(id, _)| id.kind == "CkanInstance")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<jc_core::kinds::CkanInstanceSpec>(&resource.manifest)?;
+            let project = id.namespace.clone().unwrap_or_default();
+            Some(((project, id.name.clone()), spec.base_url().to_owned()))
+        })
+        .collect()
+}
+
+/// The open data portal page of a public Endpoint `name` of `project` (T-6569): the dataset its
+/// `spec.publish.ckan` names, on the site of the project's `CkanInstance` it refers to. `None`
+/// for an internal Endpoint, one that publishes none, or one naming an instance its project
+/// lacks, so the address comes from manifests alone and never from a caller.
+fn dataset_page(
+    spec: &EndpointSpec,
+    project: &str,
+    name: &str,
+    sites: &BTreeMap<(String, String), String>,
+) -> Option<String> {
+    if spec.audience != Audience::Public {
+        return None;
+    }
+    let publication = spec.publish.as_ref()?.ckan.as_ref()?;
+    let site = sites.get(&(
+        project.to_owned(),
+        publication.instance_ref.name().to_owned(),
+    ))?;
+    Some(format!("{site}/dataset/{}", publication.dataset_name(name)))
+}
+
 /// The endpoint table, with the model artifacts read from `root` when one is given (DM-02,
 /// EP-46). Deterministic: the repository is indexed by resource identity, so two runs on the same
 /// commit build the same table in the same order (CC-27).
@@ -717,6 +750,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
     let policies = policies_by_space(repo);
     let views = view_mappings(repo, root);
     let projections = projections(repo);
+    let ckan_sites = ckan_sites(repo);
 
     let mut endpoints = Vec::new();
     let policy_domains = policy_ref_domains(repo);
@@ -792,6 +826,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             publishers.get(&project).map(Arc::as_ref),
         )
         .map(Arc::new);
+        let page = dataset_page(&spec, &project, &id.name, &ckan_sites);
         endpoints.push(Endpoint {
             roles: match app_client {
                 Some(client) => EndpointRoles::of_app(&project, &id.name, &spec, client),
@@ -823,6 +858,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
             deprecation: spec.deprecation.clone().map(Arc::new),
             calendars,
             map_defaults,
+            page,
             feeds: spec.representations.map(|r| r.feed).unwrap_or_default(),
             view_mapping: spec.view_mapping_ref.and_then(|view| {
                 let named = (
@@ -1033,6 +1069,7 @@ fn spaces_from(repo: &Repository, models: &ModelSet) -> Vec<Space> {
                 feeds: Vec::new(),
                 calendars: Vec::new(),
                 map_defaults: Default::default(),
+                page: None,
                 base_path: format!("/cs/{segment}"),
             }),
             title: language_map(&resource.manifest.metadata.rest, "title"),
@@ -1476,8 +1513,8 @@ fn normalize(path: &Path) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        beside_text, language_map, normalize, of_own_project, portal_personal_data_read,
-        PORTAL_RECONCILER_USER,
+        beside_text, dataset_page, language_map, normalize, of_own_project,
+        portal_personal_data_read, PORTAL_RECONCILER_USER,
     };
     use crate::auth::subject::Subject;
     use crate::pdp::evaluator::{evaluate, Request};
@@ -1488,6 +1525,40 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    /// T-6569: a public Endpoint publishing to its project's CkanInstance gets that dataset's
+    /// page on the open data portal; an internal one, one publishing none, or one naming an
+    /// instance its project lacks gets none.
+    #[test]
+    fn a_public_endpoint_publishing_to_ckan_gets_its_dataset_page() {
+        let spec = |audience: &str, publish: &str| -> jc_core::kinds::EndpointSpec {
+            serde_norway::from_str(&format!(
+                "contextSpaceRef: barcelona\nslug: qjos5uyy46rmn7hzxupmldkcwt2wzghd\n\
+                 audience: {audience}\nenabledRepresentations: [ngsi-ld, mcp]\n{publish}"
+            ))
+            .expect("an endpoint spec")
+        };
+        let named = "publish: { ckan: { instanceRef: { kind: CkanInstance, name: bcn }, name: barcelona-places } }\n";
+        let own = "publish: { ckan: { instanceRef: { kind: CkanInstance, name: bcn } } }\n";
+        let sites = BTreeMap::from([(
+            ("barcelona".to_owned(), "bcn".to_owned()),
+            "https://opendata.smartcity.example".to_owned(),
+        )]);
+        let page = |audience: &str, publish: &str, project: &str| {
+            dataset_page(&spec(audience, publish), project, "places", &sites)
+        };
+        assert_eq!(
+            page("public", named, "barcelona").as_deref(),
+            Some("https://opendata.smartcity.example/dataset/barcelona-places")
+        );
+        assert_eq!(
+            page("public", own, "barcelona").as_deref(),
+            Some("https://opendata.smartcity.example/dataset/places")
+        );
+        assert_eq!(page("organization", named, "barcelona"), None);
+        assert_eq!(page("public", "", "barcelona"), None);
+        assert_eq!(page("public", named, "praha"), None);
+    }
 
     /// AP-139: an App's endpoint owns its caller role and each of its named roles, and nothing
     /// that only starts like them or is not a role at all.

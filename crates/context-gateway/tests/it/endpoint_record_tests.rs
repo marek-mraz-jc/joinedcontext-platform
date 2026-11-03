@@ -87,6 +87,7 @@ fn endpoint(audience: Audience) -> Endpoint {
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         base_path: format!("/api/endpoint/{SLUG}"),
         models: vec![air_quality()],
         policy_names: Vec::new(),

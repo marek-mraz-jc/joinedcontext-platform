@@ -122,6 +122,7 @@ fn endpoint(slug: &str, audience: Audience) -> Endpoint {
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         policy_names,
         manifest_name: String::new(),
         policies,

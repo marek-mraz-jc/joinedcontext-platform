@@ -1361,6 +1361,10 @@ fn described(gateway: &Gateway, endpoint: &Endpoint, subject: &Subject) -> Value
     if let Some(publisher) = endpoint.catalog.as_ref().and_then(|c| c.publisher.as_ref()) {
         entry["publisher"] = json!(publisher.name);
     }
+    // The dataset page on the open data portal, the link to give a person (T-6569).
+    if let Some(page) = &endpoint.page {
+        entry["page"] = json!(page);
+    }
     entry
 }
 
@@ -1452,9 +1456,9 @@ pub(crate) fn list_endpoints_tool() -> Value {
 pub(crate) fn get_endpoint_tool() -> Value {
     json!({
         "name": "get_endpoint",
-        "description": "One Endpoint: its NGSI-LD query card (types, attributes, units), then \
-                        title, history and links (surfaces, DCAT, MCP, LinkML, SHACL, JSON Schema, \
-                        context). detail attributes: all types, or one.",
+        "description": "One Endpoint: its NGSI-LD query card (types, attributes, units), \
+                        title, history and links (page, surfaces, DCAT, MCP, LinkML, SHACL, JSON Schema, \
+                        context). detail attributes: all types or one.",
         "inputSchema": {
             "type": "object",
             "properties": {

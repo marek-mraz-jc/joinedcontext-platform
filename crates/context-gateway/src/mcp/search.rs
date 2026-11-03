@@ -20,6 +20,8 @@ pub(crate) struct Facts {
     pub(crate) domains: Vec<String>,
     pub(crate) themes: Vec<String>,
     pub(crate) words: Vec<String>,
+    /// Its dataset page on the open data portal (T-6569), the link to give a person.
+    pub(crate) page: Option<String>,
 }
 
 struct Doc {
@@ -29,6 +31,8 @@ struct Doc {
     types: Vec<String>,
     /// Per Endpoint, the types it answers for this caller, so a hit names one that serves them.
     served: Vec<(String, Vec<String>)>,
+    /// Per Endpoint slug, its open data portal page (T-6569).
+    pages: HashMap<String, String>,
     domains: Vec<String>,
     themes: Vec<String>,
     /// The words of its titles, so a hit can say it matched on the title.
@@ -240,6 +244,7 @@ impl Index {
                 slugs,
                 types: Vec::new(),
                 served: Vec::new(),
+                pages: HashMap::new(),
                 domains: Vec::new(),
                 themes: strings(Some(&entity["theme"]["value"]))
                     .iter()
@@ -252,6 +257,9 @@ impl Index {
             for slug in &doc.slugs {
                 if let Some(f) = facts.get(slug) {
                     doc.served.push((slug.clone(), f.types.clone()));
+                    if let Some(page) = &f.page {
+                        doc.pages.insert(slug.clone(), page.clone());
+                    }
                     for (into, from) in [(&mut doc.types, &f.types), (&mut doc.domains, &f.domains)]
                     {
                         into.extend(
@@ -493,7 +501,8 @@ fn hit(doc: &Doc, score: f64, lang: &str, asked: &Asked<'_>) -> Value {
         arguments["type"] = json!([first]);
     }
     let why = reason(doc, types, asked);
-    json!({
+    let page = doc.pages.get(&endpoint).cloned();
+    let mut hit = json!({
         "dataset": doc.dataset,
         "why": why,
         "endpoint": endpoint,
@@ -504,7 +513,11 @@ fn hit(doc: &Doc, score: f64, lang: &str, asked: &Asked<'_>) -> Value {
         "themes": doc.themes,
         "score": (score * 100.0).round() / 100.0,
         "nextQuery": { "tool": "query_entities", "arguments": arguments },
-    })
+    });
+    if let Some(page) = page {
+        hit["page"] = json!(page);
+    }
+    hit
 }
 
 /// One line of why a Dataset matched: the place, the title, the types, the facets; else the
@@ -746,5 +759,56 @@ mod tests {
                 "{asked}: {hits}"
             );
         }
+    }
+
+    /// T-6569: a hit names the open data portal page of the Endpoint it routes to, and a hit
+    /// whose Endpoint publishes none names no page.
+    #[test]
+    fn a_hit_names_its_endpoints_open_data_page() {
+        let dataset = |n: &str, title: &str| {
+            json!({
+                "id": format!("urn:ngsi-ld:Dataset:{n}"), "type": "Dataset",
+                "title": { "languageMap": { "en": title } },
+                "searchText": { "value": title },
+                "refDataService": { "type": "Relationship", "object": format!("urn:ngsi-ld:DataService:{n}") },
+            })
+        };
+        let entities = [
+            dataset("places", "Pharmacies and facilities"),
+            dataset("internal", "Pharmacies stock"),
+        ];
+        let mut facts = HashMap::new();
+        facts.insert(
+            "places".to_owned(),
+            Facts {
+                types: vec!["PointOfInterest".to_owned()],
+                page: Some("https://opendata.example/dataset/barcelona-places".to_owned()),
+                ..Facts::default()
+            },
+        );
+        let index = Index::build(&entities, &facts);
+        let answer = index
+            .search(
+                json!({ "query": "pharmacies" })
+                    .as_object()
+                    .expect("arguments"),
+            )
+            .expect("an answer");
+        let hits = answer["structuredContent"]["hits"]
+            .as_array()
+            .expect("hits");
+        let page = |slug: &str| {
+            hits.iter()
+                .find(|hit| hit["endpoint"] == slug)
+                .map(|hit| hit.get("page").cloned())
+        };
+        assert_eq!(
+            page("places"),
+            Some(Some(json!(
+                "https://opendata.example/dataset/barcelona-places"
+            ))),
+            "{answer}"
+        );
+        assert_eq!(page("internal"), Some(None), "{answer}");
     }
 }

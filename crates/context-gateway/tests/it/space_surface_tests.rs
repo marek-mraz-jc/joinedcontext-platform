@@ -87,6 +87,7 @@ fn space(name: &str, policies: Vec<PolicySpec>) -> Space {
             feeds: Vec::new(),
             calendars: Vec::new(),
             map_defaults: Default::default(),
+            page: None,
             policy_names: Vec::new(),
             manifest_name: String::new(),
             policies,

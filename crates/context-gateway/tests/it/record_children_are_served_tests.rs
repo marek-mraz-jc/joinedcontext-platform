@@ -110,6 +110,7 @@ fn endpoint(slug: &str, space: &str, representations: Vec<Representation>) -> En
         feeds: Vec::new(),
         calendars: Vec::new(),
         map_defaults: Default::default(),
+        page: None,
         policy_names: Vec::new(),
         manifest_name: String::new(),
         policies: public_grant(space),
