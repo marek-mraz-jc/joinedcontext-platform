@@ -1163,3 +1163,9 @@ test("every language of the widget and of its launcher has every word", () => {
     }
   }
 });
+
+test("a table of participation data is captioned in the reader's language (T-6449)", () => {
+  const rows = { columns: ["name"], rows: [["Amfik"]], type: "Proposal", total: 1 };
+  assert.equal(table(rows, "sk", 0).caption, "Návrhy (1)");
+  assert.equal(table({ ...rows, type: "ParticipatoryProcess" }, "sk", 0).caption, "Procesy (1)");
+});

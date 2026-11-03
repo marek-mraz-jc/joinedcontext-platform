@@ -373,7 +373,14 @@ var JCRender = (function () {
     GtfsStop: { sk: "Zastávky", cs: "Zastávky", en: "Stops", de: "Haltestellen" },
     BikeHireDockingStation: { sk: "Stanice bicyklov", cs: "Stanice kol", en: "Bike stations", de: "Fahrradstationen" },
     Event: { sk: "Podujatia", cs: "Akce", en: "Events", de: "Veranstaltungen" },
-    Vehicle: { sk: "Vozidlá", cs: "Vozidla", en: "Vehicles", de: "Fahrzeuge" }
+    Vehicle: { sk: "Vozidlá", cs: "Vozidla", en: "Vehicles", de: "Fahrzeuge" },
+    Proposal: { sk: "Návrhy", cs: "Návrhy", en: "Proposals", de: "Vorschläge" },
+    ParticipatoryProcess: { sk: "Procesy", cs: "Procesy", en: "Processes", de: "Prozesse" },
+    BudgetProject: { sk: "Rozpočtové projekty", cs: "Rozpočtové projekty", en: "Budget projects", de: "Budgetprojekte" },
+    Result: { sk: "Výsledky", cs: "Výsledky", en: "Results", de: "Ergebnisse" },
+    Meeting: { sk: "Stretnutia", cs: "Setkání", en: "Meetings", de: "Treffen" },
+    Debate: { sk: "Diskusie", cs: "Diskuse", en: "Debates", de: "Debatten" },
+    Survey: { sk: "Dotazníky", cs: "Dotazníky", en: "Surveys", de: "Umfragen" }
   };
   var YES_NO = { sk: ["Áno", "Nie"], cs: ["Ano", "Ne"], en: ["Yes", "No"], de: ["Ja", "Nein"] };
   var OF = { sk: "z", cs: "z", en: "of", de: "von" };
