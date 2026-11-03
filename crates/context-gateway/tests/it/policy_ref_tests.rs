@@ -220,6 +220,46 @@ fn a_policy_ref_of_another_domain_binds_nothing() {
     }
 }
 
+/// T-6502: one installation holds several Organizations, each publishing under its own domain.
+/// A reference of a Project's Organization, or of the Project's own domain, binds; the
+/// installation's domain and any other bind nothing for that Project.
+#[test]
+fn a_policy_ref_binds_by_the_domains_of_its_project() {
+    const ORGANIZATIONS: &str = "apiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  \
+         name: hel\nspec:\n  domain: hel.fi\n  installation: true\n  locales: [\"fi\"]\n  \
+         defaultLocale: fi\n---\napiVersion: joinedcontext.com/v1alpha1\nkind: Organization\nmetadata:\n  \
+         name: bratislava\nspec:\n  domain: bratislava.sk\n  locales: [\"sk\"]\n  \
+         defaultLocale: sk\n";
+    let project = |organization: &str, domain: &str| {
+        format!(
+            "apiVersion: joinedcontext.com/v1alpha1\nkind: Project\nmetadata:\n  name: helsinki\nspec:\n  \
+             organizationRef: {organization}\n{domain}"
+        )
+    };
+    for (organization, own, domain, bound) in [
+        ("bratislava", "", "bratislava.sk", 1),
+        ("hel", "  domain: praha.eu\n", "praha.eu", 1),
+        ("hel", "  domain: praha.eu\n", "hel.fi", 1),
+        ("bratislava", "", "hel.fi", 0),
+        ("bratislava", "  domain: bratislava.sk\n", "vantaa.fi", 0),
+    ] {
+        let dir = repo(&format!("{organization}-{domain}-{bound}"));
+        write(&dir, "organizations.yaml", ORGANIZATIONS);
+        write(&dir, "project.yaml", &project(organization, own));
+        write(
+            &dir,
+            "bikes.yaml",
+            &BIKES.replace(":hel.fi:", &format!(":{domain}:")),
+        );
+        let (endpoints, ..) = store::load(&dir).expect("the repository loads");
+        let bikes = endpoints
+            .iter()
+            .find(|endpoint| endpoint.slug == "bbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("the endpoint is still in the table");
+        assert_eq!(bikes.policies.len(), bound, "{organization} {domain}");
+    }
+}
+
 /// ADR-N-057 decision 2: `policyRefs` binds exactly the Policies it lists; a reference into
 /// another space among them binds nothing and widens nothing.
 #[test]

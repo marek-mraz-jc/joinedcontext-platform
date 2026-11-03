@@ -15,6 +15,7 @@ use axum::http::header::ACCEPT;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use axum::response::IntoResponse;
 use futures_util::stream::{self, StreamExt};
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use jc_core::ProblemDetails;
 use jc_tabular::{Collect, Collector, Limits, Table, Window};
 use serde_json::Value;
@@ -210,9 +211,13 @@ async fn view_bytes(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     let (parts, body) = answer.into_parts();
-    let bytes = axum::body::to_bytes(body, MAX_BODY)
-        .await
-        .map_err(|_| Box::new(ProblemDetails::internal().into_response()))?;
+    let bytes = match Limited::new(body, MAX_BODY).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        // One page past what the gateway holds (a page of flood zone polygons, T-6502) is no
+        // fault of the gateway's: it is the download's own 413.
+        Err(error) if error.is::<LengthLimitError>() => return Err(Box::new(too_large())),
+        Err(_) => return Err(Box::new(ProblemDetails::internal().into_response())),
+    };
     if parts.status == StatusCode::NOT_FOUND && names_no_tenant(&bytes) {
         return Ok((Bytes::new(), false, Some(0)));
     }

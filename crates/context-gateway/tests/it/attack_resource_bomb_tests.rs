@@ -177,6 +177,45 @@ async fn a_download_of_a_dataset_that_never_ends_is_refused_at_the_row_ceiling()
     );
 }
 
+/// T-6502: a broker page past what the gateway holds, one row with its polygons, is the download's
+/// own 413 and no 500: the person is told to narrow the file.
+#[tokio::test]
+async fn a_page_past_the_gateways_hold_is_the_downloads_413() {
+    let app = Router::new().fallback(any(|| async {
+        let padding = "x".repeat(9 * 1024 * 1024); // past the gateway's 8 MiB MAX_BODY
+        let mut row = station(0);
+        row["note"] = serde_json::json!({ "type": "Property", "value": padding });
+        axum::Json(Value::Array(vec![row]))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let address = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let gateway = Arc::new(
+        Gateway::new(
+            Broker::new(format!("http://{address}")),
+            Box::new(PolicyPdp),
+            DOMAIN,
+        )
+        .serve([endpoint(None)]),
+    );
+    let response = router(gateway)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/endpoint/{SLUG}/file.csv?type=AirQualityObserved"
+                ))
+                .body(Body::empty())
+                .expect("a request"),
+        )
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 /// The ceiling stops the file before it holds the whole space, and the broker is never read
 /// past it (`file.csv`, the one file since T-4597).
 #[tokio::test]

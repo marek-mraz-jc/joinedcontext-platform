@@ -719,6 +719,7 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
     let projections = projections(repo);
 
     let mut endpoints = Vec::new();
+    let policy_domains = policy_ref_domains(repo);
     for (id, resource) in repo.iter() {
         if id.kind != "Endpoint" {
             continue;
@@ -735,7 +736,12 @@ fn endpoints_from(repo: &Repository, root: Option<&Path>, models: &ModelSet) -> 
         let named = policies.get(&key).map(Vec::as_slice).unwrap_or_default();
         let app_client = app_of(repo, &project, &id.name);
         let mut bound = match spec.policy_refs() {
-            Some(refs) => bound_policies(&id.name, refs, (repo.org_domain(), &space), named),
+            Some(refs) => bound_policies(
+                &id.name,
+                refs,
+                (policy_domains.get(&project), repo.org_domain(), &space),
+                named,
+            ),
             None => named.to_vec(),
         };
         // An App's generated Endpoint evaluates its own grants and the space's prohibitions
@@ -1185,23 +1191,51 @@ fn of_own_project(mut spec: PolicySpec, project: &str) -> PolicySpec {
     spec
 }
 
+/// The domains each Project publishes under: its own `spec.domain` and its Organization's
+/// (PF-122). An installation holds several Organizations, so the one domain the load renders
+/// `{orgDomain}` with is not every Endpoint's (T-6502).
+fn policy_ref_domains(repo: &Repository) -> BTreeMap<String, BTreeSet<String>> {
+    let organizations: BTreeMap<&str, OrganizationSpec> = repo
+        .iter()
+        .filter(|(id, _)| id.kind == "Organization")
+        .filter_map(|(id, resource)| Some((id.name.as_str(), spec_of(&resource.manifest)?)))
+        .collect();
+    repo.iter()
+        .filter(|(id, _)| id.kind == "Project")
+        .filter_map(|(id, resource)| {
+            let spec = spec_of::<ProjectSpec>(&resource.manifest)?;
+            let organization = organizations.get(spec.organization_ref.name());
+            let domains: BTreeSet<String> = spec
+                .domain
+                .into_iter()
+                .chain(organization.map(|organization| organization.domain.clone()))
+                .collect();
+            (!domains.is_empty()).then(|| (id.name.clone(), domains))
+        })
+        .collect()
+}
+
 /// The Policies an endpoint with `spec.policyRefs` (or `policyRef`) evaluates, every rule of each
 /// (EP-14, GW8, ADR-N-057).
 ///
 /// Without a reference an endpoint evaluates every Policy of its space; with references it
 /// evaluates the named Policies alone, which is how several endpoints over one space each publish
 /// a different slice of it. A reference to a Policy of another space or another organization's
-/// domain (when the load knows its own), or to none the repository has, binds nothing and says
-/// so: an endpoint that widened to the whole space instead would publish exactly what its author
-/// narrowed away.
+/// domain (the Project's own domains, else the installation's when the load knows it), or to none
+/// the repository has, binds nothing and says so: an endpoint that widened to the whole space
+/// instead would publish exactly what its author narrowed away.
 fn bound_policies(
     endpoint: &str,
     refs: &[Urn],
-    (domain, space): (Option<&str>, &str),
+    (domains, installation, space): (Option<&BTreeSet<String>>, Option<&str>, &str),
     named: &[(String, PolicySpec)],
 ) -> Vec<(String, PolicySpec)> {
+    let its_domain = |policy_ref: &Urn| match domains {
+        Some(domains) => policy_ref.org_domain().is_some_and(|d| domains.contains(d)),
+        None => installation.is_none_or(|domain| policy_ref.org_domain() == Some(domain)),
+    };
     let names = |policy_ref: &Urn, name: &str| {
-        domain.is_none_or(|domain| policy_ref.org_domain() == Some(domain))
+        its_domain(policy_ref)
             && policy_ref.space() == Some(space)
             && PolicySpec::policy_of(name) == policy_ref.local_id()
     };
