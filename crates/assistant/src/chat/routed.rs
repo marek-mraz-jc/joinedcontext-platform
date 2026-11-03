@@ -2336,6 +2336,10 @@ async fn dataset_or(
                 return Ok(Some(part));
             }
         }
+        // The dataset its manifest publishes to, when it is public, needs no scan (T-6566).
+        if connector.dataset.is_some() {
+            return Ok(connector.dataset.clone());
+        }
         match own {
             Some(own) => Ok(own),
             None => rows_dataset(ask, connector, kind).await,
@@ -5028,6 +5032,7 @@ mod tests {
             tools: super::super::mcp::picked(&listed, &allowed),
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         };
         let tools = super::super::data::tool_specs(&[connector], false);
         let used = tokens_of(&messages) + tokens_of(&tools);
@@ -5105,6 +5110,7 @@ mod tests {
             tools: vec![tool("list_types"), tool("query_entities")],
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         };
         let cache = AnswerCache::default();
         let connectors = [connector("slow"), connector("down")];
@@ -5158,6 +5164,7 @@ mod tests {
                 tools: vec![tool("list_types"), tool("query_entities")],
                 label: None,
                 siblings: Vec::new(),
+                dataset: None,
             })
             .collect();
         let cache = AnswerCache::default();
@@ -5216,6 +5223,7 @@ mod tests {
                 tools: vec![tool("list_types"), tool("query_entities")],
                 label: Some(format!("publisher of {slug}")),
                 siblings: Vec::new(),
+                dataset: None,
             })
             .collect();
         let cache = AnswerCache::default();
@@ -5281,6 +5289,7 @@ mod tests {
             tools: vec![tool("list_types"), tool("query_entities")],
             label: None,
             siblings: Vec::new(),
+            dataset: None,
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         warm(&cache, &http, &connectors).await;
@@ -5343,6 +5352,7 @@ mod tests {
             tools: vec![tool("list_types"), tool("query_entities")],
             label: Some("Mesto Banská Bystrica".into()),
             siblings: Vec::new(),
+            dataset: None,
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         let named = |live: &Live| {
@@ -5430,6 +5440,7 @@ mod tests {
                     tools: super::super::mcp::picked(&listed, &allowed),
                     siblings: Vec::new(),
                     label: None,
+                    dataset: None,
                 });
             }
         }
@@ -5497,6 +5508,7 @@ mod tests {
             ),
             siblings: Vec::new(),
             label: Some("Banskobystrický samosprávny kraj".into()),
+            dataset: None,
         };
         let (live, missing) = live_of(
             &cache,
@@ -5565,6 +5577,7 @@ mod tests {
             tools: vec![tool("list_types"), tool("query_entities")],
             label: Some("Helsingin kaupunki".into()),
             siblings: Vec::new(),
+            dataset: None,
         }];
         let (cache, http) = (AnswerCache::default(), reqwest::Client::new());
         let (first, missing) = live_of(&cache, &http, "bbsk/data", &connectors, None).await;
@@ -7502,6 +7515,7 @@ classes:
                 .into(),
             ),
             siblings: Vec::new(),
+            dataset: None,
         }
     }
 

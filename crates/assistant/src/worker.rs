@@ -66,6 +66,11 @@ pub struct EndpointRef {
     /// Its title in each language the manifest writes, so a step names it in the visitor's
     /// language (T-5343); empty for a plain title.
     pub titles: BTreeMap<String, String>,
+    /// The CKAN dataset page a public Endpoint publishes to (`spec.publish.ckan`), from its
+    /// manifest: what a citation of rows it served links and is titled after (T-6566). `None`
+    /// for an Endpoint that publishes none or is not public, so an internal Endpoint's dataset
+    /// never names a public answer's source.
+    pub dataset: Option<String>,
 }
 
 /// What a visitor of the context page may read of one Endpoint (AG-123, T-4692).
@@ -191,7 +196,9 @@ pub fn snapshot(checkout: &Checkout) -> Result<Snapshot, Error> {
         let spec = &resource.manifest.spec;
         match id.kind.as_str() {
             "Endpoint" => match endpoint_ref(spec, resource.manifest.metadata.rest.get("title")) {
-                Some(endpoint) => {
+                Some(mut endpoint) => {
+                    endpoint.dataset =
+                        public_dataset(&endpoint, spec, &project, &id.name, &catalogues);
                     snapshot
                         .endpoints
                         .insert((project, id.name.clone()), endpoint);
@@ -732,6 +739,27 @@ fn endpoint_ref(
         space: space.to_owned(),
         title: title.and_then(title_line),
         titles: title.map(title_lines).unwrap_or_default(),
+        dataset: None,
+    })
+}
+
+/// The CKAN dataset page of a public Endpoint of `project` (T-6566), at the URL of the project's
+/// `CkanInstance` it names; `None` for an Endpoint that is not public or publishes none.
+fn public_dataset(
+    endpoint: &EndpointRef,
+    spec: &serde_json::Value,
+    project: &str,
+    name: &str,
+    catalogues: &BTreeMap<(String, String), String>,
+) -> Option<String> {
+    if endpoint.audience != "public" {
+        return None;
+    }
+    let spec = serde_json::from_value::<EndpointSpec>(spec.clone()).ok()?;
+    crate::catalogue::ckan_dataset(&spec, name, |instance| {
+        catalogues
+            .get(&(project.to_owned(), instance.to_owned()))
+            .cloned()
     })
 }
 
@@ -921,6 +949,37 @@ mod tests {
         );
     }
 
+    /// T-6566: a public Endpoint publishing to its project's CkanInstance names that dataset's
+    /// page from its manifest; an internal one, or one whose instance is another project's,
+    /// names none.
+    #[test]
+    fn a_public_endpoint_names_the_ckan_dataset_it_publishes_to() {
+        let spec = |audience: &str| {
+            serde_json::json!({
+                "contextSpaceRef": "bbsk-registre",
+                "slug": "omto6qk5sfn5ft7zl5pdiaxunj2ljnae",
+                "audience": audience,
+                "enabledRepresentations": ["ngsi-ld", "mcp"],
+                "publish": {"ckan": {"instanceRef": {"kind": "CkanInstance", "name": "bbsk"}, "license": "cc-by-sa"}}
+            })
+        };
+        let catalogues = BTreeMap::from([(
+            ("bbsk".to_owned(), "bbsk".to_owned()),
+            "https://opendata.dev.example/".to_owned(),
+        )]);
+        let dataset = |audience: &str, project: &str| {
+            let spec = spec(audience);
+            let endpoint = endpoint_ref(&spec, None).expect("a minted slug");
+            public_dataset(&endpoint, &spec, project, "bbsk-mosty", &catalogues)
+        };
+        assert_eq!(
+            dataset("public", "bbsk").as_deref(),
+            Some("https://opendata.dev.example/dataset/bbsk-mosty")
+        );
+        assert_eq!(dataset("organization", "bbsk"), None);
+        assert_eq!(dataset("public", "zilina"), None);
+    }
+
     /// T-3314: a slug that is not one the platform mints never becomes part of an address.
     #[test]
     fn only_a_minted_slug_is_connected() {
@@ -999,6 +1058,7 @@ mod tests {
                     title: None,
                     publisher: None,
                     space: String::new(),
+                    dataset: None,
                 },
             );
             if let Some(theme) = themes {

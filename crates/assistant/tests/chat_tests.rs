@@ -194,6 +194,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
         publisher: None,
         space: String::new(),
         title: None,
+        dataset: None,
     };
     snapshot.endpoints = BTreeMap::from([
         (("bbsk".into(), "kraj".into()), public(REGION_SLUG)),
@@ -206,6 +207,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 publisher: None,
                 space: String::new(),
                 title: None,
+                dataset: None,
             },
         ),
         (("helsinki".into(), "kraj".into()), public(ELSEWHERE_SLUG)),
@@ -218,6 +220,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 publisher: None,
                 space: String::new(),
                 title: None,
+                dataset: None,
             },
         ),
         (("hronov".into(), "catalog".into()), public(CATALOG_SLUG)),
@@ -230,6 +233,7 @@ async fn world(test: &str, deployment: Deployment) -> World {
                 publisher: None,
                 space: String::new(),
                 title: None,
+                dataset: None,
             },
         ),
     ]);

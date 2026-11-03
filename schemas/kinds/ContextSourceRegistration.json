@@ -281,7 +281,7 @@
       "type": "object"
     },
     "FederationIdentity": {
-      "description": "Which identity a forwarded request carries (PF-48).\n\nNeither mode is a grant. `ServiceAccount` reads a source with the grants a `Policy` on that source gave the named account; `Caller` reads it with the caller's own. In both, the hub Endpoint's policy set applies as well and the narrower one wins.",
+      "description": "Which identity a forwarded request carries (PF-48).\n\nNo mode is a grant. `ServiceAccount` reads a source with the grants a `Policy` on that source gave the named account; `Caller` reads it with the caller's own; `Anonymous` reads an address outside this platform with no credential at all, so it sees what any visitor of that address sees. In each, the hub Endpoint's policy set applies as well and the narrower one wins.",
       "oneOf": [
         {
           "description": "The hub forwards as a `ServiceAccount` of its own, named by `serviceAccountRef`.",
@@ -294,6 +294,13 @@
           "description": "The caller's own token is forwarded, rewritten for the source's audience.",
           "enum": [
             "caller"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "No credential is forwarded: only for an `endpoint` outside this platform that answers anonymous reads (T-6545), so no token or account ever leaves the platform for it.",
+          "enum": [
+            "anonymous"
           ],
           "type": "string"
         }
