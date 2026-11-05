@@ -188,6 +188,7 @@ async fn holding(broker: &Slow, count: usize) {
     }
 }
 
+/// The 503 of a full gateway: `Retry-After` in the header, the detail in plain words (T-6503).
 async fn assert_busy(answer: axum::response::Response) {
     assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(answer.headers()["retry-after"], "1");
@@ -198,7 +199,7 @@ async fn assert_busy(answer: axum::response::Response) {
     assert!(
         problem["detail"]
             .as_str()
-            .is_some_and(|detail| detail.contains("Retry-After")),
+            .is_some_and(|detail| detail.ends_with("; try again in a moment")),
         "{problem}"
     );
 }
