@@ -963,7 +963,7 @@ fn attribute(slot: &Value, require_units: bool) -> Value {
     let value = if kind == "LanguageProperty" {
         json!({ "type": "object", "additionalProperties": { "type": "string" } })
     } else {
-        without_null(slot)
+        date_time_literal(without_null(slot))
     };
     let mut shape = json!({
         "type": "object",
@@ -988,6 +988,25 @@ fn attribute(slot: &Value, require_units: bool) -> Value {
         }
     }
     shape
+}
+
+/// A date-time slot's value, also as the NGSI-LD typed literal of one (`{"@type": "DateTime",
+/// "@value": …}`, the indicator's `updatedAt`), which the gateway reads as its `@value`
+/// (`quality::prepared`). One schema of both types, not an `anyOf`, so a wrong value still fails
+/// on its type or format, `sh:datatype` (T-6593).
+fn date_time_literal(mut value: Value) -> Value {
+    let date_time = value.get("type") == Some(&json!("string"))
+        && value.get("format") == Some(&json!("date-time"));
+    if let (true, Some(object)) = (date_time, value.as_object_mut()) {
+        object.insert("type".into(), json!(["string", "object"]));
+        object.insert("required".into(), json!(["@type", "@value"]));
+        object.insert(
+            "properties".into(),
+            json!({ "@type": { "const": "DateTime" }, "@value": instant() }),
+        );
+        object.insert("additionalProperties".into(), json!(false));
+    }
+    value
 }
 
 /// The form of a system member that holds an instant: an RFC 3339 date-time (DM-131).
@@ -1653,5 +1672,40 @@ mod tests {
         let normalized = model(false).normalize("AirQualityObserved", &kv);
         assert_eq!(normalized["expiresAt"], at);
         assert_eq!(rules(&normalized), []);
+    }
+
+    /// T-6593: a date-time Property holds an RFC 3339 string or the NGSI-LD typed literal of one,
+    /// `{"@type": "DateTime", "@value": …}` (the indicator's `updatedAt`, Architecture/03 §2), as
+    /// the gateway reads it; any other value is still the slot's wrong datatype.
+    #[test]
+    fn a_date_time_is_a_string_or_its_ngsi_ld_typed_literal() {
+        let with = |value: Value| {
+            let mut record = valid();
+            record["dateObserved"]["value"] = value;
+            rules(&record)
+        };
+        assert_eq!(with(json!("2026-09-01T06:00:00Z")), []);
+        assert_eq!(
+            with(json!({ "@type": "DateTime", "@value": "2026-09-01T06:00:00Z" })),
+            []
+        );
+        for bad in [
+            json!("yesterday"),
+            json!(17),
+            json!({ "@type": "DateTime", "@value": "yesterday" }),
+        ] {
+            assert_eq!(
+                with(bad.clone()),
+                [("sh:datatype".into(), "dateObserved".into())],
+                "{bad}"
+            );
+        }
+        for bad in [
+            json!({ "@type": "Date", "@value": "2026-09-01T06:00:00Z" }),
+            json!({ "@value": "2026-09-01T06:00:00Z" }),
+            json!({ "@type": "DateTime", "@value": "2026-09-01T06:00:00Z", "extra": 1 }),
+        ] {
+            assert!(!with(bad.clone()).is_empty(), "{bad}");
+        }
     }
 }
