@@ -117,6 +117,9 @@ pub struct Gateway {
     /// How many seconds a shared cache may keep an anonymous read of data (T-5900,
     /// `JC_GATEWAY_PUBLIC_MAX_AGE`); 0, the default, keeps every answer `private, no-store`.
     pub public_max_age: u32,
+    /// Whether the broker's request cost is counted per Organization and handed on (T-6616,
+    /// `JC_GATEWAY_REQUEST_COST`); off, the default, takes it off every answer.
+    pub request_cost: crate::request_cost::Mode,
     /// Whether a write waits for the Organization's verified domain (PF-41, T-2572).
     pub domain_gate: Arc<crate::domain_gate::DomainGate>,
     /// Where a person's own connectors are read, `/api/mcp/me/{name}` (EP-123); `None` serves
@@ -220,6 +223,7 @@ impl Gateway {
             ws_token_lifetime: crate::handlers::ws::TOKEN_LIFETIME,
             ws_linger: crate::fanout::socket::LINGER,
             public_max_age: 0,
+            request_cost: crate::request_cost::Mode::Off,
             domain_gate: Arc::new(crate::domain_gate::DomainGate::new(
                 crate::domain_gate::Mode::Report,
             )),
