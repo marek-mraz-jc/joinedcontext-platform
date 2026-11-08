@@ -488,6 +488,16 @@ pub(crate) async fn serve_ngsi_ld_view(
         Ok(sent) => sent,
         Err(answer) => return *answer,
     };
+    // A POST query carries its `q` and time property in the body (F-10, DM-139).
+    if method == Method::POST {
+        let refusal = passed
+            .as_ref()
+            .and_then(|p| p.refusal(&crate::pdp::metadata::body_params(&sent)));
+        if let Some(refusal) = refusal {
+            tracing::info!(slug = %endpoint.slug, "refused: a query body on a metadata member not passed");
+            return refusal.into_response();
+        }
+    }
     let mut divided: Option<(Vec<String>, Refused)> = None;
     // A view of another model takes no write (the broker's 405, `mapping::READS`), so no body is
     // judged against the source model first (T-3799).
