@@ -155,6 +155,29 @@ fn a_token_that_is_not_valid_yet_is_refused_like_an_expired_one() {
     );
 }
 
+/// CVE-2026-25537 (T-6650): a time claim written as a string is no absent claim. jsonwebtoken
+/// before 10.3 read a string `nbf` as unparsable and skipped it, so a realm-signed token with
+/// `"nbf": "<far future>"` passed `validate_nbf`.
+#[test]
+fn a_time_claim_written_as_a_string_is_refused() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+
+    let mut early = claims(json!(SLUG), 3_600);
+    early["nbf"] = json!(common::in_seconds(86_400).to_string());
+    assert!(
+        verifier.verify(&realm.mint(&early), &audiences()).is_err(),
+        "a string nbf a day ahead passed",
+    );
+
+    let mut stale = claims(json!(SLUG), 3_600);
+    stale["exp"] = json!(common::in_seconds(-86_400).to_string());
+    assert!(
+        verifier.verify(&realm.mint(&stale), &audiences()).is_err(),
+        "a string exp a day ago passed",
+    );
+}
+
 /// The issuer is this realm, character for character: a realm URL with a trailing slash, or
 /// one hosted on a domain that merely starts the same way, is another realm.
 #[test]
