@@ -85,7 +85,23 @@ USER 65532:65532
 # scripts/ci/checkouts-reaps-orphans.sh checks the built image.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/jcctl", "checkouts"]
 
+# Distroless rebuilds days after a Debian security fix (zlib1g CVE-2026-76844 and CVE-2026-85091,
+# fixed in trixie-security while the newest cc-debian13 still shipped the old one, T-6683). This
+# stage takes the Debian packages the runtime image carries from today's archive (APT_REFRESH) and
+# lays their files and dpkg records over it, so the scan reads the version that actually runs.
+FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian-fixes
+ARG APT_REFRESH
+ARG FIXED_PACKAGES="zlib1g"
+RUN apt-get update && apt-get install -y --no-install-recommends --only-upgrade $FIXED_PACKAGES \
+ && rm -rf /var/lib/apt/lists/* && mkdir -p /out/var/lib/dpkg/status.d \
+ && for p in $FIXED_PACKAGES; do \
+      dpkg-query -L "$p" | while read -r f; do [ -d "$f" ] || cp -a --parents "$f" /out; done; \
+      dpkg-query -s "$p" | grep -v '^Status:' > "/out/var/lib/dpkg/status.d/$p"; \
+      cp /var/lib/dpkg/info/"$p"*.md5sums "/out/var/lib/dpkg/status.d/$p.md5sums"; \
+    done
+
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
+COPY --from=debian-fixes /out/ /
 COPY --from=build /src/target/release/context-gateway /usr/local/bin/context-gateway
 COPY --from=build /src/target/release/jcctl /usr/local/bin/jcctl
 COPY --from=build /src/target/release/jc-agent-proxy /usr/local/bin/jc-agent-proxy
