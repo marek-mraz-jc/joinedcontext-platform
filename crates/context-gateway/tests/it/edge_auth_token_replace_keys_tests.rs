@@ -95,12 +95,12 @@ fn a_key_that_names_no_algorithm_or_an_unreadable_one_is_left_out() {
     assert_eq!(verifier.replace_keys(&jwks(json!([encryption]))), 0);
 
     // And an algorithm no version of the crate knows is not a JWKS this gateway can read at
-    // all: serde refuses the whole set, which `jwks::refresh` reports as unreachable and which
-    // leaves the keys the verifier already had (T-1898).
+    // all: `jwks::read` refuses the whole set, which `jwks::refresh` reports as unreachable and
+    // which leaves the keys the verifier already had (T-1898).
     let mut unknown = ec("realm-key-1");
     unknown["alg"] = json!("ES999");
     assert!(
-        serde_json::from_value::<JwkSet>(json!({ "keys": [unknown] })).is_err(),
+        jc_core::auth::jwks::read(json!({ "keys": [unknown] }).to_string().as_bytes()).is_err(),
         "one unreadable algorithm costs the whole JWKS",
     );
 }
