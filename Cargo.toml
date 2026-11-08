@@ -15,6 +15,9 @@ repository = "https://github.com/marek-mraz-jc/joinedcontext-platform"
 # its default TLS stack here and each member names the one it needs.
 antares-ql = { package = "ngsild-ql", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 antares-jsonld = { package = "ngsild-jsonld", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
+# OData CSDL writer of the default broker's odata-* crates (no Antares dependency), for the
+# gateway's own routes as OData operations (T-6657); pinned by rev like the Portal's (T-6632).
+odata-csdl = { git = "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker.git", rev = "5d363678f58f8006f8be64ab7231d60c8ad2e7dd", version = "0.3.0" }
 antares-matcher = { package = "ngsild-matcher", git = "https://github.com/marek-mraz-jc/ngsild", tag = "v0.3.0", version = "0.3" }
 base64 = "0.22"
 jsonwebtoken = { version = "11.1", default-features = false, features = ["aws_lc_rs"] }

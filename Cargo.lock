@@ -1361,6 +1361,7 @@ dependencies = [
  "ngsild-jsonld",
  "ngsild-matcher",
  "ngsild-ql",
+ "odata-csdl",
  "rcgen",
  "regex",
  "reqwest",
@@ -4751,6 +4752,14 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "memchr",
+]
+
+[[package]]
+name = "odata-csdl"
+version = "0.3.0"
+source = "git+https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker.git?rev=5d363678f58f8006f8be64ab7231d60c8ad2e7dd#5d363678f58f8006f8be64ab7231d60c8ad2e7dd"
+dependencies = [
+ "regex",
 ]
 
 [[package]]
