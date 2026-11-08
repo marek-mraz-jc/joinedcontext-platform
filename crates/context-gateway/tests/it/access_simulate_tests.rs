@@ -653,3 +653,133 @@ async fn with_no_action_the_answer_is_the_subjects_whole_grant() {
     let (status, _) = simulate(&app, &realm, OPEN, resource_alone).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// A GET of `path` with an optional bearer: the status and the body as text.
+async fn get_as(app: &axum::Router, path: &str, bearer: Option<&str>) -> (StatusCode, String) {
+    let mut request = Request::builder().uri(path);
+    if let Some(bearer) = bearer {
+        request = request.header("authorization", format!("Bearer {bearer}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).expect("a request"))
+        .await
+        .expect("the gateway answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+        .await
+        .expect("a readable body");
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// T-6657: the OData service of an organization-only Endpoint refuses the public and an unknown
+/// slug exactly as `access` does, its `$metadata` and service document included, so the twin
+/// tells nobody more than the plain route; a person of another organization, admitted at the
+/// door, gets the engine's refusal on each twin as on its plain route.
+#[tokio::test]
+async fn the_odata_twins_refuse_whom_the_plain_routes_refuse() {
+    let realm = common::Realm::new();
+    let refused = json!({ "type": "https://uri.etsi.org/ngsi-ld/errors/PermissionDenied",
+        "title": "not granted" });
+    let (upstream, _) = recording_broker(StatusCode::FORBIDDEN, refused).await;
+    let app = view_app(&realm, upstream);
+    let outsider = person_token(
+        &realm,
+        CLOSED,
+        &json!({ "user": "eve", "groups": ["zilina"], "roles": [] }),
+    );
+    let unknown = "zzzzzzzzzzzzzzzzzzzzzzzzzz";
+    let cases = [
+        (CLOSED, None, true),
+        (unknown, None, true),
+        (CLOSED, Some(outsider.as_str()), false),
+    ];
+    for (slug, bearer, described) in cases {
+        let plain = get_as(&app, &format!("/api/endpoint/{slug}/access"), bearer).await;
+        assert!(plain.0.is_client_error(), "{slug} {bearer:?}: {}", plain.1);
+        let mut twins = vec!["access/odata/Access()"];
+        if described {
+            twins.extend(["access/odata", "access/odata/$metadata"]);
+        }
+        for twin in twins {
+            let answer = get_as(&app, &format!("/api/endpoint/{slug}/{twin}"), bearer).await;
+            assert_eq!(answer, plain, "{slug} {twin} {bearer:?}");
+        }
+        let plain = get_as(
+            &app,
+            &format!("/api/endpoint/{slug}/access/attributes?type=AirQualityObserved"),
+            bearer,
+        )
+        .await;
+        let twin = get_as(
+            &app,
+            &format!("/api/endpoint/{slug}/access/odata/Attributes(type='AirQualityObserved')"),
+            bearer,
+        )
+        .await;
+        assert!(plain.0.is_client_error(), "{slug} attributes {bearer:?}");
+        assert_eq!(twin, plain, "{slug} attributes {bearer:?}");
+        let asked = question("retrieveEntity", None);
+        let plain = post(
+            &app,
+            &format!("/api/endpoint/{slug}/access/check"),
+            bearer,
+            &asked,
+        )
+        .await;
+        let twin = post(
+            &app,
+            &format!("/api/endpoint/{slug}/access/odata/Check"),
+            bearer,
+            &asked,
+        )
+        .await;
+        assert!(plain.0.is_client_error(), "{slug} check {bearer:?}");
+        assert_eq!(twin, plain, "{slug} check {bearer:?}");
+    }
+}
+
+/// T-6657: `Simulate` is `access/simulate`: the Portal's account alone, the same strict body
+/// (an unknown member is a 400) and the same decision of the engine, plus `@odata.context`.
+#[tokio::test]
+async fn the_simulate_action_is_the_simulate_route() {
+    let realm = common::Realm::new();
+    let decided = json!({ "decision": true, "context": { "reason": "policy_grant_matched" } });
+    let (upstream, hops) = recording_broker(StatusCode::OK, decided).await;
+    let app = view_app(&realm, upstream);
+    let plain_path = format!("/api/endpoint/{OPEN}/access/simulate");
+    let twin_path = format!("/api/endpoint/{OPEN}/access/odata/Simulate");
+    let mut asked = question("createEntity", Some("InternalIncident"));
+    asked["subject"] = json!({ "user": "stefan", "groups": ["ovzdusie"] });
+    let portal = portal_token(&realm);
+
+    let plain = post(&app, &plain_path, Some(&portal), &asked).await;
+    let plain_hops = taken(&hops);
+    let (status, mut twin) = post(&app, &twin_path, Some(&portal), &asked).await;
+    assert_eq!(
+        (plain.0, status),
+        (StatusCode::OK, StatusCode::OK),
+        "{twin}"
+    );
+    let context = twin
+        .as_object_mut()
+        .and_then(|members| members.remove("@odata.context"));
+    assert_eq!(
+        context,
+        Some(json!(format!(
+            "https://bb.example.sk/api/endpoint/{OPEN}/access/odata/$metadata#Gateway.Access.Decision"
+        )))
+    );
+    assert_eq!(twin, plain.1);
+    assert_eq!(taken(&hops), plain_hops, "the same ask of the engine");
+
+    let mut strict = asked.clone();
+    strict["subject"]["nickname"] = json!("s");
+    for (bearer, body) in [(None, &asked), (Some(portal.as_str()), &strict)] {
+        let plain = post(&app, &plain_path, bearer, body).await;
+        let twin = post(&app, &twin_path, bearer, body).await;
+        assert!(plain.0.is_client_error(), "{body}");
+        assert_eq!(twin, plain, "{body}");
+    }
+    assert!(taken(&hops).is_empty(), "a refused simulation asks nobody");
+}

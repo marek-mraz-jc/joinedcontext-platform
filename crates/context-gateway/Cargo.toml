@@ -33,6 +33,8 @@ antares-jsonld.workspace = true
 # The broker's own subscription predicates against one in-memory entity, so the WebSocket fan-out
 # (ADR-N-049) decides a client filter exactly as the broker would.
 antares-matcher.workspace = true
+# $metadata of the access routes' OData twins (T-6657).
+odata-csdl.workspace = true
 # The preview list from the Portal (Architecture/06 §7.2).
 reqwest = { workspace = true, features = ["json"] }
 serde = { version = "1", features = ["derive"] }

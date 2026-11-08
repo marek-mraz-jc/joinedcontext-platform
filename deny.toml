@@ -37,4 +37,7 @@ allow-git = [
   # The NGSI-LD crates of the default broker, which the gateway judges grant conditions and
   # WebSocket filters with (T-3530, T-3913); pinned by tag in crates/context-gateway/Cargo.toml.
   "https://github.com/marek-mraz-jc/ngsild",
+  # odata-csdl of the default broker's repository, the CSDL writer of the gateway's OData
+  # operations (T-6657); pinned by rev in Cargo.toml.
+  "https://github.com/marek-mraz-jc/Antares-NGSI-LD-Context-Broker",
 ]

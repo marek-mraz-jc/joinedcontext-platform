@@ -3,6 +3,7 @@
 //! The broker's engine answers every one through the Endpoint's view (plan 5.6, T-3649, T-3650):
 //! the gateway admits the caller, pins them on the hop and adds what belongs to the Endpoint.
 
+pub mod odata;
 pub mod odrl;
 
 use crate::app::{Gateway, MAX_BODY};
@@ -419,11 +420,25 @@ struct AttributesQuery {
 pub(crate) async fn access_attributes(
     State(gateway): State<Arc<Gateway>>,
     Path(slug): Path<String>,
+    request: Request,
+) -> Response<Body> {
+    let asked = axum::extract::Query::<AttributesQuery>::try_from_uri(request.uri())
+        .ok()
+        .and_then(|query| query.0.entity_type);
+    attributes(&gateway, &slug, request, asked).await
+}
+
+/// The answer of `access/attributes` for the class `asked`, however the caller named it: the
+/// `type` query of the plain route or the `type` parameter of the OData function (T-6657).
+async fn attributes(
+    gateway: &Gateway,
+    slug: &str,
     mut request: Request,
+    asked: Option<String>,
 ) -> Response<Body> {
     tenancy::strip_client_headers(&mut request);
-    let caller = rate_limit::caller_of(&gateway, &request);
-    let (endpoint, subject) = match admit(&gateway, &slug, None, request.headers()) {
+    let caller = rate_limit::caller_of(gateway, &request);
+    let (endpoint, subject) = match admit(gateway, slug, None, request.headers()) {
         Ok(admitted) => admitted,
         Err(problem) => return *problem,
     };
@@ -432,10 +447,7 @@ pub(crate) async fn access_attributes(
             .with_detail(detail)
             .into_response()
     };
-    let asked = axum::extract::Query::<AttributesQuery>::try_from_uri(request.uri())
-        .ok()
-        .and_then(|query| query.0.entity_type)
-        .filter(|entity_type| !entity_type.is_empty());
+    let asked = asked.filter(|entity_type| !entity_type.is_empty());
     let Some(entity_type) = asked else {
         return refused("type is required: the entity type whose attributes to answer, e.g. ?type=AirQualityObserved".to_owned());
     };
@@ -463,14 +475,14 @@ pub(crate) async fn access_attributes(
         .saturating_mul(3)
         .div_ceil(DECISIONS_PER_CHARGE);
     let extra = u32::try_from(charges.saturating_sub(1)).unwrap_or(u32::MAX);
-    let charged = match rate_limit::charge(&gateway, &endpoint, &caller, extra) {
+    let charged = match rate_limit::charge(gateway, &endpoint, &caller, extra) {
         Ok(charged) => charged,
         Err(refused) => return *refused,
     };
     let names: Vec<&str> = attributes.iter().map(|a| a.name.as_str()).collect();
     let ask = json!({"type": entity_type, "attributes": names}).to_string();
     let mut answer = match from_view(
-        &gateway,
+        gateway,
         &endpoint,
         &subject,
         ViewCall::Attributes(Bytes::from(ask)),
@@ -976,6 +988,7 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
             "/api/endpoint/{slug}/access/simulate",
             post(access_simulate),
         )
+        .merge(odata::routes())
 }
 
 #[cfg(test)]
