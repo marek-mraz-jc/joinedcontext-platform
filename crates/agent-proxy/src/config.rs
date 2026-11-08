@@ -70,12 +70,13 @@ pub struct Config {
     /// caller whose service-account token may hand this proxy a person's token for a run
     /// (`POST /internal/runs/{run}/identity`, ADR-N-038, AG-52, AG-94).
     pub portal_client_id: String,
-    /// The `jc-functions` workload's ServiceAccount (`JC_PROXY_FUNCTIONS_IDENTITY`, default
-    /// `jc-functions`): with mesh identity required, the one workload a run's data credential is
-    /// honoured from (ADR-N-038 decision 6).
+    /// The `jc-functions` workload (`JC_PROXY_FUNCTIONS_IDENTITY`, `<serviceaccount>.<namespace>`,
+    /// default `jc-functions`, which names no namespace and so matches nobody): with mesh identity
+    /// required, the one workload a run's data credential is honoured from (ADR-N-038 decision 6,
+    /// F-17).
     pub functions_identity: String,
-    /// The Portal's workload (`JC_PROXY_PORTAL_IDENTITY`, `<serviceaccount>` or
-    /// `<serviceaccount>.<namespace>`, default `portal`): with mesh identity required, the one
+    /// The Portal's workload (`JC_PROXY_PORTAL_IDENTITY`, `<serviceaccount>.<namespace>`, default
+    /// `portal`, which names no namespace and so matches nobody): with mesh identity required, the one
     /// workload besides a run's own whose ticket is honoured. The Portal drives conversations and
     /// `ui`/`wasm` builds in-process and holds those tickets (AP-56, AG-54).
     pub portal_identity: String,

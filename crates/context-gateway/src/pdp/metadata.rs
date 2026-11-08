@@ -254,20 +254,28 @@ impl Passed {
     }
 
     /// Strips every member not passed from an NGSI-LD answer: one entity, a list of them, their
-    /// temporal evolutions with versions, or a GeoJSON feature collection.
+    /// temporal evolutions with versions, a GeoJSON feature collection or one feature.
     pub fn strip(&self, body: &mut Value) {
         match body {
             Value::Array(items) => items.iter_mut().for_each(|item| self.strip(item)),
-            Value::Object(object) => match object.get_mut("features") {
-                Some(Value::Array(features)) => {
-                    for feature in features {
-                        if let Some(Value::Object(properties)) = feature.get_mut("properties") {
+            Value::Object(object) => {
+                let feature = object.get("type").and_then(Value::as_str) == Some("Feature");
+                match object.get_mut("features") {
+                    Some(Value::Array(features)) => {
+                        for feature in features {
+                            if let Some(Value::Object(properties)) = feature.get_mut("properties") {
+                                self.strip_entity(properties);
+                            }
+                        }
+                    }
+                    _ if feature => {
+                        if let Some(Value::Object(properties)) = object.get_mut("properties") {
                             self.strip_entity(properties);
                         }
                     }
+                    _ => self.strip_entity(object),
                 }
-                _ => self.strip_entity(object),
-            },
+            }
             _ => {}
         }
     }
@@ -332,6 +340,27 @@ fn strip_instance(members: &Members, instance: &mut Map<String, Value>) -> bool 
         }
     }
     true
+}
+
+/// The query parameters a POST query body carries, as [`Passed::refusal`] reads them: `q`,
+/// `orderBy` and the `temporalQ` time property, `observedAt` when it names none (TS 104 175
+/// 4.11). A body that is no JSON object carries none; the broker refuses it.
+pub fn body_params(body: &[u8]) -> Vec<(String, String)> {
+    let Ok(Value::Object(query)) = serde_json::from_slice::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut params: Vec<(String, String)> = ["q", "orderBy"]
+        .into_iter()
+        .filter_map(|name| Some((name.to_owned(), query.get(name)?.as_str()?.to_owned())))
+        .collect();
+    if let Some(Value::Object(temporal)) = query.get("temporalQ") {
+        let property = temporal
+            .get("timeproperty")
+            .and_then(Value::as_str)
+            .unwrap_or("observedAt");
+        params.push(("timeproperty".to_owned(), property.to_owned()));
+    }
+    params
 }
 
 /// The `(attribute, member, word)` triples a `q` or `orderBy` names as `attr.member`.
@@ -583,6 +612,32 @@ mod tests {
         assert_eq!(refused("timeproperty", "observedAt"), None);
     }
 
+    /// F-10: a POST query body is judged as the URL query is, and a temporal query without a
+    /// time property is one on `observedAt`.
+    #[test]
+    fn a_post_query_body_on_a_stripped_member_is_refused() {
+        let p = passed(
+            &[public_with("    pm10: { metadata: [unitCode] }\n")],
+            &Subject::anonymous(),
+            true,
+        )
+        .expect("narrows");
+        let refused = |body: Value| p.refusal(&body_params(body.to_string().as_bytes()));
+        assert!(
+            refused(json!({ "type": "Query", "q": "pm10.observedAt>2026-11-01T00:00:00Z" }))
+                .is_some()
+        );
+        assert!(
+            refused(json!({ "type": "Query", "temporalQ": { "timerel": "after",
+            "timeAt": "2026-11-01T00:00:00Z" } }))
+            .is_some()
+        );
+        assert!(refused(json!({ "type": "Query", "q": "pm10>40",
+            "entities": [{ "type": "AirQualityObserved" }] }))
+        .is_none());
+        assert!(body_params(b"not json").is_empty());
+    }
+
     #[test]
     fn a_prohibition_takes_back_what_it_lists() {
         let take = policy(
@@ -618,5 +673,25 @@ mod tests {
             pm10.get("observedAt").is_none() && pm10.get("unitCode").is_some(),
             "{pm10}"
         );
+    }
+
+    /// F-10: one Feature (a geo+json single-entity read) is narrowed like a collection's.
+    #[test]
+    fn a_single_feature_is_narrowed() {
+        let p = passed(
+            &[public_with("    pm10: { metadata: [unitCode] }\n")],
+            &Subject::anonymous(),
+            true,
+        )
+        .expect("narrows");
+        let mut instance = instance();
+        instance["modifiedBy"] = json!({ "organization": "did:web:hel.fi", "actor": "0f5a" });
+        let mut feature = json!({ "type": "Feature", "id": "x", "geometry": null,
+            "properties": { "type": "T", "pm10": instance } });
+        p.strip(&mut feature);
+        let pm10 = &feature["properties"]["pm10"];
+        assert!(pm10.get("observedAt").is_none(), "{pm10}");
+        assert!(pm10.get("modifiedBy").is_none(), "{pm10}");
+        assert!(feature.get("geometry").is_some(), "{feature}");
     }
 }
