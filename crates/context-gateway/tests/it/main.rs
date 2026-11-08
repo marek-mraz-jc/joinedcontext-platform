@@ -170,6 +170,7 @@ mod reaper_tests;
 mod record_children_are_served_tests;
 mod relationship_delete_tests;
 mod relationship_write_tests;
+mod request_cost_tests;
 mod resolver_tests;
 mod response_headers_tests;
 mod revocation_tests;

@@ -176,6 +176,7 @@ pub async fn record(
     let endpoint = served(&gateway, request.uri().path())
         .unwrap_or("-")
         .to_owned();
+    let asked = crate::request_cost::Asked::of(&gateway, &request);
     let started = Instant::now();
     let (mut response, pdp, broker, caller) = SPLIT
         .scope(Split::default(), async {
@@ -186,12 +187,20 @@ pub async fn record(
         })
         .await;
     let seconds = started.elapsed().as_secs_f64();
-    let timing = format!(
+    let forwarded = crate::request_cost::settle(&gateway, asked, response.headers_mut(), &endpoint);
+    let mut timing = format!(
         "pdp;dur={:.3}, broker;dur={:.3}, total;dur={:.3}",
         pdp * 1000.0,
         broker * 1000.0,
         seconds * 1000.0
     );
+    // The gateway's own share beside the broker's figures it handed on (T-6616).
+    if forwarded {
+        timing.push_str(&format!(
+            ", gw;dur={:.3}",
+            (seconds - broker).max(0.0) * 1000.0
+        ));
+    }
     if let Ok(value) = HeaderValue::from_str(&timing) {
         response.headers_mut().append(SERVER_TIMING, value);
     }
@@ -224,7 +233,7 @@ pub async fn record(
 ///
 /// Both surfaces name a configured thing in the same position, and there are as many of them
 /// as the repository declares, so the label stays bounded (EP-05, SP-03).
-fn named(path: &str) -> Option<&str> {
+pub(crate) fn named(path: &str) -> Option<&str> {
     let mut segments = path.split('/').skip(1);
     match segments.next()? {
         "api" => match segments.next()? {

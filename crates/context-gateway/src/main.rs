@@ -123,6 +123,7 @@ async fn main() -> ExitCode {
         .serve_loadtest(config.loadtest_client.clone(), config.loadtest_in_flight);
     let mut gateway = gateway.serve(endpoints).serve_spaces(spaces);
     gateway.public_max_age = config.public_max_age;
+    gateway.request_cost = config.request_cost;
     gateway.replace_federation(federations);
     gateway.replace_agreements(agreements);
     gateway.replace_limits(limits);

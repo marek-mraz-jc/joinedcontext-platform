@@ -156,6 +156,12 @@ pub struct Config {
     /// [`PUBLIC_MAX_AGE_LIMIT`]). A public grant revoked or a value changed is served stale at most
     /// this long (T-5900).
     pub public_max_age: u32,
+    /// `off`, `metrics` or `header` (`JC_GATEWAY_REQUEST_COST`, default `off`): whether the
+    /// broker's `Server-Timing` and `JC-Request-Cost` are counted per Organization and Endpoint
+    /// on `/metrics` (`metrics`), and also handed to a verified caller of the Endpoint's own
+    /// Organization with the gateway's `gw` share (`header`); `off` takes both off every answer
+    /// (T-6616).
+    pub request_cost: crate::request_cost::Mode,
 }
 
 /// Why the environment does not describe a runnable gateway.
@@ -297,6 +303,13 @@ impl Config {
             in_flight::LOADTEST_IN_FLIGHT,
         )?;
         let public_max_age = public_max_age(std::env::var("JC_GATEWAY_PUBLIC_MAX_AGE"))?;
+        let request_cost = crate::request_cost::Mode::parse(
+            std::env::var("JC_GATEWAY_REQUEST_COST").ok().as_deref(),
+        )
+        .map_err(|reason| ConfigError::Invalid {
+            name: "JC_GATEWAY_REQUEST_COST",
+            reason,
+        })?;
 
         let public_url = std::env::var("JC_GATEWAY_PUBLIC_URL")
             .ok()
@@ -339,6 +352,7 @@ impl Config {
                 .filter(|client| !client.is_empty()),
             loadtest_in_flight,
             public_max_age,
+            request_cost,
             domain_verification,
             domain_verifications_url,
             bind,
@@ -604,6 +618,7 @@ mod tests {
             loadtest_client: None,
             loadtest_in_flight: crate::middleware::in_flight::LOADTEST_IN_FLIGHT,
             public_max_age: 0,
+            request_cost: crate::request_cost::Mode::Off,
         }
     }
 
