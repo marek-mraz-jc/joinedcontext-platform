@@ -73,6 +73,10 @@ pub struct ScopeItem {
     pub pipeline: Option<String>,
     /// `read` or `write`; this door reads only whichever it says.
     pub access: String,
+    /// Whether the person ticked personal data for this item (AG-158). Without it an Endpoint
+    /// that serves an attribute its model marks personal is left out of the connector.
+    #[serde(default, rename = "personalData")]
+    pub personal_data: bool,
 }
 
 impl ScopeItem {
@@ -213,16 +217,54 @@ pub fn addressed(name: &str) -> Option<McpServer> {
     })
 }
 
+/// The personal attributes `endpoint` serves, `Err` when its model's schema cannot be read
+/// (AG-158: such an answer is refused). An Endpoint of a space with no model serves none.
+fn personal_of(endpoint: &Endpoint) -> Result<Vec<String>, ()> {
+    match &endpoint.declared_types {
+        Some(declared) if declared.schema.is_none() => Err(()),
+        _ => Ok(endpoint.personal_attributes()),
+    }
+}
+
 /// `connector` as the server it is served as: every Endpoint of `endpoints` its scope reaches.
+/// An Endpoint serving personal attributes is reached only by an item that ticks personal data
+/// (AG-158, as `/c/{id}` withholds them); the description names each one left out and why,
+/// never a value.
 fn server_of(connector: &Connector, endpoints: &[Arc<Endpoint>]) -> Option<McpServer> {
     let mut server = addressed(&connector.name)?;
-    server.endpoints = Some(
-        endpoints
+    let mut kept = Vec::new();
+    let mut left_out = Vec::new();
+    for endpoint in endpoints {
+        let reaching: Vec<&ScopeItem> = connector
+            .scope
             .iter()
-            .filter(|e| connector.scope.iter().any(|item| item.reaches(e)))
-            .map(|e| e.slug.clone())
-            .collect(),
-    );
+            .filter(|item| item.reaches(endpoint))
+            .collect();
+        if reaching.is_empty() {
+            continue;
+        }
+        if reaching.iter().any(|item| item.personal_data) {
+            kept.push(endpoint.slug.clone());
+            continue;
+        }
+        match personal_of(endpoint) {
+            Ok(personal) if personal.is_empty() => kept.push(endpoint.slug.clone()),
+            Ok(personal) => left_out.push(format!(
+                "{} (personal data: {})",
+                endpoint.slug,
+                personal.join(", ")
+            )),
+            Err(()) => left_out.push(format!("{} (its model cannot be read)", endpoint.slug)),
+        }
+    }
+    if !left_out.is_empty() {
+        let description = server.description.take().unwrap_or_default();
+        server.description = Some(format!(
+            "{description} Left out because this connector does not reach personal data: {}.",
+            left_out.join("; ")
+        ));
+    }
+    server.endpoints = Some(kept);
     Some(server)
 }
 
@@ -379,5 +421,68 @@ mod tests {
             ..c
         };
         assert!(any.admits(None));
+    }
+
+    fn trips(slug: &str, hidden: &[&str], readable: bool) -> Arc<Endpoint> {
+        let schema = jc_manifest::model_schema::ModelSchema::compile(
+            "bike-trips",
+            "1.0.0",
+            &serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "definitions": { "BikeTrip": { "type": "object", "properties": {
+                    "id": { "type": "string" },
+                    "rider": { "type": "string", "x-personal-data": true },
+                    "startStation": { "type": "string" }
+                } } }
+            }),
+            &["BikeTrip".to_owned()],
+            true,
+        );
+        let mut e = (*endpoint(slug, "doprava", "trips", slug)).clone();
+        e.declared_types = Some(Arc::new(crate::resolver::DeclaredTypes {
+            model: "bike-trips".into(),
+            classes: ["BikeTrip".to_owned()].into(),
+            units: Default::default(),
+            relationships: Default::default(),
+            quality: Vec::new(),
+            schema: readable.then(|| Arc::new(schema)),
+        }));
+        e.hidden_attributes = hidden.iter().map(|h| (*h).to_owned()).collect();
+        Arc::new(e)
+    }
+
+    /// AG-158 (F-07): without a personal-data tick the personal door leaves out an Endpoint that
+    /// serves a personal attribute, or whose model cannot be read, and names it without a value.
+    #[test]
+    fn personal_data_is_withheld_unless_the_scope_ticks_it() {
+        let endpoints = [
+            trips("riders", &[], true),
+            trips("hidden", &["rider"], true),
+            trips("unread", &[], false),
+        ];
+        let plain = connector(serde_json::json!({
+            "id": "x", "name": "trips", "expiresAt": "2999-01-01T00:00:00Z",
+            "scope": [{ "project": "doprava", "access": "read" }],
+        }));
+        let server = server_of(&plain, &endpoints).expect("a server");
+        assert_eq!(server.endpoints, Some(vec!["hidden".to_owned()]));
+        let said = server.description.expect("a description");
+        assert!(
+            said.contains("riders (personal data: BikeTrip.rider)"),
+            "{said}"
+        );
+        assert!(said.contains("unread (its model cannot be read)"), "{said}");
+        let ticked = connector(serde_json::json!({
+            "id": "x", "name": "trips", "expiresAt": "2999-01-01T00:00:00Z",
+            "scope": [{ "project": "doprava", "access": "read", "personalData": true }],
+        }));
+        assert_eq!(
+            server_of(&ticked, &endpoints).and_then(|s| s.endpoints),
+            Some(vec![
+                "riders".to_owned(),
+                "hidden".to_owned(),
+                "unread".to_owned()
+            ])
+        );
     }
 }
