@@ -1073,3 +1073,189 @@ async fn the_attribute_table_pays_the_rate_limit_per_hundred_decisions() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(hops.lock().expect("the hop log").len(), 1);
 }
+
+/// A request to the access routes' OData service (T-6657): `operation` under its root.
+fn odata(method: Method, operation: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(format!("/api/endpoint/{SLUG}/access/odata/{operation}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("a request")
+}
+
+/// An OData answer's `@odata.context` and the document without it.
+fn context_and_rest(body: &str) -> (String, Value) {
+    let mut document: Value = serde_json::from_str(body).expect("a JSON answer");
+    let context = document
+        .as_object_mut()
+        .and_then(|members| members.remove("@odata.context"))
+        .and_then(|context| context.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (context, document)
+}
+
+/// T-6657: each access route and its OData twin answer the same status and document, from the
+/// same ask of the view; the twin adds only `@odata.context` and the OData headers.
+#[tokio::test]
+async fn every_access_route_has_an_odata_twin_with_the_same_answer() {
+    let decision = json!({"decision": true, "context": {"reason": "policy_grant_matched"}});
+    let table = json!({"type": "AirQualityObserved", "attributes": [
+        {"name": "pm10", "read": true, "write": false, "delete": false, "reason": "grant"}]});
+    let asked = r#"{"action":{"name":"retrieveEntity"},"resource":{"type":"AirQualityObserved"}}"#;
+    let cases = [
+        (
+            view_document(),
+            get("application/json"),
+            odata(Method::GET, "Access()", ""),
+            "AccessDocument",
+        ),
+        (
+            decision.clone(),
+            check(asked),
+            odata(Method::POST, "Check", asked),
+            "Decision",
+        ),
+        (
+            table.clone(),
+            attributes("?type=AirQualityObserved"),
+            odata(Method::GET, "Attributes(type='AirQualityObserved')", ""),
+            "AttributeTable",
+        ),
+        (
+            table,
+            attributes("?type=AirQualityObserved"),
+            odata(
+                Method::GET,
+                "Attributes(type=@t)?@t=%27AirQualityObserved%27",
+                "",
+            ),
+            "AttributeTable",
+        ),
+    ];
+    for (view, plain, twin, ty) in cases {
+        let (upstream, hops) = json_broker(StatusCode::OK, view).await;
+        let (status, _, body) = call(app(upstream.clone(), modelled(1)), plain).await;
+        let plain_hop = one_hop(&hops);
+        hops.lock().expect("the hop log").clear();
+        let (twin_status, headers, twin_body) = call(app(upstream, modelled(1)), twin).await;
+        let twin_hop = one_hop(&hops);
+        assert_eq!(
+            (status, twin_status),
+            (StatusCode::OK, StatusCode::OK),
+            "{ty}: {twin_body}"
+        );
+        let (context, document) = context_and_rest(&twin_body);
+        assert_eq!(
+            document,
+            serde_json::from_str::<Value>(&body).expect("JSON"),
+            "{ty}"
+        );
+        assert_eq!(
+            context,
+            format!("{BASE}/api/endpoint/{SLUG}/access/odata/$metadata#Gateway.Access.{ty}")
+        );
+        assert_eq!(headers["odata-version"], "4.01");
+        assert_eq!(
+            (plain_hop.path, plain_hop.body),
+            (twin_hop.path, twin_hop.body),
+            "{ty}"
+        );
+    }
+}
+
+/// T-6657: a refusal of the plain route is the twin's refusal, byte for byte, whether the
+/// gateway refuses (a malformed check, no type) or the view does; the twin adds no context.
+#[tokio::test]
+async fn an_access_refusal_is_the_same_on_the_odata_twin() {
+    let refused = json!({"type": "https://uri.etsi.org/ngsi-ld/errors/PermissionDenied",
+        "title": "denied"});
+    let (upstream, _) = json_broker(StatusCode::FORBIDDEN, refused).await;
+    let cases = [
+        (get("application/json"), odata(Method::GET, "Access()", "")),
+        (
+            check(r#"{"action":{}}"#),
+            odata(Method::POST, "Check", r#"{"action":{}}"#),
+        ),
+        (check("not json"), odata(Method::POST, "Check", "not json")),
+        (
+            attributes("?type="),
+            odata(Method::GET, "Attributes(type='')", ""),
+        ),
+        (
+            attributes("?type=Nosuch"),
+            odata(Method::GET, "Attributes(type='Nosuch')", ""),
+        ),
+        (
+            attributes("?type=AirQualityObserved"),
+            odata(Method::GET, "Attributes(type='AirQualityObserved')", ""),
+        ),
+    ];
+    for (plain, twin) in cases {
+        let what = twin.uri().to_string();
+        let plain = call(app(upstream.clone(), modelled(1)), plain).await;
+        let twin = call(app(upstream.clone(), modelled(1)), twin).await;
+        assert!(plain.0.is_client_error(), "{what}: {}", plain.2);
+        assert_eq!((plain.0, plain.2), (twin.0, twin.2), "{what}");
+    }
+}
+
+/// T-6657: `$metadata` is CSDL XML, or CSDL JSON on `$format=json`; the service document lists
+/// the functions; an unknown operation is a 404 naming the four, a wrong method a 405.
+#[tokio::test]
+async fn the_access_odata_service_describes_itself() {
+    let (upstream, hops) = json_broker(StatusCode::OK, json!({})).await;
+    let service = app(upstream, endpoint());
+    let (status, headers, xml) = call(service.clone(), odata(Method::GET, "$metadata", "")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "application/xml");
+    assert!(xml.contains(r#"<FunctionImport Name="Access" Function="Gateway.Access.Access" IncludeInServiceDocument="true"/>"#), "{xml}");
+    assert!(xml.contains(r#"<ActionImport Name="Simulate" Action="Gateway.Access.Simulate"/>"#));
+    let (status, _, json) = call(
+        service.clone(),
+        odata(Method::GET, "$metadata?$format=json", ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let csdl: Value = serde_json::from_str(&json).expect("CSDL JSON");
+    assert_eq!(csdl["$Version"], "4.01");
+    assert_eq!(csdl["Gateway.Access"]["Check"][0]["$Kind"], "Action");
+    let (status, _, _) = call(
+        service.clone(),
+        odata(Method::GET, "$metadata?$format=atom", ""),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+
+    let root = Request::builder()
+        .uri(format!("/api/endpoint/{SLUG}/access/odata"))
+        .body(Body::empty())
+        .expect("a request");
+    let (status, _, body) = call(service.clone(), root).await;
+    assert_eq!(status, StatusCode::OK);
+    let (context, document) = context_and_rest(&body);
+    assert_eq!(
+        context,
+        format!("{BASE}/api/endpoint/{SLUG}/access/odata/$metadata")
+    );
+    assert_eq!(document["value"][0]["name"], "Access");
+    assert_eq!(document["value"][1]["name"], "Attributes");
+
+    let (status, _, body) = call(service.clone(), odata(Method::GET, "Grants()", "")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body.contains("Simulate"), "{body}");
+    let (status, headers, _) = call(service.clone(), odata(Method::GET, "Check", "")).await;
+    assert_eq!(
+        (status, &headers["allow"]),
+        (
+            StatusCode::METHOD_NOT_ALLOWED,
+            &"POST".parse().expect("a header")
+        )
+    );
+    let (status, _, _) = call(service, odata(Method::POST, "Access()", "")).await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(
+        hops.lock().expect("the hop log").is_empty(),
+        "nothing reached the broker"
+    );
+}
