@@ -11,7 +11,7 @@
 
 use crate::auth::token::Verifier;
 use axum::body::Body;
-use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,10 +62,28 @@ async fn refresh_within(
         .map_err(|_| {
             JwksError::Unreachable(format!("the realm did not answer within {timeout:?}"))
         })??;
-    let jwks: JwkSet =
-        serde_json::from_slice(&bytes).map_err(|e| JwksError::Unreachable(e.to_string()))?;
+    let jwks = read(&bytes).map_err(JwksError::Unreachable)?;
 
     Ok(verifier.replace_keys(&jwks))
+}
+
+/// Parses a JWKS document, refusing the whole set when one key names an algorithm or a key
+/// shape jsonwebtoken cannot read (T-1898, T-6650). jsonwebtoken 9 refused such a set in serde;
+/// 10+ reads it as `UNKNOWN_ALGORITHM` / `AlgorithmParameters::Other`, and a set of only such
+/// keys would then replace the table with nothing and lock every caller out.
+pub fn read(bytes: &[u8]) -> Result<JwkSet, String> {
+    let jwks: JwkSet = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let unreadable = jwks.keys.iter().find(|jwk| {
+        jwk.common.key_algorithm == Some(KeyAlgorithm::UNKNOWN_ALGORITHM)
+            || matches!(jwk.algorithm, AlgorithmParameters::Other(_))
+    });
+    match unreadable {
+        Some(jwk) => Err(format!(
+            "the JWKS holds a key this gateway cannot read (kid {:?})",
+            jwk.common.key_id
+        )),
+        None => Ok(jwks),
+    }
 }
 
 /// The JWKS document's bytes, at most 1 MiB.
