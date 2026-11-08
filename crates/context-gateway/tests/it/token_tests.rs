@@ -83,6 +83,33 @@ fn an_expired_token_is_refused() {
     );
 }
 
+/// F-14: only an access token opens a resource. An ID or refresh token whose mapper added the
+/// resource's audience is refused; Keycloak's `Bearer` passes.
+#[test]
+fn only_an_access_token_is_admitted() {
+    let realm = Realm::new();
+    let verifier = realm.verifier();
+    let typed = |typ: &str| {
+        realm.mint(&json!({
+            "iss": ISSUER,
+            "sub": "0f5a",
+            "aud": ["context-gateway", SLUG],
+            "typ": typ,
+            "exp": in_seconds(300),
+        }))
+    };
+    for other in ["ID", "Refresh", "Logout", "bearer"] {
+        assert_eq!(
+            verifier.verify(&typed(other), &audiences()).err(),
+            Some(Rejected::Malformed),
+            "{other} was accepted"
+        );
+    }
+    verifier
+        .verify(&typed("Bearer"), &audiences())
+        .expect("an access token verifies");
+}
+
 #[test]
 fn a_token_from_another_realm_is_refused() {
     let realm = Realm::new();

@@ -753,6 +753,57 @@ async fn a_prohibition_of_the_slot_keeps_the_set_null_unlink_and_one_of_another_
     assert!(teacher.get("desk").is_none(), "{teacher}");
 }
 
+/// The side find of the 2026-11-08 review (T-6662): a delete rule changes entities as the
+/// gateway, so a caller whose write grant names only some attributes changes no other slot
+/// through a rule and deletes no entity whole, the root included.
+#[tokio::test]
+async fn a_rule_change_outside_the_grants_attributes_is_refused() {
+    let narrowed = |attributes: &str| {
+        let entities: String = CLASSES
+            .iter()
+            .map(|kind| format!("\x20     - type: {kind}\n"))
+            .collect();
+        let write: PolicySpec = serde_norway::from_str(&format!(
+            "contextSpaceRef: {SPACE}\n\
+             assigner: did:web:{DOMAIN}\n\
+             assignee: {{ kind: role, id: public }}\n\
+             operations: [updateAttrs, deleteAttrs, deleteEntity]\n\
+             information:\n\
+             \x20 - entities:\n{entities}\
+             \x20   propertyNames: [{attributes}]\n"
+        ))
+        .expect("the narrowed grant parses");
+        let mut endpoint = endpoint(CLASSES);
+        // The whole-entity write grant goes; the read grant stays.
+        endpoint.policies[0] = write;
+        endpoint
+    };
+    let delete_of = |endpoint: Endpoint, id: String| async move {
+        send_to(
+            endpoint,
+            &[],
+            Method::DELETE,
+            &format!("/entities/{id}"),
+            None,
+        )
+        .await
+    };
+
+    let unlink = delete_of(narrowed("name"), urn("Desk", "d1")).await;
+    assert_eq!(unlink.status, StatusCode::CONFLICT, "{}", unlink.body);
+    assert_eq!(unlink.body["slot"], "desk");
+    assert!(unlink.writes().is_empty(), "{:?}", unlink.writes());
+
+    let cascade = delete_of(narrowed("name, desk, school, courses"), urn("School", "s1")).await;
+    assert_eq!(cascade.status, StatusCode::CONFLICT, "{}", cascade.body);
+    assert_eq!(cascade.body["slot"], "school");
+    assert!(cascade.writes().is_empty(), "{:?}", cascade.writes());
+
+    let root = delete_of(narrowed("desk"), urn("Desk", "d1")).await;
+    assert_eq!(root.status, StatusCode::FORBIDDEN, "{}", root.body);
+    assert!(root.writes().is_empty(), "{:?}", root.writes());
+}
+
 #[tokio::test]
 async fn a_cascade_into_entities_the_caller_may_not_delete_is_refused_without_ids() {
     // The caller deletes Schools and Teachers, not Lessons.

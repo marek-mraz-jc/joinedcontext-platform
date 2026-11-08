@@ -393,8 +393,7 @@ impl Verifier {
         validation.validate_nbf = true;
         validation.leeway = LEEWAY.unsigned_abs();
 
-        decode::<Claims>(token, key, &validation)
-            .map(|data| data.claims)
+        decode::<Typed>(token, key, &validation)
             .map_err(|error| match error.kind() {
                 jsonwebtoken::errors::ErrorKind::ExpiredSignature
                 | jsonwebtoken::errors::ErrorKind::ImmatureSignature => Rejected::Expired,
@@ -402,6 +401,29 @@ impl Verifier {
                 jsonwebtoken::errors::ErrorKind::InvalidSignature => Rejected::BadSignature,
                 _ => Rejected::Malformed,
             })
+            .and_then(|data| data.claims.access())
+    }
+}
+
+/// The claims with Keycloak's `typ`: an access token says `Bearer`, an ID token `ID`, a refresh
+/// token `Refresh`, a logout token `Logout` (F-14).
+#[derive(Deserialize)]
+struct Typed {
+    #[serde(flatten)]
+    claims: Claims,
+    #[serde(default)]
+    typ: Option<String>,
+}
+
+impl Typed {
+    /// The claims of an access token. One that names another kind is refused, so an ID token
+    /// whose mapper added a resource's audience never opens that resource; a token without
+    /// `typ` (RFC 9068 says it in the header) stays the audience check's to decide.
+    fn access(self) -> Result<Claims, Rejected> {
+        match self.typ.as_deref() {
+            None | Some("Bearer") => Ok(self.claims),
+            Some(_) => Err(Rejected::Malformed),
+        }
     }
 }
 

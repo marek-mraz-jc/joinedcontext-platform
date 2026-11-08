@@ -213,11 +213,25 @@ pub async fn authenticate_data(
     Ok(run)
 }
 
-/// Whether a Linkerd client identity is the workload `expected`: a ServiceAccount, or
-/// `<serviceaccount>.<namespace>`, compared label by label and each label whole.
+/// Whether a Linkerd client identity is the workload `expected`, `<serviceaccount>.<namespace>`:
+/// the identity is `<serviceaccount>.<namespace>.serviceaccount.identity.linkerd.<trust domain>`
+/// with both labels equal and whole (F-17). An `expected` without its namespace matches nothing:
+/// any namespace may hold an account of that name.
 pub(crate) fn is_workload(client_id: &str, expected: &str) -> bool {
-    let mut labels = client_id.split('.');
-    !expected.is_empty() && expected.split('.').all(|want| labels.next() == Some(want))
+    let Some((account, namespace)) = expected.split_once('.') else {
+        return false;
+    };
+    let labels: Vec<&str> = client_id.split('.').collect();
+    match labels.as_slice() {
+        [a, n, "serviceaccount", "identity", "linkerd", domain @ ..] => {
+            !account.is_empty()
+                && *a == account
+                && *n == namespace
+                && !domain.is_empty()
+                && domain.iter().all(|label| !label.is_empty())
+        }
+        _ => false,
+    }
 }
 
 /// Whether a Linkerd client identity is this run's own workload (AG-52).
@@ -244,15 +258,24 @@ mod tests {
     #[test]
     fn only_the_functions_workload_is_the_functions_workload() {
         let functions = "jc-functions.helsinki.serviceaccount.identity.linkerd.cluster.local";
-        assert!(is_workload(functions, "jc-functions"));
+        assert!(is_workload(functions, "jc-functions.helsinki"));
         for other in [
             "jc-functions-evil.helsinki.serviceaccount.identity.linkerd.cluster.local",
             "agent-run-1.helsinki.serviceaccount.identity.linkerd.cluster.local",
             "x-jc-functions.helsinki.serviceaccount.identity.linkerd.cluster.local",
+            // F-17: an account of the same name in another namespace is another workload.
+            "jc-functions.evil.serviceaccount.identity.linkerd.cluster.local",
+            "jc-functions.helsinki.evil.serviceaccount.identity.linkerd.cluster.local",
+            "jc-functions.helsinki",
+            "jc-functions.helsinki.serviceaccount.identity.linkerd.",
             "",
         ] {
-            assert!(!is_workload(other, "jc-functions"), "{other}");
+            assert!(!is_workload(other, "jc-functions.helsinki"), "{other}");
         }
+        assert!(
+            !is_workload(functions, "jc-functions"),
+            "an account without its namespace names no workload"
+        );
         assert!(
             !is_workload("", ""),
             "no configured account matches nothing"

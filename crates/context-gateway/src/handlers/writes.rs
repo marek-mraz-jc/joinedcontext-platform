@@ -599,6 +599,7 @@ impl HeldDelete<'_> {
                 !granted.empty
                     && !conditional::state_dependent(&granted)
                     && write_guard::check_granted_id(root, &granted).is_ok()
+                    && within_attributes(&granted, class, None)
             }
             _ => false,
         };
@@ -663,10 +664,12 @@ impl HeldDelete<'_> {
                 .decide(self.subject, operation, &requested, self.endpoint)
             {
                 Verdict::Rewrite(granted) => {
+                    let touched = (operation != Operation::DeleteEntity).then_some(slot);
                     !granted.empty
                         && !granted.hidden.contains(slot)
                         && !conditional::state_dependent(&granted)
                         && write_guard::check_granted_id(other, &granted).is_ok()
+                        && within_attributes(&granted, class, touched)
                 }
                 _ => false,
             };
@@ -1482,6 +1485,21 @@ mod object_query_tests {
         );
         for object in ["urn:ngsi-ld:X:a\"|b==\"c", "urn:ngsi-ld:X:a\\", ""] {
             assert!(object_query("refStation", object).is_err(), "{object}");
+        }
+    }
+}
+
+/// Whether a change a delete rule makes as the gateway stays inside the attributes `granted`
+/// lets the caller write: `slot` for an attribute change, the whole entity for `None`. A grant
+/// that names attributes (or a projection of `class`) never reaches a whole-entity delete, so
+/// a rule cannot remove what the caller could not have changed by hand.
+fn within_attributes(granted: &evaluator::Constraints, class: &str, slot: Option<&str>) -> bool {
+    let projected = granted.attrs_by_type.get(class);
+    match slot {
+        None => granted.served.is_empty() && granted.attrs_by_type.is_empty(),
+        Some(slot) => {
+            (granted.served.is_empty() || granted.served.contains(slot))
+                && (granted.attrs_by_type.is_empty() || projected.is_some_and(|s| s.contains(slot)))
         }
     }
 }
