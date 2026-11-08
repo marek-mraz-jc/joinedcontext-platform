@@ -1470,6 +1470,21 @@ pub(crate) fn empty_space(operation: Operation) -> Option<Value> {
     }
 }
 
+/// Whether a change a delete rule makes as the gateway stays inside the attributes `granted`
+/// lets the caller write: `slot` for an attribute change, the whole entity for `None`. A grant
+/// that names attributes (or a projection of `class`) never reaches a whole-entity delete, so
+/// a rule cannot remove what the caller could not have changed by hand.
+fn within_attributes(granted: &evaluator::Constraints, class: &str, slot: Option<&str>) -> bool {
+    let projected = granted.attrs_by_type.get(class);
+    match slot {
+        None => granted.served.is_empty() && granted.attrs_by_type.is_empty(),
+        Some(slot) => {
+            (granted.served.is_empty() || granted.served.contains(slot))
+                && (granted.attrs_by_type.is_empty() || projected.is_some_and(|s| s.contains(slot)))
+        }
+    }
+}
+
 #[cfg(test)]
 mod object_query_tests {
     use super::object_query;
@@ -1485,21 +1500,6 @@ mod object_query_tests {
         );
         for object in ["urn:ngsi-ld:X:a\"|b==\"c", "urn:ngsi-ld:X:a\\", ""] {
             assert!(object_query("refStation", object).is_err(), "{object}");
-        }
-    }
-}
-
-/// Whether a change a delete rule makes as the gateway stays inside the attributes `granted`
-/// lets the caller write: `slot` for an attribute change, the whole entity for `None`. A grant
-/// that names attributes (or a projection of `class`) never reaches a whole-entity delete, so
-/// a rule cannot remove what the caller could not have changed by hand.
-fn within_attributes(granted: &evaluator::Constraints, class: &str, slot: Option<&str>) -> bool {
-    let projected = granted.attrs_by_type.get(class);
-    match slot {
-        None => granted.served.is_empty() && granted.attrs_by_type.is_empty(),
-        Some(slot) => {
-            (granted.served.is_empty() || granted.served.contains(slot))
-                && (granted.attrs_by_type.is_empty() || projected.is_some_and(|s| s.contains(slot)))
         }
     }
 }
