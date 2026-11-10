@@ -196,6 +196,23 @@ pub fn endpoint_target(gateway: &str, slug: &str, uri: &http::Uri) -> Option<Str
     Some(format!("{gateway}{own}{below}"))
 }
 
+/// The headers of a component's call that reach the gateway: `accept` and `content-type`, the
+/// two the SDK sends, and nothing else. Behind the gateway sits a router that trusts forwarding
+/// headers (`X-Forwarded-*`, `Forwarded`, `X-Real-IP`), mesh headers (`l5d-*`) and the platform's
+/// identity headers (`x-jc-*`) from the pod network, and the broker reads `NGSILD-Tenant` and
+/// `Link`; tenant code names none of them. The host adds the person's token itself.
+fn sent_headers(from: &http::HeaderMap) -> http::HeaderMap {
+    [http::header::ACCEPT, http::header::CONTENT_TYPE]
+        .into_iter()
+        .flat_map(|name| {
+            from.get_all(&name)
+                .iter()
+                .map(move |value| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 impl WasiHttpHooks for GatewayOnly {
     fn send_request(
         &mut self,
@@ -238,10 +255,7 @@ impl WasiHttpHooks for GatewayOnly {
                 .await
                 .map_err(|_| wasmtime_wasi_http::Error::HttpRequestBodySize(Some(sent_cap as u64)))?
                 .to_bytes();
-            let mut headers = parts.headers;
-            headers.remove(http::header::AUTHORIZATION);
-            headers.remove(http::header::COOKIE);
-            headers.remove(http::header::HOST);
+            let headers = sent_headers(&parts.headers);
             let mut call = client
                 .request(parts.method, url)
                 .headers(headers)
