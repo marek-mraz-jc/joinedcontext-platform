@@ -433,12 +433,19 @@ async fn a_components_forged_forwarding_mesh_and_identity_headers_are_dropped() 
         "ngsild-tenant",
         "link",
     ] {
-        assert!(headers.get(forged).is_none(), "{forged} reached the gateway");
+        assert!(
+            headers.get(forged).is_none(),
+            "{forged} reached the gateway"
+        );
     }
     let value = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     assert_eq!(value("accept"), Some("application/json"));
     assert_eq!(value("content-type"), Some("application/json"));
-    assert_eq!(value("authorization"), Some("Bearer tok-1"), "the host's token, not the component's");
+    assert_eq!(
+        value("authorization"),
+        Some("Bearer tok-1"),
+        "the host's token, not the component's"
+    );
 }
 
 /// AP-147: a component has no environment, so it calls the gateway as `http://gateway` and the
@@ -911,8 +918,14 @@ async fn identity_email_and_ai_ask_the_portal_as_the_requests_person() {
         // The host builds each Portal call itself; a component names no header of it (guard).
         for name in request.headers.keys() {
             assert!(
-                ["authorization", "content-type", "content-length", "host", "accept"]
-                    .contains(&name.as_str()),
+                [
+                    "authorization",
+                    "content-type",
+                    "content-length",
+                    "host",
+                    "accept"
+                ]
+                .contains(&name.as_str()),
                 "{name} reached the Portal on {}",
                 request.url
             );
