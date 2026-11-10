@@ -394,6 +394,60 @@ async fn outgoing_http_reaches_the_gateway_alone_with_the_callers_token() {
     );
 }
 
+/// A component's call reaches the gateway with `accept` and `content-type` alone. The router in
+/// front of the gateway trusts forwarding, mesh and identity headers from the pod network, so a
+/// forged `X-Forwarded-For`, `x-jc-client` or `l5d-dst-override` would name another client
+/// address, identity or upstream to it; the broker would read `NGSILD-Tenant` and `Link`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_components_forged_forwarding_mesh_and_identity_headers_are_dropped() {
+    let gateway = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&gateway)
+        .await;
+    let world = World::new("forged", Limits::default(), Some(&gateway.uri()));
+    let app = world.place("forger", guest());
+
+    let (_, answer) = world
+        .get(
+            &app,
+            "/api/fetch-forged?http://gateway/ngsi-ld/v1/entities?type=Alert",
+            Some("tok-1"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer, "status 200");
+    let seen = gateway.received_requests().await.unwrap_or_default();
+    assert_eq!(seen.len(), 1);
+    let headers = &seen[0].headers;
+    for forged in [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "forwarded",
+        "x-real-ip",
+        "x-jc-client",
+        "x-jc-subject",
+        "l5d-dst-override",
+        "l5d-client-id",
+        "ngsild-tenant",
+        "link",
+    ] {
+        assert!(
+            headers.get(forged).is_none(),
+            "{forged} reached the gateway"
+        );
+    }
+    let value = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    assert_eq!(value("accept"), Some("application/json"));
+    assert_eq!(value("content-type"), Some("application/json"));
+    assert_eq!(
+        value("authorization"),
+        Some("Bearer tok-1"),
+        "the host's token, not the component's"
+    );
+}
+
 /// AP-147: a component has no environment, so it calls the gateway as `http://gateway` and the
 /// host sends the call to the App's own Endpoint on the gateway it is configured with, in the long
 /// form (`/api/endpoint/<slug>/…`, T-3346) or the short one (T-3351); a look-alike origin and
@@ -861,6 +915,21 @@ async fn identity_email_and_ai_ask_the_portal_as_the_requests_person() {
             request.url
         );
         assert!(request.headers.get("cookie").is_none());
+        // The host builds each Portal call itself; a component names no header of it (guard).
+        for name in request.headers.keys() {
+            assert!(
+                [
+                    "authorization",
+                    "content-type",
+                    "content-length",
+                    "host",
+                    "accept"
+                ]
+                .contains(&name.as_str()),
+                "{name} reached the Portal on {}",
+                request.url
+            );
+        }
     }
     let mail: serde_json::Value = serde_json::from_slice(&seen[1].body).expect("json");
     assert_eq!(

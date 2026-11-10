@@ -1,6 +1,7 @@
 //! A test App: `/api/hello`, `/api/state` (a counter that a fresh instance starts at one),
 //! `/api/loop` (never ends), `/api/alloc` (asks for 128 MiB), `/api/fetch?<url>` (an outgoing
-//! GET, answering the status or the error), `/api/sql` (the host's `jc:app/sql`), `/api/reach`
+//! GET, answering the status or the error), `/api/fetch-forged?<url>` (the same GET with forged
+//! forwarding, mesh and identity headers), `/api/sql` (the host's `jc:app/sql`), `/api/reach`
 //! (what the component gets of the environment, the files and the sockets); the hostile ones of
 //! T-4777: `/api/recurse` (unbounded recursion), `/api/passwd` (a host file by path),
 //! `/api/answer-then-spin` (answers, then never ends), `/api/upload?<MiB>` (an outgoing POST of
@@ -122,13 +123,40 @@ fn upload(mib: usize) -> String {
 }
 
 fn fetch(url: &str) -> String {
+    fetch_with(url, &[])
+}
+
+/// What a hostile component would send along with its call: headers a router behind the gateway
+/// trusts, beside the two the SDK sends.
+const FORGED: &[(&str, &str)] = &[
+    ("accept", "application/json"),
+    ("content-type", "application/json"),
+    ("x-forwarded-for", "203.0.113.9"),
+    ("x-forwarded-host", "portal.evil"),
+    ("x-forwarded-proto", "https"),
+    ("forwarded", "for=203.0.113.9;host=portal.evil"),
+    ("x-real-ip", "203.0.113.9"),
+    ("x-jc-client", "portal"),
+    ("x-jc-subject", "admin"),
+    ("l5d-dst-override", "portal.jc.svc.cluster.local:8080"),
+    ("l5d-client-id", "apisix.edge.serviceaccount.identity.linkerd.cluster.local"),
+    ("ngsild-tenant", "other"),
+    ("link", "<http://evil/ctx.jsonld>; rel=\"http://www.w3.org/ns/json-ld#context\""),
+    ("authorization", "Bearer forged"),
+];
+
+fn fetch_with(url: &str, headers: &[(&str, &str)]) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some(("https", rest)) => (Scheme::Https, rest),
         Some(("http", rest)) => (Scheme::Http, rest),
         _ => return "not a URL".into(),
     };
     let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
-    let request = OutgoingRequest::new(Fields::new());
+    let fields = Fields::new();
+    for (name, value) in headers {
+        let _ = fields.append(name, value.as_bytes());
+    }
+    let request = OutgoingRequest::new(fields);
     let _ = request.set_scheme(Some(&scheme));
     let _ = request.set_authority(Some(authority));
     let _ = request.set_path_with_query(Some(&path));
@@ -163,6 +191,7 @@ impl wasip2::exports::http::incoming_handler::Guest for App {
                 answer(out, 200, &std::hint::black_box(big).len().to_string());
             }
             "/api/fetch" => answer(out, 200, &fetch(query)),
+            "/api/fetch-forged" => answer(out, 200, &fetch_with(query, FORGED)),
             "/api/upload" => answer(out, 200, &upload(query.parse().unwrap_or(1))),
             "/api/recurse" => answer(out, 200, &recurse(0).to_string()),
             "/api/passwd" => match std::fs::read_to_string("/etc/passwd") {
