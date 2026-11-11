@@ -291,6 +291,12 @@ fn rows() -> Vec<Row> {
             DATA,
         ),
         row(
+            "GET",
+            "/api/endpoint/{slug}/entities.csv",
+            get(ep("/entities.csv")),
+            DATA,
+        ),
+        row(
             "ANY",
             "/api/endpoint/{slug}/ogc/features",
             get(ep("/ogc/features")),
@@ -355,6 +361,36 @@ fn rows() -> Vec<Row> {
             "ANY",
             "/api/endpoint/{slug}/feed/v1/{*rest}",
             get(ep("/feed/v1/news/atom.xml")),
+            DATA,
+        ),
+        row(
+            "ANY",
+            "/api/endpoint/{slug}/entities.ics",
+            get(ep("/entities.ics")),
+            DATA,
+        ),
+        row(
+            "ANY",
+            "/api/endpoint/{slug}/entities.rss",
+            get(ep("/entities.rss")),
+            DATA,
+        ),
+        row(
+            "ANY",
+            "/api/endpoint/{slug}/entities.atom",
+            get(ep("/entities.atom")),
+            DATA,
+        ),
+        row(
+            "ANY",
+            "/api/endpoint/{slug}/entities.json",
+            get(ep("/entities.json")),
+            DATA,
+        ),
+        row(
+            "ANY",
+            "/api/endpoint/{slug}/feeds/{*rest}",
+            get(ep("/feeds/q=a==1/events.ics")),
             DATA,
         ),
         row(

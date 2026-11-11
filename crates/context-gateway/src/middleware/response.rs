@@ -352,9 +352,20 @@ fn deprecation_headers(gateway: &Gateway, path: &str) -> Vec<(HeaderName, Header
 /// and access documents, which belong to the Endpoint as a whole.
 fn surface_of(rest: &str) -> Option<jc_core::kinds::Representation> {
     use jc_core::kinds::Representation as R;
+    // A feeds link names its format by its last extension (API/02 §4a).
+    if rest.starts_with("feeds/") {
+        return Some(if rest.ends_with(".ics") {
+            R::Ical
+        } else {
+            R::Feed
+        });
+    }
     [
         ("ngsi-ld/v1", R::NgsiLd),
         ("file.", R::Csv),
+        ("entities.csv", R::Csv),
+        ("entities.ics", R::Ical),
+        ("entities.", R::Feed),
         ("ogc/features", R::OgcFeatures),
         ("sta/v1.1", R::Sta),
         ("odata/v4", R::Odata),
