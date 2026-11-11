@@ -363,6 +363,9 @@ fn surface_of(rest: &str) -> Option<jc_core::kinds::Representation> {
     [
         ("ngsi-ld/v1", R::NgsiLd),
         ("file.", R::Csv),
+        ("entities.csv", R::Csv),
+        ("entities.ics", R::Ical),
+        ("entities.", R::Feed),
         ("ogc/features", R::OgcFeatures),
         ("sta/v1.1", R::Sta),
         ("odata/v4", R::Odata),

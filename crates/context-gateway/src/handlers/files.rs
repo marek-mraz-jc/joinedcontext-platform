@@ -129,5 +129,8 @@ async fn build(
 
 /// This surface's routes; `app::router` merges them under its guards.
 pub(crate) fn routes() -> Router<Arc<Gateway>> {
-    Router::new().route("/api/endpoint/{slug}/file.csv", get(file_csv))
+    // `entities.csv` is the same table by the name of the format aliases (API/02 §4a).
+    Router::new()
+        .route("/api/endpoint/{slug}/file.csv", get(file_csv))
+        .route("/api/endpoint/{slug}/entities.csv", get(file_csv))
 }

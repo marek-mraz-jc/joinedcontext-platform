@@ -194,6 +194,45 @@ pub(crate) async fn feeds(
     read_surface(&gateway, &params, request, surface, Some(forward)).await
 }
 
+/// `entities.{ics,rss,atom,json}?{query}` (API/02 §4a, EP-174): the Endpoint's first calendar
+/// output (`events`, else the first) or its first feed output over the caller's query, the
+/// query read by that output as on `ical/v1` and `feed/v1`; no feed output is a 404.
+pub(crate) async fn entities(
+    State(gateway): State<Arc<Gateway>>,
+    Path(params): Path<HashMap<String, String>>,
+    request: Request,
+) -> Response<Body> {
+    let path = request.uri().path();
+    let (surface, file) = match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("rss") => (&FEED, "rss.xml"),
+        Some("atom") => (&FEED, "atom.xml"),
+        Some("json") => (&FEED, "feed.json"),
+        _ => (&ICAL, "events.ics"),
+    };
+    let below = if surface.representation == Representation::Ical {
+        Ok(format!("/{file}"))
+    } else {
+        let slug = params.get("slug").map(String::as_str).unwrap_or_default();
+        gateway
+            .resolver
+            .resolve(slug)
+            .and_then(|endpoint| {
+                endpoint
+                    .feeds
+                    .first()
+                    .map(|o| format!("/{}/{file}", o.name))
+            })
+            .ok_or_else(|| Box::new(ProblemDetails::not_found()))
+    };
+    let forward = below.map(
+        |below| match request.uri().query().filter(|q| !q.is_empty()) {
+            Some(query) => format!("{below}?{query}"),
+            None => below,
+        },
+    );
+    read_surface(&gateway, &params, request, surface, Some(forward)).await
+}
+
 /// The longest `{filter}` segment a feeds link carries.
 pub const MAX_FILTER: usize = 2048;
 
@@ -948,6 +987,11 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         // A stored output by a link that ends in its format, optionally narrowed by a filter
         // segment (API/02 §4a, EP-177).
         .route("/api/endpoint/{slug}/feeds/{*rest}", any(feeds))
+        // One NGSI-LD query, then a format (API/02 §4a, EP-174).
+        .route("/api/endpoint/{slug}/entities.ics", any(entities))
+        .route("/api/endpoint/{slug}/entities.rss", any(entities))
+        .route("/api/endpoint/{slug}/entities.atom", any(entities))
+        .route("/api/endpoint/{slug}/entities.json", any(entities))
 }
 
 #[cfg(test)]

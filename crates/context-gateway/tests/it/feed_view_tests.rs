@@ -257,6 +257,36 @@ async fn a_filter_segment_is_the_query_string_of_the_output() {
     );
 }
 
+/// `entities.{ext}?{query}` is the first calendar output (`events.ics`) or the first feed output
+/// over the query as sent; an Endpoint without a feed output has no `entities.rss`.
+#[tokio::test]
+async fn an_entities_alias_is_the_first_output_over_the_query() {
+    let (upstream, hops) = broker().await;
+    let query = "type=Event&q=category==%22music%22&georel=near;maxDistance==5000&geometry=Point&coordinates=%5B19.15,48.73%5D";
+    for (ext, below) in [
+        ("ics", "ical/v1/events.ics"),
+        ("rss", "feed/v1/kultura/rss.xml"),
+        ("atom", "feed/v1/kultura/atom.xml"),
+        ("json", "feed/v1/kultura/feed.json"),
+    ] {
+        let uri = format!("/api/endpoint/{SLUG}/entities.{ext}?{query}");
+        let (status, _, body) = call(&upstream, calendar(kultura()), Method::GET, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{ext}: {body}");
+        let hop = hops.lock().expect("the hop log").pop().expect("a hop");
+        assert_eq!(hop.0, format!("/x/views/{SLUG}/{below}"));
+        assert_eq!(hop.1.as_deref(), Some(query));
+    }
+    let (status, _, body) = call(
+        &upstream,
+        calendar(Vec::new()),
+        Method::GET,
+        &format!("/api/endpoint/{SLUG}/entities.rss"),
+    )
+    .await;
+    assert!(status.is_client_error(), "{body}");
+    assert!(hops.lock().expect("the hop log").is_empty());
+}
+
 /// Each feed extension of a feeds link is that output's file on the feed surface.
 #[tokio::test]
 async fn a_feeds_link_names_the_feed_file_by_its_extension() {

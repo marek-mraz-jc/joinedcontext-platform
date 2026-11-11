@@ -334,6 +334,25 @@ async fn a_download_carries_an_etag_and_answers_304() {
     assert_eq!(stale.status(), StatusCode::OK);
 }
 
+/// API/02 §4a: `entities.csv` is `file.csv` by the format alias's name, the same bytes and ETag.
+#[tokio::test]
+async fn entities_csv_is_file_csv() {
+    let broker = BrokerStub::start(vec![json!([reading(1)]), json!([reading(1)])]).await;
+    let app = gateway(&broker.url, endpoint(vec![Representation::Csv], None));
+    let mut answers = Vec::new();
+    for file in ["file.csv", "entities.csv"] {
+        let path = format!("/api/endpoint/{SLUG}/{file}?type=AirQualityObserved");
+        let answer = download_with(app.clone(), &path, None).await;
+        assert_eq!(answer.status(), StatusCode::OK, "{file}");
+        let tag = answer.headers().get(axum::http::header::ETAG).cloned();
+        let body = axum::body::to_bytes(answer.into_body(), 1 << 20)
+            .await
+            .expect("a body");
+        answers.push((tag, body));
+    }
+    assert_eq!(answers[0], answers[1]);
+}
+
 /// T-5209: a dialect the download does not know is a 400 naming the parameter.
 #[tokio::test]
 async fn an_unknown_delimiter_is_refused_by_name() {
