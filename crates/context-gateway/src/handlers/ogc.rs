@@ -992,6 +992,11 @@ pub(crate) fn routes() -> Router<Arc<Gateway>> {
         .route("/api/endpoint/{slug}/entities.rss", any(entities))
         .route("/api/endpoint/{slug}/entities.atom", any(entities))
         .route("/api/endpoint/{slug}/entities.json", any(entities))
+        // `entities.csv` is file.csv's table by the name of the format aliases.
+        .route(
+            "/api/endpoint/{slug}/entities.csv",
+            axum::routing::get(crate::handlers::files::file_csv),
+        )
 }
 
 #[cfg(test)]
