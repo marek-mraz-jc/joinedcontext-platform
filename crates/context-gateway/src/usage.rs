@@ -85,7 +85,7 @@ pub fn surface(route: &str) -> Option<&'static str> {
         "ogc" => "ogc",
         "sta" => "sta",
         "ical" => "ical",
-        "feed" => "feed",
+        "feed" | "feeds" => "feed",
         "mcp" => "mcp",
         "ws" => "websocket",
         "file.csv" => "download",
@@ -232,6 +232,7 @@ mod tests {
             surface("/api/endpoint/{slug}/feed/v1/{*rest}"),
             Some("feed")
         );
+        assert_eq!(surface("/api/endpoint/{slug}/feeds/{*rest}"), Some("feed"));
         assert_eq!(surface("/api/endpoint/{slug}/mcp"), Some("mcp"));
         assert_eq!(surface("/api/endpoint/{slug}/ws"), Some("websocket"));
         assert_eq!(surface("/api/endpoint/{slug}/file.csv"), Some("download"));

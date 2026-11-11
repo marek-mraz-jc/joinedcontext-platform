@@ -358,6 +358,12 @@ fn rows() -> Vec<Row> {
             DATA,
         ),
         row(
+            "ANY",
+            "/api/endpoint/{slug}/feeds/{*rest}",
+            get(ep("/feeds/q=a==1/events.ics")),
+            DATA,
+        ),
+        row(
             "GET",
             "/catalog.jsonld",
             get("/catalog.jsonld".to_owned()),
