@@ -26,6 +26,14 @@ pub struct Placed {
     /// Its scheduled jobs, `spec.server.jobs[]` as the reconciler checked them (AP-154).
     #[serde(default)]
     pub jobs: Vec<PlacedJob>,
+    /// Its object prefix under its project's key, `org/<OrgId>/project/<ProjectId>/apps/<id>/`
+    /// (ARCH/STO-14); absent while the project has no key, and then `apps/<shard>/<id>/`.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Files from before the key still sit under `apps/<shard>/<id>/`: read, listed and deleted
+    /// there too until the Portal has moved them under `prefix` (TEN-15).
+    #[serde(default)]
+    pub legacy: bool,
 }
 
 /// One job of a placed App (AP-154).
@@ -72,6 +80,24 @@ pub fn is_slug(slug: &str) -> bool {
     slug.len() <= 64 && jc_core::kinds::EndpointSlug::new(slug).is_ok()
 }
 
+/// `org/<uuid>/project/<uuid>/apps/<id>/`, the only shape of a keyed App prefix: nothing an App
+/// names reaches the store's key, and no prefix may name another App's id.
+pub fn is_prefix(prefix: &str, id: &str) -> bool {
+    let uuid = |s: &str| {
+        s.len() == 36
+            && s.bytes().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => b == b'-',
+                _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+            })
+    };
+    match prefix.split('/').collect::<Vec<_>>()[..] {
+        ["org", org, "project", project, "apps", own, ""] => {
+            uuid(org) && uuid(project) && own == id
+        }
+        _ => false,
+    }
+}
+
 /// `sha256:` and 64 lowercase hex digits.
 pub fn is_digest(digest: &str) -> bool {
     digest.strip_prefix("sha256:").is_some_and(|hex| {
@@ -109,6 +135,16 @@ impl Placement {
             if app.endpoint.as_deref().is_some_and(|slug| !is_slug(slug)) {
                 return Err(format!(
                     "the placement of `{}`: an endpoint is 1 to 64 lowercase letters and digits",
+                    app.name
+                ));
+            }
+            if app
+                .prefix
+                .as_deref()
+                .is_some_and(|p| !is_prefix(p, &app.id))
+            {
+                return Err(format!(
+                    "the placement of `{}`: a prefix is org/<uuid>/project/<uuid>/apps/<its id>/",
                     app.name
                 ));
             }
@@ -151,6 +187,34 @@ mod tests {
         .unwrap();
         assert_eq!(apps["notes"].id, "a1");
         assert_eq!(apps["notes"].endpoint, None);
+    }
+
+    #[test]
+    fn a_keyed_prefix_names_the_apps_own_id_under_two_uuids_or_the_file_is_refused() {
+        let with = |prefix: &str| {
+            file(&format!(
+                r#"{{"name": "notes", "id": "a1", "tenant": "t", "digest": "{D}", "prefix": "{prefix}", "legacy": true}}"#
+            ))
+        };
+        let key =
+            "org/0b8e7f1c-1d2e-4f30-8a41-5b6c7d8e9f00/project/1c9f8e7d-6b5a-4c3d-9e2f-0a1b2c3d4e5f";
+        let apps = Placement::parse(&with(&format!("{key}/apps/a1/")), "s1").unwrap();
+        assert_eq!(
+            apps["notes"].prefix.as_deref(),
+            Some(format!("{key}/apps/a1/").as_str())
+        );
+        assert!(apps["notes"].legacy);
+        for bad in [
+            format!("{key}/apps/a2/"),
+            format!("{key}/apps/a1"),
+            format!("{key}/apps/a1/../"),
+            format!("{key}/schemas/a1/"),
+            "apps/s1/a1/".to_owned(),
+            "org/helsinki/project/notes/apps/a1/".to_owned(),
+            format!("/{key}/apps/a1/"),
+        ] {
+            assert!(Placement::parse(&with(&bad), "s1").is_err(), "{bad}");
+        }
     }
 
     #[test]
