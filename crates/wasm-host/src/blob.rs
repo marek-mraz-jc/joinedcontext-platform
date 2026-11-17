@@ -477,7 +477,8 @@ mod tests {
     async fn a_moving_app_reads_its_old_files_writes_only_under_its_key_and_deletes_both() {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        const KEYED: &str = "org/0b8e7f1c-1d2e-4f30-8a41-5b6c7d8e9f00/project/1c9f8e7d-6b5a-4c3d-9e2f-0a1b2c3d4e5f/apps/a1/";
+        const KEYED: &str =
+            "org/ad2z3bvobuqkfmd3f2vjyhqnqe/project/c7i5ym2kleuwxdl6t4fbwlb5ju/apps/a1/";
         let store = MockServer::start().await;
         let listing = |keys: &[&str]| {
             let contents: String = keys
