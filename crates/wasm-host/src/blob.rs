@@ -1,6 +1,9 @@
 //! `jc:app/blob` on RustFS (ADR-N-044 §2.4, §2.5, AP-145, AP-146). Every key is the App's own,
-//! under `apps/<shard>/<id>/`; a key that would leave that prefix is refused here, and the shard's
-//! key may not reach another shard's prefix there. A presigned URL names one key and one method
+//! under its project's `org/<OrgId>/project/<ProjectId>/apps/<id>/` (ARCH/STO-14), or
+//! `apps/<shard>/<id>/` while the project has no key; a key that would leave that prefix is refused
+//! here, and the shard's key may not reach another App's prefix there. While the placement says
+//! `legacy`, the files from before the key are read, listed and deleted under `apps/<shard>/<id>/`
+//! too, and every write goes under the new prefix, which the Portal's move never overwrites (TEN-15). A presigned URL names one key and one method
 //! and lives at most five minutes.
 
 use std::collections::HashMap;
@@ -69,9 +72,23 @@ impl S3Blob {
         self
     }
 
-    /// `apps/<shard>/<id>/`.
+    /// The placement's keyed prefix, or `apps/<shard>/<id>/` while the project has none.
     pub fn prefix(&self, app: &Placed) -> String {
-        format!("apps/{}/{}/", self.shard, app.id)
+        app.prefix
+            .clone()
+            .unwrap_or_else(|| format!("apps/{}/{}/", self.shard, app.id))
+    }
+
+    /// `apps/<shard>/<id>/` while it still holds files the Portal has not moved (TEN-15).
+    fn legacy(&self, app: &Placed) -> Option<String> {
+        (app.prefix.is_some() && app.legacy).then(|| format!("apps/{}/{}/", self.shard, app.id))
+    }
+
+    /// The prefixes a read looks under, the keyed one first.
+    fn prefixes(&self, app: &Placed) -> Vec<String> {
+        std::iter::once(self.prefix(app))
+            .chain(self.legacy(app))
+            .collect()
     }
 
     fn key(&self, app: &Placed, key: &str) -> Result<String, BlobError> {
@@ -86,14 +103,18 @@ impl S3Blob {
                 return Ok(bytes);
             }
         }
-        let bytes = self
-            .bucket
-            .list(&self.prefix(app))
-            .await
-            .map_err(BlobError::Unavailable)?
-            .iter()
-            .map(|(_, size)| size)
-            .sum();
+        let mut bytes = 0u64;
+        for prefix in self.prefixes(app) {
+            bytes = bytes.saturating_add(
+                self.bucket
+                    .list(&prefix)
+                    .await
+                    .map_err(BlobError::Unavailable)?
+                    .iter()
+                    .map(|(_, size)| size)
+                    .sum(),
+            );
+        }
         if let Ok(mut sizes) = self.sizes.lock() {
             sizes.insert(app.id.clone(), (Instant::now(), bytes));
         }
@@ -116,22 +137,29 @@ impl S3Blob {
     /// One object, read only up to the read limit: a presigned PUT can leave an object of any
     /// size under the prefix, and the shard never holds more than one answer's worth of it.
     pub async fn get(&self, app: &Placed, key: &str) -> Result<Vec<u8>, BlobError> {
-        let key = self.key(app, key)?;
-        let Some((status, bytes)) = self
-            .bucket
-            .get_capped(&key, self.read_limit)
-            .await
-            .map_err(BlobError::Unavailable)?
-        else {
-            return Err(refused(
-                app,
-                format!(
-                    "the object passes {} bytes, the read limit",
-                    self.read_limit
-                ),
-            ));
-        };
-        Self::answer(status).map(|()| bytes)
+        let key = checked(key).map_err(|why| refused(app, why))?;
+        let mut answer = Err(BlobError::NotFound);
+        for prefix in self.prefixes(app) {
+            let Some((status, bytes)) = self
+                .bucket
+                .get_capped(&format!("{prefix}{key}"), self.read_limit)
+                .await
+                .map_err(BlobError::Unavailable)?
+            else {
+                return Err(refused(
+                    app,
+                    format!(
+                        "the object passes {} bytes, the read limit",
+                        self.read_limit
+                    ),
+                ));
+            };
+            answer = Self::answer(status).map(|()| bytes);
+            if !matches!(answer, Err(BlobError::NotFound)) {
+                break;
+            }
+        }
+        answer
     }
 
     pub async fn put(
@@ -165,29 +193,41 @@ impl S3Blob {
 
     pub async fn list(&self, app: &Placed, prefix: &str) -> Result<Vec<String>, BlobError> {
         let prefix = checked_prefix(prefix).map_err(|why| refused(app, why))?;
-        let own = self.prefix(app);
-        let keys = self
-            .bucket
-            .list(&format!("{own}{prefix}"))
-            .await
-            .map_err(BlobError::Unavailable)?;
-        Ok(keys
-            .into_iter()
-            .filter_map(|(key, _)| key.strip_prefix(&own).map(str::to_owned))
-            .collect())
+        let mut keys = std::collections::BTreeSet::new();
+        for own in self.prefixes(app) {
+            let listed = self
+                .bucket
+                .list(&format!("{own}{prefix}"))
+                .await
+                .map_err(BlobError::Unavailable)?;
+            keys.extend(
+                listed
+                    .into_iter()
+                    .filter_map(|(key, _)| key.strip_prefix(&own).map(str::to_owned)),
+            );
+        }
+        Ok(keys.into_iter().collect())
     }
 
+    /// Deletes the key under both prefixes while `legacy` holds, or the moved copy would bring
+    /// the old one back on the next read.
     pub async fn delete(&self, app: &Placed, key: &str) -> Result<(), BlobError> {
-        let key = self.key(app, key)?;
-        let (status, _) = self
-            .bucket
-            .object(reqwest::Method::DELETE, &key, None)
-            .await
-            .map_err(BlobError::Unavailable)?;
+        let key = checked(key).map_err(|why| refused(app, why))?;
+        let mut answer = Ok(());
+        for prefix in self.prefixes(app) {
+            let (status, _) = self
+                .bucket
+                .object(reqwest::Method::DELETE, &format!("{prefix}{key}"), None)
+                .await
+                .map_err(BlobError::Unavailable)?;
+            if status != 404 {
+                answer = answer.and(Self::answer(status));
+            }
+        }
         if let Ok(mut sizes) = self.sizes.lock() {
             sizes.remove(&app.id);
         }
-        Self::answer(status)
+        answer
     }
 
     /// A URL for one key and one method, for at most [`MAX_PRESIGN_SECONDS`]. A PUT is refused
@@ -201,9 +241,16 @@ impl S3Blob {
         method: Method,
         expires: u32,
     ) -> Result<String, BlobError> {
-        let key = self.key(app, key)?;
+        let mut key = self.key(app, key)?;
         let method = match method {
-            Method::Get => "GET",
+            Method::Get => {
+                // A store URL names one key: the old one while only the old prefix holds it. A
+                // link on the App's host names the App's key, and its download looks under both.
+                if self.urls.is_none() {
+                    key = self.located(app, &key).await?;
+                }
+                "GET"
+            }
             Method::Put => {
                 // At least one byte fits: refused once the files are at their quota.
                 self.room_for(app, 1).await?;
@@ -241,10 +288,28 @@ impl S3Blob {
     /// shard to stream to a file link's holder (T-6195).
     pub async fn download(&self, app: &Placed, key: &str) -> Result<reqwest::Response, BlobError> {
         let key = self.key(app, key)?;
+        let key = self.located(app, &key).await?;
         self.bucket
             .send(reqwest::Method::GET, &key, None)
             .await
             .map_err(BlobError::Unavailable)
+    }
+
+    /// `key` (under the keyed prefix), or its old place when only the old prefix holds it.
+    async fn located(&self, app: &Placed, key: &str) -> Result<String, BlobError> {
+        let Some(legacy) = self.legacy(app) else {
+            return Ok(key.to_owned());
+        };
+        let listed = self
+            .bucket
+            .list(key)
+            .await
+            .map_err(BlobError::Unavailable)?;
+        if listed.iter().any(|(found, _)| found == key) {
+            return Ok(key.to_owned());
+        }
+        let own = key.strip_prefix(&self.prefix(app)).unwrap_or(key);
+        Ok(format!("{legacy}{own}"))
     }
 
     /// A file link's PUT: a sized link's room was taken when it was signed, so only an unsized
@@ -386,6 +451,8 @@ mod tests {
             digest: format!("sha256:{}", "a".repeat(64)),
             endpoint: None,
             jobs: Vec::new(),
+            prefix: None,
+            legacy: false,
         };
         // A sized link took its room when signed: no listing, the store takes the bytes.
         blob.upload(&app, "sized", vec![0; 5], Some("text/plain".into()), true)
@@ -404,5 +471,97 @@ mod tests {
             blob.upload(&app, "../x", vec![0; 1], None, true).await,
             Err(BlobError::Refused(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_moving_app_reads_its_old_files_writes_only_under_its_key_and_deletes_both() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const KEYED: &str = "org/0b8e7f1c-1d2e-4f30-8a41-5b6c7d8e9f00/project/1c9f8e7d-6b5a-4c3d-9e2f-0a1b2c3d4e5f/apps/a1/";
+        let store = MockServer::start().await;
+        let listing = |keys: &[&str]| {
+            let contents: String = keys
+                .iter()
+                .map(|k| format!("<Contents><Key>{k}</Key><Size>1</Size></Contents>"))
+                .collect();
+            ResponseTemplate::new(200).set_body_string(format!(
+                "<ListBucketResult><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"
+            ))
+        };
+        Mock::given(method("GET"))
+            .and(query_param("prefix", KEYED))
+            .respond_with(listing(&[&format!("{KEYED}new")]))
+            .mount(&store)
+            .await;
+        Mock::given(method("GET"))
+            .and(query_param("prefix", "apps/s1/a1/"))
+            .respond_with(listing(&["apps/s1/a1/new", "apps/s1/a1/old"]))
+            .mount(&store)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/b/{KEYED}old")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&store)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b/apps/s1/a1/old"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("before the key"))
+            .mount(&store)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/b/{KEYED}fresh")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&store)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/b/{KEYED}old")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&store)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/b/apps/s1/a1/old"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&store)
+            .await;
+        let blob = S3Blob::new(
+            Bucket {
+                endpoint: store.uri(),
+                bucket: "b".into(),
+                region: "us-east-1".into(),
+                key_id: "k".into(),
+                secret: "s".into(),
+                public_endpoint: None,
+                http: reqwest::Client::new(),
+            },
+            "s1",
+            1000,
+        );
+        let moving = Placed {
+            name: "notes".into(),
+            id: "a1".into(),
+            tenant: "t".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            endpoint: None,
+            jobs: Vec::new(),
+            prefix: Some(KEYED.into()),
+            legacy: true,
+        };
+        assert_eq!(blob.get(&moving, "old").await.unwrap(), b"before the key");
+        assert_eq!(blob.list(&moving, "").await.unwrap(), ["new", "old"]);
+        blob.put(&moving, "fresh", vec![1], None).await.unwrap();
+        blob.delete(&moving, "old").await.unwrap();
+        // Moved: the old prefix is not looked at any more, and its object is not found.
+        let moved = Placed {
+            legacy: false,
+            ..moving
+        };
+        assert!(matches!(
+            blob.get(&moved, "old").await,
+            Err(BlobError::NotFound)
+        ));
+        assert_eq!(blob.list(&moved, "").await.unwrap(), ["new"]);
     }
 }

@@ -124,6 +124,8 @@ impl World {
             digest,
             endpoint: Some("ep1".into()),
             jobs: Vec::new(),
+            prefix: None,
+            legacy: false,
         }
     }
 

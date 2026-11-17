@@ -29,6 +29,8 @@ pub fn app(id: &str) -> Placed {
         digest: String::new(),
         endpoint: None,
         jobs: Vec::new(),
+        prefix: None,
+        legacy: false,
     }
 }
 

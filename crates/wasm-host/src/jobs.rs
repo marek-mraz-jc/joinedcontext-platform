@@ -382,6 +382,8 @@ mod tests {
                 schedule: schedule.into(),
                 export: "compute-kpi".into(),
             }],
+            prefix: None,
+            legacy: false,
         }
     }
 
