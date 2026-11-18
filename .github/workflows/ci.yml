@@ -77,8 +77,10 @@ jobs:
     runs-on: ubuntu-latest
     # A warm cache runs this in 2-3 min. A cold one (the repo's 10 GB cache evicts the job's key)
     # needs ~12; a run cut off at the timeout never saves its cache, so 8 min turned one eviction
-    # into a red on every push (36193fa, d1b8f7f; T-4146).
-    timeout-minutes: 20
+    # into a red on every push (36193fa, d1b8f7f; T-4146). A change that reaches --workspace
+    # (scripts/ci/*) on a cold cache needs ~22 (run 44240331998: cut off twice at 20, in the
+    # gateway it suite), so 20 locked every rerun cold (T-7225).
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: every action is a commit, and only a publishing job may publish (T-0851)
